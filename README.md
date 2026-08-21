@@ -1,3 +1,5 @@
+
+
 # Warmor
 
 <p align="center">
@@ -104,7 +106,7 @@ Warmor goes beyond static policy enforcement — it learns, adapts, and predicts
 Observe containers in **learning mode**, record every allowed operation, then auto-generate a deny-everything-else policy. Zero manual rule writing.
 
 ```bash
-warmor-learn --duration 30m --all -o learned-policy.yaml
+warmor-learn --duration 30m -o learned-policy.yaml
 ```
 
 ### Policy Simulator
