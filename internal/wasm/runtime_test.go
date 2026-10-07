@@ -119,10 +119,18 @@ func TestNewRuntime_WithCompilationCache(t *testing.T) {
 // TestNewRuntime_BadCacheDir verifies that an unwritable cache directory returns an error.
 func TestNewRuntime_BadCacheDir(t *testing.T) {
 	ctx := context.Background()
-	// A path whose parent doesn't exist and can't be created.
-	badDir := "/nonexistent_root_dir/warmor/cache"
 
-	_, err := NewRuntime(ctx, RuntimeConfig{CacheDir: badDir})
+	// Create a file (not a directory) and try to use it as a cache dir.
+	// os.MkdirAll will fail because the path already exists as a regular file,
+	// and this behaviour is consistent across Linux, macOS, and Windows.
+	f, err := os.CreateTemp(t.TempDir(), "not-a-dir-*.tmp")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	f.Close()
+	badDir := filepath.Join(f.Name(), "subdir") // parent is a file, not a dir
+
+	_, err = NewRuntime(ctx, RuntimeConfig{CacheDir: badDir})
 	if err == nil {
 		t.Error("expected error for bad cache dir, got nil")
 	}
