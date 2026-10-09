@@ -224,3 +224,122 @@ func TestPolicyKey_MarshalBinary_ZeroValue(t *testing.T) {
 		}
 	}
 }
+
+func TestHashPort_KnownVectors(t *testing.T) {
+	tests := []struct {
+		port uint16
+	}{
+		{0}, {22}, {80}, {443}, {8080}, {65535},
+	}
+
+	for _, tc := range tests {
+		// Reference: FNV-1a over the port's two bytes, low byte first.
+		want := uint32(2166136261)
+		want ^= uint32(tc.port & 0xFF)
+		want *= 16777619
+		want ^= uint32(tc.port >> 8)
+		want *= 16777619
+
+		if got := HashPort(tc.port); got != want {
+			t.Errorf("HashPort(%d) = %d, want %d", tc.port, got, want)
+		}
+	}
+}
+
+func TestHashPort_MatchesHashPatternOfLEBytes(t *testing.T) {
+	// hash_port in BPF is FNV-1a over the little-endian bytes of the port.
+	for _, port := range []uint16{1, 80, 443, 8080, 65535} {
+		b := make([]byte, 2)
+		binary.LittleEndian.PutUint16(b, port)
+		if got, want := HashPort(port), HashPattern(string(b)); got != want {
+			t.Errorf("HashPort(%d) = %d, want FNV-1a(LE bytes) = %d", port, got, want)
+		}
+	}
+}
+
+func TestHashPort_Distinct(t *testing.T) {
+	seen := make(map[uint32]uint16)
+	for _, p := range []uint16{22, 80, 443, 3306, 5432, 6379, 8080, 8443} {
+		h := HashPort(p)
+		if prev, ok := seen[h]; ok {
+			t.Errorf("collision: HashPort(%d) == HashPort(%d)", p, prev)
+		}
+		seen[h] = p
+	}
+}
+
+func TestHashIPv4Endpoint_MatchesHashPatternOfBytes(t *testing.T) {
+	// The endpoint hash is FNV-1a over the 4 address bytes (LE order of the
+	// u32) followed by the 2 port bytes (LE order of the u16).
+	addr := uint32(0x0100007f)
+	port := uint16(0x5000)
+	b := make([]byte, 6)
+	binary.LittleEndian.PutUint32(b[0:4], addr)
+	binary.LittleEndian.PutUint16(b[4:6], port)
+	if got, want := HashIPv4Endpoint(addr, port), HashPattern(string(b)); got != want {
+		t.Errorf("HashIPv4Endpoint = %d, want %d", got, want)
+	}
+}
+
+func TestHashIPv6Endpoint_MatchesHashPatternOfBytes(t *testing.T) {
+	var addr [16]byte
+	for i := range addr {
+		addr[i] = byte(i * 7)
+	}
+	port := uint16(0xbb01)
+	b := append(addr[:0:0], addr[:]...)
+	b = append(b, byte(port), byte(port>>8))
+	if got, want := HashIPv6Endpoint(addr, port), HashPattern(string(b)); got != want {
+		t.Errorf("HashIPv6Endpoint = %d, want %d", got, want)
+	}
+}
+
+func TestPolicyStructSizes(t *testing.T) {
+	if got := binary.Size(PolicyKey{}); got != 16 {
+		t.Errorf("binary.Size(PolicyKey) = %d, want 16", got)
+	}
+	if got := binary.Size(PolicyValue{}); got != 8 {
+		t.Errorf("binary.Size(PolicyValue) = %d, want 8", got)
+	}
+}
+
+func TestPolicyKey_MarshalBinary_IgnoresPad(t *testing.T) {
+	// Non-zero Pad must not leak into the map key, or lookups from the BPF
+	// side (which zero-initialises pad) would miss.
+	key := PolicyKey{CgroupID: 1, RuleHash: 2, EventType: EventTypeMount, Pad: [3]uint8{9, 9, 9}}
+	data, err := key.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary failed: %v", err)
+	}
+	if data[13] != 0 || data[14] != 0 || data[15] != 0 {
+		t.Errorf("padding not zeroed: %v", data[13:])
+	}
+	if data[12] != EventTypeMount {
+		t.Errorf("EventType byte = %d, want %d", data[12], EventTypeMount)
+	}
+}
+
+func TestPolicyKey_MarshalBinary_MatchesBinaryWrite(t *testing.T) {
+	key := PolicyKey{CgroupID: 0xfeedface, RuleHash: HashPattern("/bin/sh"), EventType: EventTypePtrace}
+	data, err := key.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary failed: %v", err)
+	}
+	want := make([]byte, 0, 16)
+	want = binary.LittleEndian.AppendUint64(want, key.CgroupID)
+	want = binary.LittleEndian.AppendUint32(want, key.RuleHash)
+	want = append(want, key.EventType, 0, 0, 0)
+	if string(data) != string(want) {
+		t.Errorf("MarshalBinary = %x, want %x", data, want)
+	}
+}
+
+func TestNewPolicyMapManager(t *testing.T) {
+	m := NewPolicyMapManager(nil)
+	if m == nil {
+		t.Fatal("NewPolicyMapManager returned nil")
+	}
+	if m.policyMap != nil {
+		t.Error("expected wrapped map to be the one passed in")
+	}
+}

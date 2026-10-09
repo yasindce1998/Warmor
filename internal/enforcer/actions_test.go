@@ -2,6 +2,7 @@ package enforcer
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,8 +78,10 @@ func TestActionHandler_AuditMode_AllowPassesThrough(t *testing.T) {
 func TestActionHandler_NoAudit_DenyNotDowngraded(t *testing.T) {
 	handler := NewActionHandler(false)
 
+	// PID 0 skips terminateProcess; a real PID here would SIGKILL whatever
+	// host process owns it. The kill path is covered in actions_linux_test.go.
 	event := &api.Event{
-		PID:      1234,
+		PID:      0,
 		UID:      1000,
 		Comm:     "nc",
 		Filename: "/usr/bin/nc",
@@ -140,5 +143,78 @@ func TestActionHandler_PerRuleAudit(t *testing.T) {
 	}
 	if stats.Denied != 0 {
 		t.Errorf("expected Denied=0 for audit deny, got %d", stats.Denied)
+	}
+}
+
+func TestActionHandler_LogAction(t *testing.T) {
+	handler := NewActionHandler(false)
+
+	result := &api.ActionResult{Action: api.ActionLog, Reason: "log it"}
+	if err := handler.Enforce(context.Background(), &api.Event{PID: 0, Comm: "python"}, result); err != nil {
+		t.Fatalf("Enforce failed: %v", err)
+	}
+
+	stats := handler.GetStats()
+	if stats.Logged != 1 || stats.Allowed != 0 || stats.Denied != 0 || stats.AuditDenied != 0 {
+		t.Errorf("unexpected stats for log action: %+v", stats)
+	}
+	if result.Audit {
+		t.Error("log action must not set Audit")
+	}
+}
+
+func TestActionHandler_UnknownActionReturnsError(t *testing.T) {
+	handler := NewActionHandler(false)
+
+	err := handler.Enforce(context.Background(), &api.Event{PID: 0}, &api.ActionResult{Action: api.Action(42)})
+	if err == nil {
+		t.Fatal("expected error for unknown action")
+	}
+
+	stats := handler.GetStats()
+	if stats.Allowed+stats.Denied+stats.Logged+stats.AuditDenied != 0 {
+		t.Errorf("unknown action must not be counted, got %+v", stats)
+	}
+}
+
+func TestActionHandler_DenyPIDZeroIsNoop(t *testing.T) {
+	handler := NewActionHandler(false)
+
+	// PID 0 must never be signalled (kill(0, ...) would target our own
+	// process group).
+	err := handler.Enforce(context.Background(), &api.Event{PID: 0}, &api.ActionResult{Action: api.ActionDeny})
+	if err != nil {
+		t.Fatalf("Enforce failed: %v", err)
+	}
+	if got := handler.GetStats().Denied; got != 1 {
+		t.Errorf("Denied = %d, want 1", got)
+	}
+}
+
+func TestActionHandler_ConcurrentStats(t *testing.T) {
+	handler := NewActionHandler(true)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			_ = handler.Enforce(ctx, &api.Event{PID: 0}, &api.ActionResult{Action: api.ActionAllow})
+		}()
+		go func() {
+			defer wg.Done()
+			_ = handler.Enforce(ctx, &api.Event{PID: 99}, &api.ActionResult{Action: api.ActionDeny})
+		}()
+		go func() {
+			defer wg.Done()
+			_ = handler.Enforce(ctx, &api.Event{PID: 0}, &api.ActionResult{Action: api.ActionLog})
+		}()
+	}
+	wg.Wait()
+
+	stats := handler.GetStats()
+	if stats.Allowed != 50 || stats.AuditDenied != 50 || stats.Logged != 100 || stats.Denied != 0 {
+		t.Errorf("unexpected concurrent stats: %+v", stats)
 	}
 }
