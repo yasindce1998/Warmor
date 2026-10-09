@@ -457,3 +457,79 @@ func TestGenerateIDUnique(t *testing.T) {
 		seen[id] = true
 	}
 }
+
+// TestPipelineEmitCloseRace stresses Emit racing with Close. Before the
+// send was serialised against close(eventCh), this panicked with "send on
+// closed channel" (and -race reported the conflicting accesses).
+func TestPipelineEmitCloseRace(t *testing.T) {
+	for iter := 0; iter < 200; iter++ {
+		p := NewPipeline(PipelineConfig{BufferSize: 8, Sinks: []Sink{&mockSink{}}})
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for g := 0; g < 8; g++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				for i := 0; i < 50; i++ {
+					p.Emit(&api.Event{PID: uint32(i)}, &api.ActionResult{})
+				}
+			}()
+		}
+		close(start)
+		if err := p.Close(); err != nil {
+			t.Fatal(err)
+		}
+		wg.Wait()
+		s := p.Stats()
+		if s.EventsReceived != s.EventsEmitted+s.EventsDropped {
+			t.Fatalf("iter %d: received %d != emitted %d + dropped %d",
+				iter, s.EventsReceived, s.EventsEmitted, s.EventsDropped)
+		}
+	}
+}
+
+// labelMutatingEnricher writes into the event's existing labels map.
+type labelMutatingEnricher struct{}
+
+func (labelMutatingEnricher) Enrich(ev *SecurityEvent) {
+	ev.Labels["pid"] = string(rune('0' + ev.PID))
+}
+
+func TestPipelineLabelsCopiedPerEvent(t *testing.T) {
+	sink := &mockSink{}
+	cfgLabels := map[string]string{"env": "test"}
+	p := NewPipeline(PipelineConfig{
+		Sinks:     []Sink{sink},
+		Labels:    cfgLabels,
+		Enrichers: []Enricher{labelMutatingEnricher{}},
+	})
+	p.Emit(&api.Event{PID: 1}, &api.ActionResult{})
+	p.Emit(&api.Event{PID: 2}, &api.ActionResult{})
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sink.events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(sink.events))
+	}
+	if got := sink.events[0].Labels["pid"]; got != "1" {
+		t.Errorf("first event's labels were overwritten by a later event: pid=%q", got)
+	}
+	if got := sink.events[1].Labels["pid"]; got != "2" {
+		t.Errorf("second event pid label = %q, want 2", got)
+	}
+	if _, ok := cfgLabels["pid"]; ok || len(cfgLabels) != 1 {
+		t.Errorf("pipeline config labels were mutated: %v", cfgLabels)
+	}
+	if sink.events[0].Labels["env"] != "test" {
+		t.Errorf("configured labels not propagated: %v", sink.events[0].Labels)
+	}
+}
+
+func TestPipelineTransformNilLabels(t *testing.T) {
+	p := &Pipeline{hostname: "h"}
+	if se := p.transform(&api.Event{}, nil); se.Labels != nil {
+		t.Errorf("expected nil labels when none configured, got %v", se.Labels)
+	}
+}

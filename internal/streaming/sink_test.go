@@ -204,6 +204,107 @@ func TestFileSinkRotationFailure(t *testing.T) {
 	if err := sink.Write(context.Background(), sampleEvent(2)); err == nil {
 		t.Error("expected rotation error when log directory is gone")
 	}
+	// Flush/Close must tolerate the closed-and-not-reopened state.
+	if err := sink.Flush(context.Background()); err != nil {
+		t.Errorf("flush after failed rotation: %v", err)
+	}
+
+	// Once the directory is back the sink must recover rather than fail
+	// every write until restart.
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Write(context.Background(), sampleEvent(3)); err != nil {
+		t.Fatalf("write after directory restored: %v", err)
+	}
+	lines := readLines(t, path)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line in recovered log, got %d", len(lines))
+	}
+	var ev SecurityEvent
+	_ = json.Unmarshal([]byte(lines[0]), &ev)
+	if ev.PID != 3 {
+		t.Errorf("expected recovered log to contain pid=3, got %d", ev.PID)
+	}
+	if err := sink.Close(); err != nil {
+		t.Errorf("close: %v", err)
+	}
+}
+
+func TestFileSinkCloseAfterFailedRotation(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "logs")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sink, err := NewFileSink(filepath.Join(dir, "events.jsonl"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sink.Write(context.Background(), sampleEvent(1))
+	_ = os.RemoveAll(dir)
+	_ = sink.Write(context.Background(), sampleEvent(2))
+	if err := sink.Close(); err != nil {
+		t.Errorf("close with no open file: %v", err)
+	}
+}
+
+// TestFileSinkRotationNamesUnique rotates many times in quick succession
+// (typically within one millisecond). Rotated files used to be named only by
+// millisecond timestamp, so os.Rename silently overwrote earlier ones.
+func TestFileSinkRotationNamesUnique(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	sink, err := NewFileSink(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+
+	const n = 20
+	for i := 1; i <= n; i++ {
+		if err := sink.Write(context.Background(), sampleEvent(uint32(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	matches, _ := filepath.Glob(path + ".*")
+	if len(matches) != n-1 {
+		t.Fatalf("expected %d rotated files, got %d", n-1, len(matches))
+	}
+	seen := map[uint32]bool{}
+	for _, m := range append(matches, path) {
+		for _, line := range readLines(t, m) {
+			var ev SecurityEvent
+			if err := json.Unmarshal([]byte(line), &ev); err != nil {
+				t.Fatal(err)
+			}
+			seen[ev.PID] = true
+		}
+	}
+	if len(seen) != n {
+		t.Errorf("events lost across rotations: have %d of %d", len(seen), n)
+	}
+}
+
+func TestFileSinkRotatedNameSkipsExisting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	s := &FileSink{path: path}
+	first := s.rotatedName()
+	if err := os.WriteFile(first, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-create the next candidate too, in case the clock ticked over.
+	if err := os.WriteFile(first+".1", nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	second := s.rotatedName()
+	if second == first || second == first+".1" {
+		t.Errorf("rotatedName returned existing file %q", second)
+	}
+	if _, err := os.Lstat(second); err == nil {
+		t.Errorf("rotatedName returned existing file %q", second)
+	}
 }
 
 func TestFileSinkOpenError(t *testing.T) {
@@ -341,9 +442,95 @@ func TestWebhookSinkErrorStatus(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("expected status 500 error, got %v", err)
 	}
-	// The failed batch is discarded, not retried.
+	// A 5xx is transient: the batch is kept and re-sent on the next flush.
+	rec.mu.Lock()
+	rec.status = http.StatusOK
+	rec.mu.Unlock()
 	if err := s.Flush(context.Background()); err != nil {
-		t.Errorf("expected empty flush after failed batch, got %v", err)
+		t.Fatalf("retry flush: %v", err)
+	}
+	batches, _ := rec.snapshot()
+	if len(batches) != 2 || len(batches[1]) != 1 || batches[1][0].PID != 1 {
+		t.Fatalf("expected failed batch to be retried, got %v", batches)
+	}
+	if err := s.Flush(context.Background()); err != nil {
+		t.Errorf("expected empty flush after successful retry, got %v", err)
+	}
+	if s.Dropped() != 0 {
+		t.Errorf("dropped = %d, want 0", s.Dropped())
+	}
+}
+
+func TestWebhookSinkClientErrorNotRetried(t *testing.T) {
+	rec := &webhookRecorder{status: http.StatusBadRequest}
+	ts := httptest.NewServer(rec.handler(t))
+	defer ts.Close()
+
+	s := NewWebhookSink(WebhookConfig{URL: ts.URL, BatchSize: 1})
+	if err := s.Write(context.Background(), sampleEvent(1)); err == nil {
+		t.Fatal("expected 400 error")
+	}
+	if err := s.Flush(context.Background()); err != nil {
+		t.Errorf("expected rejected batch to be dropped, got %v", err)
+	}
+	if batches, _ := rec.snapshot(); len(batches) != 1 {
+		t.Errorf("expected exactly one POST, got %d", len(batches))
+	}
+	if s.Dropped() != 1 {
+		t.Errorf("dropped = %d, want 1", s.Dropped())
+	}
+}
+
+func TestWebhookSinkRetryBacklogBounded(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := ts.URL
+	ts.Close() // nothing listening: every POST fails with a transport error
+
+	s := NewWebhookSink(WebhookConfig{
+		URL: url, BatchSize: 2, MaxPending: 5,
+		FlushEvery: time.Hour, Timeout: 2 * time.Second,
+	})
+	if s.maxPending != 5 {
+		t.Fatalf("maxPending = %d, want 5", s.maxPending)
+	}
+	// The first full batch flushes and fails; while failing, further writes
+	// only queue (no POST per write) until the backlog cap drops the oldest.
+	for i := 1; i <= 9; i++ {
+		_ = s.Write(context.Background(), sampleEvent(uint32(i)))
+	}
+	s.mu.Lock()
+	pending := append([]*SecurityEvent(nil), s.batch...)
+	failing := s.failing
+	s.mu.Unlock()
+	if !failing {
+		t.Error("expected sink to be in failing state")
+	}
+	if len(pending) != 5 {
+		t.Fatalf("pending = %d, want 5", len(pending))
+	}
+	if pending[0].PID != 5 || pending[4].PID != 9 {
+		t.Errorf("expected oldest events dropped, pending PIDs %d..%d", pending[0].PID, pending[4].PID)
+	}
+	if s.Dropped() != 4 {
+		t.Errorf("dropped = %d, want 4", s.Dropped())
+	}
+
+	// A failed explicit flush keeps the backlog in order.
+	if err := s.Flush(context.Background()); err == nil {
+		t.Fatal("expected flush to fail")
+	}
+	s.mu.Lock()
+	n, first := len(s.batch), s.batch[0].PID
+	s.mu.Unlock()
+	if n != 5 || first != 5 {
+		t.Errorf("after failed flush: pending %d (first pid %d), want 5 (first pid 5)", n, first)
+	}
+}
+
+func TestWebhookSinkMaxPendingDefault(t *testing.T) {
+	s := NewWebhookSink(WebhookConfig{URL: "http://x", BatchSize: 7})
+	if s.maxPending != 70 {
+		t.Errorf("maxPending = %d, want 70", s.maxPending)
 	}
 }
 

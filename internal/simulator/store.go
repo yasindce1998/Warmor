@@ -2,9 +2,12 @@ package simulator
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -114,17 +117,56 @@ func readEventFile(path string, since time.Time) ([]*streaming.SecurityEvent, er
 	defer f.Close()
 
 	var events []*streaming.SecurityEvent
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		var event streaming.SecurityEvent
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-			continue
+	var malformed, oversized int
+	r := bufio.NewReader(f)
+	for {
+		line, tooLong, err := readBoundedLine(r, maxEventLineBytes)
+		if err != nil && err != io.EOF {
+			return nil, err
 		}
-		if !event.Timestamp.Before(since) {
-			events = append(events, &event)
+		switch {
+		case tooLong:
+			// Like malformed lines, an oversized line is skipped rather
+			// than failing the whole replay.
+			oversized++
+		case len(bytes.TrimSpace(line)) == 0:
+			// Blank line.
+		default:
+			var event streaming.SecurityEvent
+			if jerr := json.Unmarshal(line, &event); jerr != nil {
+				malformed++
+			} else if !event.Timestamp.Before(since) {
+				events = append(events, &event)
+			}
+		}
+		if err == io.EOF {
+			break
 		}
 	}
-	return events, scanner.Err()
+	if malformed > 0 || oversized > 0 {
+		log.Printf("simulator: %s: skipped %d malformed and %d oversized (>%d bytes) lines",
+			path, malformed, oversized, maxEventLineBytes)
+	}
+	return events, nil
+}
+
+// maxEventLineBytes caps the size of a single ndjson record in the store.
+const maxEventLineBytes = 1024 * 1024
+
+// readBoundedLine reads one '\n'-terminated line (terminator included) from
+// r. If the line exceeds max bytes it is consumed and discarded without
+// being buffered, and tooLong is reported. err is io.EOF on the final line.
+func readBoundedLine(r *bufio.Reader, max int) (line []byte, tooLong bool, err error) {
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if !tooLong {
+			line = append(line, chunk...)
+			if len(bytes.TrimRight(line, "\r\n")) > max {
+				tooLong, line = true, nil
+			}
+		}
+		if err != bufio.ErrBufferFull {
+			return line, tooLong, err
+		}
+	}
 }

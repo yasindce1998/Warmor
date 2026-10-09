@@ -12,9 +12,9 @@ type Runtime string
 
 const (
 	RuntimeContainerd Runtime = "containerd"
-	RuntimeCRIO      Runtime = "cri-o"
-	RuntimeDocker    Runtime = "docker"
-	RuntimeUnknown   Runtime = "unknown"
+	RuntimeCRIO       Runtime = "cri-o"
+	RuntimeDocker     Runtime = "docker"
+	RuntimeUnknown    Runtime = "unknown"
 )
 
 type ContainerInfo struct {
@@ -28,14 +28,18 @@ type ContainerInfo struct {
 	Runtime   Runtime           `json:"runtime"`
 }
 
+// hostRoot is the filesystem root under which runtime sockets and task
+// state are looked up. It is a variable so tests can point it at a fake tree.
+var hostRoot = "/"
+
 func DetectRuntime() Runtime {
-	if _, err := os.Stat("/run/containerd/containerd.sock"); err == nil {
+	if _, err := os.Stat(filepath.Join(hostRoot, "run/containerd/containerd.sock")); err == nil {
 		return RuntimeContainerd
 	}
-	if _, err := os.Stat("/var/run/crio/crio.sock"); err == nil {
+	if _, err := os.Stat(filepath.Join(hostRoot, "var/run/crio/crio.sock")); err == nil {
 		return RuntimeCRIO
 	}
-	if _, err := os.Stat("/var/run/docker.sock"); err == nil {
+	if _, err := os.Stat(filepath.Join(hostRoot, "var/run/docker.sock")); err == nil {
 		return RuntimeDocker
 	}
 	return RuntimeUnknown
@@ -83,8 +87,8 @@ func ContainerFromCgroup(cgroupPath string) (*ContainerInfo, error) {
 
 func ReadContainerLabels(containerID string) (map[string]string, error) {
 	paths := []string{
-		filepath.Join("/run/containerd/io.containerd.runtime.v2.task/k8s.io", containerID, "config.json"),
-		filepath.Join("/run/containerd/io.containerd.runtime.v2.task/default", containerID, "config.json"),
+		filepath.Join(hostRoot, "run/containerd/io.containerd.runtime.v2.task/k8s.io", containerID, "config.json"),
+		filepath.Join(hostRoot, "run/containerd/io.containerd.runtime.v2.task/default", containerID, "config.json"),
 	}
 
 	for _, path := range paths {

@@ -296,8 +296,9 @@ func TestFormatText_WithDetails(t *testing.T) {
 	if strings.Index(out, "a2") > strings.Index(out, "a1") {
 		t.Error("allows not sorted by count descending")
 	}
-	if res.UniqueNewDenials[0].Comm != "high" || res.UniqueNewAllows[0].Comm != "a2" {
-		t.Error("expected FormatText to sort result slices in place")
+	// FormatText must not reorder the caller's slices.
+	if res.UniqueNewDenials[0].Comm != "low" || res.UniqueNewAllows[0].Comm != "a1" {
+		t.Error("FormatText mutated the result's slice order")
 	}
 }
 

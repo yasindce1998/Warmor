@@ -12,7 +12,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -80,9 +82,9 @@ func TestContainerdMonitor_PollDeliversEvents(t *testing.T) {
 	var got []ContainerdEvent
 	m := NewContainerdMonitor(sock, func(e ContainerdEvent) { got = append(got, e) }, testLogger())
 
-	err := m.poll(context.Background())
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("poll err = %v, want io.EOF at end of stream", err)
+	// A clean end of stream is not an error.
+	if err := m.poll(context.Background()); err != nil {
+		t.Fatalf("poll err = %v, want nil at clean end of stream", err)
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d events, want %d", len(got), len(want))
@@ -127,37 +129,95 @@ func TestContainerdMonitor_WatchCancelledContext(t *testing.T) {
 	}
 }
 
-func TestContainerdMonitor_WatchStopsDuringBackoff(t *testing.T) {
-	var mu sync.Mutex
-	var got []string
-	received := make(chan struct{}, 1)
-
+func TestContainerdMonitor_PollNonOKStatus(t *testing.T) {
 	sock := newUnixServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(ContainerdEvent{Topic: "/tasks/start", Container: "abc"})
+		// A JSON body must not be decoded as events on an error status.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(ContainerdEvent{Topic: "/bogus"})
+	}))
+	calls := 0
+	m := NewContainerdMonitor(sock, func(ContainerdEvent) { calls++ }, testLogger())
+	err := m.poll(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("poll err = %v, want unexpected status 503", err)
+	}
+	if calls != 0 {
+		t.Errorf("handler called %d times on error response, want 0", calls)
+	}
+}
+
+// TestContainerdMonitor_WatchReconnectsOnCleanEOF: a stream that ends
+// normally must be re-opened immediately, not treated as an error with a 5s
+// backoff during which events would be missed.
+func TestContainerdMonitor_WatchReconnectsOnCleanEOF(t *testing.T) {
+	var conns atomic.Int32
+	sock := newUnixServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := conns.Add(1)
+		_ = json.NewEncoder(w).Encode(ContainerdEvent{Topic: "/tasks/start", Container: fmt.Sprint(n)})
 	}))
 
+	received := make(chan string, 16)
 	m := NewContainerdMonitor(sock, func(e ContainerdEvent) {
-		mu.Lock()
-		got = append(got, e.Container)
-		mu.Unlock()
 		select {
-		case received <- struct{}{}:
+		case received <- e.Container:
 		default:
 		}
 	}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- m.Watch(ctx) }()
+
+	// Well under the 5s error backoff.
+	deadline := time.After(2 * time.Second)
+	for _, want := range []string{"1", "2", "3"} {
+		select {
+		case got := <-received:
+			if got != want {
+				t.Fatalf("event from connection %s, want %s", got, want)
+			}
+		case <-deadline:
+			t.Fatalf("Watch did not reconnect promptly after clean EOF (connections: %d)", conns.Load())
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Watch err = %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Watch did not return after cancellation")
+	}
+}
+
+func TestContainerdMonitor_WatchStopsDuringBackoff(t *testing.T) {
+	var conns atomic.Int32
+	attempted := make(chan struct{}, 1)
+	sock := newUnixServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conns.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		select {
+		case attempted <- struct{}{}:
+		default:
+		}
+	}))
+
+	m := NewContainerdMonitor(sock, func(ContainerdEvent) {}, testLogger())
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- m.Watch(ctx) }()
 
 	select {
-	case <-received:
+	case <-attempted:
 	case <-time.After(5 * time.Second):
 		cancel()
-		t.Fatal("timed out waiting for event")
+		t.Fatal("timed out waiting for first poll")
 	}
-	// The stream has ended (EOF) so Watch is now in its 5s backoff; cancel
-	// must interrupt it promptly.
+	// A real error puts Watch into its 5s backoff; cancel must interrupt it.
+	time.Sleep(100 * time.Millisecond)
 	cancel()
 
 	select {
@@ -168,11 +228,8 @@ func TestContainerdMonitor_WatchStopsDuringBackoff(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Watch did not return after cancellation")
 	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(got) == 0 || got[0] != "abc" {
-		t.Errorf("got events %v, want [abc]", got)
+	if n := conns.Load(); n != 1 {
+		t.Errorf("connections = %d, want 1 (error must back off, not retry immediately)", n)
 	}
 }
 
@@ -242,13 +299,38 @@ func TestShimPlugin_ListTasksErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("bad url", func(t *testing.T) {
-		s := NewShimPlugin(filepath.Join(t.TempDir(), "x.sock"), NewPolicyScope(), testLogger())
-		// A control character makes the request URL unparsable.
-		if _, err := s.ListTasks(context.Background(), "bad\x7fns"); err == nil {
-			t.Fatal("expected URL parse error")
+	t.Run("error status", func(t *testing.T) {
+		sock := newUnixServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// A decodable body must not be mistaken for a task list.
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"tasks":[{"id":"ghost","status":"RUNNING"}]}`))
+		}))
+		s := NewShimPlugin(sock, NewPolicyScope(), testLogger())
+		tasks, err := s.ListTasks(context.Background(), "default")
+		if err == nil || !strings.Contains(err.Error(), "404") {
+			t.Fatalf("ListTasks err = %v, want unexpected status 404", err)
+		}
+		if tasks != nil {
+			t.Errorf("tasks = %v, want nil on error", tasks)
 		}
 	})
+}
+
+func TestShimPlugin_ListTasksEscapesNamespace(t *testing.T) {
+	var gotNS, gotRaw string
+	sock := newUnixServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotNS = r.URL.Query().Get("namespace")
+		gotRaw = r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"tasks":[]}`))
+	}))
+	s := NewShimPlugin(sock, NewPolicyScope(), testLogger())
+	ns := "a&namespace=evil b\x7f"
+	if _, err := s.ListTasks(context.Background(), ns); err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if gotNS != ns {
+		t.Errorf("server saw namespace %q, want %q (raw query %q)", gotNS, ns, gotRaw)
+	}
 }
 
 func TestShimPlugin_SyncRunningContainers(t *testing.T) {
@@ -293,5 +375,44 @@ func TestShimPlugin_SyncRunningContainersAllFail(t *testing.T) {
 	s := NewShimPlugin(filepath.Join(t.TempDir(), "missing.sock"), NewPolicyScope(), testLogger())
 	if err := s.SyncRunningContainers(context.Background()); err != nil {
 		t.Errorf("SyncRunningContainers should swallow per-namespace errors, got %v", err)
+	}
+}
+
+func TestShimPlugin_SyncRunningContainersBindsLabelledPolicy(t *testing.T) {
+	root := withHostRoot(t)
+	taskDir := filepath.Join(root, "run/containerd/io.containerd.runtime.v2.task", "k8s.io")
+	touch(t, filepath.Join(taskDir, "web", "config.json"),
+		`{"annotations":{"io.warmor/policy":"web-policy","io.kubernetes.container.image":"nginx:1.25"}}`)
+	touch(t, filepath.Join(taskDir, "nolabel", "config.json"), `{"annotations":{"other":"x"}}`)
+
+	sock := newUnixServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("namespace") != "k8s.io" {
+			_, _ = w.Write([]byte(`{"tasks":[]}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tasks": []ContainerdTask{
+				{ID: "web", PID: 1, Status: "RUNNING"},
+				{ID: "nolabel", PID: 2, Status: "RUNNING"},
+			},
+		})
+	}))
+
+	scope := NewPolicyScope()
+	s := NewShimPlugin(sock, scope, testLogger())
+	if err := s.SyncRunningContainers(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := scope.Lookup("web"); !ok || got != "web-policy" {
+		t.Errorf("Lookup(web) = %q,%v; want web-policy", got, ok)
+	}
+	if got, ok := scope.LookupByImage("nginx:1.25"); !ok || got != "web-policy" {
+		t.Errorf("LookupByImage = %q,%v; want web-policy", got, ok)
+	}
+	if got, ok := scope.LookupByNamespace("k8s.io"); !ok || got != "web-policy" {
+		t.Errorf("LookupByNamespace = %q,%v; want web-policy", got, ok)
+	}
+	if n := len(scope.All()); n != 1 {
+		t.Errorf("bindings = %d, want 1", n)
 	}
 }

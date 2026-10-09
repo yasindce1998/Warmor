@@ -403,10 +403,160 @@ func TestToCEF_EscapesFilenameAndReason(t *testing.T) {
 		Filename:  "/tmp/a=b|c",
 		Reason:    "line1\nline2",
 	})
-	if !strings.Contains(cef, `filePath=/tmp/a\=b\|c`) {
+	// '|' needs no escaping in extension values; only '\\' and '=' do.
+	if !strings.Contains(cef, `filePath=/tmp/a\=b|c`) {
 		t.Errorf("filename not escaped: %s", cef)
 	}
 	if strings.Contains(cef, "\n") {
 		t.Errorf("newline leaked into CEF output: %q", cef)
+	}
+	if !strings.Contains(cef, `msg=line1\nline2`) {
+		t.Errorf("newline not encoded as \\n: %s", cef)
+	}
+}
+
+// hostileEvent carries injection attempts in every attacker-influenced field.
+func hostileEvent() *SecurityEvent {
+	return &SecurityEvent{
+		EventType:  "exec|x",
+		Decision:   "deny",
+		Hostname:   "host dst=6.6.6.6\n<13>fake",
+		Comm:       "sh dst=1.2.3.4",
+		Filename:   "/tmp/x\n<13>Jan 1 00:00:00 evil warmor: CEF:0|forged",
+		RemoteAddr: "10.0.0.1 act=allow",
+		Protocol:   "tcp\r\nproto=udp",
+		Reason:     "a|b\\",
+		Timestamp:  time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+}
+
+// cefExtensionKeys parses the extension section of a CEF record the way a
+// SIEM does (keys are tokens immediately followed by an unescaped '=') and
+// returns the keys in order.
+func cefExtensionKeys(t *testing.T, cef string) []string {
+	t.Helper()
+	// Skip the 7 header fields, honouring \| and \\ escapes.
+	fields, i := 0, 0
+	for ; i < len(cef) && fields < 7; i++ {
+		switch cef[i] {
+		case '\\':
+			i++
+		case '|':
+			fields++
+		}
+	}
+	if fields != 7 {
+		t.Fatalf("CEF header has %d unescaped separators, want 7: %s", fields, cef)
+	}
+	var keys []string
+	ext := cef[i:]
+	start := 0 // start of the current whitespace-delimited token
+	for j := 0; j < len(ext); j++ {
+		switch ext[j] {
+		case '\\':
+			j++
+		case ' ':
+			start = j + 1
+		case '=':
+			keys = append(keys, ext[start:j])
+		}
+	}
+	return keys
+}
+
+func TestToCEF_HostileValuesCannotInjectFields(t *testing.T) {
+	cef := ToCEF(hostileEvent())
+
+	if strings.ContainsAny(cef, "\r\n") {
+		t.Fatalf("raw line break in CEF output: %q", cef)
+	}
+	want := []string{"src", "dvcpid", "duser", "cs1", "cs1Label", "filePath", "dst", "proto", "msg", "rt"}
+	got := cefExtensionKeys(t, cef)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("extension keys = %v, want %v\n%s", got, want, cef)
+	}
+	for _, sub := range []string{
+		`cs1=sh dst\=1.2.3.4 `,
+		`dst=10.0.0.1 act\=allow `,
+		`proto=tcp\r\nproto\=udp `,
+		`msg=a|b\\ `,
+		`|exec\|x|exec\|x_deny|`,
+	} {
+		if !strings.Contains(cef, sub) {
+			t.Errorf("CEF missing %q: %s", sub, cef)
+		}
+	}
+}
+
+func TestCEFHeaderEscape(t *testing.T) {
+	if got := cefHeaderEscape("a|b\\c\nd\re"); got != `a\|b\\c d e` {
+		t.Errorf("cefHeaderEscape = %q", got)
+	}
+}
+
+func TestSyslogHostname(t *testing.T) {
+	for in, want := range map[string]string{
+		"":           "-",
+		"node-1":     "node-1",
+		"a b\n<13>c": "a_b_<13>c",
+		"x\ty\x7f":   "x_y_",
+	} {
+		if got := syslogHostname(in); got != want {
+			t.Errorf("syslogHostname(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSyslogSink_HostileValuesStayOnOneLine(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	received := make(chan string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		// Read everything until the sink closes the connection.
+		var sb strings.Builder
+		buf := make([]byte, 4096)
+		for {
+			n, err := conn.Read(buf)
+			sb.Write(buf[:n])
+			if err != nil {
+				break
+			}
+		}
+		received <- sb.String()
+	}()
+
+	sink, err := NewSyslogSink(SyslogConfig{Network: "tcp", Addr: ln.Addr().String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Write(context.Background(), hostileEvent()); err != nil {
+		t.Fatal(err)
+	}
+	_ = sink.Close()
+
+	var data string
+	select {
+	case data = <-received:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for syslog data")
+	}
+	lines := strings.Split(strings.TrimSuffix(data, "\n"), "\n")
+	if len(lines) != 1 || strings.Contains(data, "\r") {
+		t.Fatalf("hostile event produced %d syslog records: %q", len(lines), data)
+	}
+	// Header: <PRI>TIMESTAMP HOSTNAME TAG: - the hostname must be one token.
+	parts := strings.SplitN(lines[0], " ", 3)
+	if len(parts) != 3 || parts[1] != "host_dst=6.6.6.6_<13>fake" || !strings.HasPrefix(parts[2], "warmor: CEF:0|") {
+		t.Errorf("syslog header was corrupted: %q", lines[0])
 	}
 }

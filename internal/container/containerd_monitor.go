@@ -3,7 +3,9 @@ package container
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -54,6 +56,8 @@ func (m *ContainerdMonitor) Watch(ctx context.Context) error {
 		default:
 		}
 
+		// poll returns nil when the stream ends cleanly; reconnect
+		// immediately so no events are missed. Only real errors back off.
 		if err := m.poll(ctx); err != nil {
 			m.logger.Warn("containerd poll error", "err", err)
 			select {
@@ -77,10 +81,17 @@ func (m *ContainerdMonitor) poll(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("containerd events request: unexpected status %s", resp.Status)
+	}
+
 	dec := json.NewDecoder(resp.Body)
 	for {
 		var event ContainerdEvent
 		if err := dec.Decode(&event); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
 			return err
 		}
 		m.handler(event)

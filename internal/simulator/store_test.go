@@ -227,13 +227,46 @@ func TestReadEventFile_Missing(t *testing.T) {
 	}
 }
 
-func TestReadEventFile_LineTooLong(t *testing.T) {
+// A single oversized line used to abort the whole read (bufio.Scanner's
+// ErrTooLong) while malformed lines were skipped; both are now skipped.
+func TestReadEventFile_LineTooLongSkipped(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events-big.ndjson")
-	big := strings.Repeat("x", 1024*1024+10)
-	if err := os.WriteFile(path, []byte(big+"\n"), 0o644); err != nil {
+	ts := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC).Format(time.RFC3339)
+	ok := func(comm string) string {
+		return `{"timestamp":"` + ts + `","event_type":"exec","comm":"` + comm + `"}` + "\n"
+	}
+	// An oversized but otherwise valid JSON record, so it is skipped for
+	// its size rather than for being malformed.
+	big := `{"comm":"big","reason":"` + strings.Repeat("x", maxEventLineBytes) + `"}` + "\n"
+	limit := `{"comm":"` + strings.Repeat("y", maxEventLineBytes-11) + `"}` // exactly max bytes
+	data := ok("a") + big + ok("b") + limit + "\r\n" + big + ok("c") + strings.TrimSuffix(big, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readEventFile(path, time.Time{}); err == nil {
-		t.Fatal("expected scanner error for line exceeding buffer")
+	events, err := readEventFile(path, time.Time{})
+	if err != nil {
+		t.Fatalf("readEventFile: %v", err)
+	}
+	var comms []string
+	for _, e := range events {
+		if len(e.Comm) > 10 {
+			comms = append(comms, "limit")
+			continue
+		}
+		comms = append(comms, e.Comm)
+	}
+	if got := strings.Join(comms, ","); got != "a,b,limit,c" {
+		t.Errorf("events = %s, want a,b,limit,c", got)
+	}
+}
+
+func TestReadEventFile_FinalLineWithoutNewline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events-x.ndjson")
+	if err := os.WriteFile(path, []byte(`{"comm":"a"}`+"\n"+`{"comm":"b"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	events, err := readEventFile(path, time.Time{})
+	if err != nil || len(events) != 2 || events[1].Comm != "b" {
+		t.Fatalf("got %d events, err %v; want 2 ending with b", len(events), err)
 	}
 }

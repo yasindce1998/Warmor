@@ -1,11 +1,14 @@
 package metrics
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -97,5 +100,90 @@ func TestHealthAndReadyHandlers(t *testing.T) {
 	code, body = doGet(t, http.HandlerFunc(readyHandler), "/ready")
 	if code != http.StatusOK || body != "READY" {
 		t.Errorf("readyHandler = %d %q, want 200 \"READY\"", code, body)
+	}
+}
+
+func TestServer_AddrAfterStart(t *testing.T) {
+	s := NewServer(0)
+	if s.Addr() != "" {
+		t.Errorf("Addr before Start = %q, want empty", s.Addr())
+	}
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = s.Stop(context.Background()) }()
+
+	addr := s.Addr()
+	if addr == "" || strings.HasSuffix(addr, ":0") {
+		t.Fatalf("Addr = %q, want resolved port", addr)
+	}
+	resp, err := http.Get("http://" + addr + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+	if body, _ := io.ReadAll(resp.Body); resp.StatusCode != http.StatusOK || string(body) != "OK" {
+		t.Errorf("GET /health = %d %q", resp.StatusCode, body)
+	}
+}
+
+// syncBuffer is a goroutine-safe log sink.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestServer_ServeErrorLogged(t *testing.T) {
+	var out syncBuffer
+	prev := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(prev)
+
+	s := NewServer(0)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Closing the listener behind the server's back makes Serve fail with
+	// an error other than ErrServerClosed.
+	_ = s.listener.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(out.String(), "metrics: server error:") {
+		if time.Now().After(deadline) {
+			t.Fatalf("serve error not logged; log output: %q", out.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = s.Stop(context.Background())
+}
+
+func TestServer_StopDoesNotLog(t *testing.T) {
+	var out syncBuffer
+	prev := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(prev)
+
+	s := NewServer(0)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := s.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if out.String() != "" {
+		t.Errorf("graceful stop logged: %q", out.String())
 	}
 }

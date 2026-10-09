@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -23,10 +24,14 @@ type Pipeline struct {
 
 	enrichers []Enricher
 
-	eventCh  chan eventPair
-	doneCh   chan struct{}
-	wg       sync.WaitGroup
-	closed   atomic.Bool
+	eventCh chan eventPair
+	doneCh  chan struct{}
+	wg      sync.WaitGroup
+	closed  atomic.Bool
+	// sendMu orders Emit's send against Close's close(eventCh): Emit holds
+	// it shared while checking closed and sending, Close holds it
+	// exclusively while closing, so a send can never hit a closed channel.
+	sendMu sync.RWMutex
 
 	stats pipelineCounters
 }
@@ -86,6 +91,8 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 // Emit sends an event+decision into the pipeline for async processing.
 // Non-blocking; drops the event if the buffer is full.
 func (p *Pipeline) Emit(event *api.Event, result *api.ActionResult) {
+	p.sendMu.RLock()
+	defer p.sendMu.RUnlock()
 	if p.closed.Load() {
 		return
 	}
@@ -109,10 +116,13 @@ func (p *Pipeline) Stats() PipelineStats {
 
 // Close shuts down the pipeline, flushing all sinks.
 func (p *Pipeline) Close() error {
+	p.sendMu.Lock()
 	if p.closed.Swap(true) {
+		p.sendMu.Unlock()
 		return nil
 	}
 	close(p.eventCh)
+	p.sendMu.Unlock()
 	p.wg.Wait()
 
 	var errs []error
@@ -183,7 +193,9 @@ func (p *Pipeline) transform(event *api.Event, result *api.ActionResult) *Securi
 		Comm:      event.Comm,
 		CgroupID:  event.CgroupID,
 		Filename:  event.Filename,
-		Labels:    p.labels,
+		// Each event gets its own copy so enrichers or sinks mutating one
+		// event's labels cannot affect other events or the pipeline config.
+		Labels: maps.Clone(p.labels),
 	}
 
 	if se.Timestamp.IsZero() {
