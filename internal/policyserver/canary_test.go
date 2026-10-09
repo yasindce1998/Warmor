@@ -25,6 +25,10 @@ func setupCanaryTest(t *testing.T) (*RolloutManager, *CanaryAnalyzer) {
 	}, wasmPath); err != nil {
 		t.Fatal(err)
 	}
+	// Version 2 is the canary target.
+	if err := store.UpdatePolicy("canary-policy", wasmPath); err != nil {
+		t.Fatal(err)
+	}
 
 	ca := NewCanaryAnalyzer(rm)
 	return rm, ca

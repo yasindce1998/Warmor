@@ -12,7 +12,7 @@ import (
 
 func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
-	srv := NewServer(ServerConfig{Addr: ":0"})
+	srv := NewServer(ServerConfig{Addr: ":0", Insecure: true, PolicyDir: t.TempDir()})
 	ts := httptest.NewServer(srv.httpServer.Handler)
 	return srv, ts
 }
@@ -61,11 +61,11 @@ func TestRegisterAndHeartbeat(t *testing.T) {
 }
 
 func TestPolicyCRUD(t *testing.T) {
-	_, ts := setupTestServer(t)
+	srv, ts := setupTestServer(t)
 	defer ts.Close()
 
-	// Create a temp WASM file
-	dir := t.TempDir()
+	// Create a WASM file in the server's policy directory
+	dir := srv.policyDir
 	wasmPath := filepath.Join(dir, "test.wasm")
 	_ = os.WriteFile(wasmPath, []byte("fake-wasm-binary"), 0644)
 
@@ -250,6 +250,7 @@ func TestRolloutHTTPEndpoints(t *testing.T) {
 		Selector: map[string]string{"tier": "web"},
 		Priority: 10,
 	}, wasmPath)
+	_ = srv.Store().UpdatePolicy("web-policy", wasmPath)
 
 	// Create rollout
 	cfg, _ := json.Marshal(RolloutConfig{
@@ -325,6 +326,19 @@ func TestRolloutHTTPEndpoints(t *testing.T) {
 	resp.Body.Close()
 	if state.Status != "aborted" {
 		t.Errorf("expected status=aborted, got %s", state.Status)
+	}
+
+	// An aborted rollout can't be ramped again or re-aborted.
+	for _, method := range []string{http.MethodPut, http.MethodDelete} {
+		req, _ = http.NewRequest(method, ts.URL+"/api/v1/admin/rollouts/canary-1", bytes.NewReader(update))
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Errorf("%s on aborted rollout: expected 409, got %d", method, resp.StatusCode)
+		}
 	}
 }
 

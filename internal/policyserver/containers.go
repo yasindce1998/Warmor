@@ -19,8 +19,8 @@ type containerStore struct {
 	bindings map[string]*ContainerBinding
 }
 
-var containers = &containerStore{
-	bindings: make(map[string]*ContainerBinding),
+func newContainerStore() *containerStore {
+	return &containerStore{bindings: make(map[string]*ContainerBinding)}
 }
 
 func (s *Server) handleContainerBind(w http.ResponseWriter, r *http.Request) {
@@ -39,9 +39,9 @@ func (s *Server) handleContainerBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	containers.mu.Lock()
-	containers.bindings[binding.ContainerID] = &binding
-	containers.mu.Unlock()
+	s.containers.mu.Lock()
+	s.containers.bindings[binding.ContainerID] = &binding
+	s.containers.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":       "bound",
@@ -62,29 +62,32 @@ func (s *Server) handleContainerDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	containers.mu.Lock()
-	delete(containers.bindings, id)
-	containers.mu.Unlock()
+	s.containers.mu.Lock()
+	delete(s.containers.bindings, id)
+	s.containers.mu.Unlock()
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func GetContainerPolicy(containerID string) (string, bool) {
-	containers.mu.RLock()
-	defer containers.mu.RUnlock()
-	b, ok := containers.bindings[containerID]
+// GetContainerPolicy returns the policy bound to a container.
+func (s *Server) GetContainerPolicy(containerID string) (string, bool) {
+	s.containers.mu.RLock()
+	defer s.containers.mu.RUnlock()
+	b, ok := s.containers.bindings[containerID]
 	if !ok {
 		return "", false
 	}
 	return b.PolicyID, true
 }
 
-func ListContainerBindings() []*ContainerBinding {
-	containers.mu.RLock()
-	defer containers.mu.RUnlock()
-	out := make([]*ContainerBinding, 0, len(containers.bindings))
-	for _, b := range containers.bindings {
-		out = append(out, b)
+// ListContainerBindings returns copies of all container bindings.
+func (s *Server) ListContainerBindings() []*ContainerBinding {
+	s.containers.mu.RLock()
+	defer s.containers.mu.RUnlock()
+	out := make([]*ContainerBinding, 0, len(s.containers.bindings))
+	for _, b := range s.containers.bindings {
+		cp := *b
+		out = append(out, &cp)
 	}
 	return out
 }

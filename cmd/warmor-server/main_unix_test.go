@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"log"
 	"net"
 	"net/http"
@@ -111,37 +112,52 @@ func runServer(t *testing.T, probe func(addr string), extraArgs ...string) strin
 
 func TestServer_PlainHTTPWithJWT(t *testing.T) {
 	logs := runServer(t, func(addr string) {
-		resp, err := http.Get("http://" + addr + "/api/v1/admin/agents")
-		if err != nil {
-			t.Fatalf("GET: %v", err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Errorf("admin API without token: status %d, want 401", resp.StatusCode)
+		for _, path := range []string{"/api/v1/admin/agents", "/api/v1/policy?agent_id=a", "/api/v1/policy/wasm?policy_id=p"} {
+			resp, err := http.Get("http://" + addr + path)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("GET %s without token: status %d, want 401", path, resp.StatusCode)
+			}
 		}
 	}, "-jwt-secret", "s3cret")
 
-	assertContains(t, "logs", logs, "JWT admin auth enabled", "shutting down policy server")
+	assertContains(t, "logs", logs, "JWT auth enabled", "shutting down policy server")
 	if strings.Contains(logs, "mTLS enabled") {
 		t.Errorf("mTLS should be off:\n%s", logs)
 	}
 }
 
-func TestServer_NoJWTAdminAPIIsOpen(t *testing.T) {
+func TestServer_JWTSecretFromEnv(t *testing.T) {
+	t.Setenv("WARMOR_JWT_SECRET", "from-env")
 	logs := runServer(t, func(addr string) {
 		resp, err := http.Get("http://" + addr + "/api/v1/admin/agents")
 		if err != nil {
 			t.Fatalf("GET: %v", err)
 		}
 		resp.Body.Close()
-		// Without --jwt-secret the admin API is unauthenticated.
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("status %d, want 401", resp.StatusCode)
+		}
+	})
+	assertContains(t, "logs", logs, "JWT auth enabled")
+}
+
+// With neither JWT nor mTLS the server must not start unless --insecure.
+func TestServer_InsecureFlag(t *testing.T) {
+	logs := runServer(t, func(addr string) {
+		resp, err := http.Get("http://" + addr + "/api/v1/admin/agents")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("status %d, want 200", resp.StatusCode)
 		}
-	})
-	if strings.Contains(logs, "JWT admin auth enabled") {
-		t.Errorf("JWT should be off:\n%s", logs)
-	}
+	}, "-insecure")
+	assertContains(t, "logs", logs, "INSECURE MODE")
 }
 
 type pki struct {
@@ -186,13 +202,22 @@ func TestServer_MTLS(t *testing.T) {
 			t.Fatal(err)
 		}
 		client := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}, Timeout: 5 * time.Second}
-		resp, err := client.Get("https://" + addr + "/api/v1/admin/agents")
+		resp, err := client.Post("https://"+addr+"/api/v1/register", "application/json", strings.NewReader(`{"id":"a1"}`))
+		if err != nil {
+			t.Fatalf("mTLS register: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("mTLS register status %d, want 200", resp.StatusCode)
+		}
+		// A client cert alone does not grant admin access.
+		resp, err = client.Get("https://" + addr + "/api/v1/admin/agents")
 		if err != nil {
 			t.Fatalf("mTLS GET: %v", err)
 		}
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("mTLS status %d, want 200", resp.StatusCode)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("admin over mTLS without JWT: status %d, want 401", resp.StatusCode)
 		}
 
 		// A client without a certificate must be rejected.
@@ -206,20 +231,31 @@ func TestServer_MTLS(t *testing.T) {
 	assertContains(t, "logs", logs, "mTLS enabled", "(mTLS)")
 }
 
-// Supplying only some of the TLS flags silently falls back to plaintext HTTP
-// (see report). This pins that behaviour.
-func TestServer_PartialTLSFlagsFallBackToPlaintext(t *testing.T) {
+// --tls-cert/--tls-key without --ca-cert serves TLS without client auth, so
+// a JWT secret is required.
+func TestServer_TLSWithoutClientAuth(t *testing.T) {
 	p := writePKI(t)
 	logs := runServer(t, func(addr string) {
-		resp, err := http.Get("http://" + addr + "/api/v1/admin/agents")
+		pool := x509.NewCertPool()
+		pool.AppendCertsFromPEM(p.caPEM)
+		client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}, Timeout: 5 * time.Second}
+		resp, err := client.Post("https://"+addr+"/api/v1/register", "application/json", strings.NewReader(`{"id":"a1"}`))
 		if err != nil {
-			t.Fatalf("plaintext GET: %v", err)
+			t.Fatalf("TLS register: %v", err)
 		}
 		resp.Body.Close()
-	}, "-tls-cert", p.serverCert, "-tls-key", p.serverKey)
-	if strings.Contains(logs, "mTLS enabled") {
-		t.Errorf("unexpected mTLS with missing --ca-cert:\n%s", logs)
-	}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("register without token: status %d, want 401", resp.StatusCode)
+		}
+		// Plaintext must not be served on the TLS port (Go answers it with 400).
+		if resp, err := http.Get("http://" + addr + "/api/v1/admin/agents"); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("plaintext request on TLS port: status %d, want 400", resp.StatusCode)
+			}
+		}
+	}, "-tls-cert", p.serverCert, "-tls-key", p.serverKey, "-jwt-secret", "s3cret")
+	assertContains(t, "logs", logs, "TLS enabled", "(TLS)")
 }
 
 func TestServer_Failures(t *testing.T) {
@@ -239,7 +275,15 @@ func TestServer_Failures(t *testing.T) {
 		{"missing tls key", []string{"-ca-cert", p.caCert, "-tls-cert", p.serverCert, "-tls-key", missing}, "read tls key"},
 		{"missing ca", []string{"-ca-cert", missing, "-tls-cert", p.serverCert, "-tls-key", p.serverKey}, "read ca cert"},
 		{"bad keypair", []string{"-ca-cert", p.caCert, "-tls-cert", garbage, "-tls-key", p.serverKey}, "configure mTLS"},
-		{"bad addr", []string{"-addr", "127.0.0.1:notaport"}, "policy server:"},
+		{"bad addr", []string{"-addr", "127.0.0.1:notaport", "-insecure"}, "policy server:"},
+		{"no auth", nil, "refusing to start without authentication"},
+		{"tls without ca or jwt", []string{"-tls-cert", p.serverCert, "-tls-key", p.serverKey}, "refusing to start without authentication"},
+		{"only tls cert", []string{"-tls-cert", p.serverCert, "-jwt-secret", "x"}, "--tls-cert and --tls-key must be given together"},
+		{"only tls key", []string{"-tls-key", p.serverKey, "-jwt-secret", "x"}, "--tls-cert and --tls-key must be given together"},
+		{"only ca", []string{"-ca-cert", p.caCert}, "--tls-cert and --tls-key must be given together"},
+		{"ca and cert without key", []string{"-ca-cert", p.caCert, "-tls-cert", p.serverCert}, "--tls-cert and --tls-key must be given together"},
+		{"tls-only bad keypair", []string{"-tls-cert", garbage, "-tls-key", p.serverKey, "-jwt-secret", "x"}, "configure TLS"},
+		{"policy dir missing", []string{"-insecure", "-policy-dir", missing}, "is not a directory"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

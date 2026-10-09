@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"log"
 	"os"
@@ -14,20 +15,41 @@ import (
 
 var (
 	addr      = flag.String("addr", ":8443", "Server listen address")
-	caCert    = flag.String("ca-cert", "", "CA certificate PEM path (enables mTLS)")
+	caCert    = flag.String("ca-cert", "", "CA certificate PEM path used to verify agent client certificates (enables mTLS; requires --tls-cert and --tls-key)")
 	tlsCert   = flag.String("tls-cert", "", "Server TLS certificate PEM path")
 	tlsKey    = flag.String("tls-key", "", "Server TLS private key PEM path")
-	jwtSecret = flag.String("jwt-secret", "", "JWT secret for admin API auth")
+	jwtSecret = flag.String("jwt-secret", "", "JWT secret for bearer-token auth (env WARMOR_JWT_SECRET); required for the admin API")
+	policyDir = flag.String("policy-dir", "", "Directory admin requests may load policy WASM files from")
+	insecure  = flag.Bool("insecure", false, "Allow serving without any authentication (development only)")
 )
 
 func main() {
 	flag.Parse()
 
 	cfg := policyserver.ServerConfig{
-		Addr: *addr,
+		Addr:      *addr,
+		PolicyDir: *policyDir,
+		Insecure:  *insecure,
 	}
 
-	if *caCert != "" && *tlsCert != "" && *tlsKey != "" {
+	if *jwtSecret == "" {
+		*jwtSecret = os.Getenv("WARMOR_JWT_SECRET")
+	}
+
+	switch {
+	case *tlsCert == "" && *tlsKey == "" && *caCert == "":
+		// Plaintext.
+	case *tlsCert == "" || *tlsKey == "":
+		log.Fatalf("--tls-cert and --tls-key must be given together (and are required by --ca-cert)")
+	case *caCert == "":
+		// TLS without client certificates: callers authenticate with JWTs.
+		cert, err := tls.LoadX509KeyPair(*tlsCert, *tlsKey)
+		if err != nil {
+			log.Fatalf("configure TLS: %v", err)
+		}
+		cfg.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13}
+		log.Println("TLS enabled (no client certificates; JWT auth required)")
+	default:
 		certPEM, err := os.ReadFile(*tlsCert)
 		if err != nil {
 			log.Fatalf("read tls cert: %v", err)
@@ -51,7 +73,17 @@ func main() {
 
 	if *jwtSecret != "" {
 		cfg.JWTSecret = []byte(*jwtSecret)
-		log.Println("JWT admin auth enabled")
+		log.Println("JWT auth enabled")
+	}
+
+	if cfg.JWTSecret == nil && *caCert == "" && !*insecure {
+		log.Fatalf("refusing to start without authentication: set --jwt-secret and/or --ca-cert with --tls-cert/--tls-key (or --insecure for development only)")
+	}
+
+	if *policyDir == "" {
+		log.Println("no --policy-dir set; creating or updating policies via the admin API is disabled")
+	} else if info, err := os.Stat(*policyDir); err != nil || !info.IsDir() {
+		log.Fatalf("--policy-dir %s is not a directory", *policyDir)
 	}
 
 	srv := policyserver.NewServer(cfg)

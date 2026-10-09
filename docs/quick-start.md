@@ -206,22 +206,39 @@ warmorctl certs generate --agent --ca-cert ./certs/ca.crt --ca-key ./certs/ca.ke
 Enable mutual TLS between agents and the policy server:
 
 ```bash
-# Start server with mTLS
+# Start server with mTLS (agents authenticate with client certificates;
+# the admin API requires an admin JWT signed with --jwt-secret)
 warmor-server \
-  --listen :8443 \
+  --addr :8443 \
   --tls-cert ./certs/server.crt \
   --tls-key ./certs/server.key \
-  --tls-ca ./certs/ca.crt \
+  --ca-cert ./certs/ca.crt \
+  --jwt-secret "$WARMOR_JWT_SECRET" \
   --policy-dir ./policies
 
-# Start agent with mTLS
+# Start agent with mTLS; the downloaded policy replaces --policy
 warmor-daemon \
-  --policy policy.yaml \
+  --policy /var/lib/warmor/policy.wasm \
   --server https://warmor-server:8443 \
   --tls-cert ./certs/agent-01.crt \
   --tls-key ./certs/agent-01.key \
   --tls-ca ./certs/ca.crt
 ```
+
+The server refuses to start without authentication. Supported modes:
+
+| Server flags | Agent / runtime auth | Admin API |
+|--------------|---------------------|-----------|
+| `--ca-cert --tls-cert --tls-key` | client certificate | admin JWT (needs `--jwt-secret`; disabled otherwise) |
+| `--tls-cert --tls-key --jwt-secret` | JWT, role `agent` / `runtime` | admin JWT |
+| `--jwt-secret` (plain HTTP) | JWT, role `agent` / `runtime` | admin JWT |
+| `--insecure` (development only) | none | none |
+
+`--ca-cert`, `--tls-cert` and `--tls-key` must be supplied as a consistent set;
+`--jwt-secret` may also be given via `WARMOR_JWT_SECRET`. Agents using token
+auth pass `--server-token` (or `WARMOR_SERVER_TOKEN`) instead of a client
+certificate. Admin `wasm_path` values must point inside `--policy-dir`; without
+it, policies cannot be created or updated over the API.
 
 ---
 

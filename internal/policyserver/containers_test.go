@@ -7,20 +7,8 @@ import (
 	"testing"
 )
 
-func resetContainers(t *testing.T) {
-	t.Helper()
-	reset := func() {
-		containers.mu.Lock()
-		containers.bindings = make(map[string]*ContainerBinding)
-		containers.mu.Unlock()
-	}
-	reset()
-	t.Cleanup(reset)
-}
-
 func TestContainerBindAndDelete(t *testing.T) {
-	resetContainers(t)
-	_, ts := setupTestServer(t)
+	srv, ts := setupTestServer(t)
 	defer ts.Close()
 
 	body, _ := json.Marshal(ContainerBinding{ContainerID: "c1", PID: 100, PolicyID: "p1", Labels: map[string]string{"app": "web"}})
@@ -38,13 +26,13 @@ func TestContainerBindAndDelete(t *testing.T) {
 		t.Errorf("unexpected bind response: %v", out)
 	}
 
-	if pid, ok := GetContainerPolicy("c1"); !ok || pid != "p1" {
+	if pid, ok := srv.GetContainerPolicy("c1"); !ok || pid != "p1" {
 		t.Errorf("expected c1 -> p1, got %q %v", pid, ok)
 	}
-	if _, ok := GetContainerPolicy("unknown"); ok {
+	if _, ok := srv.GetContainerPolicy("unknown"); ok {
 		t.Error("expected unknown container lookup to fail")
 	}
-	if list := ListContainerBindings(); len(list) != 1 || list[0].PID != 100 {
+	if list := srv.ListContainerBindings(); len(list) != 1 || list[0].PID != 100 {
 		t.Errorf("unexpected bindings: %+v", list)
 	}
 
@@ -57,17 +45,16 @@ func TestContainerBindAndDelete(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete: status %d", resp.StatusCode)
 	}
-	if _, ok := GetContainerPolicy("c1"); ok {
+	if _, ok := srv.GetContainerPolicy("c1"); ok {
 		t.Error("expected binding removed")
 	}
-	if len(ListContainerBindings()) != 0 {
+	if len(srv.ListContainerBindings()) != 0 {
 		t.Error("expected no bindings after delete")
 	}
 }
 
 func TestContainerEndpointErrors(t *testing.T) {
-	resetContainers(t)
-	_, ts := setupTestServer(t)
+	srv, ts := setupTestServer(t)
 	defer ts.Close()
 
 	tests := []struct {
@@ -97,7 +84,36 @@ func TestContainerEndpointErrors(t *testing.T) {
 			}
 		})
 	}
-	if len(ListContainerBindings()) != 0 {
+	if len(srv.ListContainerBindings()) != 0 {
 		t.Error("invalid requests must not create bindings")
+	}
+}
+
+// Bindings belong to a Server instance, not to the package.
+func TestContainerBindingsArePerServer(t *testing.T) {
+	a, tsA := setupTestServer(t)
+	defer tsA.Close()
+	b, tsB := setupTestServer(t)
+	defer tsB.Close()
+
+	body, _ := json.Marshal(ContainerBinding{ContainerID: "c1", PolicyID: "p1"})
+	resp, err := http.Post(tsA.URL+"/api/v1/containers/bind", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if _, ok := a.GetContainerPolicy("c1"); !ok {
+		t.Fatal("expected binding on server A")
+	}
+	if _, ok := b.GetContainerPolicy("c1"); ok {
+		t.Error("binding on server A leaked into server B")
+	}
+
+	// Returned bindings are copies.
+	list := a.ListContainerBindings()
+	list[0].PolicyID = "mutated"
+	if pid, _ := a.GetContainerPolicy("c1"); pid != "p1" {
+		t.Errorf("ListContainerBindings must return copies, got %q", pid)
 	}
 }

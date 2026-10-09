@@ -49,10 +49,12 @@ func doAuthRequest(t *testing.T, method, url, authHeader string) *http.Response 
 	return resp
 }
 
-var adminRoutes = []struct {
+type route struct {
 	method string
 	path   string
-}{
+}
+
+var adminRoutes = []route{
 	{http.MethodGet, "/api/v1/admin/policies"},
 	{http.MethodPost, "/api/v1/admin/policies"},
 	{http.MethodGet, "/api/v1/admin/policies/some-id"},
@@ -152,13 +154,168 @@ func TestAdminAcceptsAdminToken(t *testing.T) {
 	}
 }
 
-func TestAdminOpenWithoutJWTSecret(t *testing.T) {
-	// Documented behavior: with no JWT secret, admin endpoints are not protected.
-	_, ts := setupTestServer(t)
+var agentRoutes = []route{
+	{http.MethodPost, "/api/v1/register"},
+	{http.MethodPost, "/api/v1/heartbeat"},
+	{http.MethodGet, "/api/v1/policy?agent_id=a"},
+	{http.MethodGet, "/api/v1/policy/wasm?policy_id=p"},
+}
+
+var containerRoutes = []route{
+	{http.MethodPost, "/api/v1/containers/bind"},
+	{http.MethodDelete, "/api/v1/containers/c1"},
+}
+
+// Without a JWT secret, mTLS or insecure mode every route must be closed.
+func TestNoAuthConfiguredRejectsEverything(t *testing.T) {
+	srv := NewServer(ServerConfig{Addr: ":0"})
+	ts := httptest.NewServer(srv.httpServer.Handler)
 	defer ts.Close()
-	resp := doAuthRequest(t, http.MethodGet, ts.URL+"/api/v1/admin/agents", "")
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 without secret configured, got %d", resp.StatusCode)
+
+	tok := issueToken(t, testJWTSecret, "admin", time.Hour)
+	all := append(append(append([]route{}, agentRoutes...), containerRoutes...), adminRoutes...)
+	for _, route := range all {
+		for _, header := range []string{"", "Bearer " + tok} {
+			resp := doAuthRequest(t, route.method, ts.URL+route.path, header)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("%s %s (header %q): expected 401, got %d", route.method, route.path, header, resp.StatusCode)
+			}
+		}
+	}
+}
+
+func TestStartRefusesWithoutAuth(t *testing.T) {
+	pki := newTestPKI(t)
+	cert, err := tls.X509KeyPair(pki.serverCert, pki.serverKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, cfg := range map[string]ServerConfig{
+		"plaintext":           {Addr: "127.0.0.1:0"},
+		"tls without clients": {Addr: "127.0.0.1:0", TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := NewServer(cfg).Start()
+			if err == nil || !strings.Contains(err.Error(), "no authentication configured") {
+				t.Fatalf("expected refusal to start, got %v", err)
+			}
+		})
+	}
+}
+
+func TestInsecureModeAllowsUnauthenticated(t *testing.T) {
+	srv := NewServer(ServerConfig{Addr: ":0", Insecure: true})
+	ts := httptest.NewServer(srv.httpServer.Handler)
+	defer ts.Close()
+	srv.Store().RegisterAgent(&RegisterRequest{ID: "a"})
+
+	for _, path := range []string{"/api/v1/admin/agents", "/api/v1/policy?agent_id=a"} {
+		resp := doAuthRequest(t, http.MethodGet, ts.URL+path, "")
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			t.Errorf("GET %s in insecure mode: got %d", path, resp.StatusCode)
+		}
+	}
+}
+
+// Insecure mode does not switch off a configured JWT secret.
+func TestInsecureModeStillEnforcesConfiguredJWT(t *testing.T) {
+	srv := NewServer(ServerConfig{Addr: ":0", Insecure: true, JWTSecret: testJWTSecret})
+	ts := httptest.NewServer(srv.httpServer.Handler)
+	defer ts.Close()
+	for _, path := range []string{"/api/v1/admin/agents", "/api/v1/policy?agent_id=a"} {
+		if resp := doAuthRequest(t, http.MethodGet, ts.URL+path, ""); resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET %s: expected 401, got %d", path, resp.StatusCode)
+		}
+	}
+}
+
+func TestAgentAndContainerRoutesRejectUnauthenticated(t *testing.T) {
+	_, ts := setupAuthServer(t)
+
+	valid := issueToken(t, testJWTSecret, "agent", time.Hour)
+	parts := strings.Split(valid, ".")
+	cases := map[string]string{
+		"no header":      "",
+		"basic scheme":   "Basic YWdlbnQ6YWdlbnQ=",
+		"empty bearer":   "Bearer ",
+		"garbage token":  "Bearer not-a-jwt",
+		"tampered":       "Bearer " + parts[0] + "." + parts[1] + "x." + parts[2],
+		"wrong secret":   "Bearer " + issueToken(t, []byte("attacker-secret"), "agent", time.Hour),
+		"expired":        "Bearer " + issueToken(t, testJWTSecret, "agent", -time.Hour),
+		"lowercase auth": "bearer " + valid,
+	}
+	for _, route := range append(append([]route{}, agentRoutes...), containerRoutes...) {
+		for name, header := range cases {
+			resp := doAuthRequest(t, route.method, ts.URL+route.path, header)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("%s %s/%s: expected 401, got %d", route.method, route.path, name, resp.StatusCode)
+			}
+		}
+	}
+}
+
+func TestAgentAndContainerRouteRoles(t *testing.T) {
+	_, ts := setupAuthServer(t)
+	authorized := func(code int) bool { return code != http.StatusUnauthorized && code != http.StatusForbidden }
+
+	for _, tc := range []struct {
+		role                      string
+		agentOK, containerOK, adm bool
+	}{
+		{"agent", true, false, false},
+		{"runtime", false, true, false},
+		{"admin", true, true, true},
+		{"viewer", false, false, false},
+	} {
+		tok := "Bearer " + issueToken(t, testJWTSecret, tc.role, time.Hour)
+		check := func(routes []route, wantOK bool) {
+			for _, r := range routes {
+				code := doAuthRequest(t, r.method, ts.URL+r.path, tok).StatusCode
+				if wantOK && !authorized(code) {
+					t.Errorf("role %s %s %s: expected access, got %d", tc.role, r.method, r.path, code)
+				}
+				if !wantOK && code != http.StatusForbidden {
+					t.Errorf("role %s %s %s: expected 403, got %d", tc.role, r.method, r.path, code)
+				}
+			}
+		}
+		check(agentRoutes, tc.agentOK)
+		check(containerRoutes, tc.containerOK)
+		check(adminRoutes, tc.adm)
+	}
+}
+
+// The policy client authenticates with an agent token.
+func TestClientSendsAgentToken(t *testing.T) {
+	srv, ts := setupAuthServer(t)
+	srv.policyDir = t.TempDir()
+	w := writeWASM(t, srv.policyDir, "p.wasm", "wasm-v1")
+	if err := srv.Store().CreatePolicy(&Policy{ID: "p"}, w); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := newUpdateRecorder()
+	ctx := context.Background()
+	c := NewClient(ClientConfig{
+		ServerURL: ts.URL, AgentID: "a1", Token: issueToken(t, testJWTSecret, "agent", time.Hour), OnUpdate: rec.onUpdate,
+	})
+	if err := c.Register(ctx); err != nil {
+		t.Fatalf("register with agent token: %v", err)
+	}
+	c.poll(ctx)
+	if rec.count() != 1 || string(rec.wasm[0]) != "wasm-v1" {
+		t.Fatalf("expected policy delivered with agent token, got %d updates", rec.count())
+	}
+	if err := c.SendHeartbeat(ctx); err != nil {
+		t.Fatalf("heartbeat with agent token: %v", err)
+	}
+
+	anon := NewClient(ClientConfig{ServerURL: ts.URL, AgentID: "a2"})
+	if err := anon.Register(ctx); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Errorf("expected 401 without token, got %v", err)
+	}
+	if err := anon.SendHeartbeat(ctx); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Errorf("expected heartbeat 401 without token, got %v", err)
 	}
 }
 
@@ -280,6 +437,43 @@ func TestMTLSRejectsPlaintext(t *testing.T) {
 	c := NewClient(ClientConfig{ServerURL: plainURL, AgentID: "plain"})
 	if err := c.Register(context.Background()); err == nil {
 		t.Fatal("expected plaintext HTTP to an mTLS server to fail")
+	}
+}
+
+// A verified client certificate authenticates agent and runtime routes, but
+// never the admin API.
+func TestMTLSCertAuthenticatesAgentAndRuntimeRoutes(t *testing.T) {
+	pki := newTestPKI(t)
+	_, ts := startMTLSServer(t, pki)
+
+	clientTLS, err := crypto.NewClientTLSConfig(pki.clientCert, pki.clientKey, pki.caPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: clientTLS}, Timeout: 5 * time.Second}
+	do := func(method, path, body string) int {
+		req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+		resp, err := hc.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := do(http.MethodPost, "/api/v1/register", `{"id":"a1"}`); code != http.StatusOK {
+		t.Errorf("register over mTLS: %d", code)
+	}
+	if code := do(http.MethodPost, "/api/v1/containers/bind", `{"container_id":"c","policy_id":"p"}`); code != http.StatusOK {
+		t.Errorf("container bind over mTLS: %d", code)
+	}
+	if code := do(http.MethodDelete, "/api/v1/containers/c", ""); code != http.StatusNoContent {
+		t.Errorf("container delete over mTLS: %d", code)
+	}
+	for _, r := range adminRoutes {
+		if code := do(r.method, r.path, ""); code != http.StatusUnauthorized {
+			t.Errorf("admin %s %s over mTLS without JWT: expected 401, got %d", r.method, r.path, code)
+		}
 	}
 }
 

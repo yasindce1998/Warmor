@@ -26,6 +26,13 @@ func TestFlagDefaults(t *testing.T) {
 		"webhook-header": "",
 		"event-labels":   "",
 		"version":        "false",
+		"server":         "",
+		"server-token":   "",
+		"tls-ca":         "",
+		"tls-cert":       "",
+		"tls-key":        "",
+		"agent-id":       "",
+		"poll-interval":  (30 * time.Second).String(),
 	}
 	for name, def := range want {
 		f := flag.CommandLine.Lookup(name)
