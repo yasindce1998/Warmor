@@ -60,19 +60,13 @@ func TestScan_DefaultOutputInCwd(t *testing.T) {
 	}
 }
 
-// writeHostDB builds a database whose keys are absolute host paths, which is
-// what Database.Verify actually hashes (see TestVerify_IgnoresRootFS).
-func writeHostDB(t *testing.T, files map[string]string, rootfs string) string {
+// scanDB scans rootfs into a database file and returns its path.
+func scanDB(t *testing.T, rootfs string) string {
 	t.Helper()
-	var paths []string
-	for p := range files {
-		paths = append(paths, p)
-	}
-	db, err := integrity.ScanPaths(paths)
+	db, err := integrity.ScanRootFS(rootfs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.RootFS = rootfs
 	dbPath := filepath.Join(t.TempDir(), "db.json")
 	if err := db.Save(dbPath); err != nil {
 		t.Fatal(err)
@@ -81,39 +75,42 @@ func writeHostDB(t *testing.T, files map[string]string, rootfs string) string {
 }
 
 func TestVerify_AllPass(t *testing.T) {
-	dir := t.TempDir()
-	f1 := filepath.Join(dir, "one")
-	f2 := filepath.Join(dir, "two")
-	mustWrite(t, f1, "1", 0o755)
-	mustWrite(t, f2, "2", 0o755)
-	dbPath := writeHostDB(t, map[string]string{f1: "", f2: ""}, "")
+	rootfs := fakeRootFS(t)
+	dbPath := scanDB(t, rootfs)
 
-	stdout, stderr := runMain(t, "", "-verify", dbPath, "-rootfs", dir)
-	assertContains(t, "stderr", stderr, "Verifying 2 binaries against "+dir, "Results: 2 passed, 0 failed, 0 missing")
+	stdout, stderr := runMain(t, "", "-verify", dbPath, "-rootfs", rootfs)
+	assertContains(t, "stderr", stderr, "Verifying 2 binaries against "+rootfs, "Results: 2 passed, 0 failed, 0 missing")
 	if stdout != "" {
 		t.Errorf("no FAIL/MISSING lines expected, got %q", stdout)
 	}
 }
 
 func TestVerify_RootFSFromDatabase(t *testing.T) {
-	dir := t.TempDir()
-	f := filepath.Join(dir, "bin")
-	mustWrite(t, f, "x", 0o755)
-	dbPath := writeHostDB(t, map[string]string{f: ""}, "/stored/rootfs")
+	rootfs := fakeRootFS(t)
+	dbPath := scanDB(t, rootfs)
 	_, stderr := runMain(t, "", "-verify", dbPath)
-	assertContains(t, "stderr", stderr, "against /stored/rootfs", "1 passed")
+	assertContains(t, "stderr", stderr, "against "+rootfs, "2 passed")
+}
+
+// TestVerify_FlagOverridesDatabaseRootFS checks that --rootfs, not the path
+// stored at scan time, is what gets verified (e.g. after copying the image).
+func TestVerify_FlagOverridesDatabaseRootFS(t *testing.T) {
+	rootfs := fakeRootFS(t)
+	dbPath := scanDB(t, rootfs)
+	moved := filepath.Join(t.TempDir(), "moved")
+	if err := os.Rename(rootfs, moved); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr := runMain(t, "", "-verify", dbPath, "-rootfs", moved)
+	assertContains(t, "stderr", stderr, "against "+moved, "Results: 2 passed, 0 failed, 0 missing")
 }
 
 func TestVerify_TamperedAndMissing(t *testing.T) {
-	dir := t.TempDir()
-	tampered := filepath.Join(dir, "tampered")
-	gone := filepath.Join(dir, "gone")
-	mustWrite(t, tampered, "original", 0o755)
-	mustWrite(t, gone, "here for now", 0o755)
-	dbPath := writeHostDB(t, map[string]string{tampered: "", gone: ""}, dir)
+	rootfs := fakeRootFS(t)
+	dbPath := scanDB(t, rootfs)
 
-	mustWrite(t, tampered, "modified!", 0o755)
-	if err := os.Remove(gone); err != nil {
+	mustWrite(t, filepath.Join(rootfs, "usr", "bin", "tool"), "modified!", 0o755)
+	if err := os.Remove(filepath.Join(rootfs, "bin", "sh")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -121,15 +118,14 @@ func TestVerify_TamperedAndMissing(t *testing.T) {
 	if r.code != 1 {
 		t.Errorf("exit = %d, want 1", r.code)
 	}
-	assertContains(t, "stdout", r.stdout, "FAIL     "+tampered, "MISSING  "+gone)
+	assertContains(t, "stdout", r.stdout, "FAIL     /usr/bin/tool", "MISSING  /bin/sh")
 	assertContains(t, "stderr", r.stderr, "Results: 0 passed, 1 failed, 1 missing")
 }
 
-// BUG: database keys are rootfs-relative ("/bin/sh") but runVerify never joins
-// them with --rootfs, so Database.Verify hashes the *host* path. A freshly
-// scanned rootfs therefore cannot verify against itself. This test pins the
-// current behaviour; flip the expectations when the bug is fixed.
-func TestVerify_IgnoresRootFS(t *testing.T) {
+// TestVerify_HonoursRootFS is a regression test: database keys are
+// rootfs-relative ("/usr/local/sbin/x") and verify used to hash the host path
+// instead, so a freshly scanned rootfs could not verify against itself.
+func TestVerify_HonoursRootFS(t *testing.T) {
 	rootfs := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(rootfs, "usr", "local", "sbin"), 0o755); err != nil {
 		t.Fatal(err)
@@ -141,11 +137,36 @@ func TestVerify_IgnoresRootFS(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "db.json")
 	runMain(t, "", "-rootfs", rootfs, "-o", dbPath)
 
-	r := runChild(t, nil, "-verify", dbPath, "-rootfs", rootfs)
-	if r.code == 0 {
-		t.Skip("verify now honours --rootfs; update this test to assert success")
+	stdout, stderr := runMain(t, "", "-verify", dbPath, "-rootfs", rootfs)
+	assertContains(t, "stderr", stderr, "Results: 1 passed, 0 failed, 0 missing")
+	if stdout != "" {
+		t.Errorf("no FAIL/MISSING lines expected, got %q", stdout)
 	}
-	assertContains(t, "stdout", r.stdout, "MISSING  /usr/local/sbin/"+name)
+}
+
+// TestVerify_SymlinkCannotEscapeRootFS ensures a symlink inside the rootfs
+// pointing at an absolute host path is resolved inside the rootfs, so a
+// tampered image cannot make verify hash (and pass on) a host binary.
+func TestVerify_SymlinkCannotEscapeRootFS(t *testing.T) {
+	host := filepath.Join(t.TempDir(), "hostbin")
+	// Same content as the scanned binary, so hashing it would wrongly pass.
+	mustWrite(t, host, "tool-binary", 0o755)
+
+	rootfs := fakeRootFS(t)
+	dbPath := scanDB(t, rootfs)
+	tool := filepath.Join(rootfs, "usr", "bin", "tool")
+	if err := os.Remove(tool); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(host, tool); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	r := runChild(t, nil, "-verify", dbPath)
+	if r.code != 1 {
+		t.Errorf("exit = %d, want 1", r.code)
+	}
+	assertContains(t, "stdout", r.stdout, "MISSING  /usr/bin/tool")
 }
 
 func TestScanVerify_Errors(t *testing.T) {

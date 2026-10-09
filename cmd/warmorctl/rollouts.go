@@ -113,10 +113,9 @@ func (m *rolloutsModel) fetch() tea.Msg {
 }
 
 func renderProgressBar(pct, width int) string {
+	// Clamp so a bad percentage from the server can't make Repeat panic.
+	pct = max(0, min(pct, 100))
 	filled := pct * width / 100
-	if filled > width {
-		filled = width
-	}
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 	return bar
 }

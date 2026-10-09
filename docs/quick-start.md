@@ -176,8 +176,11 @@ go install github.com/yasindce1998/warmor/cmd/warmorctl@latest
 # Launch interactive TUI dashboard
 warmorctl
 
-# Connect to a specific server
-warmorctl --server https://warmor-server:8443 --cert agent.crt --key agent.key
+# Connect to a specific server: the admin API needs a JWT with the admin
+# role (--token or $WARMOR_TOKEN); --ca-cert trusts a private CA, and
+# --client-cert/--client-key present a certificate if the server requires mTLS
+export WARMOR_TOKEN=<admin-jwt>
+warmorctl --server https://warmor-server:8443 --ca-cert ca.crt --client-cert admin.crt --client-key admin.key
 ```
 
 The TUI provides tabs for:

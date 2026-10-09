@@ -24,6 +24,7 @@ func TestRenderProgressBar(t *testing.T) {
 		{50, 20, 10, 20},
 		{100, 20, 20, 20},
 		{150, 20, 20, 20}, // clamped
+		{-10, 20, 0, 20},  // clamped; used to panic in strings.Repeat
 		{33, 10, 3, 10},   // integer truncation
 		{99, 10, 9, 10},
 		{100, 0, 0, 0},
@@ -37,17 +38,6 @@ func TestRenderProgressBar(t *testing.T) {
 			t.Errorf("renderProgressBar(%d,%d) width = %d, want %d", tt.pct, tt.width, got, tt.total)
 		}
 	}
-}
-
-// renderProgressBar does not clamp negative percentages; strings.Repeat panics
-// on a negative count. This documents the bug (see report) without failing.
-func TestRenderProgressBar_NegativePanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Log("renderProgressBar(-10, 20) no longer panics; negative clamp appears fixed")
-		}
-	}()
-	_ = renderProgressBar(-10, 20)
 }
 
 // --- dashboard ---
@@ -209,6 +199,21 @@ func TestAgentsModel_FetchViewNavigate(t *testing.T) {
 	}
 }
 
+// TestAgentsModel_LabelsSorted is a regression test: labels used to render in
+// Go's random map order, reshuffling on every redraw.
+func TestAgentsModel_LabelsSorted(t *testing.T) {
+	m := newAgentsModel("http://unused", "")
+	m.Update(agentsMsg{{ID: "a1", Labels: map[string]string{
+		"zone": "z1", "app": "web", "env": "prod", "tier": "front", "region": "eu", "owner": "ops",
+	}}})
+	want := "app=web env=prod owner=ops region=eu tier=front zone=z1"
+	for i := 0; i < 20; i++ {
+		if v := m.View(); !strings.Contains(v, want) {
+			t.Fatalf("labels not sorted, want %q in:\n%s", want, v)
+		}
+	}
+}
+
 func TestAgentsModel_EmptyAndError(t *testing.T) {
 	m := newAgentsModel("http://unused", "")
 	m.Update(agentsMsg(nil))
@@ -319,6 +324,16 @@ func TestRolloutsModel_FetchViewNavigate(t *testing.T) {
 	}
 	if cmd := m.Update(runeKey("r")); cmd == nil {
 		t.Error("'r' should refresh")
+	}
+}
+
+// TestRolloutsModel_NegativePercentage is a regression test: a negative
+// percentage from the server used to panic the TUI in renderProgressBar.
+func TestRolloutsModel_NegativePercentage(t *testing.T) {
+	m := newRolloutsModel("http://unused", "")
+	m.Update(rolloutsMsg{{ID: "r-bad", PolicyID: "p1", Status: "active", Percentage: -5}})
+	if v := m.View(); !strings.Contains(v, "r-bad") {
+		t.Errorf("view missing rollout:\n%s", v)
 	}
 }
 

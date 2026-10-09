@@ -123,6 +123,7 @@ func TestSimulate_Errors(t *testing.T) {
 	}{
 		{"no policy", []string{"-data", data}, "--policy is required"},
 		{"no data", []string{"-policy", policy}, "--data is required"},
+		{"unknown format", []string{"-policy", policy, "-data", data, "-format", "yaml"}, `unknown --format "yaml" (valid: text, json)`},
 		{"bad glob", []string{"-policy", policy, "-data", "[" + dir}, "error reading events"},
 		{"missing policy", []string{"-policy", filepath.Join(dir, "nope.wasm"), "-data", data}, "error loading policy"},
 		{"invalid wasm", []string{"-policy", badWasm, "-data", data}, "error loading policy"},

@@ -1,12 +1,54 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 )
+
+// apiTLSConfig, when non-nil, is used for every admin API connection. main
+// sets it from --ca-cert / --client-cert / --client-key.
+var apiTLSConfig *tls.Config
+
+// loadTLSConfig builds the client TLS config for the policy server: caFile
+// pins the CA that signed the server certificate (otherwise the system pool
+// is used) and certFile/keyFile present a client certificate for servers
+// that require mTLS. It returns nil when no TLS flag is set.
+func loadTLSConfig(caFile, certFile, keyFile string) (*tls.Config, error) {
+	if caFile == "" && certFile == "" && keyFile == "" {
+		return nil, nil
+	}
+	if (certFile == "") != (keyFile == "") {
+		return nil, errors.New("--client-cert and --client-key must be set together")
+	}
+
+	cfg := &tls.Config{MinVersion: tls.VersionTLS13}
+	if caFile != "" {
+		caPEM, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read ca cert: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("no certificates found in %s", caFile)
+		}
+		cfg.RootCAs = pool
+	}
+	if certFile != "" {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load client keypair: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{cert}
+	}
+	return cfg, nil
+}
 
 type apiClient struct {
 	baseURL string
@@ -15,10 +57,16 @@ type apiClient struct {
 }
 
 func newAPIClient(baseURL, token string) *apiClient {
+	hc := &http.Client{Timeout: 10 * time.Second}
+	if apiTLSConfig != nil {
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.TLSClientConfig = apiTLSConfig
+		hc.Transport = tr
+	}
 	return &apiClient{
 		baseURL: baseURL,
 		token:   token,
-		http:    &http.Client{Timeout: 10 * time.Second},
+		http:    hc,
 	}
 }
 
