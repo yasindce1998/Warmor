@@ -193,8 +193,8 @@ func newTestEnforcer(t *testing.T, o testEnforcerOpts) (*Enforcer, *fakePlatform
 		if pipeline != nil {
 			_ = pipeline.Close()
 		}
-		// Close the pool exactly once (see TestClose_ReleasesResources for
-		// why we don't go through Enforcer.Close here).
+		// Close the pool and runtime directly; Close is idempotent, so this
+		// is safe even when the test already called Enforcer.Close.
 		e.evaluatorMu.Lock()
 		p, r := e.pool, e.wasmRuntime
 		e.evaluatorMu.Unlock()
@@ -931,21 +931,10 @@ func TestClose_ReleasesResources(t *testing.T) {
 	e, plat := newTestEnforcer(t, testEnforcerOpts{sink: rec})
 	e.handleEvent(&api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"})
 
-	// Enforcer.Close calls evaluator.Close (which closes the pool) and then
-	// pool.Close on the same pool. wasm.Pool.Close closes its channel, so the
-	// second close panics. Detect that rather than crash the test binary.
-	var panicked any
-	func() {
-		defer func() { panicked = recover() }()
-		_ = e.Close()
-	}()
-	// Prevent the cleanup from closing these again.
-	e.evaluatorMu.Lock()
-	e.pool, e.wasmRuntime = nil, nil
-	e.evaluatorMu.Unlock()
-
-	if panicked != nil {
-		t.Skipf("KNOWN BUG: Enforcer.Close double-closes the WASM pool (evaluator.Close + pool.Close): %v", panicked)
+	// Regression: Close used to panic by closing the WASM pool twice
+	// (evaluator.Close followed by pool.Close).
+	if err := e.Close(); err != nil {
+		t.Errorf("Close: %v", err)
 	}
 	if plat.closed != 1 {
 		t.Errorf("platform Close called %d times, want 1", plat.closed)
@@ -1025,14 +1014,10 @@ func TestReloadPolicy_DoubleClose(t *testing.T) {
 	isolateCacheDir(t)
 	e, _ := newTestEnforcer(t, testEnforcerOpts{})
 
-	var panicked any
-	func() {
-		defer func() { panicked = recover() }()
-		_ = e.ReloadPolicy()
-	}()
-	if panicked != nil {
-		// The new pool/runtime were installed before the panic; cleanup closes them.
-		t.Skipf("KNOWN BUG: ReloadPolicy closes the old pool twice (oldEvaluator.Close + oldPool.Close): %v", panicked)
+	// Regression: ReloadPolicy used to panic by closing the old pool twice
+	// (oldEvaluator.Close followed by oldPool.Close).
+	if err := e.ReloadPolicy(); err != nil {
+		t.Fatalf("ReloadPolicy: %v", err)
 	}
 }
 

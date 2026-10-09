@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -133,6 +134,80 @@ func TestPool_Close_Empty(t *testing.T) {
 
 	if err := pool.Close(ctx); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+func TestPool_Close_Idempotent(t *testing.T) {
+	ctx := context.Background()
+	rt := newTestRuntime(t)
+	defer rt.Close(ctx)
+
+	pool, err := NewPool(ctx, rt, 2)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+
+	if err := pool.Close(ctx); err != nil {
+		t.Errorf("first Close: %v", err)
+	}
+	if err := pool.Close(ctx); err != nil {
+		t.Errorf("second Close: %v", err)
+	}
+}
+
+func TestPool_GetAfterClose(t *testing.T) {
+	ctx := context.Background()
+	rt := newTestRuntime(t)
+	defer rt.Close(ctx)
+
+	pool, err := NewPool(ctx, rt, 1)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	pool.Close(ctx)
+
+	policy, err := pool.Get(ctx)
+	if !errors.Is(err, ErrPoolClosed) {
+		t.Errorf("Get after Close: err = %v, want ErrPoolClosed", err)
+	}
+	if policy != nil {
+		t.Error("Get after Close returned a non-nil policy")
+	}
+}
+
+func TestPool_PutAfterClose(t *testing.T) {
+	ctx := context.Background()
+	rt := newTestRuntime(t)
+	defer rt.Close(ctx)
+
+	pool, err := NewPool(ctx, rt, 1)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	policy, err := pool.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	pool.Close(ctx)
+
+	// Returning a checked-out instance after Close must not panic.
+	pool.Put(policy)
+}
+
+func TestEvaluator_EvaluateAfterClose(t *testing.T) {
+	ctx := context.Background()
+	rt := newTestRuntime(t)
+	defer rt.Close(ctx)
+
+	pool, err := NewPool(ctx, rt, 1)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	evaluator := NewPolicyEvaluator(pool, "test-host")
+	evaluator.Close(ctx)
+
+	if _, err := evaluator.Evaluate(ctx, &api.Event{Comm: "ls"}); !errors.Is(err, ErrPoolClosed) {
+		t.Errorf("Evaluate after Close: err = %v, want ErrPoolClosed", err)
 	}
 }
 
