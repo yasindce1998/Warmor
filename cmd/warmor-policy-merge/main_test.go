@@ -144,8 +144,8 @@ func TestMerge_DirValidateDenyWins(t *testing.T) {
 	}
 }
 
-// Files given after positional args, including a trailing "-o <file>", are
-// re-scanned by main() since the flag package stops at the first positional.
+// Flags given after positional args, including a trailing "-o <file>", are
+// still parsed as flags.
 func TestMerge_DirPlusFilesAndTrailingOutput(t *testing.T) {
 	dir, _, _ := writePolicies(t)
 	extraDir := t.TempDir()
@@ -168,6 +168,46 @@ rules:
 	if !ruleNames(p)["log-net"] {
 		t.Errorf("rule from positional file missing: %v", ruleNames(p))
 	}
+}
+
+// Every flag form works in any position; previously only a bare trailing
+// "-o <file>" was recognised and anything else became a file name.
+func TestMerge_FlagsAfterFiles(t *testing.T) {
+	_, a, b := writePolicies(t)
+	outPath := filepath.Join(t.TempDir(), "merged.yaml")
+	for _, args := range [][]string{
+		{a, b, "-o=" + outPath, "-strategy", "intersection", "-name=late"},
+		{a, "--strategy=intersection", b, "--o", outPath, "--name", "late"},
+	} {
+		os.Remove(outPath)
+		stdout, _ := runMain(t, "", args...)
+		if stdout != "" {
+			t.Errorf("%v: stdout should be empty, got %q", args, stdout)
+		}
+		p := loadMerged(t, outPath)
+		if p.Name != "late" || len(p.Rules) != 1 {
+			t.Errorf("%v: name=%q rules=%d, want late/1 (trailing flags ignored)", args, p.Name, len(p.Rules))
+		}
+	}
+}
+
+func TestMerge_DoubleDashEndsFlags(t *testing.T) {
+	// After "--" a dash-prefixed argument is a file name, not a flag.
+	_, a, _ := writePolicies(t)
+	r := runChild(t, nil, a, "--", "-validate")
+	if r.code != 1 {
+		t.Fatalf("exit = %d, want 1 (stderr: %s)", r.code, r.stderr)
+	}
+	assertContains(t, "stderr", r.stderr, "-validate")
+}
+
+func TestMerge_UnknownTrailingFlagRejected(t *testing.T) {
+	_, a, b := writePolicies(t)
+	r := runChild(t, nil, a, b, "--bogus")
+	if r.code != 2 {
+		t.Errorf("exit = %d, want 2 (stderr: %s)", r.code, r.stderr)
+	}
+	assertContains(t, "stderr", r.stderr, "flag provided but not defined: -bogus")
 }
 
 func TestMerge_Errors(t *testing.T) {

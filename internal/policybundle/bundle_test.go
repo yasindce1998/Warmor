@@ -20,6 +20,8 @@ import (
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/content/memory"
+
+	"github.com/yasindce1998/warmor/internal/crypto"
 )
 
 // fakeRegistry is a minimal in-memory OCI distribution registry served over
@@ -254,7 +256,22 @@ func fakeWasm(payload string) []byte {
 	return append([]byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}, []byte(payload)...)
 }
 
-// seedBundle seeds a well-formed bundle under tag with the given wasm bytes
+// testKey signs every bundle in these tests; otherKey is an unrelated key.
+var testKey, otherKey = mustKey(), mustKey()
+
+func mustKey() *crypto.SigningKey {
+	k, err := crypto.GenerateSigningKey()
+	if err != nil {
+		panic(err)
+	}
+	return k
+}
+
+func signOpts() PushOptions { return PushOptions{SigningKey: testKey} }
+
+func verifyOpts() PullOptions { return PullOptions{PublicKey: testKey.Public} }
+
+// seedBundle seeds a well-formed, testKey-signed bundle under tag with the given wasm bytes
 // and returns the wasm digest.
 func seedBundle(t *testing.T, r *fakeRegistry, tag string, wasm []byte, extraLayers ...ocispec.Descriptor) digest.Digest {
 	t.Helper()
@@ -271,6 +288,9 @@ func seedBundle(t *testing.T, r *fakeRegistry, tag string, wasm []byte, extraLay
 		MediaType: ocispec.MediaTypeImageManifest,
 		Config:    cfgDesc,
 		Layers:    layers,
+	}
+	if err := SignManifest(&m, testKey); err != nil {
+		t.Fatal(err)
 	}
 	data, err := json.Marshal(m)
 	if err != nil {
@@ -296,7 +316,7 @@ func TestPushPullRoundTrip(t *testing.T) {
 	ref := r.ref("policies/roundtrip:v1")
 	cfg := BundleConfig{Name: "roundtrip", Version: "1.2.3", Description: "test bundle"}
 
-	desc, err := Push(ctx, ref, writeWasm(t, wasm), cfg)
+	desc, err := Push(ctx, ref, writeWasm(t, wasm), cfg, signOpts())
 	if err != nil {
 		t.Fatalf("Push: %v", err)
 	}
@@ -355,7 +375,7 @@ func TestPushPullRoundTrip(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "pulled.wasm")
-	if err := Pull(ctx, ref, out); err != nil {
+	if _, err := Pull(ctx, ref, out, verifyOpts()); err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
 	got, err := os.ReadFile(out)
@@ -374,11 +394,11 @@ func TestPushIdempotent(t *testing.T) {
 	ref := r.ref("policies/idem:v1")
 	cfg := BundleConfig{Name: "idem", Version: "1"}
 
-	d1, err := Push(ctx, ref, p, cfg)
+	d1, err := Push(ctx, ref, p, cfg, signOpts())
 	if err != nil {
 		t.Fatal(err)
 	}
-	d2, err := Push(ctx, ref, p, cfg)
+	d2, err := Push(ctx, ref, p, cfg, signOpts())
 	if err != nil {
 		t.Fatalf("second Push: %v", err)
 	}
@@ -393,15 +413,15 @@ func TestPushRetagOverwrites(t *testing.T) {
 	ref := r.ref("policies/retag:latest")
 	cfg := BundleConfig{Name: "retag", Version: "1"}
 
-	if _, err := Push(ctx, ref, writeWasm(t, fakeWasm("first")), cfg); err != nil {
+	if _, err := Push(ctx, ref, writeWasm(t, fakeWasm("first")), cfg, signOpts()); err != nil {
 		t.Fatal(err)
 	}
 	second := fakeWasm("second")
-	if _, err := Push(ctx, ref, writeWasm(t, second), cfg); err != nil {
+	if _, err := Push(ctx, ref, writeWasm(t, second), cfg, signOpts()); err != nil {
 		t.Fatal(err)
 	}
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	if err := Pull(ctx, ref, out); err != nil {
+	if _, err := Pull(ctx, ref, out, verifyOpts()); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(out)
@@ -412,7 +432,7 @@ func TestPushRetagOverwrites(t *testing.T) {
 
 func TestPushMissingWasm(t *testing.T) {
 	_, err := Push(context.Background(), "localhost:5000/x:y",
-		filepath.Join(t.TempDir(), "does-not-exist.wasm"), BundleConfig{Name: "x"})
+		filepath.Join(t.TempDir(), "does-not-exist.wasm"), BundleConfig{Name: "x"}, signOpts())
 	if err == nil || !strings.Contains(err.Error(), "read wasm") {
 		t.Fatalf("expected read wasm error, got %v", err)
 	}
@@ -422,7 +442,7 @@ func TestPushInvalidReference(t *testing.T) {
 	p := writeWasm(t, fakeWasm("x"))
 	for _, ref := range []string{"", "not a reference", "UPPER/Case:tag", "host:5000/repo:bad tag!"} {
 		t.Run(ref, func(t *testing.T) {
-			_, err := Push(context.Background(), ref, p, BundleConfig{Name: "x"})
+			_, err := Push(context.Background(), ref, p, BundleConfig{Name: "x"}, signOpts())
 			if err == nil {
 				t.Fatalf("expected error for ref %q", ref)
 			}
@@ -434,7 +454,7 @@ func TestPushRegistryRejectsUpload(t *testing.T) {
 	r := newFakeRegistry(t)
 	r.rejectUploads = true
 	_, err := Push(context.Background(), r.ref("policies/denied:v1"),
-		writeWasm(t, fakeWasm("x")), BundleConfig{Name: "x"})
+		writeWasm(t, fakeWasm("x")), BundleConfig{Name: "x"}, signOpts())
 	if err == nil || !strings.Contains(err.Error(), "push to") {
 		t.Fatalf("expected push error, got %v", err)
 	}
@@ -449,7 +469,7 @@ func TestPushCanceledContext(t *testing.T) {
 	r := newFakeRegistry(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := Push(ctx, r.ref("policies/cancel:v1"), writeWasm(t, fakeWasm("x")), BundleConfig{Name: "x"})
+	_, err := Push(ctx, r.ref("policies/cancel:v1"), writeWasm(t, fakeWasm("x")), BundleConfig{Name: "x"}, signOpts())
 	if err == nil {
 		t.Fatal("expected error with canceled context")
 	}
@@ -457,7 +477,7 @@ func TestPushCanceledContext(t *testing.T) {
 
 func TestPullInvalidReference(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	err := Pull(context.Background(), "not a reference", out)
+	_, err := Pull(context.Background(), "not a reference", out, verifyOpts())
 	if err == nil || !strings.Contains(err.Error(), "parse reference") {
 		t.Fatalf("expected parse reference error, got %v", err)
 	}
@@ -467,7 +487,7 @@ func TestPullInvalidReference(t *testing.T) {
 func TestPullUnknownTag(t *testing.T) {
 	r := newFakeRegistry(t)
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	err := Pull(context.Background(), r.ref("policies/missing:v1"), out)
+	_, err := Pull(context.Background(), r.ref("policies/missing:v1"), out, verifyOpts())
 	if err == nil || !strings.Contains(err.Error(), "pull from") {
 		t.Fatalf("expected pull error, got %v", err)
 	}
@@ -490,7 +510,7 @@ func TestPullTamperedWasmBlob(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	if err := Pull(context.Background(), r.ref("policies/tamper:v1"), out); err == nil {
+	if _, err := Pull(context.Background(), r.ref("policies/tamper:v1"), out, verifyOpts()); err == nil {
 		t.Fatal("tampered wasm layer was accepted")
 	}
 	assertNoFile(t, out)
@@ -506,7 +526,7 @@ func TestPullReplacedWasmBlobDifferentLength(t *testing.T) {
 		return data
 	}
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	if err := Pull(context.Background(), r.ref("policies/swap:v1"), out); err == nil {
+	if _, err := Pull(context.Background(), r.ref("policies/swap:v1"), out, verifyOpts()); err == nil {
 		t.Fatal("replaced wasm layer was accepted")
 	}
 	assertNoFile(t, out)
@@ -522,7 +542,7 @@ func TestPullTruncatedWasmBlob(t *testing.T) {
 		return 0, false
 	}
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	if err := Pull(context.Background(), r.ref("policies/trunc:v1"), out); err == nil {
+	if _, err := Pull(context.Background(), r.ref("policies/trunc:v1"), out, verifyOpts()); err == nil {
 		t.Fatal("truncated wasm layer was accepted")
 	}
 	assertNoFile(t, out)
@@ -538,7 +558,7 @@ func TestPullEmptyWasmBlobServed(t *testing.T) {
 		return data
 	}
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	if err := Pull(context.Background(), r.ref("policies/empty:v1"), out); err == nil {
+	if _, err := Pull(context.Background(), r.ref("policies/empty:v1"), out, verifyOpts()); err == nil {
 		t.Fatal("empty wasm body was accepted")
 	}
 	assertNoFile(t, out)
@@ -558,7 +578,7 @@ func TestPullTamperedConfigBlob(t *testing.T) {
 		return evil
 	}
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	if err := Pull(context.Background(), r.ref("policies/cfg:v1"), out); err == nil {
+	if _, err := Pull(context.Background(), r.ref("policies/cfg:v1"), out, verifyOpts()); err == nil {
 		t.Fatal("tampered config blob was accepted")
 	}
 	assertNoFile(t, out)
@@ -582,7 +602,7 @@ func TestPullTamperedManifest(t *testing.T) {
 		return out
 	}
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	if err := Pull(context.Background(), r.ref("policies/mf:v1"), out); err == nil {
+	if _, err := Pull(context.Background(), r.ref("policies/mf:v1"), out, verifyOpts()); err == nil {
 		t.Fatal("tampered manifest was accepted")
 	}
 	assertNoFile(t, out)
@@ -592,7 +612,7 @@ func TestPullCorruptManifestJSON(t *testing.T) {
 	r := newFakeRegistry(t)
 	r.putManifest("v1", ocispec.MediaTypeImageManifest, []byte(`{"schemaVersion":2,"layers":[`))
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	if err := Pull(context.Background(), r.ref("policies/corrupt:v1"), out); err == nil {
+	if _, err := Pull(context.Background(), r.ref("policies/corrupt:v1"), out, verifyOpts()); err == nil {
 		t.Fatal("corrupt manifest JSON was accepted")
 	}
 	assertNoFile(t, out)
@@ -604,7 +624,7 @@ func TestPullNonManifestMediaType(t *testing.T) {
 	r := newFakeRegistry(t)
 	r.putManifest("v1", "application/vnd.example.unknown", []byte("this is not json"))
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	err := Pull(context.Background(), r.ref("policies/opaque:v1"), out)
+	_, err := Pull(context.Background(), r.ref("policies/opaque:v1"), out, verifyOpts())
 	if err == nil {
 		t.Fatal("non-manifest artifact was accepted")
 	}
@@ -627,7 +647,7 @@ func TestPullNoWasmLayer(t *testing.T) {
 	r.putManifest("v1", ocispec.MediaTypeImageManifest, data)
 
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	err := Pull(context.Background(), r.ref("policies/nowasm:v1"), out)
+	_, err := Pull(context.Background(), r.ref("policies/nowasm:v1"), out, verifyOpts())
 	if err == nil || !strings.Contains(err.Error(), "no wasm layer") {
 		t.Fatalf("expected no wasm layer error, got %v", err)
 	}
@@ -642,7 +662,7 @@ func TestPullSkipsNonWasmLayers(t *testing.T) {
 	seedBundle(t, r, "v1", wasm, other)
 
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	if err := Pull(context.Background(), r.ref("policies/multi:v1"), out); err != nil {
+	if _, err := Pull(context.Background(), r.ref("policies/multi:v1"), out, verifyOpts()); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(out)
@@ -655,7 +675,7 @@ func TestPullUnwritableOutput(t *testing.T) {
 	r := newFakeRegistry(t)
 	seedBundle(t, r, "v1", fakeWasm("ok"))
 	out := filepath.Join(t.TempDir(), "no-such-dir", "out.wasm")
-	if err := Pull(context.Background(), r.ref("policies/w:v1"), out); err == nil {
+	if _, err := Pull(context.Background(), r.ref("policies/w:v1"), out, verifyOpts()); err == nil {
 		t.Fatal("expected write error for missing output directory")
 	}
 }
@@ -666,7 +686,7 @@ func TestPullCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	out := filepath.Join(t.TempDir(), "out.wasm")
-	if err := Pull(ctx, r.ref("policies/c:v1"), out); err == nil {
+	if _, err := Pull(ctx, r.ref("policies/c:v1"), out, verifyOpts()); err == nil {
 		t.Fatal("expected error with canceled context")
 	}
 	assertNoFile(t, out)
@@ -689,5 +709,378 @@ func TestPushBlobDescriptor(t *testing.T) {
 	}
 	if _, err := pushBlob(ctx, store, WasmMediaType, data); err == nil {
 		t.Error("expected error pushing duplicate blob")
+	}
+}
+
+// --- signing, pinning, limits and media types ---
+
+// seedManifest seeds an arbitrary manifest (signed with key unless nil)
+// under tag and returns its digest.
+func seedManifest(t *testing.T, r *fakeRegistry, tag string, m ocispec.Manifest, key *crypto.SigningKey) digest.Digest {
+	t.Helper()
+	if key != nil {
+		if err := SignManifest(&m, key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r.putManifest(tag, ocispec.MediaTypeImageManifest, data)
+}
+
+// bundleManifest builds (and seeds the blobs for) a standard bundle
+// manifest without signing or tagging it.
+func bundleManifest(r *fakeRegistry, wasm []byte) ocispec.Manifest {
+	cfg, _ := json.Marshal(BundleConfig{Name: "seeded", Version: "1.0.0"})
+	cfgDesc := r.putBlob(cfg)
+	cfgDesc.MediaType = ConfigMediaType
+	wasmDesc := r.putBlob(wasm)
+	wasmDesc.MediaType = WasmMediaType
+	return ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    cfgDesc,
+		Layers:    []ocispec.Descriptor{wasmDesc},
+	}
+}
+
+// countBlobGets records every blob GET served by r.
+func countBlobGets(r *fakeRegistry) *[]string {
+	var got []string
+	r.serveBlob = func(d string, data []byte) []byte {
+		got = append(got, d)
+		return data
+	}
+	return &got
+}
+
+func TestPullRejectsWithoutKey(t *testing.T) {
+	r := newFakeRegistry(t)
+	seedBundle(t, r, "v1", fakeWasm("ok"))
+	out := filepath.Join(t.TempDir(), "out.wasm")
+	_, err := Pull(context.Background(), r.ref("policies/nokey:v1"), out, PullOptions{})
+	if err == nil || !strings.Contains(err.Error(), "no verification public key") {
+		t.Fatalf("expected missing key error, got %v", err)
+	}
+	assertNoFile(t, out)
+}
+
+func TestPullUnsignedBundle(t *testing.T) {
+	r := newFakeRegistry(t)
+	wasm := fakeWasm("unsigned")
+	seedManifest(t, r, "v1", bundleManifest(r, wasm), nil)
+	ref := r.ref("policies/unsigned:v1")
+	out := filepath.Join(t.TempDir(), "out.wasm")
+
+	_, err := Pull(context.Background(), ref, out, verifyOpts())
+	if err == nil || !strings.Contains(err.Error(), "not signed") {
+		t.Fatalf("expected unsigned error, got %v", err)
+	}
+	assertNoFile(t, out)
+
+	// Explicit opt-out accepts it.
+	if _, err := Pull(context.Background(), ref, out, PullOptions{InsecureSkipVerify: true}); err != nil {
+		t.Fatalf("InsecureSkipVerify pull: %v", err)
+	}
+	if got, _ := os.ReadFile(out); !bytes.Equal(got, wasm) {
+		t.Errorf("pulled %q, want %q", got, wasm)
+	}
+}
+
+func TestPullInsecureSkipVerifyStillChecksGivenKey(t *testing.T) {
+	r := newFakeRegistry(t)
+	seedBundle(t, r, "v1", fakeWasm("ok"))
+	out := filepath.Join(t.TempDir(), "out.wasm")
+	_, err := Pull(context.Background(), r.ref("policies/both:v1"), out,
+		PullOptions{PublicKey: otherKey.Public, InsecureSkipVerify: true})
+	if err == nil {
+		t.Fatal("wrong key accepted because InsecureSkipVerify was set")
+	}
+	assertNoFile(t, out)
+}
+
+func TestPullWrongKey(t *testing.T) {
+	r := newFakeRegistry(t)
+	seedBundle(t, r, "v1", fakeWasm("ok"))
+	gets := countBlobGets(r)
+	out := filepath.Join(t.TempDir(), "out.wasm")
+	_, err := Pull(context.Background(), r.ref("policies/wrongkey:v1"), out, PullOptions{PublicKey: otherKey.Public})
+	if err == nil || !strings.Contains(err.Error(), "signature verification failed") {
+		t.Fatalf("expected verification failure, got %v", err)
+	}
+	if len(*gets) != 0 {
+		t.Errorf("blobs fetched before signature verification: %v", *gets)
+	}
+	assertNoFile(t, out)
+}
+
+func TestPullMalformedSignature(t *testing.T) {
+	r := newFakeRegistry(t)
+	m := bundleManifest(r, fakeWasm("ok"))
+	m.Annotations = map[string]string{AnnotationSignature: "!!not base64!!"}
+	seedManifest(t, r, "v1", m, nil)
+	out := filepath.Join(t.TempDir(), "out.wasm")
+	if _, err := Pull(context.Background(), r.ref("policies/badsig:v1"), out, verifyOpts()); err == nil {
+		t.Fatal("malformed signature accepted")
+	}
+	assertNoFile(t, out)
+}
+
+func TestPullSignatureOverDifferentDigest(t *testing.T) {
+	// A validly signed signature for bundle A transplanted onto bundle B
+	// (different wasm digest) must not verify.
+	r := newFakeRegistry(t)
+	a := bundleManifest(r, fakeWasm("bundle A"))
+	if err := SignManifest(&a, testKey); err != nil {
+		t.Fatal(err)
+	}
+	b := bundleManifest(r, fakeWasm("bundle B"))
+	b.Annotations = map[string]string{AnnotationSignature: a.Annotations[AnnotationSignature]}
+	seedManifest(t, r, "v1", b, nil)
+	out := filepath.Join(t.TempDir(), "out.wasm")
+	_, err := Pull(context.Background(), r.ref("policies/transplant:v1"), out, verifyOpts())
+	if err == nil || !strings.Contains(err.Error(), "signature verification failed") {
+		t.Fatalf("expected verification failure, got %v", err)
+	}
+	assertNoFile(t, out)
+}
+
+func TestPullSignedLayerDescriptorSwapped(t *testing.T) {
+	// Re-pointing the signed manifest's wasm layer at a different blob
+	// (as a registry serving a modified manifest under its own digest
+	// would) invalidates the signature.
+	r := newFakeRegistry(t)
+	m := bundleManifest(r, fakeWasm("legit"))
+	if err := SignManifest(&m, testKey); err != nil {
+		t.Fatal(err)
+	}
+	evil := r.putBlob(fakeWasm("evil"))
+	evil.MediaType = WasmMediaType
+	m.Layers = []ocispec.Descriptor{evil}
+	seedManifest(t, r, "v1", m, nil)
+	out := filepath.Join(t.TempDir(), "out.wasm")
+	if _, err := Pull(context.Background(), r.ref("policies/swapdesc:v1"), out, verifyOpts()); err == nil {
+		t.Fatal("swapped layer descriptor accepted")
+	}
+	assertNoFile(t, out)
+}
+
+func TestPullPreservesExistingOutputOnFailure(t *testing.T) {
+	r := newFakeRegistry(t)
+	seedBundle(t, r, "v1", fakeWasm("ok"))
+	out := filepath.Join(t.TempDir(), "out.wasm")
+	if err := os.WriteFile(out, []byte("previous"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Pull(context.Background(), r.ref("policies/keep:v1"), out, PullOptions{PublicKey: otherKey.Public}); err == nil {
+		t.Fatal("expected failure")
+	}
+	if got, _ := os.ReadFile(out); string(got) != "previous" {
+		t.Errorf("existing output clobbered: %q", got)
+	}
+}
+
+func TestPullPinnedDigest(t *testing.T) {
+	r := newFakeRegistry(t)
+	ctx := context.Background()
+	wasm := fakeWasm("pinned")
+	desc, err := Push(ctx, r.ref("policies/pin:v1"), writeWasm(t, wasm), BundleConfig{Name: "pin"}, signOpts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{
+		r.ref("policies/pin@" + desc.Digest.String()),
+		r.ref("policies/pin:v1@" + desc.Digest.String()),
+	} {
+		out := filepath.Join(t.TempDir(), "out.wasm")
+		got, err := Pull(ctx, ref, out, verifyOpts())
+		if err != nil {
+			t.Fatalf("Pull(%s): %v", ref, err)
+		}
+		if got.Digest != desc.Digest {
+			t.Errorf("Pull(%s) digest = %s, want %s", ref, got.Digest, desc.Digest)
+		}
+		if data, _ := os.ReadFile(out); !bytes.Equal(data, wasm) {
+			t.Errorf("Pull(%s) wrote %q", ref, data)
+		}
+	}
+
+	// Pinning a digest the registry doesn't hold, or whose content the
+	// registry substitutes, fails.
+	other := digest.FromString("something else")
+	out := filepath.Join(t.TempDir(), "out.wasm")
+	if _, err := Pull(ctx, r.ref("policies/pin@"+other.String()), out, verifyOpts()); err == nil {
+		t.Fatal("pull of unknown pinned digest succeeded")
+	}
+	r.serveManifest = func(_ string, data []byte) []byte {
+		var m ocispec.Manifest
+		_ = json.Unmarshal(data, &m)
+		m.Annotations["extra"] = "x"
+		b, _ := json.Marshal(m)
+		return b
+	}
+	if _, err := Pull(ctx, r.ref("policies/pin@"+desc.Digest.String()), out, verifyOpts()); err == nil {
+		t.Fatal("substituted manifest accepted for pinned digest")
+	}
+	assertNoFile(t, out)
+}
+
+func TestPullSizeLimits(t *testing.T) {
+	wasm := fakeWasm(strings.Repeat("w", 100))
+	tests := []struct {
+		name string
+		opts PullOptions
+		want string
+	}{
+		{"wasm", PullOptions{MaxWasmSize: int64(len(wasm)) - 1}, "wasm layer size"},
+		{"config", PullOptions{MaxConfigSize: 4}, "config size"},
+		{"manifest", PullOptions{MaxManifestSize: 64}, "exceeds"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newFakeRegistry(t)
+			seedBundle(t, r, "v1", wasm)
+			gets := countBlobGets(r)
+			tt.opts.PublicKey = testKey.Public
+			out := filepath.Join(t.TempDir(), "out.wasm")
+			_, err := Pull(context.Background(), r.ref("policies/big:v1"), out, tt.opts)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q error, got %v", tt.want, err)
+			}
+			if len(*gets) != 0 {
+				t.Errorf("blobs fetched despite size limit: %v", *gets)
+			}
+			assertNoFile(t, out)
+		})
+	}
+
+	// At exactly the limit the pull succeeds.
+	r := newFakeRegistry(t)
+	seedBundle(t, r, "v1", wasm)
+	out := filepath.Join(t.TempDir(), "out.wasm")
+	if _, err := Pull(context.Background(), r.ref("policies/big:v1"), out,
+		PullOptions{PublicKey: testKey.Public, MaxWasmSize: int64(len(wasm))}); err != nil {
+		t.Fatalf("pull at limit: %v", err)
+	}
+}
+
+func TestPullDefaultWasmLimit(t *testing.T) {
+	// A manifest advertising a huge layer is rejected without fetching it.
+	r := newFakeRegistry(t)
+	m := bundleManifest(r, fakeWasm("small"))
+	m.Layers[0].Size = DefaultMaxWasmSize + 1
+	seedManifest(t, r, "v1", m, testKey)
+	gets := countBlobGets(r)
+	out := filepath.Join(t.TempDir(), "out.wasm")
+	_, err := Pull(context.Background(), r.ref("policies/huge:v1"), out, verifyOpts())
+	if err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("expected size limit error, got %v", err)
+	}
+	if len(*gets) != 0 {
+		t.Errorf("blobs fetched: %v", *gets)
+	}
+	assertNoFile(t, out)
+}
+
+func TestPullWrongMediaTypes(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*ocispec.Manifest)
+		mtype  string // manifest Content-Type served
+		want   string
+	}{
+		{"config media type", func(m *ocispec.Manifest) { m.Config.MediaType = ocispec.MediaTypeImageConfig }, "", "config media type"},
+		{"empty config media type", func(m *ocispec.Manifest) { m.Config.MediaType = "" }, "", "config media type"},
+		{"artifact type", func(m *ocispec.Manifest) { m.ArtifactType = "application/vnd.evil" }, "", "artifact type"},
+		{"manifest mediaType field", func(m *ocispec.Manifest) { m.MediaType = ocispec.MediaTypeImageIndex }, "", "mediaType field"},
+		{"served content type", func(*ocispec.Manifest) {}, "application/vnd.docker.distribution.manifest.v2+json", "manifest media type"},
+		{"two wasm layers", func(m *ocispec.Manifest) { m.Layers = append(m.Layers, m.Layers[0]) }, "", "more than one wasm layer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newFakeRegistry(t)
+			m := bundleManifest(r, fakeWasm("ok"))
+			tt.mutate(&m)
+			d := seedManifest(t, r, "v1", m, testKey)
+			if tt.mtype != "" {
+				r.mtypes[d.String()] = tt.mtype
+			}
+			out := filepath.Join(t.TempDir(), "out.wasm")
+			_, err := Pull(context.Background(), r.ref("policies/mt:v1"), out, verifyOpts())
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q error, got %v", tt.want, err)
+			}
+			assertNoFile(t, out)
+		})
+	}
+}
+
+func TestPullAcceptsMatchingArtifactType(t *testing.T) {
+	r := newFakeRegistry(t)
+	m := bundleManifest(r, fakeWasm("ok"))
+	m.ArtifactType = ConfigMediaType
+	seedManifest(t, r, "v1", m, testKey)
+	out := filepath.Join(t.TempDir(), "out.wasm")
+	if _, err := Pull(context.Background(), r.ref("policies/at:v1"), out, verifyOpts()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPushRequiresKey(t *testing.T) {
+	r := newFakeRegistry(t)
+	p := writeWasm(t, fakeWasm("x"))
+	_, err := Push(context.Background(), r.ref("policies/nokey:v1"), p, BundleConfig{Name: "x"}, PushOptions{})
+	if err == nil || !strings.Contains(err.Error(), "no signing key") {
+		t.Fatalf("expected missing signing key error, got %v", err)
+	}
+	r.mu.Lock()
+	n := len(r.tags)
+	r.mu.Unlock()
+	if n != 0 {
+		t.Error("unsigned bundle pushed without AllowUnsigned")
+	}
+
+	// AllowUnsigned pushes a bundle with no signature annotation.
+	if _, err := Push(context.Background(), r.ref("policies/nokey:v1"), p, BundleConfig{Name: "x"}, PushOptions{AllowUnsigned: true}); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	data := r.manifests[r.tags["v1"]]
+	r.mu.Unlock()
+	var m ocispec.Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Annotations[AnnotationSignature]; ok {
+		t.Error("unsigned push carries a signature annotation")
+	}
+}
+
+func TestPushSignatureAnnotations(t *testing.T) {
+	r := newFakeRegistry(t)
+	if _, err := Push(context.Background(), r.ref("policies/sig:v1"), writeWasm(t, fakeWasm("x")), BundleConfig{Name: "x"}, signOpts()); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	data := r.manifests[r.tags["v1"]]
+	r.mu.Unlock()
+	var m ocispec.Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyManifest(&m, testKey.Public); err != nil {
+		t.Errorf("pushed manifest does not verify: %v", err)
+	}
+	want, _ := KeyID(testKey.Public)
+	if got := m.Annotations[AnnotationSignatureKeyID]; got != want {
+		t.Errorf("key id = %q, want %q", got, want)
+	}
+	if err := VerifyManifest(&m, otherKey.Public); err == nil || !strings.Contains(err.Error(), "claims key") {
+		t.Errorf("expected key mismatch detail, got %v", err)
+	}
+	if err := VerifyManifest(&m, nil); err == nil {
+		t.Error("nil key accepted")
 	}
 }

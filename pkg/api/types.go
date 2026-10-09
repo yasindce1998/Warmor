@@ -28,7 +28,17 @@ func (t EventType) String() string {
 	}
 }
 
+// valid reports whether t is one of the defined event types.
+func (t EventType) valid() bool {
+	return t >= EventTypeProcess && t <= EventTypeNetwork
+}
+
+// MarshalJSON encodes t as its name. Unknown values are rejected rather than
+// encoded as "UNKNOWN", which UnmarshalJSON could not read back.
 func (t EventType) MarshalJSON() ([]byte, error) {
+	if !t.valid() {
+		return nil, fmt.Errorf("cannot marshal unknown EventType %d", int32(t))
+	}
 	return json.Marshal(t.String())
 }
 
@@ -40,8 +50,12 @@ func (t *EventType) UnmarshalJSON(data []byte) error {
 		if err2 := json.Unmarshal(data, &n); err2 != nil {
 			return fmt.Errorf("EventType must be string or number: %w", err)
 		}
-		*t = EventType(n)
-		return nil
+		// Range-check numerics just as unknown names are rejected.
+		if et := EventType(n); et.valid() {
+			*t = et
+			return nil
+		}
+		return fmt.Errorf("unknown EventType: %d", n)
 	}
 	switch s {
 	case "PROCESS":
@@ -115,11 +129,60 @@ type Event struct {
 
 	// LSM fields
 	LSMEvent bool `json:"lsm_event,omitempty"`
+
+	// processSet records that Type was explicitly set to EventTypeProcess
+	// (the zero value), via SetType or a JSON "type" key, so GetType does
+	// not fall back to sub-event inference.
+	processSet bool
 }
 
-// GetType returns the event type
+// SetType sets the event type explicitly. Unlike assigning Type directly,
+// this also marks EventTypeProcess (the zero value) as explicit, so GetType
+// returns it even when a File or Network sub-event is populated.
+func (e *Event) SetType(t EventType) {
+	e.Type = t
+	e.processSet = t == EventTypeProcess
+}
+
+// eventJSON has Event's fields but none of its methods.
+type eventJSON Event
+
+// MarshalJSON encodes the event. "type" is omitted for an unset (zero)
+// Type, as before, but is emitted for an explicit EventTypeProcess so the
+// decoder can tell the two apart.
+func (e Event) MarshalJSON() ([]byte, error) {
+	var typ *EventType
+	if e.Type != EventTypeProcess || e.processSet {
+		t := e.Type
+		typ = &t
+	}
+	return json.Marshal(struct {
+		eventJSON
+		Type *EventType `json:"type,omitempty"`
+	}{eventJSON(e), typ})
+}
+
+// UnmarshalJSON decodes the event, recording whether "type" was present.
+func (e *Event) UnmarshalJSON(data []byte) error {
+	aux := struct {
+		*eventJSON
+		Type *EventType `json:"type"`
+	}{eventJSON: (*eventJSON)(e)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if aux.Type != nil {
+		e.SetType(*aux.Type)
+	}
+	return nil
+}
+
+// GetType returns the event type. An explicit Type wins; an unset Type is
+// inferred from the populated sub-event, defaulting to Process for legacy
+// events. A plain struct literal cannot distinguish Type: EventTypeProcess
+// from unset (both are zero), so use SetType to force Process.
 func (e *Event) GetType() EventType {
-	if e.Type != 0 {
+	if e.Type != EventTypeProcess || e.processSet {
 		return e.Type
 	}
 	if e.Process != nil {
@@ -149,6 +212,7 @@ func (e *Event) ToProcessEvent() *ProcessEvent {
 			GID:       e.GID,
 			Comm:      e.Comm,
 			Timestamp: e.Timestamp,
+			CgroupID:  e.CgroupID,
 		},
 		Filename: e.Filename,
 	}

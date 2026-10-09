@@ -24,7 +24,7 @@ func TestEventTypeString(t *testing.T) {
 }
 
 func TestEventTypeMarshalJSON(t *testing.T) {
-	for _, et := range []EventType{EventTypeProcess, EventTypeFile, EventTypeNetwork, EventType(42)} {
+	for _, et := range []EventType{EventTypeProcess, EventTypeFile, EventTypeNetwork} {
 		data, err := json.Marshal(et)
 		if err != nil {
 			t.Fatal(err)
@@ -32,6 +32,16 @@ func TestEventTypeMarshalJSON(t *testing.T) {
 		if want := `"` + et.String() + `"`; string(data) != want {
 			t.Errorf("Marshal(%d) = %s, want %s", int32(et), data, want)
 		}
+	}
+	// Unknown values would encode as "UNKNOWN", which cannot be decoded, so
+	// they are rejected at encode time.
+	for _, et := range []EventType{EventType(42), EventType(-1), EventType(3)} {
+		if data, err := json.Marshal(et); err == nil {
+			t.Errorf("Marshal(%d) = %s, want error", int32(et), data)
+		}
+	}
+	if _, err := json.Marshal(&Event{Type: EventType(99)}); err == nil {
+		t.Error("Event with unknown Type marshaled without error")
 	}
 }
 
@@ -47,8 +57,10 @@ func TestEventTypeUnmarshalJSON(t *testing.T) {
 		{`0`, EventTypeProcess, false},
 		{`1`, EventTypeFile, false},
 		{`2`, EventTypeNetwork, false},
-		// Numeric fallback does not range-check (see report).
-		{`99`, EventType(99), false},
+		// Unknown numerics are rejected like unknown names.
+		{`99`, 0, true},
+		{`3`, 0, true},
+		{`-1`, 0, true},
 		{`"process"`, 0, true}, // case-sensitive
 		{`"UNKNOWN"`, 0, true}, // String() output for unknown types does not round-trip
 		{`""`, 0, true},
@@ -85,6 +97,10 @@ func TestEventTypeUnmarshalErrorMessage(t *testing.T) {
 	}
 	err = json.Unmarshal([]byte(`"BOGUS"`), &et)
 	if err == nil || !strings.Contains(err.Error(), `"BOGUS"`) {
+		t.Errorf("unexpected error: %v", err)
+	}
+	err = json.Unmarshal([]byte(`99`), &et)
+	if err == nil || !strings.Contains(err.Error(), "unknown EventType: 99") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -209,20 +225,86 @@ func TestGetType(t *testing.T) {
 		{"from file sub-event", Event{File: &FileEvent{BaseEvent: BaseEvent{Type: EventTypeFile}}}, EventTypeFile},
 		{"from network sub-event", Event{Network: &NetworkEvent{BaseEvent: BaseEvent{Type: EventTypeNetwork}}}, EventTypeNetwork},
 		{"explicit wins over sub-event", Event{Type: EventTypeNetwork, File: &FileEvent{BaseEvent: BaseEvent{Type: EventTypeFile}}}, EventTypeNetwork},
-		// Type==EventTypeProcess is indistinguishable from "unset", so a
-		// populated sub-event takes precedence (see report).
-		{"process type with file sub-event", Event{Type: EventTypeProcess, File: &FileEvent{BaseEvent: BaseEvent{Type: EventTypeFile}}}, EventTypeFile},
+		// A plain literal Type: EventTypeProcess is indistinguishable from
+		// unset (both zero), so the sub-event is used ...
+		{"literal process type with file sub-event", Event{Type: EventTypeProcess, File: &FileEvent{BaseEvent: BaseEvent{Type: EventTypeFile}}}, EventTypeFile},
 		{"process sub-event checked before file", Event{
 			Process: &ProcessEvent{BaseEvent: BaseEvent{Type: EventTypeProcess}},
 			File:    &FileEvent{BaseEvent: BaseEvent{Type: EventTypeFile}},
 		}, EventTypeProcess},
 	}
+	// ... but an explicit SetType(EventTypeProcess) wins.
+	explicit := Event{File: &FileEvent{BaseEvent: BaseEvent{Type: EventTypeFile}}}
+	explicit.SetType(EventTypeProcess)
+	cases = append(cases, struct {
+		name string
+		ev   Event
+		want EventType
+	}{"SetType process with file sub-event", explicit, EventTypeProcess})
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.ev.GetType(); got != tc.want {
 				t.Errorf("GetType = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestGetTypeExplicitProcessJSON(t *testing.T) {
+	// An explicit "type":"PROCESS" (or 0) on the wire is honoured even
+	// when a file sub-event is present; an absent type still infers.
+	cases := []struct {
+		in   string
+		want EventType
+	}{
+		{`{"type":"PROCESS","file":{"type":"FILE","path":"/x"}}`, EventTypeProcess},
+		{`{"type":0,"file":{"type":"FILE","path":"/x"}}`, EventTypeProcess},
+		{`{"file":{"type":"FILE","path":"/x"}}`, EventTypeFile},
+		{`{"type":null,"file":{"type":"FILE","path":"/x"}}`, EventTypeFile},
+		{`{"pid":1}`, EventTypeProcess},
+	}
+	for _, tc := range cases {
+		var ev Event
+		if err := json.Unmarshal([]byte(tc.in), &ev); err != nil {
+			t.Fatalf("%s: %v", tc.in, err)
+		}
+		if got := ev.GetType(); got != tc.want {
+			t.Errorf("%s: GetType = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestEventExplicitProcessRoundTrip(t *testing.T) {
+	ev := Event{PID: 3, File: &FileEvent{BaseEvent: BaseEvent{Type: EventTypeFile}, Path: "/x"}}
+	ev.SetType(EventTypeProcess)
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"type":"PROCESS"`) {
+		t.Errorf("explicit process type not encoded: %s", data)
+	}
+	var got Event
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.GetType() != EventTypeProcess || !reflect.DeepEqual(got, ev) {
+		t.Errorf("round trip = %+v (type %v), want %+v", got, got.GetType(), ev)
+	}
+
+	// An unset type is still omitted, preserving the legacy wire format.
+	data, err = json.Marshal(&Event{PID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"type"`) {
+		t.Errorf("unset type encoded: %s", data)
+	}
+	// SetType to a non-zero type then back clears the explicit marker
+	// consistently with plain assignment.
+	ev.SetType(EventTypeFile)
+	if ev.GetType() != EventTypeFile {
+		t.Errorf("GetType = %v after SetType(FILE)", ev.GetType())
 	}
 }
 
@@ -239,10 +321,9 @@ func TestToProcessEventFromLegacy(t *testing.T) {
 	ev := &Event{PID: 42, UID: 1, GID: 2, Comm: "sh", Filename: "/bin/sh", Timestamp: ts, CgroupID: 9}
 	got := ev.ToProcessEvent()
 	want := &ProcessEvent{
-		BaseEvent: BaseEvent{Type: EventTypeProcess, PID: 42, UID: 1, GID: 2, Comm: "sh", Timestamp: ts},
+		BaseEvent: BaseEvent{Type: EventTypeProcess, PID: 42, UID: 1, GID: 2, Comm: "sh", Timestamp: ts, CgroupID: 9},
 		Filename:  "/bin/sh",
 	}
-	// Note: CgroupID is not carried over in the legacy conversion.
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ToProcessEvent = %+v, want %+v", got, want)
 	}

@@ -32,7 +32,10 @@ func main() {
 		flag.PrintDefaults()
 	}
 
-	flag.Parse()
+	files, err := parseInterspersed(flag.CommandLine, os.Args[1:])
+	if err != nil {
+		os.Exit(2)
+	}
 
 	if *showVersion {
 		fmt.Printf("warmor-policy-merge %s\n", version)
@@ -43,27 +46,12 @@ func main() {
 	var sources []string
 
 	if *dir != "" {
-		var err error
 		policies, sources, err = policymerge.LoadDir(*dir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "Loaded %d policies from %s\n", len(policies), *dir)
-	}
-
-	args := flag.Args()
-	var files []string
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-o":
-			if i+1 < len(args) {
-				*output = args[i+1]
-				i++
-			}
-		default:
-			files = append(files, args[i])
-		}
 	}
 
 	for _, arg := range files {
@@ -122,5 +110,27 @@ func main() {
 		os.Stdout.Write(data)
 		fmt.Fprintf(os.Stderr, "Merged %d policies (%d rules, %d deduplicated)\n",
 			result.Sources, len(result.Policy.Rules), result.DedupedRules)
+	}
+}
+
+// parseInterspersed parses flags that may appear before, between or after
+// positional arguments (Go's flag package stops at the first positional)
+// and returns the positionals in order. A "--" ends flag parsing; every
+// argument after it is positional.
+func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if n := len(args) - len(rest); n > 0 && args[n-1] == "--" {
+			return append(positional, rest...), nil
+		}
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
 	}
 }

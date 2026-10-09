@@ -100,8 +100,7 @@ func TestDiff_OutputFlagBeforeArgs(t *testing.T) {
 	assertContains(t, "output file", string(data), "In both:    1 rules")
 }
 
-// Go's flag package stops at the first positional arg; main() re-scans the
-// remaining args for a trailing "-o <file>".
+// Flags after the positional args are parsed as flags.
 func TestDiff_OutputFlagAfterArgs(t *testing.T) {
 	dir, a, b := writePolicies(t)
 	outPath := filepath.Join(dir, "trailing.txt")
@@ -114,6 +113,61 @@ func TestDiff_OutputFlagAfterArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertContains(t, "output file", string(data), "deny-tmp", "log-etc")
+}
+
+// Every flag works in any position; previously only a bare "-o <file>" was
+// recognised after the files and e.g. "--summary" became a third file.
+func TestDiff_FlagsInAnyPosition(t *testing.T) {
+	dir, a, b := writePolicies(t)
+	outPath := filepath.Join(dir, "o.txt")
+	cases := [][]string{
+		{a, b, "--summary", "-o=" + outPath},
+		{a, "-summary", b, "--o", outPath},
+		{"-o", outPath, a, b, "-summary=true"},
+	}
+	for _, args := range cases {
+		os.Remove(outPath)
+		stdout, _ := runMain(t, "", args...)
+		if stdout != "" {
+			t.Errorf("%v: stdout should be empty, got %q", args, stdout)
+		}
+		data, err := os.ReadFile(outPath)
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		assertContains(t, "output file", string(data), "In both:    1 rules")
+		if strings.Contains(string(data), "deny-tmp") {
+			t.Errorf("%v: --summary ignored:\n%s", args, data)
+		}
+	}
+}
+
+func TestDiff_DoubleDashEndsFlags(t *testing.T) {
+	_, a, _ := writePolicies(t)
+	r := runChild(t, nil, a, "--", "-summary")
+	if r.code != 1 {
+		t.Fatalf("exit = %d, want 1 (stderr: %s)", r.code, r.stderr)
+	}
+	assertContains(t, "stderr", r.stderr, "error loading -summary")
+}
+
+func TestDiff_UnknownTrailingFlagRejected(t *testing.T) {
+	_, a, b := writePolicies(t)
+	r := runChild(t, nil, a, b, "--bogus")
+	if r.code != 2 {
+		t.Errorf("exit = %d, want 2 (stderr: %s)", r.code, r.stderr)
+	}
+	assertContains(t, "stderr", r.stderr, "flag provided but not defined: -bogus")
+}
+
+func TestDiff_ChangedDecision(t *testing.T) {
+	dir, a, _ := writePolicies(t)
+	// Same rule as policyA's deny-tmp but allowed instead.
+	c := writeFile(t, filepath.Join(dir, "c.yaml"), strings.Replace(policyA, "action: deny", "action: allow", 1))
+	out, _ := runMain(t, "", a, c)
+	assertContains(t, "detailed diff", out, "=== Changed (1 rules) ===", "[process] deny-tmp: action deny -> allow")
+	out, _ = runMain(t, "", "--summary", a, c)
+	assertContains(t, "summary", out, "Changed:    1 rules", "In both:    1 rules")
 }
 
 func TestDiff_Errors(t *testing.T) {

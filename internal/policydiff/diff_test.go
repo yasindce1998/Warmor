@@ -94,9 +94,9 @@ func TestDiffSameConditionsDifferentAction(t *testing.T) {
 	b := &policymerge.PolicyYAML{Name: "b", Version: 1, DefaultAction: "deny", Rules: []policymerge.RuleYAML{ruleB}}
 
 	result := Diff(a, b)
-	// Same event+conditions = same fingerprint, so counted as "both"
-	if len(result.Both) != 1 {
-		t.Errorf("Both = %d, want 1 (same fingerprint despite action diff)", len(result.Both))
+	// Same event+conditions but allow vs deny is a decision change.
+	if len(result.Changed) != 1 || len(result.Both) != 0 {
+		t.Errorf("Changed = %d, Both = %d, want 1, 0", len(result.Changed), len(result.Both))
 	}
 }
 

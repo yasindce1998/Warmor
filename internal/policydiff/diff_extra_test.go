@@ -90,18 +90,57 @@ func TestDiffResultsSortedByName(t *testing.T) {
 	}
 }
 
-func TestDiffIgnoresNameActionModeReason(t *testing.T) {
-	ra := rule("name-a", "file", "allow", "/etc/passwd")
-	ra.Mode, ra.Reason = "audit", "why a"
-	rb := rule("name-b", "file", "deny", "/etc/passwd")
-	rb.Mode, rb.Reason = "enforce", "why b"
-	r := Diff(policy("a", ra), policy("b", rb))
-	if len(r.Both) != 1 || len(r.OnlyA) != 0 || len(r.OnlyB) != 0 {
-		t.Errorf("expected match on event+conditions only, got %+v", r)
+func TestDiffIgnoresName(t *testing.T) {
+	// A rename alone is not a decision change.
+	r := Diff(policy("a", rule("name-a", "file", "deny", "/etc/passwd")), policy("b", rule("name-b", "file", "deny", "/etc/passwd")))
+	if len(r.Both) != 1 || len(r.OnlyA)+len(r.OnlyB)+len(r.Changed) != 0 {
+		t.Fatalf("expected match ignoring name, got %+v", r)
 	}
 	// Both reports the rule from policy A.
 	if r.Both[0].Name != "name-a" {
 		t.Errorf("Both[0] = %q, want rule from A", r.Both[0].Name)
+	}
+}
+
+func TestDiffDecisionChangesReported(t *testing.T) {
+	// Same event+conditions but a different action, mode or reason must be
+	// surfaced as Changed, never silently reported as "In both".
+	base := rule("r", "file", "allow", "/etc/passwd")
+	cases := map[string]func(*policymerge.RuleYAML){
+		"action": func(r *policymerge.RuleYAML) { r.Action = "deny" },
+		"mode":   func(r *policymerge.RuleYAML) { r.Mode = "audit" },
+		"reason": func(r *policymerge.RuleYAML) { r.Reason = "changed" },
+		"all": func(r *policymerge.RuleYAML) {
+			r.Name, r.Action, r.Mode, r.Reason = "r2", "deny", "enforce", "why b"
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			rb := base
+			mutate(&rb)
+			r := Diff(policy("a", base), policy("b", rb))
+			if len(r.Changed) != 1 || len(r.Both)+len(r.OnlyA)+len(r.OnlyB) != 0 {
+				t.Fatalf("expected one Changed, got %+v", r)
+			}
+			if r.Changed[0].A.Name != base.Name || r.Changed[0].B.Name != rb.Name ||
+				r.Changed[0].A.Action != base.Action || r.Changed[0].B.Action != rb.Action {
+				t.Errorf("unexpected pair %+v", r.Changed[0])
+			}
+		})
+	}
+}
+
+func TestFormatDetailedChanged(t *testing.T) {
+	ra := rule("r", "file", "allow", "/etc/shadow")
+	rb := rule("r2", "file", "deny", "/etc/shadow")
+	rb.Mode = "enforce"
+	out := FormatDetailed(Diff(policy("a", ra), policy("b", rb)), "a.yaml", "b.yaml")
+	want := "=== Changed (1 rules) ===\n  - [file] r -> r2: action allow -> deny, mode \"\" -> \"enforce\"\n\n"
+	if out != want {
+		t.Errorf("FormatDetailed =\n%q\nwant\n%q", out, want)
+	}
+	if s := FormatSummary(Diff(policy("a", ra), policy("b", rb)), "a", "b"); !strings.Contains(s, "Changed:    1 rules") {
+		t.Errorf("summary missing changed count: %q", s)
 	}
 }
 
@@ -148,16 +187,55 @@ func TestDiffConditionListOrderMatters(t *testing.T) {
 	}
 }
 
-func TestDiffDuplicateRulesCollapse(t *testing.T) {
-	// Two rules with identical event+conditions in one policy collapse into
-	// a single fingerprint entry (the last one wins).
+func TestDiffDuplicateRulesKept(t *testing.T) {
+	// Rules with identical event+conditions in one policy are all kept.
 	a := policy("a", rule("first", "file", "allow", "/x"), rule("second", "file", "deny", "/x"))
 	r := Diff(a, policy("b"))
-	if len(r.OnlyA) != 1 {
-		t.Fatalf("OnlyA = %d, want 1 (duplicates collapse)", len(r.OnlyA))
+	if got := strings.Join(names(r.OnlyA), ","); got != "first,second" {
+		t.Fatalf("OnlyA = %s, want first,second", got)
 	}
-	if r.OnlyA[0].Name != "second" {
-		t.Errorf("kept %q, want last duplicate", r.OnlyA[0].Name)
+
+	// Duplicates are matched one-for-one: A has the rule twice, B once, so
+	// one copy is shared and the other is only in A.
+	dup := rule("d", "file", "allow", "/d")
+	r = Diff(policy("a", dup, dup), policy("b", dup))
+	if len(r.Both) != 1 || len(r.OnlyA) != 1 || len(r.OnlyB)+len(r.Changed) != 0 {
+		t.Errorf("expected Both=1 OnlyA=1, got %+v", r)
+	}
+
+	// A conflicting duplicate in A is paired with B's differing rule only
+	// after the identical copy has been matched.
+	deny := rule("d", "file", "deny", "/d")
+	r = Diff(policy("a", deny, dup), policy("b", dup, dup))
+	if len(r.Both) != 1 || len(r.Changed) != 1 || len(r.OnlyA)+len(r.OnlyB) != 0 {
+		t.Fatalf("expected Both=1 Changed=1, got %+v", r)
+	}
+	if r.Changed[0].A.Action != "deny" || r.Changed[0].B.Action != "allow" {
+		t.Errorf("unexpected change %+v", r.Changed[0])
+	}
+}
+
+func TestDiffSortStableTiebreak(t *testing.T) {
+	// Same-named rules must come out in a deterministic order regardless of
+	// input order.
+	r1 := rule("same", "file", "allow", "/b")
+	r2 := rule("same", "file", "allow", "/a")
+	r3 := rule("same", "file", "deny", "/c")
+	r4 := rule("same", "network", "allow", "/a")
+	want := ""
+	for i, in := range [][]policymerge.RuleYAML{{r1, r2, r3, r4}, {r4, r3, r2, r1}, {r3, r1, r4, r2}} {
+		got := ""
+		for _, x := range Diff(policy("a", in...), policy("b")).OnlyA {
+			got += x.Event + "/" + x.Action + "/" + conditionsKey(x.Conditions) + ";"
+		}
+		if i == 0 {
+			want = got
+		} else if got != want {
+			t.Errorf("order depends on input:\n%s\n%s", got, want)
+		}
+	}
+	if want != "file/allow/"+conditionsKey(r2.Conditions)+";file/allow/"+conditionsKey(r1.Conditions)+";file/deny/"+conditionsKey(r3.Conditions)+";network/allow/"+conditionsKey(r4.Conditions)+";" {
+		t.Errorf("unexpected order %s", want)
 	}
 }
 
@@ -172,18 +250,36 @@ func TestFingerprintFormat(t *testing.T) {
 		}
 	}
 	if fp != fingerprint(rule("other", "file", "deny", "/x")) {
-		t.Error("fingerprint not deterministic over event+conditions")
+		t.Error("match fingerprint should cover only event+conditions")
 	}
 }
 
-func TestFingerprintUnmarshalableConditionsCollide(t *testing.T) {
-	// json.Marshal errors are ignored in fingerprint, so any two rules whose
-	// conditions cannot be marshalled (e.g. NaN, which YAML ".nan" yields)
-	// hash identically regardless of event. Documents current behaviour.
-	a := policymerge.RuleYAML{Event: "file", Conditions: policymerge.ConditionsYAML{All: []map[string]any{{"v": math.NaN()}}}}
-	b := policymerge.RuleYAML{Event: "network", Conditions: policymerge.ConditionsYAML{All: []map[string]any{{"w": math.Inf(1)}}}}
-	if fingerprint(a) != fingerprint(b) {
-		t.Skip("fingerprint now distinguishes unmarshalable conditions")
+func TestFingerprintUnmarshalableConditions(t *testing.T) {
+	// Conditions JSON cannot encode (NaN/Inf, which YAML ".nan"/".inf"
+	// yield) must still fingerprint distinctly and deterministically.
+	mk := func(event string, v any) policymerge.RuleYAML {
+		return policymerge.RuleYAML{Event: event, Conditions: policymerge.ConditionsYAML{All: []map[string]any{{"v": v}}}}
+	}
+	nan, inf, ninf := mk("file", math.NaN()), mk("file", math.Inf(1)), mk("file", math.Inf(-1))
+	fps := map[string]string{
+		"nan": fingerprint(nan), "inf": fingerprint(inf), "-inf": fingerprint(ninf),
+		"nan-network": fingerprint(mk("network", math.NaN())),
+		"nan-string":  fingerprint(mk("file", "NaN")),
+		"key":         fingerprint(policymerge.RuleYAML{Event: "file", Conditions: policymerge.ConditionsYAML{All: []map[string]any{{"w": math.NaN()}}}}),
+	}
+	seen := map[string]string{}
+	for k, fp := range fps {
+		if other, ok := seen[fp]; ok {
+			t.Errorf("%s and %s share fingerprint %s", k, other, fp)
+		}
+		seen[fp] = k
+	}
+	if fingerprint(nan) != fingerprint(mk("file", math.NaN())) {
+		t.Error("NaN fingerprint not deterministic")
+	}
+	r := Diff(policy("a", nan), policy("b", inf))
+	if len(r.OnlyA) != 1 || len(r.OnlyB) != 1 {
+		t.Errorf("NaN vs Inf conditions matched: %+v", r)
 	}
 }
 
@@ -193,8 +289,9 @@ func TestFormatSummaryContent(t *testing.T) {
 		OnlyB: make([]policymerge.RuleYAML, 2),
 		Both:  make([]policymerge.RuleYAML, 5),
 	}
+	r.Changed = make([]RuleChange, 1)
 	got := FormatSummary(r, "sbom.yaml", "audit.yaml")
-	want := "Only in sbom.yaml: 3 rules\nOnly in audit.yaml: 2 rules\nIn both:    5 rules\n"
+	want := "Only in sbom.yaml: 3 rules\nOnly in audit.yaml: 2 rules\nChanged:    1 rules\nIn both:    5 rules\n"
 	if got != want {
 		t.Errorf("FormatSummary =\n%q\nwant\n%q", got, want)
 	}
@@ -231,7 +328,9 @@ func TestFormatDetailedOmitsEmptySections(t *testing.T) {
 		{"only B", &DiffResult{OnlyB: []policymerge.RuleYAML{{Name: "x"}}},
 			[]string{"Only in B"}, []string{"Only in A", "In both"}},
 		{"only both", &DiffResult{Both: []policymerge.RuleYAML{{Name: "x"}}},
-			[]string{"In both"}, []string{"Only in A", "Only in B"}},
+			[]string{"In both"}, []string{"Only in A", "Only in B", "Changed"}},
+		{"only changed", &DiffResult{Changed: []RuleChange{{A: policymerge.RuleYAML{Name: "x"}, B: policymerge.RuleYAML{Name: "x", Action: "deny"}}}},
+			[]string{"Changed (1 rules)"}, []string{"Only in A", "Only in B", "In both"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
