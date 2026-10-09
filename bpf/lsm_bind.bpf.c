@@ -84,21 +84,22 @@ int BPF_PROG(lsm_bind_check, struct socket *sock, struct sockaddr *address, int 
 
 		if (val->action == ACTION_DENY) {
 			emit_lsm_event(EVENT_TYPE_BIND, 1, 0, 0,
-				cgid, port, addr_v4, addr_v6);
+				cgid, family, port, addr_v4, addr_v6);
 
-			if (is_enforce_enabled())
+			// An audit-flagged deny is a would-be denial: log it, never block.
+			if (is_enforce_enabled() && !val->audit)
 				return -1;
 			return 0;
 		}
 
 		if (val->audit) {
 			emit_lsm_event(EVENT_TYPE_BIND, 0, 0, 0,
-				cgid, port, addr_v4, addr_v6);
+				cgid, family, port, addr_v4, addr_v6);
 		}
 		return 0;
 	}
 
-	emit_lsm_event(EVENT_TYPE_BIND, 0, 0, 0, cgid, port, addr_v4, addr_v6);
+	emit_lsm_event(EVENT_TYPE_BIND, 0, 0, 0, cgid, family, port, addr_v4, addr_v6);
 	return 0;
 }
 

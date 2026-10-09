@@ -102,16 +102,20 @@ func TestGetPIDCgroupID_Invalid(t *testing.T) {
 func TestDiscoverPodCgroups_KubepodsSlice(t *testing.T) {
 	tmpDir := t.TempDir()
 	base := filepath.Join(tmpDir, "kubepods.slice")
-	// Every systemd-driver child of kubepods.slice contains "kubepods" (and so
-	// the substring "pod"), so the QoS slices themselves are also returned.
-	podDirs := []string{
+	// Pod slices and the container scopes beneath them are returned; the QoS
+	// slices (which merely contain "kubepods") are not pods and are skipped.
+	qosDirs := []string{
 		filepath.Join(base, "kubepods-besteffort.slice"),
 		filepath.Join(base, "kubepods-burstable.slice"),
+	}
+	podDirs := []string{
+		filepath.Join(base, "kubepods-pod9f8e7d6c_1234_4abc_8def_0123456789ab.slice"),
 		filepath.Join(base, "kubepods-besteffort.slice", "kubepods-besteffort-pod1234.slice"),
 		filepath.Join(base, "kubepods-burstable.slice", "kubepods-burstable-podabcd.slice"),
 		filepath.Join(base, "kubepods-burstable.slice", "kubepods-burstable-podabcd.slice", "cri-containerd-0123.scope"),
+		filepath.Join(base, "kubepods-burstable.slice", "kubepods-burstable-podabcd.slice", "crio-4567.scope"),
 	}
-	for _, d := range podDirs {
+	for _, d := range append(qosDirs, podDirs...) {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -145,10 +149,25 @@ func TestDiscoverPodCgroups_KubepodsSlice(t *testing.T) {
 }
 
 func TestDiscoverPodCgroups_CgroupfsKubepods(t *testing.T) {
-	// cgroupfs driver layout: kubepods/<qos>/pod<uid>
+	// cgroupfs driver layout: kubepods/<qos>/pod<uid>/<container-id>, plus
+	// guaranteed pods directly under kubepods/. Container dirs are bare hex
+	// IDs that contain no "pod" substring but must still be included.
 	tmpDir := t.TempDir()
-	pod := filepath.Join(tmpDir, "kubepods", "besteffort", "pod5678")
-	if err := os.MkdirAll(pod, 0755); err != nil {
+	base := filepath.Join(tmpDir, "kubepods")
+	pod := filepath.Join(base, "besteffort", "pod5678abcd-1234-4abc-8def-0123456789ab")
+	podDirs := []string{
+		pod,
+		filepath.Join(pod, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+		filepath.Join(pod, "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"),
+		filepath.Join(base, "pod1111aaaa-2222-4333-8444-555566667777"),
+	}
+	for _, d := range podDirs {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The QoS dir and a non-pod sibling must not be returned.
+	if err := os.MkdirAll(filepath.Join(base, "burstable", "system"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -156,12 +175,41 @@ func TestDiscoverPodCgroups_CgroupfsKubepods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiscoverPodCgroups failed: %v", err)
 	}
-	wantID, err := ResolveCgroupID(pod)
-	if err != nil {
-		t.Fatal(err)
+	want := make(map[uint64]bool)
+	for _, d := range podDirs {
+		id, err := ResolveCgroupID(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[id] = true
 	}
-	if len(ids) != 1 || ids[0] != wantID {
-		t.Errorf("ids = %v, want [%d]", ids, wantID)
+	if len(ids) != len(want) {
+		t.Fatalf("got %d IDs %v, want %d", len(ids), ids, len(want))
+	}
+	for _, id := range ids {
+		if !want[id] {
+			t.Errorf("unexpected cgroup ID %d", id)
+		}
+	}
+}
+
+func TestIsPodCgroupDir(t *testing.T) {
+	for name, want := range map[string]bool{
+		"kubepods-pod9f8e7d6c_1234_4abc_8def_0123456789ab.slice":            true,
+		"kubepods-besteffort-pod9f8e7d6c_1234_4abc_8def_0123456789ab.slice": true,
+		"kubepods-burstable-podabcd.slice":                                  true,
+		"pod9f8e7d6c-1234-4abc-8def-0123456789ab":                           true,
+		"kubepods-besteffort.slice":                                         false,
+		"kubepods-burstable.slice":                                          false,
+		"kubepods.slice":                                                    false,
+		"besteffort":                                                        false,
+		"cri-containerd-0123.scope":                                         false,
+		"0123456789abcdef":                                                  false,
+		"podman.slice":                                                      false,
+	} {
+		if got := isPodCgroupDir(name); got != want {
+			t.Errorf("isPodCgroupDir(%q) = %v, want %v", name, got, want)
+		}
 	}
 }
 

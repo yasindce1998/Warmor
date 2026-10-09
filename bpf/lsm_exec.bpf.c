@@ -15,9 +15,9 @@ int BPF_PROG(lsm_exec_check, struct linux_binprm *bprm, int ret)
 	if (should_skip_cgroup(cgid))
 		return 0;
 
-	// Read the filename being executed (64 bytes max for verifier-friendly hashing)
+	// Read the filename being executed (same bound as warmor_event.filename)
 	const char *filename = BPF_CORE_READ(bprm, filename);
-	char fname_buf[64];
+	char fname_buf[WARMOR_HASH_STR_MAX];
 	int len = bpf_probe_read_kernel_str(fname_buf, sizeof(fname_buf), filename);
 	if (len <= 0)
 		return 0;
@@ -32,11 +32,17 @@ int BPF_PROG(lsm_exec_check, struct linux_binprm *bprm, int ret)
 		.event_type = EVENT_TYPE_EXEC,
 	};
 
-	struct policy_value *val = bpf_map_lookup_elem(&policy_map, &key);
-	if (!val) {
-		// Try global rule (cgroup_id = 0)
-		key.cgroup_id = 0;
+	// A full buffer means the string may have been truncated, and the hash
+	// would then cover only a prefix shared with other strings. Never consult
+	// the policy map for it; let userspace evaluate the event instead.
+	struct policy_value *val = 0;
+	if (len < (int)sizeof(fname_buf)) {
 		val = bpf_map_lookup_elem(&policy_map, &key);
+		if (!val) {
+			// Try global rule (cgroup_id = 0)
+			key.cgroup_id = 0;
+			val = bpf_map_lookup_elem(&policy_map, &key);
+		}
 	}
 
 	if (val) {
@@ -46,9 +52,10 @@ int BPF_PROG(lsm_exec_check, struct linux_binprm *bprm, int ret)
 		if (val->action == ACTION_DENY) {
 			// Emit audit event for the denial
 			emit_lsm_event(EVENT_TYPE_EXEC, 1, fname_buf, len,
-				cgid, 0, 0, 0);
+				cgid, 0, 0, 0, 0);
 
-			if (is_enforce_enabled())
+			// An audit-flagged deny is a would-be denial: log it, never block.
+			if (is_enforce_enabled() && !val->audit)
 				return -1; // -EPERM
 			return 0; // audit-only mode
 		}
@@ -56,13 +63,13 @@ int BPF_PROG(lsm_exec_check, struct linux_binprm *bprm, int ret)
 		// ACTION_ALLOW — if audit flag set, emit event
 		if (val->audit) {
 			emit_lsm_event(EVENT_TYPE_EXEC, 0, fname_buf, len,
-				cgid, 0, 0, 0);
+				cgid, 0, 0, 0, 0);
 		}
 		return 0;
 	}
 
 	// No policy map entry — emit to userspace for WASM evaluation
-	emit_lsm_event(EVENT_TYPE_EXEC, 0, fname_buf, len, cgid, 0, 0, 0);
+	emit_lsm_event(EVENT_TYPE_EXEC, 0, fname_buf, len, cgid, 0, 0, 0, 0);
 	return 0;
 }
 

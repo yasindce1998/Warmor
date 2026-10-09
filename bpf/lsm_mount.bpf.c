@@ -27,10 +27,16 @@ int BPF_PROG(lsm_mount_check, const char *dev_name, const struct path *path,
 		.event_type = EVENT_TYPE_MOUNT,
 	};
 
-	struct policy_value *val = bpf_map_lookup_elem(&policy_map, &key);
-	if (!val) {
-		key.cgroup_id = 0;
+	// A full buffer means the string may have been truncated, and the hash
+	// would then cover only a prefix shared with other strings. Never consult
+	// the policy map for it; let userspace evaluate the event instead.
+	struct policy_value *val = 0;
+	if (len < (int)sizeof(type_buf)) {
 		val = bpf_map_lookup_elem(&policy_map, &key);
+		if (!val) {
+			key.cgroup_id = 0;
+			val = bpf_map_lookup_elem(&policy_map, &key);
+		}
 	}
 
 	if (val) {
@@ -38,21 +44,22 @@ int BPF_PROG(lsm_mount_check, const char *dev_name, const struct path *path,
 
 		if (val->action == ACTION_DENY) {
 			emit_lsm_event(EVENT_TYPE_MOUNT, 1, type_buf, len,
-				cgid, 0, 0, 0);
+				cgid, 0, 0, 0, 0);
 
-			if (is_enforce_enabled())
+			// An audit-flagged deny is a would-be denial: log it, never block.
+			if (is_enforce_enabled() && !val->audit)
 				return -1;
 			return 0;
 		}
 
 		if (val->audit) {
 			emit_lsm_event(EVENT_TYPE_MOUNT, 0, type_buf, len,
-				cgid, 0, 0, 0);
+				cgid, 0, 0, 0, 0);
 		}
 		return 0;
 	}
 
-	emit_lsm_event(EVENT_TYPE_MOUNT, 0, type_buf, len, cgid, 0, 0, 0);
+	emit_lsm_event(EVENT_TYPE_MOUNT, 0, type_buf, len, cgid, 0, 0, 0, 0);
 	return 0;
 }
 

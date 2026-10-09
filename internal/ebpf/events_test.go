@@ -266,9 +266,10 @@ func TestConnectEvent_RemoteAddrString(t *testing.T) {
 		ev   ConnectEvent
 		want string
 	}{
-		// remoteAddrString treats RemoteAddrV4 as a host-order integer
-		// (most significant byte = first octet).
-		{"ipv4", ConnectEvent{Family: 2, RemoteAddrV4: 0x0a000001}, "10.0.0.1"},
+		// RemoteAddrV4 is the raw network-order sin_addr as decoded from the
+		// ring buffer (native endianness), so 10.0.0.1 is bytes {10,0,0,1}.
+		{"ipv4", ConnectEvent{Family: 2, RemoteAddrV4: binary.NativeEndian.Uint32([]byte{10, 0, 0, 1})}, "10.0.0.1"},
+		{"ipv4 asymmetric", ConnectEvent{Family: 2, RemoteAddrV4: binary.NativeEndian.Uint32([]byte{192, 168, 1, 20})}, "192.168.1.20"},
 		{"ipv4 any", ConnectEvent{Family: 2}, "0.0.0.0"},
 		{"ipv6 loopback", ConnectEvent{Family: 10, RemoteAddrV6: v6}, "::1"},
 		{"ipv6 any", ConnectEvent{Family: 10}, "::"},

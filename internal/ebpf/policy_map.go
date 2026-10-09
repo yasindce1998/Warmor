@@ -4,8 +4,11 @@ package ebpf
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/fnv"
+	"net"
+	"strings"
 	"sync"
 
 	"github.com/cilium/ebpf"
@@ -67,6 +70,69 @@ func HashPattern(pattern string) uint32 {
 	return h.Sum32()
 }
 
+// Longest strings the BPF programs hash in full, per event type. Each program
+// reads its string into a fixed buffer and skips the policy map when the read
+// fills the buffer (the string may have been truncated), so only strings of at
+// most bufsize-2 bytes can ever be matched by a rule.
+const (
+	maxExecPatternLen   = 254 // lsm_exec fname_buf[WARMOR_HASH_STR_MAX]
+	maxMountPatternLen  = 62  // lsm_mount type_buf[64]
+	maxPtracePatternLen = 15  // task comm, TASK_COMM_LEN 16 (never truncated)
+)
+
+// ErrNotKernelMatchable is returned for rules the BPF programs could never
+// match exactly. Such rules are refused rather than written: a key that only
+// covers part of what userspace decided on would apply the decision to other
+// events, which is worse than no kernel fast-path at all.
+var ErrNotKernelMatchable = errors.New("rule cannot be matched exactly by the BPF programs")
+
+// ruleHash returns the policy_map rule_hash the BPF program for eventType
+// computes for pattern, or ErrNotKernelMatchable if the program never sees
+// pattern as a whole.
+func ruleHash(eventType uint8, pattern string) (uint32, error) {
+	var maxLen int
+	switch eventType {
+	case EventTypeExec:
+		maxLen = maxExecPatternLen
+	case EventTypeMount:
+		maxLen = maxMountPatternLen
+	case EventTypePtrace:
+		maxLen = maxPtracePatternLen
+	case EventTypeFile:
+		// lsm_file only sees the dentry basename, never the path userspace
+		// evaluated, so a file rule would match every same-named file.
+		return 0, fmt.Errorf("file event: %w", ErrNotKernelMatchable)
+	default:
+		// Network/bind/listen are keyed on binary endpoint hashes; use
+		// SetEndpointRule, SetNetworkRule or HashPort instead.
+		return 0, fmt.Errorf("event type %d is not keyed by string: %w", eventType, ErrNotKernelMatchable)
+	}
+	// The kernel stops hashing at the first NUL.
+	if len(pattern) > maxLen || strings.IndexByte(pattern, 0) >= 0 {
+		return 0, fmt.Errorf("pattern %q for event type %d: %w", pattern, eventType, ErrNotKernelMatchable)
+	}
+	return HashPattern(pattern), nil
+}
+
+// endpointHash returns the rule_hash lsm_connect/lsm_bind compute for addr and
+// port. The BPF programs hash the raw sockaddr fields as loaded from memory
+// (network-order bytes read as native integers), so reproduce those values.
+func endpointHash(addr string, port uint16) (uint32, error) {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return 0, fmt.Errorf("invalid endpoint address %q", addr)
+	}
+	var portBytes [2]byte
+	binary.BigEndian.PutUint16(portBytes[:], port)
+	rawPort := binary.NativeEndian.Uint16(portBytes[:])
+	if ip4 := ip.To4(); ip4 != nil {
+		return HashIPv4Endpoint(binary.NativeEndian.Uint32(ip4), rawPort), nil
+	}
+	var ip16 [16]byte
+	copy(ip16[:], ip.To16())
+	return HashIPv6Endpoint(ip16, rawPort), nil
+}
+
 // HashIPv4Endpoint hashes an IPv4 address and port, matching the BPF-side implementation.
 func HashIPv4Endpoint(addr uint32, port uint16) uint32 {
 	hash := uint32(2166136261)
@@ -109,14 +175,20 @@ func HashPort(port uint16) uint32 {
 	return hash
 }
 
-// SetRule adds or updates a policy rule in the BPF map.
+// SetRule adds or updates a policy rule in the BPF map. Patterns the kernel
+// cannot match exactly are refused with ErrNotKernelMatchable.
 func (m *PolicyMapManager) SetRule(cgroupID uint64, eventType uint8, pattern string, action uint8, audit bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	hash, err := ruleHash(eventType, pattern)
+	if err != nil {
+		return err
+	}
+
 	key := PolicyKey{
 		CgroupID:  cgroupID,
-		RuleHash:  HashPattern(pattern),
+		RuleHash:  hash,
 		EventType: eventType,
 	}
 
@@ -157,14 +229,52 @@ func (m *PolicyMapManager) SetNetworkRule(cgroupID uint64, addrHash uint32, acti
 	return m.policyMap.Put(key, val)
 }
 
-// DeleteRule removes a policy rule from the BPF map.
-func (m *PolicyMapManager) DeleteRule(cgroupID uint64, eventType uint8, pattern string) error {
+// SetEndpointRule adds a connect or bind rule for addr:port (port in host
+// order), keyed exactly as lsm_connect/lsm_bind look it up.
+func (m *PolicyMapManager) SetEndpointRule(cgroupID uint64, eventType uint8, addr string, port uint16, action uint8, audit bool) error {
+	if eventType != EventTypeNetwork && eventType != EventTypeBind {
+		return fmt.Errorf("event type %d is not an endpoint event: %w", eventType, ErrNotKernelMatchable)
+	}
+	hash, err := endpointHash(addr, port)
+	if err != nil {
+		return err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	key := PolicyKey{
 		CgroupID:  cgroupID,
-		RuleHash:  HashPattern(pattern),
+		RuleHash:  hash,
+		EventType: eventType,
+	}
+
+	auditByte := uint8(0)
+	if audit {
+		auditByte = 1
+	}
+
+	val := PolicyValue{
+		Action: action,
+		Audit:  auditByte,
+	}
+
+	return m.policyMap.Put(key, val)
+}
+
+// DeleteRule removes a policy rule from the BPF map.
+func (m *PolicyMapManager) DeleteRule(cgroupID uint64, eventType uint8, pattern string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	hash, err := ruleHash(eventType, pattern)
+	if err != nil {
+		return err
+	}
+
+	key := PolicyKey{
+		CgroupID:  cgroupID,
+		RuleHash:  hash,
 		EventType: eventType,
 	}
 
@@ -195,9 +305,14 @@ func (m *PolicyMapManager) SyncFromWASM(decisions []CachedDecision) error {
 	defer m.mu.Unlock()
 
 	for _, d := range decisions {
+		hash, err := ruleHash(d.EventType, d.Pattern)
+		if err != nil {
+			// Not expressible in the kernel map; userspace still enforces it.
+			continue
+		}
 		key := PolicyKey{
 			CgroupID:  d.CgroupID,
-			RuleHash:  HashPattern(d.Pattern),
+			RuleHash:  hash,
 			EventType: d.EventType,
 		}
 
@@ -273,8 +388,8 @@ func SetLSMCgroupFilter(filterMap *ebpf.Map, ids []uint64) error {
 // Ensure PolicyKey is serialized correctly for BPF map operations
 func (k PolicyKey) MarshalBinary() ([]byte, error) {
 	buf := make([]byte, 16)
-	binary.LittleEndian.PutUint64(buf[0:8], k.CgroupID)
-	binary.LittleEndian.PutUint32(buf[8:12], k.RuleHash)
+	binary.NativeEndian.PutUint64(buf[0:8], k.CgroupID)
+	binary.NativeEndian.PutUint32(buf[8:12], k.RuleHash)
 	buf[12] = k.EventType
 	buf[13] = 0
 	buf[14] = 0

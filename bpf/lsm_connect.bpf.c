@@ -92,22 +92,23 @@ int BPF_PROG(lsm_connect_check, struct socket *sock, struct sockaddr *address, i
 
 		if (val->action == ACTION_DENY) {
 			emit_lsm_event(EVENT_TYPE_NETWORK, 1, 0, 0,
-				cgid, port, addr_v4, addr_v6);
+				cgid, family, port, addr_v4, addr_v6);
 
-			if (is_enforce_enabled())
+			// An audit-flagged deny is a would-be denial: log it, never block.
+			if (is_enforce_enabled() && !val->audit)
 				return -1; // -EPERM
 			return 0;
 		}
 
 		if (val->audit) {
 			emit_lsm_event(EVENT_TYPE_NETWORK, 0, 0, 0,
-				cgid, port, addr_v4, addr_v6);
+				cgid, family, port, addr_v4, addr_v6);
 		}
 		return 0;
 	}
 
 	// No match — emit for userspace evaluation
-	emit_lsm_event(EVENT_TYPE_NETWORK, 0, 0, 0, cgid, port, addr_v4, addr_v6);
+	emit_lsm_event(EVENT_TYPE_NETWORK, 0, 0, 0, cgid, family, port, addr_v4, addr_v6);
 	return 0;
 }
 

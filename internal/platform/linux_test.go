@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/ebpf"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -109,6 +110,30 @@ func TestStopWithoutStart(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Stop hung without Start")
+	}
+}
+
+func TestStopIdempotent(t *testing.T) {
+	// Regression: a second Stop used to close stopChan again and panic.
+	p, _ := NewLinuxPlatform(LinuxConfig{})
+	for i := 0; i < 3; i++ {
+		if err := p.Stop(); err != nil {
+			t.Fatalf("Stop #%d: %v", i+1, err)
+		}
+	}
+}
+
+func TestStartAfterStop(t *testing.T) {
+	// Start after Stop must fail instead of launching monitors that exit at
+	// once. The zero Loader is never read: Start refuses before spawning.
+	p, _ := NewLinuxPlatform(LinuxConfig{})
+	p.(*LinuxPlatform).ebpfLoader = &ebpf.Loader{}
+	if err := p.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	err := p.Start(context.Background(), make(chan *api.Event))
+	if err == nil || !strings.Contains(err.Error(), "already stopped") {
+		t.Fatalf("Start after Stop: err = %v, want 'already stopped'", err)
 	}
 }
 

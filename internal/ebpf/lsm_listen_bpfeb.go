@@ -8,11 +8,13 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"structs"
 
 	"github.com/cilium/ebpf"
 )
 
 type lsm_listenPolicyKey struct {
+	_         structs.HostLayout
 	CgroupId  uint64
 	RuleHash  uint32
 	EventType uint8
@@ -20,6 +22,7 @@ type lsm_listenPolicyKey struct {
 }
 
 type lsm_listenPolicyValue struct {
+	_        structs.HostLayout
 	Action   uint8
 	Audit    uint8
 	Pad      uint16

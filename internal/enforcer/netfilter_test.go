@@ -225,20 +225,62 @@ func TestNetFilterRemoveCIDR(t *testing.T) {
 		t.Error("other CIDRs must be unaffected")
 	}
 
-	// Single IPs are stored as /32 and must be removed by that form.
+	// Single IPs are stored as /32; regression: RemoveCIDR with the same bare
+	// IP that was added used to be a no-op.
 	nf.RemoveCIDR("1.2.3.4")
-	if !nf.IsBlocked("1.2.3.4") {
-		t.Error("RemoveCIDR with bare IP unexpectedly matched")
-	}
-	nf.RemoveCIDR("1.2.3.4/32")
 	if nf.IsBlocked("1.2.3.4") {
-		t.Error("RemoveCIDR(1.2.3.4/32) should remove the single-IP entry")
+		t.Error("RemoveCIDR(1.2.3.4) should remove the single-IP entry")
 	}
 
 	// Removing something not present is a no-op.
 	nf.RemoveCIDR("172.16.0.0/12")
 	if nf.BlocklistSize() != 1 {
 		t.Errorf("BlocklistSize = %d, want 1", nf.BlocklistSize())
+	}
+}
+
+func TestNetFilterRemoveCIDR_Normalized(t *testing.T) {
+	tests := []struct {
+		name   string
+		add    string
+		remove string
+		probe  string
+	}{
+		{"ipv4 bare/bare", "1.2.3.4", "1.2.3.4", "1.2.3.4"},
+		{"ipv4 bare/cidr", "1.2.3.4", "1.2.3.4/32", "1.2.3.4"},
+		{"ipv4 cidr/bare", "1.2.3.4/32", "1.2.3.4", "1.2.3.4"},
+		{"ipv6 bare/bare", "2001:db8::1", "2001:db8::1", "2001:db8::1"},
+		{"ipv6 bare/cidr", "2001:db8::1", "2001:db8::1/128", "2001:db8::1"},
+		{"ipv6 non-canonical", "2001:0db8:0:0::1", "2001:db8::1", "2001:db8::1"},
+		{"cidr host bits", "10.0.0.0/8", "10.1.2.3/8", "10.9.9.9"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			nf, err := NewNetFilter(NetFilterConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := nf.AddCIDR(tc.add); err != nil {
+				t.Fatalf("AddCIDR(%q): %v", tc.add, err)
+			}
+			if !nf.IsBlocked(tc.probe) {
+				t.Fatalf("precondition: %s should be blocked", tc.probe)
+			}
+			nf.RemoveCIDR(tc.remove)
+			if nf.IsBlocked(tc.probe) || nf.BlocklistSize() != 0 {
+				t.Errorf("RemoveCIDR(%q) did not remove %q (size=%d)", tc.remove, tc.add, nf.BlocklistSize())
+			}
+		})
+	}
+
+	// Invalid input is ignored and leaves the blocklist untouched.
+	nf, err := NewNetFilter(NetFilterConfig{BlockCIDRs: []string{"1.2.3.4"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nf.RemoveCIDR("not-an-ip")
+	if nf.BlocklistSize() != 1 {
+		t.Errorf("BlocklistSize = %d, want 1 after invalid RemoveCIDR", nf.BlocklistSize())
 	}
 }
 

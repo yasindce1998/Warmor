@@ -32,6 +32,7 @@ var testPolicyPath = filepath.Join("..", "wasm", "testdata", "allow_policy.wasm"
 type fakePlatform struct {
 	mu       sync.Mutex
 	startErr error
+	loadErr  error
 	started  int
 	stopped  int
 	closed   int
@@ -41,7 +42,7 @@ type fakePlatform struct {
 var _ platform.Platform = (*fakePlatform)(nil)
 
 func (f *fakePlatform) Name() string                        { return "fake" }
-func (f *fakePlatform) Load(context.Context) error          { return nil }
+func (f *fakePlatform) Load(context.Context) error          { return f.loadErr }
 func (f *fakePlatform) Capabilities() platform.Capabilities { return platform.Capabilities{} }
 func (f *fakePlatform) PolicyMap() any                      { return nil }
 
@@ -291,11 +292,11 @@ func TestHandleEvent_AuditModeDowngradesPolicyDeny(t *testing.T) {
 	if stats.Denied != 0 || stats.AuditDenied != 1 || stats.Logged != 1 {
 		t.Fatalf("stats = %+v, want audit-denied only", stats)
 	}
-	// Policy-map sync happens before Enforce, so the rule is a hard deny with
-	// audit=false even though user-space downgraded it.
+	// The kernel must not be stricter than userspace: in audit mode the
+	// compiled deny carries audit=true, which the BPF side only logs.
 	rules := pm.snapshot()
-	if len(rules) != 1 || rules[0].action != 1 {
-		t.Fatalf("expected one deny rule, got %+v", rules)
+	if len(rules) != 1 || rules[0].action != 1 || !rules[0].audit {
+		t.Fatalf("expected one audit-flagged deny rule, got %+v", rules)
 	}
 }
 
@@ -357,12 +358,52 @@ func TestHandleEvent_EvaluationErrorFailsClosed(t *testing.T) {
 		t.Fatalf("stats = %+v, want fail-closed deny", stats)
 	}
 
-	cached, hit := e.cache.Get(event)
-	if !hit {
-		t.Fatal("expected fail-closed decision to be cached (current behaviour)")
+	// Regression: the error-derived deny used to be cached for the full TTL,
+	// denying the event long after the transient failure cleared.
+	if _, hit := e.cache.Get(event); hit {
+		t.Error("error-derived deny must not be cached")
 	}
-	if cached.Action != api.ActionDeny || !strings.Contains(cached.Reason, "Evaluation error") {
-		t.Errorf("cached result = %+v, want deny with evaluation error reason", cached)
+	if e.cache.Stats().Size != 0 {
+		t.Errorf("cache size = %d, want 0", e.cache.Stats().Size)
+	}
+}
+
+func TestHandleEvent_EvaluationErrorNotPersisted(t *testing.T) {
+	pm := &fakePolicyMap{}
+	e, _ := newTestEnforcer(t, testEnforcerOpts{poolSize: 1, policyMap: pm})
+
+	// Make the next evaluation fail by exhausting the pool under a cancelled
+	// context, then restore a live context so evaluation succeeds again.
+	inst, err := e.pool.Get(context.Background())
+	if err != nil {
+		t.Fatalf("pool.Get: %v", err)
+	}
+	e.cancel()
+
+	event := &api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"}
+	e.handleEvent(event)
+	if got := e.GetStats().Denied; got != 1 {
+		t.Fatalf("Denied = %d, want 1 fail-closed deny", got)
+	}
+	if n := len(pm.snapshot()); n != 0 {
+		t.Errorf("error-derived deny must not be compiled into the policy map, got %d rules", n)
+	}
+
+	e.pool.Put(inst)
+	e.ctx, e.cancel = context.WithCancel(context.Background())
+
+	// Once evaluation recovers, the same event is allowed by policy.
+	e.handleEvent(event)
+	stats := e.GetStats()
+	if stats.Allowed != 1 || stats.Denied != 1 {
+		t.Fatalf("stats = %+v, want the recovered evaluation to allow", stats)
+	}
+	if cached, hit := e.cache.Get(event); !hit || cached.Action != api.ActionAllow {
+		t.Errorf("expected recovered allow to be cached, got %+v (hit=%v)", cached, hit)
+	}
+	rules := pm.snapshot()
+	if len(rules) != 1 || rules[0].action != 0 {
+		t.Errorf("expected one allow rule after recovery, got %+v", rules)
 	}
 }
 
@@ -430,6 +471,11 @@ func TestHandleEvent_LearningModeAllowsEverything(t *testing.T) {
 	if stats.Denied != 0 || stats.AuditDenied != 0 {
 		t.Fatalf("learning mode must never deny, stats = %+v", stats)
 	}
+	// Regression: learning mode used to bypass the action handler, so stats
+	// stayed at zero.
+	if stats.Allowed != 1 {
+		t.Errorf("Allowed = %d, want 1 (learning-mode events must be counted)", stats.Allowed)
+	}
 	if e.cache.Stats().Size != 0 {
 		t.Error("learning mode should not populate the decision cache")
 	}
@@ -441,6 +487,71 @@ func TestHandleEvent_LearningModeAllowsEverything(t *testing.T) {
 	lines := rec.snapshot()
 	if len(lines) != 1 || !strings.Contains(lines[0], "exec_allow") {
 		t.Errorf("expected one exec_allow pipeline event, got %v", lines)
+	}
+}
+
+// Regression: learning mode used to run the net-filter and sandbox checks as
+// hard denies, killing processes. They must be recorded as would-deny only.
+// PID 0 keeps a regression from signalling anything; the Denied counter is
+// what detects it.
+func TestHandleEvent_LearningModePrePolicyChecksDoNotDeny(t *testing.T) {
+	netEvent := func(addr string) *api.Event {
+		return &api.Event{
+			PID:     0,
+			UID:     1000,
+			Comm:    "curl",
+			Network: &api.NetworkEvent{BaseEvent: api.BaseEvent{Type: api.EventTypeNetwork}, RemoteAddr: addr, RemotePort: 443},
+		}
+	}
+
+	tests := []struct {
+		name       string
+		netFilter  *NetFilterConfig
+		sandbox    bool
+		events     int
+		addr       string
+		wantReason string
+	}{
+		{"blocklist", &NetFilterConfig{BlockCIDRs: []string{"10.0.0.0/8"}}, false, 1, "10.1.2.3", "CIDR blocklist"},
+		{"rate limit", &NetFilterConfig{RateLimit: 1, Window: time.Hour}, false, 2, "8.8.8.8", "rate limit exceeded"},
+		{"sandbox", nil, true, 1, "8.8.8.8", "network access denied"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &sinkRecorder{}
+			e, _ := newTestEnforcer(t, testEnforcerOpts{learning: true, netFilter: tc.netFilter, sink: rec})
+			if tc.sandbox {
+				if err := e.Sandbox().ApplySandbox(0, "network-deny"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			for range tc.events {
+				e.handleEvent(netEvent(tc.addr))
+			}
+
+			stats := e.GetStats()
+			if stats.Denied != 0 {
+				t.Fatalf("learning mode must never hard-deny, stats = %+v", stats)
+			}
+			if stats.AuditDenied != 1 || stats.Logged != 1 {
+				t.Errorf("stats = %+v, want exactly 1 would-deny recorded", stats)
+			}
+			if got := stats.Allowed + stats.Logged; got != uint64(tc.events) {
+				t.Errorf("counted %d events, want %d", got, tc.events)
+			}
+
+			_ = e.pipeline.Close()
+			found := false
+			for _, line := range rec.snapshot() {
+				if strings.Contains(line, tc.wantReason) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("expected would-deny %q in pipeline, got %v", tc.wantReason, rec.snapshot())
+			}
+		})
 	}
 }
 
@@ -756,6 +867,68 @@ func TestSyncToPolicyMap(t *testing.T) {
 				t.Errorf("rule = %+v, want %+v", rules[0], *tc.want)
 			}
 		})
+	}
+}
+
+// fakeEndpointPolicyMap additionally records endpoint-keyed network rules,
+// like the Linux LSM policy map.
+type fakeEndpointPolicyMap struct {
+	fakePolicyMap
+	endpoints []endpointRule
+}
+
+type endpointRule struct {
+	cgroupID  uint64
+	eventType uint8
+	addr      string
+	port      uint16
+	action    uint8
+	audit     bool
+}
+
+func (f *fakeEndpointPolicyMap) SetEndpointRule(cgroupID uint64, eventType uint8, addr string, port uint16, action uint8, audit bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.endpoints = append(f.endpoints, endpointRule{cgroupID, eventType, addr, port, action, audit})
+	return nil
+}
+
+func TestSyncToPolicyMap_AuditModeFlagsRules(t *testing.T) {
+	// Regression: sync runs before the audit downgrade, so global audit mode
+	// used to compile a hard deny (audit=false) into the kernel map.
+	pm := &fakePolicyMap{}
+	e := &Enforcer{policyMap: pm, auditMode: true}
+	e.syncToPolicyMap(&api.Event{CgroupID: 1, Filename: "/bin/sh"}, &api.ActionResult{Action: api.ActionDeny})
+
+	rules := pm.snapshot()
+	want := policyRule{cgroupID: 1, eventType: 0, pattern: "/bin/sh", action: 1, audit: true}
+	if len(rules) != 1 || rules[0] != want {
+		t.Fatalf("rules = %+v, want [%+v]", rules, want)
+	}
+}
+
+func TestSyncToPolicyMap_NetworkUsesEndpointSyncer(t *testing.T) {
+	pm := &fakeEndpointPolicyMap{}
+	e := &Enforcer{policyMap: pm, auditMode: true}
+	event := &api.Event{CgroupID: 9, Network: &api.NetworkEvent{
+		BaseEvent:  api.BaseEvent{Type: api.EventTypeNetwork},
+		RemoteAddr: "10.0.0.1",
+		RemotePort: 443,
+	}}
+	e.syncToPolicyMap(event, &api.ActionResult{Action: api.ActionDeny})
+
+	if rules := pm.snapshot(); len(rules) != 0 {
+		t.Errorf("network decision must not be written as a string rule: %+v", rules)
+	}
+	want := endpointRule{cgroupID: 9, eventType: 2, addr: "10.0.0.1", port: 443, action: 1, audit: true}
+	if len(pm.endpoints) != 1 || pm.endpoints[0] != want {
+		t.Errorf("endpoints = %+v, want [%+v]", pm.endpoints, want)
+	}
+
+	// Non-network events still go through SetRule.
+	e.syncToPolicyMap(&api.Event{CgroupID: 9, Filename: "/bin/true"}, &api.ActionResult{Action: api.ActionAllow})
+	if rules := pm.snapshot(); len(rules) != 1 || rules[0].pattern != "/bin/true" {
+		t.Errorf("rules = %+v, want one /bin/true rule", rules)
 	}
 }
 
@@ -1112,4 +1285,140 @@ func TestReloadPolicy_Errors(t *testing.T) {
 
 func writeFile(path string) error {
 	return os.WriteFile(path, []byte("x"), 0o600)
+}
+
+// ---- New ----
+
+// stubPlatform swaps the platform factory used by New for the duration of t.
+func stubPlatform(t *testing.T, plat platform.Platform, err error) *platform.Config {
+	t.Helper()
+	var got platform.Config
+	orig := newPlatform
+	newPlatform = func(cfg platform.Config) (platform.Platform, error) {
+		got = cfg
+		return plat, err
+	}
+	t.Cleanup(func() { newPlatform = orig })
+	return &got
+}
+
+func TestNew_WithInjectedPlatform(t *testing.T) {
+	isolateCacheDir(t)
+	plat := &fakePlatform{}
+	cfg := stubPlatform(t, plat, nil)
+
+	e, err := New(context.Background(), testPolicyPath, &Options{
+		CgroupFilter:    []string{"/sys/fs/cgroup/test"},
+		LSMEnforce:      true,
+		LearningMode:    false,
+		MetricsPort:     -1,
+		NetFilterConfig: &NetFilterConfig{BlockCIDRs: []string{"10.0.0.0/8"}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if !cfg.LSMEnforce || len(cfg.CgroupFilter) != 1 {
+		t.Errorf("platform config not forwarded: %+v", *cfg)
+	}
+	if e.platform != plat || e.evaluator == nil || e.pool == nil || e.cache == nil {
+		t.Fatal("New did not wire platform, evaluator, pool and cache")
+	}
+	if e.policyMap != nil {
+		t.Error("policy map must be nil without LSM enforcement capability")
+	}
+	if e.NetFilter() == nil || e.NetFilter().BlocklistSize() != 1 {
+		t.Error("net filter should be initialized from options")
+	}
+	if e.Sandbox() == nil || len(e.Sandbox().ListProfiles()) != len(DefaultProfiles()) {
+		t.Error("sandbox should default to DefaultProfiles")
+	}
+
+	// The constructed enforcer evaluates real policy.
+	e.handleEvent(&api.Event{PID: 0, UID: 0, Comm: "bash", Filename: "/bin/bash"})
+	e.handleEvent(&api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"})
+	if stats := e.GetStats(); stats.Denied != 1 || stats.Allowed != 1 {
+		t.Errorf("stats = %+v, want 1 denied and 1 allowed", stats)
+	}
+
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if plat.closed != 1 {
+		t.Errorf("platform Close called %d times, want 1", plat.closed)
+	}
+}
+
+func TestNew_NilOptions(t *testing.T) {
+	isolateCacheDir(t)
+	stubPlatform(t, &fakePlatform{}, nil)
+
+	e, err := New(context.Background(), testPolicyPath, nil)
+	if err != nil {
+		t.Fatalf("New(nil opts): %v", err)
+	}
+	defer e.Close()
+	if e.auditMode || e.learningMode || e.netFilter != nil || e.pipeline != nil {
+		t.Error("nil options should yield defaults")
+	}
+}
+
+func TestNew_Errors(t *testing.T) {
+	isolateCacheDir(t)
+
+	t.Run("platform init", func(t *testing.T) {
+		stubPlatform(t, nil, os.ErrPermission)
+		_, err := New(context.Background(), testPolicyPath, &Options{})
+		if err == nil || !strings.Contains(err.Error(), "initialize platform") {
+			t.Fatalf("New() error = %v, want initialize platform error", err)
+		}
+	})
+
+	t.Run("missing policy", func(t *testing.T) {
+		plat := &fakePlatform{}
+		stubPlatform(t, plat, nil)
+		_, err := New(context.Background(), filepath.Join(t.TempDir(), "missing.wasm"), &Options{})
+		if err == nil || !strings.Contains(err.Error(), "load policy") {
+			t.Fatalf("New() error = %v, want load policy error", err)
+		}
+		if plat.closed != 1 {
+			t.Errorf("platform Close called %d times on failure, want 1", plat.closed)
+		}
+	})
+
+	t.Run("platform load", func(t *testing.T) {
+		plat := &fakePlatform{loadErr: os.ErrPermission}
+		stubPlatform(t, plat, nil)
+		_, err := New(context.Background(), testPolicyPath, &Options{})
+		if err == nil || !strings.Contains(err.Error(), "load platform") {
+			t.Fatalf("New() error = %v, want load platform error", err)
+		}
+		if plat.closed != 1 {
+			t.Errorf("platform Close called %d times on failure, want 1", plat.closed)
+		}
+	})
+
+	t.Run("invalid net filter", func(t *testing.T) {
+		// Regression: a bad CIDR used to fail after the platform, runtime,
+		// pool and pipeline were created, leaking the pool and pipeline. It
+		// is now validated first, so nothing is acquired at all.
+		called := false
+		orig := newPlatform
+		newPlatform = func(platform.Config) (platform.Platform, error) {
+			called = true
+			return &fakePlatform{}, nil
+		}
+		t.Cleanup(func() { newPlatform = orig })
+
+		_, err := New(context.Background(), testPolicyPath, &Options{
+			NetFilterConfig: &NetFilterConfig{BlockCIDRs: []string{"bogus"}},
+			StreamSinks:     []streaming.Sink{streaming.NewCEFSink("test", (&sinkRecorder{}).write)},
+		})
+		if err == nil || !strings.Contains(err.Error(), "initialize net filter") {
+			t.Fatalf("New() error = %v, want net filter error", err)
+		}
+		if called {
+			t.Error("net filter config must be validated before any resource is acquired")
+		}
+	})
 }

@@ -3,7 +3,6 @@
 package ebpf
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -168,7 +167,9 @@ func TestLSM_ExecBlocked(t *testing.T) {
 	cmd := exec.Command(testBin)
 	err := cmd.Run()
 	if err == nil {
-		t.Skip("exec blocking not enforced on this kernel (LSM hook attached but not effective)")
+		// The kernel hashes the full bprm->filename exactly like HashPattern,
+		// so a rule for a >16-byte path must match.
+		t.Fatal("expected exec to be blocked, but it succeeded")
 	}
 
 	var exitErr *exec.ExitError
@@ -187,7 +188,7 @@ func TestLSM_ExecBlocked(t *testing.T) {
 	loader.SetEnforceMode(false)
 }
 
-func TestLSM_FileOpenBlocked(t *testing.T) {
+func TestLSM_FileRulesRefused(t *testing.T) {
 	requireRoot(t)
 	requireLSM(t)
 
@@ -204,25 +205,20 @@ func TestLSM_FileOpenBlocked(t *testing.T) {
 		t.Fatalf("write test file: %v", err)
 	}
 
-	// Insert deny rule for file open — BPF file_open hook only sees the
-	// dentry name (basename), not the full path, so hash against basename.
-	baseName := filepath.Base(testFile)
+	// The BPF file_open hook only sees the dentry basename, never the path
+	// userspace evaluated, so the policy map manager refuses file rules
+	// rather than install one that would match every same-named file.
 	pm := loader.PolicyMap()
-	if err := pm.SetRule(0, EventTypeFile, baseName, ActionDeny, false); err != nil {
-		t.Fatalf("SetRule deny: %v", err)
+	for _, pattern := range []string{testFile, filepath.Base(testFile)} {
+		if err := pm.SetRule(0, EventTypeFile, pattern, ActionDeny, false); !errors.Is(err, ErrNotKernelMatchable) {
+			t.Fatalf("SetRule(file %q) err = %v, want ErrNotKernelMatchable", pattern, err)
+		}
 	}
 
-	// Attempt to open — should get EPERM
-	_, err := os.ReadFile(testFile)
-	if err == nil {
-		t.Fatal("expected file open to be blocked, but it succeeded")
+	// With no rule installed the open must succeed.
+	if _, err := os.ReadFile(testFile); err != nil {
+		t.Fatalf("file open unexpectedly failed: %v", err)
 	}
-	if !os.IsPermission(err) {
-		t.Logf("file open failed with: %v (expected permission denied)", err)
-	}
-
-	// Clean up
-	pm.DeleteRule(0, EventTypeFile, baseName)
 	loader.SetEnforceMode(false)
 }
 
@@ -237,14 +233,11 @@ func TestLSM_ConnectBlocked(t *testing.T) {
 		t.Fatalf("SetEnforceMode failed: %v", err)
 	}
 
-	// Block connections to 169.254.169.254:80 (metadata service)
-	ip := net.ParseIP("169.254.169.254").To4()
-	addr := binary.LittleEndian.Uint32(ip)
-	addrHash := HashIPv4Endpoint(addr, 80)
-
+	// Block connections to 169.254.169.254:80 (metadata service), keyed the
+	// way lsm_connect hashes the raw sockaddr_in.
 	pm := loader.PolicyMap()
-	if err := pm.SetNetworkRule(0, addrHash, ActionDeny, false); err != nil {
-		t.Fatalf("SetNetworkRule deny: %v", err)
+	if err := pm.SetEndpointRule(0, EventTypeNetwork, "169.254.169.254", 80, ActionDeny, false); err != nil {
+		t.Fatalf("SetEndpointRule deny: %v", err)
 	}
 
 	// Attempt to connect — should fail
@@ -260,7 +253,7 @@ func TestLSM_ConnectBlocked(t *testing.T) {
 	}
 
 	// Clean up
-	pm.DeleteRule(0, EventTypeNetwork, "")
+	pm.Clear()
 	loader.SetEnforceMode(false)
 }
 
@@ -297,6 +290,37 @@ func TestLSM_AuditModeNoBlock(t *testing.T) {
 
 	// Clean up
 	pm.DeleteRule(0, EventTypeExec, testBin)
+}
+
+func TestLSM_AuditFlaggedDenyNoBlock(t *testing.T) {
+	requireRoot(t)
+	requireLSM(t)
+
+	loader := loadLSMOrSkip(t)
+	defer loader.Close()
+
+	// Enforcement on, but the rule is audit-flagged (userspace audit mode):
+	// the kernel must log it and never be stricter than userspace.
+	if err := loader.SetEnforceMode(true); err != nil {
+		t.Fatalf("SetEnforceMode failed: %v", err)
+	}
+
+	testBin := filepath.Join(t.TempDir(), "audit-flagged-binary")
+	if err := os.WriteFile(testBin, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write test binary: %v", err)
+	}
+
+	pm := loader.PolicyMap()
+	if err := pm.SetRule(0, EventTypeExec, testBin, ActionDeny, true); err != nil {
+		t.Fatalf("SetRule deny+audit: %v", err)
+	}
+
+	if err := exec.Command(testBin).Run(); err != nil {
+		t.Errorf("audit-flagged deny must not block exec, got: %v", err)
+	}
+
+	pm.DeleteRule(0, EventTypeExec, testBin)
+	loader.SetEnforceMode(false)
 }
 
 func TestLSM_CgroupFilter(t *testing.T) {
@@ -445,8 +469,9 @@ func TestLSM_WASMFeedbackLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stats failed: %v", err)
 	}
-	if count != len(decisions) {
-		t.Errorf("expected %d entries, got %d", len(decisions), count)
+	// The file decision is not kernel-matchable and is skipped.
+	if want := len(decisions) - 1; count != want {
+		t.Errorf("expected %d entries, got %d", want, count)
 	}
 
 	// 4. Verify the lookup would work by checking the raw map
@@ -485,21 +510,10 @@ func TestLSM_BindBlocked(t *testing.T) {
 	}
 
 	// Block binding to 127.0.0.1:9999
-	ip := net.ParseIP("127.0.0.1").To4()
-	addr := binary.LittleEndian.Uint32(ip)
 	port := uint16(9999)
-	portBE := uint16(port>>8) | uint16(port<<8) // network byte order
-	addrHash := HashIPv4Endpoint(addr, portBE)
-
 	pm := loader.PolicyMap()
-	key := PolicyKey{
-		CgroupID:  0,
-		RuleHash:  addrHash,
-		EventType: EventTypeBind,
-	}
-	val := PolicyValue{Action: ActionDeny}
-	if err := pm.policyMap.Put(key, val); err != nil {
-		t.Fatalf("put bind deny rule: %v", err)
+	if err := pm.SetEndpointRule(0, EventTypeBind, "127.0.0.1", port, ActionDeny, false); err != nil {
+		t.Fatalf("SetEndpointRule bind deny: %v", err)
 	}
 
 	// Attempt to bind — should get EPERM
@@ -519,7 +533,7 @@ func TestLSM_BindBlocked(t *testing.T) {
 	}
 
 	// Clean up
-	pm.policyMap.Delete(key)
+	pm.Clear()
 	loader.SetEnforceMode(false)
 }
 

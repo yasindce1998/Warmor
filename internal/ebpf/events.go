@@ -110,9 +110,9 @@ func (e *ConnectEvent) ToEvent() Event {
 
 func (e *ConnectEvent) remoteAddrString() string {
 	if e.Family == 2 { // AF_INET
-		ip := make(net.IP, 4)
-		binary.BigEndian.PutUint32(ip, e.RemoteAddrV4)
-		return ip.String()
+		// RemoteAddrV4 is the raw network-order sin_addr, decoded as a native
+		// uint32; write it back natively to recover the original byte order.
+		return intToIPv4(e.RemoteAddrV4)
 	}
 	if e.Family == 10 { // AF_INET6
 		return net.IP(e.RemoteAddrV6[:]).String()
@@ -144,6 +144,14 @@ func nullTerminatedString(b []byte) string {
 		}
 	}
 	return string(b)
+}
+
+// intToIPv4 converts a raw sin_addr (network-order bytes loaded as a native
+// uint32 by the BPF program) to a dotted-decimal IPv4 string.
+func intToIPv4(addr uint32) string {
+	ip := make(net.IP, 4)
+	binary.NativeEndian.PutUint32(ip, addr)
+	return ip.String()
 }
 
 func ntohs(v uint16) uint16 {
