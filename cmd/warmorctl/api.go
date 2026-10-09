@@ -59,7 +59,12 @@ type apiClient struct {
 func newAPIClient(baseURL, token string) *apiClient {
 	hc := &http.Client{Timeout: 10 * time.Second}
 	if apiTLSConfig != nil {
-		tr := http.DefaultTransport.(*http.Transport).Clone()
+		var tr *http.Transport
+		if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+			tr = dt.Clone()
+		} else {
+			tr = &http.Transport{}
+		}
 		tr.TLSClientConfig = apiTLSConfig
 		hc.Transport = tr
 	}

@@ -147,14 +147,6 @@ func resetFlags() {
 	})
 }
 
-func writeFile(t *testing.T, path, content string) string {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
 func assertContains(t *testing.T, label, got string, wants ...string) {
 	t.Helper()
 	for _, w := range wants {

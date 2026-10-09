@@ -2,10 +2,9 @@ package main
 
 // Test harness for exercising main() of this command.
 //
-// Paths that return normally from main() are run in-process via runMain so
-// they count towards coverage. Paths that terminate via os.Exit / log.Fatal
-// are run in a re-executed copy of the test binary via runChild (TestMain
-// intercepts the child and calls main() with the requested args).
+// Paths that terminate via os.Exit / log.Fatal are run in a re-executed copy
+// of the test binary via runChild (TestMain intercepts the child and calls
+// main() with the requested args).
 
 import (
 	"bytes"
@@ -13,7 +12,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -21,11 +19,6 @@ import (
 )
 
 const childArgsEnv = "WARMOR_CMD_TEST_CHILD_ARGS"
-
-// mainUsesLocalFlags reports whether main() defines its flags locally (and
-// therefore needs a fresh flag.CommandLine per invocation) as opposed to
-// package-level flag vars (which must instead be reset to their defaults).
-const mainUsesLocalFlags = false
 
 func TestMain(m *testing.M) {
 	if raw, ok := os.LookupEnv(childArgsEnv); ok {
@@ -76,66 +69,6 @@ func runChild(t *testing.T, extraEnv []string, args ...string) childResult {
 	return childResult{stdout: stdout.String(), stderr: stderr.String(), code: code}
 }
 
-// runMain invokes main() in-process with args, capturing stdout, stderr and
-// the standard logger. stdin, if non-empty, is fed to os.Stdin. The caller
-// must only use it for paths where main() returns normally.
-func runMain(t *testing.T, stdin string, args ...string) (stdout, stderr string) {
-	t.Helper()
-	dir := t.TempDir()
-
-	outF, err := os.Create(dir + "/stdout")
-	if err != nil {
-		t.Fatal(err)
-	}
-	errF, err := os.Create(dir + "/stderr")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var inF *os.File
-	if stdin != "" {
-		if err := os.WriteFile(dir+"/stdin", []byte(stdin), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if inF, err = os.Open(dir + "/stdin"); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	oldArgs, oldOut, oldErr, oldIn := os.Args, os.Stdout, os.Stderr, os.Stdin
-	oldCmdLine, oldUsage := flag.CommandLine, flag.Usage
-	oldLogFlags := log.Flags()
-
-	os.Args = append([]string{"warmor-server"}, args...)
-	os.Stdout, os.Stderr = outF, errF
-	if inF != nil {
-		os.Stdin = inF
-	}
-	log.SetOutput(errF)
-	if mainUsesLocalFlags {
-		flag.CommandLine = flag.NewFlagSet("warmor-server", flag.ContinueOnError)
-	} else {
-		resetFlags()
-	}
-
-	defer func() {
-		os.Args, os.Stdout, os.Stderr, os.Stdin = oldArgs, oldOut, oldErr, oldIn
-		flag.CommandLine, flag.Usage = oldCmdLine, oldUsage
-		log.SetOutput(os.Stderr)
-		log.SetFlags(oldLogFlags)
-		outF.Close()
-		errF.Close()
-		if inF != nil {
-			inF.Close()
-		}
-	}()
-
-	main()
-
-	o, _ := os.ReadFile(dir + "/stdout")
-	e, _ := os.ReadFile(dir + "/stderr")
-	return string(o), string(e)
-}
-
 // resetFlags restores every non-testing flag on flag.CommandLine to its
 // default so consecutive in-process runs don't leak values.
 func resetFlags() {
@@ -145,14 +78,6 @@ func resetFlags() {
 		}
 		_ = f.Value.Set(f.DefValue)
 	})
-}
-
-func writeFile(t *testing.T, path, content string) string {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }
 
 func assertContains(t *testing.T, label, got string, wants ...string) {

@@ -16,8 +16,14 @@ func getHistogramVecCount(hv *prometheus.HistogramVec, labels ...string) uint64 
 	if err != nil {
 		return 0
 	}
+	m, ok := obs.(prometheus.Metric)
+	if !ok {
+		return 0
+	}
 	metric := &dto.Metric{}
-	_ = obs.(prometheus.Metric).Write(metric)
+	if err := m.Write(metric); err != nil {
+		return 0
+	}
 	return metric.Histogram.GetSampleCount()
 }
 

@@ -5,6 +5,7 @@ package enforcer
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"syscall"
 	"testing"
@@ -147,4 +148,8 @@ func TestReloadPolicy_RuntimeCreationError(t *testing.T) {
 	if e.evaluator != oldEval {
 		t.Error("evaluator must not change on failed reload")
 	}
+}
+
+func writeFile(path string) error {
+	return os.WriteFile(path, []byte("x"), 0o600)
 }

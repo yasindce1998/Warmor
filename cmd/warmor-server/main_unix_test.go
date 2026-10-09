@@ -161,7 +161,7 @@ func TestServer_InsecureFlag(t *testing.T) {
 }
 
 type pki struct {
-	caCert, serverCert, serverKey, clientCert, clientKey string
+	caCert, serverCert, serverKey string
 	caPEM, clientCertPEM, clientKeyPEM                   []byte
 }
 

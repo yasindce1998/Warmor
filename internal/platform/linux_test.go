@@ -55,7 +55,10 @@ func TestCurrent(t *testing.T) {
 	if p.Name() != "linux" {
 		t.Errorf("Name = %q, want linux", p.Name())
 	}
-	lp := p.(*LinuxPlatform)
+	lp, ok := p.(*LinuxPlatform)
+	if !ok {
+		t.Fatalf("Current returned %T, want *LinuxPlatform", p)
+	}
 	if lp.config.LSMEnforce || lp.config.RequireLSM || lp.config.SkipLSM || lp.config.CgroupFilter != nil {
 		t.Errorf("Current should use zero config, got %+v", lp.config)
 	}
@@ -126,12 +129,19 @@ func TestStopIdempotent(t *testing.T) {
 func TestStartAfterStop(t *testing.T) {
 	// Start after Stop must fail instead of launching monitors that exit at
 	// once. The zero Loader is never read: Start refuses before spawning.
-	p, _ := NewLinuxPlatform(LinuxConfig{})
-	p.(*LinuxPlatform).ebpfLoader = &ebpf.Loader{}
+	p, err := NewLinuxPlatform(LinuxConfig{})
+	if err != nil {
+		t.Fatalf("NewLinuxPlatform: %v", err)
+	}
+	lp, ok := p.(*LinuxPlatform)
+	if !ok {
+		t.Fatalf("NewLinuxPlatform returned %T, want *LinuxPlatform", p)
+	}
+	lp.ebpfLoader = &ebpf.Loader{}
 	if err := p.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	err := p.Start(context.Background(), make(chan *api.Event))
+	err = p.Start(context.Background(), make(chan *api.Event))
 	if err == nil || !strings.Contains(err.Error(), "already stopped") {
 		t.Fatalf("Start after Stop: err = %v, want 'already stopped'", err)
 	}

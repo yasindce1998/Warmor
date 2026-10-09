@@ -186,7 +186,10 @@ func TestEventJSONFieldNames(t *testing.T) {
 			t.Errorf("unexpected key %q in %s (should be omitempty)", k, data)
 		}
 	}
-	nw := m["network"].(map[string]any)
+	nw, ok := m["network"].(map[string]any)
+	if !ok {
+		t.Fatalf("network is not an object: %s", data)
+	}
 	if nw["remote_addr"] != "1.2.3.4" || nw["remote_port"] != float64(80) {
 		t.Errorf("network fields wrong: %v", nw)
 	}

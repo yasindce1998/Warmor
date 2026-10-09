@@ -294,7 +294,8 @@ func TestConsistentBucketRange(t *testing.T) {
 			t.Fatalf("bucket out of range: %d", b)
 		}
 	}
-	if consistentBucket("r1", "a") != consistentBucket("r1", "a") {
+	first, second := consistentBucket("r1", "a"), consistentBucket("r1", "a")
+	if first != second {
 		t.Fatal("bucket must be deterministic")
 	}
 }

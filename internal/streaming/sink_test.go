@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -184,6 +185,9 @@ func TestFileSinkRotation(t *testing.T) {
 }
 
 func TestFileSinkRotationFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("removing the directory of an open file is not possible on Windows")
+	}
 	dir := filepath.Join(t.TempDir(), "logs")
 	if err := os.Mkdir(dir, 0755); err != nil {
 		t.Fatal(err)
@@ -423,7 +427,10 @@ func TestWebhookSinkTimeBasedFlush(t *testing.T) {
 	ts := httptest.NewServer(rec.handler(t))
 	defer ts.Close()
 
-	s := NewWebhookSink(WebhookConfig{URL: ts.URL, BatchSize: 1000, FlushEvery: time.Nanosecond})
+	s := NewWebhookSink(WebhookConfig{URL: ts.URL, BatchSize: 1000, FlushEvery: time.Second})
+	// Backdate the last flush instead of relying on a tiny interval: on
+	// Windows the clock is coarse enough that time.Since can return 0.
+	s.lastFlush = time.Now().Add(-2 * time.Second)
 	if err := s.Write(context.Background(), sampleEvent(1)); err != nil {
 		t.Fatal(err)
 	}

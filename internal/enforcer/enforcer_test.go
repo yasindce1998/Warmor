@@ -1283,10 +1283,6 @@ func TestReloadPolicy_Errors(t *testing.T) {
 	}
 }
 
-func writeFile(path string) error {
-	return os.WriteFile(path, []byte("x"), 0o600)
-}
-
 // ---- New ----
 
 // stubPlatform swaps the platform factory used by New for the duration of t.

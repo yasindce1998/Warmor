@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -57,27 +56,6 @@ func TestMain_VersionFlag(t *testing.T) {
 	// -version returns before the banner / privilege check / enforcer.
 	if strings.Contains(stderr, "WASM-Powered") || strings.Contains(stderr, "elevated") {
 		t.Errorf("-version should short-circuit:\n%s", stderr)
-	}
-}
-
-func TestIsElevated(t *testing.T) {
-	if got, want := isElevated(), os.Geteuid() == 0; got != want {
-		t.Errorf("isElevated() = %v, want %v", got, want)
-	}
-}
-
-// Without root, main must refuse to start before touching the enforcer.
-func TestMain_RequiresElevation(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root; skipping to avoid starting the enforcer")
-	}
-	r := runChild(t, nil, "-policy", "/nonexistent/policy.wasm", "-audit")
-	if r.code != 1 {
-		t.Errorf("exit = %d, want 1", r.code)
-	}
-	assertContains(t, "stderr", r.stderr, "WASM-Powered Security Enforcer", "must be run with elevated privileges")
-	if strings.Contains(r.stderr, "Policy: ") {
-		t.Errorf("config should not be logged before the privilege check:\n%s", r.stderr)
 	}
 }
 
