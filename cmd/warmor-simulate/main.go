@@ -48,6 +48,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: --data is required\n")
 		os.Exit(1)
 	}
+	// Validate before doing any work so a typo is not silently rendered as text.
+	if *format != "text" && *format != "json" {
+		fmt.Fprintf(os.Stderr, "error: unknown --format %q (valid: text, json)\n", *format)
+		os.Exit(1)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -127,7 +132,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error writing report: %v\n", err)
 			os.Exit(1)
 		}
-	default:
+	case "text":
 		if err := simulator.FormatText(w, result); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing report: %v\n", err)
 			os.Exit(1)

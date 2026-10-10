@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -98,9 +100,10 @@ func (m *agentsModel) View() string {
 			hb = time.Since(a.LastHeartbeat).Truncate(time.Second).String() + " ago"
 		}
 
+		// Sort keys so labels don't reshuffle on every redraw.
 		labels := ""
-		for k, v := range a.Labels {
-			labels += k + "=" + v + " "
+		for _, k := range slices.Sorted(maps.Keys(a.Labels)) {
+			labels += k + "=" + a.Labels[k] + " "
 		}
 
 		sb.WriteString(fmt.Sprintf("%s%-20s %-16s %-8s v%-7d %-20s %s\n",

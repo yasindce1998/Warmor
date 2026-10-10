@@ -50,6 +50,8 @@ struct warmor_event {
 	__u16 remote_port;
 	__u32 remote_addr_v4;
 	__u8  remote_addr_v6[16];
+	__u16 family;       // AF_INET/AF_INET6 for network events, 0 otherwise
+	__u16 pad[3];
 };
 
 // Shared policy map — all LSM programs reference the same map via BTF
@@ -82,18 +84,37 @@ struct {
 	__type(value, __u8);
 } lsm_enforce SEC(".maps");
 
-// FNV-1a 32-bit hash — first 16 bytes only, for BPF verifier friendliness
-static __always_inline __u32 fnv1a_hash(const char *data, int len)
+// Upper bound on the bytes fnv1a_hash will consume. Matches the largest
+// string buffer we hash (and warmor_event.filename), so the hash covers the
+// whole string, exactly like userspace HashPattern. Hashing only a prefix
+// would let a rule for one string match every string sharing that prefix.
+#define WARMOR_HASH_STR_MAX 256
+
+// FNV-1a 32-bit hash of a NUL-terminated string of at most len bytes, read
+// from a buffer of size bytes. Bytes are hashed unsigned (char is signed on the
+// BPF target), so the result equals Go's hash/fnv New32a over the same bytes.
+// The loop is bounded by the buffer size, a constant at every call site once
+// inlined, so the verifier can prove each read stays inside the buffer
+// (bounded loops, kernel >= 5.3). Call it through fnv1a_hash() below.
+static __always_inline __u32 fnv1a_hash_bounded(const char *data, int len,
+						 const int size)
 {
 	__u32 hash = 2166136261u;
-	for (int i = 0; i < 16; i++) {
+	for (int i = 0; i < size; i++) {
 		if (i >= len || data[i] == 0)
 			break;
-		hash ^= (__u32)data[i];
+		hash ^= (__u32)(__u8)data[i];
 		hash *= 16777619u;
 	}
 	return hash;
 }
+
+// buf must be a char array (not a pointer) so sizeof gives its real size.
+#define fnv1a_hash(buf, len) ({						\
+	_Static_assert(sizeof(buf) <= WARMOR_HASH_STR_MAX,		\
+		       "hash buffer larger than WARMOR_HASH_STR_MAX");	\
+	fnv1a_hash_bounded((buf), (len), sizeof(buf));			\
+})
 
 // Check if cgroup filtering is active and this cgroup should be skipped
 static __always_inline int should_skip_cgroup(__u64 cgid)
@@ -124,7 +145,7 @@ static __always_inline int is_enforce_enabled(void)
 static __always_inline void emit_lsm_event(
 	__u8 event_type, __u8 decision,
 	const char *filename, int filename_len,
-	__u64 cgroup_id,
+	__u64 cgroup_id, __u16 family,
 	__u16 remote_port, __u32 remote_addr_v4,
 	const __u8 *remote_addr_v6)
 {
@@ -146,6 +167,8 @@ static __always_inline void emit_lsm_event(
 	event->decision = decision;
 	event->remote_port = remote_port;
 	event->remote_addr_v4 = remote_addr_v4;
+	event->family = family;
+	__builtin_memset(event->pad, 0, sizeof(event->pad));
 
 	bpf_get_current_comm(&event->comm, sizeof(event->comm));
 

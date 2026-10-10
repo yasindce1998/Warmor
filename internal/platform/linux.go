@@ -27,6 +27,7 @@ type LinuxPlatform struct {
 	lsmLoader  *ebpf.LSMLoader
 	eventChan  chan<- *api.Event
 	stopChan   chan struct{}
+	stopOnce   sync.Once
 	wg         sync.WaitGroup
 	config     LinuxConfig
 	lsmEnabled bool
@@ -141,6 +142,13 @@ func (p *LinuxPlatform) logSecurityPosture() {
 func (p *LinuxPlatform) Start(ctx context.Context, eventChan chan<- *api.Event) error {
 	if p.ebpfLoader == nil {
 		return fmt.Errorf("platform not loaded")
+	}
+	// stopChan is closed for good once Stop runs; monitors started now would
+	// exit immediately, so refuse rather than silently capture nothing.
+	select {
+	case <-p.stopChan:
+		return fmt.Errorf("platform already stopped")
+	default:
 	}
 	p.eventChan = eventChan
 
@@ -405,8 +413,9 @@ func (p *LinuxPlatform) monitorLSMEvents(ctx context.Context) {
 	}
 }
 
+// Stop signals the monitors to exit and waits for them. It is idempotent.
 func (p *LinuxPlatform) Stop() error {
-	close(p.stopChan)
+	p.stopOnce.Do(func() { close(p.stopChan) })
 	p.wg.Wait()
 	return nil
 }

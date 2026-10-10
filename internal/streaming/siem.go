@@ -27,20 +27,23 @@ func CEFSeverity(decision string) int {
 // Format: CEF:0|Vendor|Product|Version|SignatureID|Name|Severity|Extensions
 func ToCEF(event *SecurityEvent) string {
 	severity := CEFSeverity(event.Decision)
-	signatureID := event.EventType
-	name := fmt.Sprintf("%s_%s", event.EventType, event.Decision)
+	signatureID := cefHeaderEscape(event.EventType)
+	name := cefHeaderEscape(fmt.Sprintf("%s_%s", event.EventType, event.Decision))
 
+	// Every extension value is escaped: an unescaped '=' or newline in an
+	// attacker-controlled field (comm, filename, ...) could otherwise forge
+	// additional key=value pairs or whole syslog records.
 	var ext strings.Builder
-	fmt.Fprintf(&ext, "src=%s ", event.Hostname)
+	fmt.Fprintf(&ext, "src=%s ", cefEscape(event.Hostname))
 	fmt.Fprintf(&ext, "dvcpid=%d ", event.PID)
 	fmt.Fprintf(&ext, "duser=%d ", event.UID)
-	fmt.Fprintf(&ext, "cs1=%s cs1Label=comm ", event.Comm)
+	fmt.Fprintf(&ext, "cs1=%s cs1Label=comm ", cefEscape(event.Comm))
 
 	if event.Filename != "" {
 		fmt.Fprintf(&ext, "filePath=%s ", cefEscape(event.Filename))
 	}
 	if event.RemoteAddr != "" {
-		fmt.Fprintf(&ext, "dst=%s ", event.RemoteAddr)
+		fmt.Fprintf(&ext, "dst=%s ", cefEscape(event.RemoteAddr))
 	}
 	if event.RemotePort > 0 {
 		fmt.Fprintf(&ext, "dpt=%d ", event.RemotePort)
@@ -49,7 +52,7 @@ func ToCEF(event *SecurityEvent) string {
 		fmt.Fprintf(&ext, "spt=%d ", event.LocalPort)
 	}
 	if event.Protocol != "" {
-		fmt.Fprintf(&ext, "proto=%s ", event.Protocol)
+		fmt.Fprintf(&ext, "proto=%s ", cefEscape(event.Protocol))
 	}
 	if event.Reason != "" {
 		fmt.Fprintf(&ext, "msg=%s ", cefEscape(event.Reason))
@@ -60,12 +63,47 @@ func ToCEF(event *SecurityEvent) string {
 		signatureID, name, severity, strings.TrimSpace(ext.String()))
 }
 
+var cefExtReplacer = strings.NewReplacer(
+	"\\", "\\\\",
+	"=", "\\=",
+	"\n", "\\n",
+	"\r", "\\r",
+)
+
+// cefEscape escapes a CEF extension value: backslash and '=' are
+// backslash-escaped and CR/LF are encoded as the literal sequences \r and \n,
+// so a value can neither start a new key nor break the record.
 func cefEscape(s string) string {
-	s = strings.ReplaceAll(s, "\\", "\\\\")
-	s = strings.ReplaceAll(s, "|", "\\|")
-	s = strings.ReplaceAll(s, "=", "\\=")
-	s = strings.ReplaceAll(s, "\n", " ")
-	return s
+	return cefExtReplacer.Replace(s)
+}
+
+var cefHeaderReplacer = strings.NewReplacer(
+	"\\", "\\\\",
+	"|", "\\|",
+	"\n", " ",
+	"\r", " ",
+)
+
+// cefHeaderEscape escapes a CEF header field: backslash and '|' are
+// backslash-escaped. Line breaks are not representable in the header, so
+// they are replaced with spaces.
+func cefHeaderEscape(s string) string {
+	return cefHeaderReplacer.Replace(s)
+}
+
+// syslogHostname makes a value safe for the HOSTNAME field of a syslog
+// header, which must be a single token: whitespace and control characters
+// are replaced and an empty value becomes the RFC 5424 nil value "-".
+func syslogHostname(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return strings.Map(func(r rune) rune {
+		if r <= ' ' || r == 0x7f {
+			return '_'
+		}
+		return r
+	}, s)
 }
 
 // SyslogSink sends events to a syslog server over UDP or TCP in CEF format.
@@ -112,7 +150,7 @@ func (s *SyslogSink) Write(_ context.Context, event *SecurityEvent) error {
 	msg := fmt.Sprintf("<%d>%s %s warmor: %s\n",
 		pri,
 		event.Timestamp.Format(time.RFC3339),
-		event.Hostname,
+		syslogHostname(event.Hostname),
 		cef,
 	)
 

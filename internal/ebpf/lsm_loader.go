@@ -42,6 +42,8 @@ type LSMEvent struct {
 	RemotePort   uint16
 	RemoteAddrV4 uint32
 	RemoteAddrV6 [16]byte
+	Family       uint16
+	_            [6]byte
 }
 
 // ToEvent converts an LSMEvent to a unified Event.
@@ -63,17 +65,20 @@ func (e *LSMEvent) ToEvent() Event {
 		ev.Kind = EventKindFile
 	case EventTypeNetwork, EventTypeBind:
 		ev.Kind = EventKindNetwork
-		ev.RemotePort = e.RemotePort
-		if e.RemoteAddrV4 != 0 {
+		// connect/bind report the raw sockaddr sin_port, in network order.
+		ev.RemotePort = ntohs(e.RemotePort)
+		ev.Family = e.Family
+		switch e.Family {
+		case 2: // AF_INET
 			ev.RemoteAddr = intToIPv4(e.RemoteAddrV4)
-			ev.Family = 2
-		} else {
+		case 10: // AF_INET6
 			ev.RemoteAddr = net.IP(e.RemoteAddrV6[:]).String()
-			ev.Family = 10
 		}
 	case EventTypeListen:
 		ev.Kind = EventKindNetwork
+		// listen reports skc_num, which is already in host order.
 		ev.RemotePort = e.RemotePort
+		ev.Family = e.Family
 	case EventTypePtrace:
 		ev.Kind = EventKindProcess
 	case EventTypeMount:
@@ -359,7 +364,7 @@ func (l *LSMLoader) ReadLSMEvent() (*Event, error) {
 
 	reader := bytes.NewReader(record.RawSample)
 	var raw LSMEvent
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
+	if err := binary.Read(reader, binary.NativeEndian, &raw); err != nil {
 		return nil, fmt.Errorf("parse lsm event: %w", err)
 	}
 
@@ -419,10 +424,4 @@ func (l *LSMLoader) Close() error {
 		return fmt.Errorf("lsm close errors: %v", errs)
 	}
 	return nil
-}
-
-// intToIPv4 converts a uint32 to a dotted-decimal IPv4 string.
-func intToIPv4(addr uint32) string {
-	return fmt.Sprintf("%d.%d.%d.%d",
-		addr&0xFF, (addr>>8)&0xFF, (addr>>16)&0xFF, (addr>>24)&0xFF)
 }

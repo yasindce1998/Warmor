@@ -25,6 +25,10 @@ func setupCanaryTest(t *testing.T) (*RolloutManager, *CanaryAnalyzer) {
 	}, wasmPath); err != nil {
 		t.Fatal(err)
 	}
+	// Version 2 is the canary target.
+	if err := store.UpdatePolicy("canary-policy", wasmPath); err != nil {
+		t.Fatal(err)
+	}
 
 	ca := NewCanaryAnalyzer(rm)
 	return rm, ca
@@ -335,5 +339,56 @@ func TestCanaryIdempotentAfterRollback(t *testing.T) {
 	_, rolled2 := ca.Evaluate("canary-8")
 	if rolled2 {
 		t.Error("second evaluate should not trigger rollback again")
+	}
+}
+
+func TestCanaryUnconfigured(t *testing.T) {
+	_, ca := setupCanaryTest(t)
+
+	if m := ca.Metrics("never-seen"); m.Verdict != "pending" || m.CanarySamples != 0 {
+		t.Errorf("expected empty pending metrics, got %+v", m)
+	}
+	if m, rolledBack := ca.Evaluate("never-seen"); m.Verdict != "pending" || rolledBack {
+		t.Errorf("expected pending without config, got %+v %v", m, rolledBack)
+	}
+
+	// Recording without Configure creates counters lazily, but Evaluate still
+	// requires a config.
+	ca.RecordDecision("lazy", true, true)
+	ca.RecordDecision("lazy", false, false)
+	m := ca.Metrics("lazy")
+	if m.CanarySamples != 1 || m.BaselineSamples != 1 || m.CanaryDenyRate != 1 || m.BaselineDenyRate != 0 {
+		t.Errorf("unexpected lazy metrics: %+v", m)
+	}
+	if m, _ := ca.Evaluate("lazy"); m.Verdict != "pending" {
+		t.Errorf("expected pending for unconfigured rollout, got %s", m.Verdict)
+	}
+
+	// Configuring after decisions keeps existing counters.
+	ca.Configure("lazy", CanaryConfig{MinSampleSize: 1})
+	if m := ca.Metrics("lazy"); m.CanarySamples != 1 {
+		t.Errorf("Configure must not reset existing counters: %+v", m)
+	}
+}
+
+func TestCanaryMetricsAfterRollback(t *testing.T) {
+	rm, ca := setupCanaryTest(t)
+	_, _ = rm.CreateRollout(RolloutConfig{ID: "rb", PolicyID: "canary-policy", TargetVersion: 2, Percentage: 50})
+	ca.Configure("rb", CanaryConfig{MaxDenyRateDelta: 0.1, MinSampleSize: 1, AutoRollback: true})
+	ca.RecordDecision("rb", false, false)
+	ca.RecordDecision("rb", true, true)
+
+	if _, rolledBack := ca.Evaluate("rb"); !rolledBack {
+		t.Fatal("expected rollback")
+	}
+	if m := ca.Metrics("rb"); m.Verdict != "rolled-back" {
+		t.Errorf("expected Metrics to report rolled-back, got %s", m.Verdict)
+	}
+	if state, _ := rm.GetRollout("rb"); state.Status != "aborted" {
+		t.Errorf("expected rollout aborted by canary, got %s", state.Status)
+	}
+	// Aborted rollout no longer selects the canary version.
+	if rm.ShouldUseNewVersion("rb", "any-agent") {
+		t.Error("aborted rollout must not route agents to the canary")
 	}
 }

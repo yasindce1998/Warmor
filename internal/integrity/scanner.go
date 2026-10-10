@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -23,6 +24,12 @@ func ScanRootFS(rootfs string) (*Database, error) {
 		Binaries: make(map[string]*BinaryHash),
 	}
 
+	root, err := os.OpenRoot(rootfs)
+	if err != nil {
+		return nil, fmt.Errorf("open rootfs %s: %w", rootfs, err)
+	}
+	defer root.Close()
+
 	execDirs := []string{"bin", "sbin", "usr/bin", "usr/sbin", "usr/local/bin", "usr/local/sbin"}
 
 	for _, dir := range execDirs {
@@ -38,18 +45,19 @@ func ScanRootFS(rootfs string) (*Database, error) {
 			if info.IsDir() {
 				return nil
 			}
-			if !isExecutable(info) {
+			if !isExecutable(info, runtime.GOOS) {
 				return nil
 			}
 
 			relPath, _ := filepath.Rel(rootfs, path)
 			relPath = "/" + filepath.ToSlash(relPath)
 
-			hash, err := HashFile(path)
+			// Hash through the rootfs so symlinks such as /bin/sh -> /bin/busybox
+			// resolve inside the container image rather than on the host.
+			hash, err := hashInRoot(root, relPath)
 			if err != nil {
 				return nil
 			}
-			hash.Path = relPath
 			db.Binaries[relPath] = hash
 			return nil
 		})
@@ -115,6 +123,23 @@ func (db *Database) Verify(path string) (bool, error) {
 	return actual.SHA256 == expected.SHA256, nil
 }
 
+// VerifyInRoot is like Verify but treats path as relative to rootfs, as the
+// keys produced by ScanRootFS are. Symlinks are resolved inside rootfs and
+// never escape it (see HashFileInRoot).
+func (db *Database) VerifyInRoot(rootfs, path string) (bool, error) {
+	expected, ok := db.Binaries[path]
+	if !ok {
+		return false, nil
+	}
+
+	actual, err := HashFileInRoot(rootfs, path)
+	if err != nil {
+		return false, err
+	}
+
+	return actual.SHA256 == expected.SHA256, nil
+}
+
 // LookupFastHash finds an entry by its fast hash and returns the expected SHA-256.
 func (db *Database) LookupFastHash(pathHash uint32) *BinaryHash {
 	for path, entry := range db.Binaries {
@@ -125,9 +150,14 @@ func (db *Database) LookupFastHash(pathHash uint32) *BinaryHash {
 	return nil
 }
 
-func isExecutable(info os.FileInfo) bool {
+// isExecutable reports whether a scanned file should be treated as an
+// executable on goos. On Unix the execute bits are authoritative.
+func isExecutable(info os.FileInfo, goos string) bool {
 	if info.Mode()&0111 != 0 {
 		return true
+	}
+	if goos != "windows" {
+		return false
 	}
 	name := strings.ToLower(info.Name())
 	if strings.HasSuffix(name, ".exe") || strings.HasSuffix(name, ".sh") {

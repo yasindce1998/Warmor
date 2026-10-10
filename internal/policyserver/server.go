@@ -4,10 +4,15 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -15,19 +20,40 @@ import (
 type Server struct {
 	store      *Store
 	rollouts   *RolloutManager
+	containers *containerStore
 	httpServer *http.Server
 	addr       string
 	staleCheck time.Duration
 	tlsConfig  *tls.Config
 	jwtSecret  []byte
+	jwt        *jwtIssuer
+	insecure   bool
+	policyDir  string
+
+	// Background loop lifecycle; stopped by Shutdown.
+	staleInterval time.Duration
+	loopMu        sync.Mutex
+	stopped       bool
+	stop          chan struct{}
+	loops         sync.WaitGroup
 }
 
 // ServerConfig configures the policy management server.
 type ServerConfig struct {
 	Addr           string
 	StaleThreshold time.Duration
-	TLSConfig      *tls.Config
-	JWTSecret      []byte
+	// TLSConfig enables TLS. If it verifies client certificates (mTLS), a
+	// verified certificate authenticates agent and container runtime calls.
+	TLSConfig *tls.Config
+	// JWTSecret enables bearer-token authentication. Admin endpoints are
+	// only reachable with an admin token.
+	JWTSecret []byte
+	// Insecure allows serving without any authentication when neither
+	// JWTSecret nor mTLS is configured. Development only.
+	Insecure bool
+	// PolicyDir is the only directory admin requests may load WASM from.
+	// If empty, policies cannot be created or updated over the API.
+	PolicyDir string
 }
 
 // NewServer creates a policy management server.
@@ -45,23 +71,32 @@ func NewServer(cfg ServerConfig) *Server {
 		rollouts:   NewRolloutManager(store),
 		addr:       cfg.Addr,
 		staleCheck: cfg.StaleThreshold,
+		containers: newContainerStore(),
 		tlsConfig:  cfg.TLSConfig,
 		jwtSecret:  cfg.JWTSecret,
+		insecure:   cfg.Insecure,
+		policyDir:  cfg.PolicyDir,
+
+		staleInterval: 30 * time.Second,
+		stop:          make(chan struct{}),
+	}
+	if len(cfg.JWTSecret) > 0 {
+		s.jwt = newJWTIssuerFromSecret(cfg.JWTSecret)
 	}
 
 	mux := http.NewServeMux()
 
-	// Agent-facing endpoints
-	mux.HandleFunc("/api/v1/register", s.handleRegister)
-	mux.HandleFunc("/api/v1/heartbeat", s.handleHeartbeat)
-	mux.HandleFunc("/api/v1/policy", s.handleGetPolicy)
-	mux.HandleFunc("/api/v1/policy/wasm", s.handleGetWASM)
+	// Agent-facing endpoints (mTLS client cert or agent token)
+	mux.HandleFunc("/api/v1/register", s.requireAgent(s.handleRegister))
+	mux.HandleFunc("/api/v1/heartbeat", s.requireAgent(s.handleHeartbeat))
+	mux.HandleFunc("/api/v1/policy", s.requireAgent(s.handleGetPolicy))
+	mux.HandleFunc("/api/v1/policy/wasm", s.requireAgent(s.handleGetWASM))
 
-	// Container runtime endpoints
-	mux.HandleFunc("/api/v1/containers/bind", s.handleContainerBind)
-	mux.HandleFunc("/api/v1/containers/", s.handleContainerDelete)
+	// Container runtime endpoints (mTLS client cert or runtime token)
+	mux.HandleFunc("/api/v1/containers/bind", s.requireRuntime(s.handleContainerBind))
+	mux.HandleFunc("/api/v1/containers/", s.requireRuntime(s.handleContainerDelete))
 
-	// Admin endpoints (JWT-protected when secret is configured)
+	// Admin endpoints (admin token)
 	mux.HandleFunc("/api/v1/admin/policies", s.requireJWT(s.handleAdminPolicies))
 	mux.HandleFunc("/api/v1/admin/policies/", s.requireJWT(s.handleAdminPolicy))
 	mux.HandleFunc("/api/v1/admin/agents", s.requireJWT(s.handleAdminAgents))
@@ -84,17 +119,46 @@ func (s *Server) Store() *Store {
 	return s.store
 }
 
+// Handler returns the server's HTTP handler, including authentication.
+func (s *Server) Handler() http.Handler {
+	return s.httpServer.Handler
+}
+
 // Rollouts returns the rollout manager.
 func (s *Server) Rollouts() *RolloutManager {
 	return s.rollouts
 }
 
-// Start begins listening and serving. Blocks until shutdown.
+// Start begins listening and serving. Blocks until shutdown. It refuses to
+// serve without authentication unless the server is in insecure mode.
 func (s *Server) Start() error {
+	if err := s.checkAuthConfig(); err != nil {
+		return err
+	}
+	if len(s.jwtSecret) == 0 {
+		if s.mtlsEnabled() {
+			log.Printf("WARNING: no JWT secret configured; admin API is disabled")
+		} else {
+			log.Printf("WARNING: INSECURE MODE: policy server API is unauthenticated; do not use in production")
+		}
+	}
+
+	s.loopMu.Lock()
+	if s.stopped {
+		s.loopMu.Unlock()
+		return nil
+	}
+	s.loops.Add(1)
+	s.loopMu.Unlock()
 	go s.staleLoop()
+
 	if s.tlsConfig != nil {
 		s.httpServer.TLSConfig = s.tlsConfig
-		log.Printf("policy server listening on %s (mTLS)", s.addr)
+		mode := "TLS"
+		if s.mtlsEnabled() {
+			mode = "mTLS"
+		}
+		log.Printf("policy server listening on %s (%s)", s.addr, mode)
 		if err := s.httpServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 			return err
 		}
@@ -107,16 +171,31 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Shutdown gracefully stops the server.
+// Shutdown gracefully stops the server and its background loops.
 func (s *Server) Shutdown(ctx context.Context) error {
-	return s.httpServer.Shutdown(ctx)
+	s.loopMu.Lock()
+	if !s.stopped {
+		s.stopped = true
+		close(s.stop)
+	}
+	s.loopMu.Unlock()
+
+	err := s.httpServer.Shutdown(ctx)
+	s.loops.Wait()
+	return err
 }
 
 func (s *Server) staleLoop() {
-	ticker := time.NewTicker(30 * time.Second)
+	defer s.loops.Done()
+	ticker := time.NewTicker(s.staleInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		s.store.MarkStaleAgents(s.staleCheck)
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-ticker.C:
+			s.store.MarkStaleAgents(s.staleCheck)
+		}
 	}
 }
 
@@ -193,12 +272,13 @@ func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Version-based long-poll: if agent already has this version, return 304
+	// Version-based long-poll: if agent already has this version, return 304.
+	// Any other version (including a newer one after a rollback) is re-sent.
 	ifVersion := r.URL.Query().Get("if_version")
 	if ifVersion != "" {
 		var v int64
 		_, _ = fmt.Sscanf(ifVersion, "%d", &v)
-		if v >= assignment.Version {
+		if v == assignment.Version {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
@@ -219,7 +299,20 @@ func (s *Server) handleGetWASM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, ok := s.store.GetWASM(policyID)
+	// Without a version the active one is served; agents pass the version
+	// from their assignment so rollout cohorts get the right binary.
+	var data []byte
+	var ok bool
+	if vs := r.URL.Query().Get("version"); vs != "" {
+		v, err := strconv.ParseInt(vs, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid version", http.StatusBadRequest)
+			return
+		}
+		data, ok = s.store.GetWASMVersion(policyID, v)
+	} else {
+		data, ok = s.store.GetWASM(policyID)
+	}
 	if !ok {
 		http.Error(w, "policy not found", http.StatusNotFound)
 		return
@@ -247,7 +340,12 @@ func (s *Server) handleAdminPolicies(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "id and wasm_path required", http.StatusBadRequest)
 			return
 		}
-		if err := s.store.CreatePolicy(&p, p.WASMPath); err != nil {
+		path, err := s.resolveWASMPath(p.WASMPath)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.store.CreatePolicy(&p, path); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
@@ -277,12 +375,28 @@ func (s *Server) handleAdminPolicy(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		var req struct {
 			WASMPath string `json:"wasm_path"`
+			// Stage uploads the version without activating it, for use as
+			// a rollout target.
+			Stage bool `json:"stage"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		if err := s.store.UpdatePolicy(id, req.WASMPath); err != nil {
+		if _, ok := s.store.GetPolicy(id); !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		path, err := s.resolveWASMPath(req.WASMPath)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		update := s.store.UpdatePolicy
+		if req.Stage {
+			update = s.store.StagePolicy
+		}
+		if err := update(id, path); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -363,7 +477,7 @@ func (s *Server) handleAdminRollout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.rollouts.UpdatePercentage(id, req.Percentage); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, err.Error(), rolloutErrorStatus(err))
 			return
 		}
 		state, _ := s.rollouts.GetRollout(id)
@@ -371,7 +485,7 @@ func (s *Server) handleAdminRollout(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodDelete:
 		if err := s.rollouts.AbortRollout(id); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, err.Error(), rolloutErrorStatus(err))
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -381,34 +495,52 @@ func (s *Server) handleAdminRollout(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) requireJWT(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if len(s.jwtSecret) == 0 {
-			next(w, r)
-			return
-		}
-
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			http.Error(w, "missing authorization", http.StatusUnauthorized)
-			return
-		}
-
-		token := strings.TrimPrefix(auth, "Bearer ")
-		issuer := newJWTIssuerFromSecret(s.jwtSecret)
-		claims, err := issuer.Validate(token)
-		if err != nil {
-			http.Error(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
-			return
-		}
-
-		if claims.Role != "admin" {
-			http.Error(w, "admin role required", http.StatusForbidden)
-			return
-		}
-
-		next(w, r)
+func rolloutErrorStatus(err error) int {
+	if errors.Is(err, ErrRolloutNotActive) {
+		return http.StatusConflict
 	}
+	return http.StatusNotFound
+}
+
+// resolveWASMPath confines an admin-supplied wasm_path to the configured
+// policy directory. Relative paths are taken relative to that directory;
+// symlinks are resolved before the containment check.
+func (s *Server) resolveWASMPath(p string) (string, error) {
+	if s.policyDir == "" {
+		return "", errors.New("server has no policy directory configured")
+	}
+	root, err := filepath.EvalSymlinks(s.policyDir)
+	if err != nil {
+		return "", fmt.Errorf("policy directory: %w", err)
+	}
+	if root, err = filepath.Abs(root); err != nil {
+		return "", fmt.Errorf("policy directory: %w", err)
+	}
+
+	candidate := p
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(root, candidate)
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", fmt.Errorf("wasm_path: %w", err)
+	}
+	if resolved, err = filepath.Abs(resolved); err != nil {
+		return "", fmt.Errorf("wasm_path: %w", err)
+	}
+
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("wasm_path %q is outside the policy directory", p)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("wasm_path: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("wasm_path %q is not a regular file", p)
+	}
+	return resolved, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

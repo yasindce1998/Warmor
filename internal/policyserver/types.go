@@ -4,17 +4,20 @@ import "time"
 
 // Policy represents a versioned WASM policy with targeting rules.
 type Policy struct {
-	ID          string            `json:"id" yaml:"id"`
-	Name        string            `json:"name" yaml:"name"`
-	Version     int64             `json:"version" yaml:"version"`
-	WASMPath    string            `json:"wasm_path" yaml:"wasm_path"`
-	WASMHash    string            `json:"wasm_hash" yaml:"wasm_hash"`
-	Selector    map[string]string `json:"selector" yaml:"selector"`
-	AuditMode   bool              `json:"audit_mode" yaml:"audit_mode"`
-	Priority    int               `json:"priority" yaml:"priority"`
-	CreatedAt   time.Time         `json:"created_at" yaml:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at" yaml:"updated_at"`
-	Description string            `json:"description,omitempty" yaml:"description,omitempty"`
+	ID      string `json:"id" yaml:"id"`
+	Name    string `json:"name" yaml:"name"`
+	Version int64  `json:"version" yaml:"version"`
+	// ActiveVersion is the version served to agents outside of an active
+	// rollout. It trails Version while a newer upload is staged or rolling out.
+	ActiveVersion int64             `json:"active_version" yaml:"active_version"`
+	WASMPath      string            `json:"wasm_path" yaml:"wasm_path"`
+	WASMHash      string            `json:"wasm_hash" yaml:"wasm_hash"`
+	Selector      map[string]string `json:"selector" yaml:"selector"`
+	AuditMode     bool              `json:"audit_mode" yaml:"audit_mode"`
+	Priority      int               `json:"priority" yaml:"priority"`
+	CreatedAt     time.Time         `json:"created_at" yaml:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at" yaml:"updated_at"`
+	Description   string            `json:"description,omitempty" yaml:"description,omitempty"`
 }
 
 // Agent represents a registered warmor agent with its labels and status.
@@ -59,11 +62,11 @@ type PolicyAssignment struct {
 
 // Rollout represents a gradual policy rollout configuration.
 type Rollout struct {
-	ID              string    `json:"id"`
-	PolicyID        string    `json:"policy_id"`
-	TargetVersion   int64     `json:"target_version"`
-	Percentage      int       `json:"percentage"`
-	StartedAt       time.Time `json:"started_at"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
-	Status          string    `json:"status"`
+	ID            string     `json:"id"`
+	PolicyID      string     `json:"policy_id"`
+	TargetVersion int64      `json:"target_version"`
+	Percentage    int        `json:"percentage"`
+	StartedAt     time.Time  `json:"started_at"`
+	CompletedAt   *time.Time `json:"completed_at,omitempty"`
+	Status        string     `json:"status"`
 }

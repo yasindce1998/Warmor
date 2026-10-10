@@ -78,7 +78,8 @@ func runVerify(dbPath, rootfs string) {
 
 	var passed, failed, missing int
 	for path := range db.Binaries {
-		ok, err := db.Verify(path)
+		// Database keys are rootfs-relative (see integrity.ScanRootFS).
+		ok, err := db.VerifyInRoot(rootfs, path)
 		if err != nil {
 			missing++
 			fmt.Printf("MISSING  %s (%v)\n", path, err)

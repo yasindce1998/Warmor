@@ -27,7 +27,12 @@ func HashFile(path string) (*BinaryHash, error) {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
+	return hashOpenFile(f, path)
+}
 
+// hashOpenFile hashes an already-open file, reporting path in errors and in
+// the returned BinaryHash.
+func hashOpenFile(f *os.File, path string) (*BinaryHash, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("stat %s: %w", path, err)

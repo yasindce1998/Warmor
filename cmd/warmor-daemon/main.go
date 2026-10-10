@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/enforcer"
+	"github.com/yasindce1998/warmor/internal/policyserver"
 	"github.com/yasindce1998/warmor/internal/streaming"
 	"github.com/yasindce1998/warmor/internal/version"
 )
@@ -27,10 +28,17 @@ var (
 	eventSink     = flag.String("event-sink", "", "Event sinks: stdout, file:<path>, webhook:<url> (comma-separated)")
 	eventFileMax  = flag.Int64("event-file-max", 100*1024*1024, "Max event file size before rotation (bytes)")
 	webhookHeader = flag.String("webhook-header", "", "Webhook auth header (format: Key:Value)")
-	eventLabels   = flag.String("event-labels", "", "Labels to attach to streamed events (format: k=v,k2=v2)")
+	eventLabels   = flag.String("event-labels", "", "Labels to attach to streamed events and report to the policy server (format: k=v,k2=v2)")
 	showVersion   = flag.Bool("version", false, "Show version and exit")
-)
 
+	serverURL    = flag.String("server", "", "Policy server URL (e.g. https://warmor-server:8443); downloaded policies replace --policy")
+	serverToken  = flag.String("server-token", "", "Agent JWT (role agent) for the policy server (default: $"+serverTokenEnv+")")
+	tlsCA        = flag.String("tls-ca", "", "CA certificate PEM used to verify the policy server")
+	tlsCert      = flag.String("tls-cert", "", "Client certificate PEM for mTLS to the policy server")
+	tlsKey       = flag.String("tls-key", "", "Client private key PEM for mTLS to the policy server")
+	agentID      = flag.String("agent-id", "", "Agent ID reported to the policy server (default: hostname)")
+	pollInterval = flag.Duration("poll-interval", 30*time.Second, "Policy server poll and heartbeat interval")
+)
 
 func main() {
 	flag.Parse()
@@ -130,6 +138,37 @@ func main() {
 		}
 	}
 
+	// Policy updates from the server and file changes both trigger a reload.
+	reloadCh := make(chan struct{}, 1)
+
+	var policyClient *policyserver.Client
+	if *serverURL != "" {
+		var err error
+		policyClient, err = newPolicyClient(policyClientConfig{
+			ServerURL: *serverURL,
+			Token:     *serverToken,
+			CAFile:    *tlsCA,
+			CertFile:  *tlsCert,
+			KeyFile:   *tlsKey,
+			AgentID:   *agentID,
+			Labels:    labels,
+		}, func(a *policyserver.PolicyAssignment, data []byte) {
+			if err := writePolicyFile(*policyPath, data); err != nil {
+				log.Printf("❌ Failed to write policy %s v%d: %v", a.PolicyID, a.Version, err)
+				return
+			}
+			log.Printf("📥 Received policy %s v%d from server", a.PolicyID, a.Version)
+			select {
+			case reloadCh <- struct{}{}:
+			default:
+			}
+		})
+		if err != nil {
+			log.Fatalf("❌ Policy server: %v", err)
+		}
+		log.Printf("Policy Server: %s", *serverURL)
+	}
+
 	// Create enforcer with options
 	enf, err := enforcer.New(ctx, *policyPath, &enforcer.Options{
 		AuditMode:    *auditMode,
@@ -161,9 +200,14 @@ func main() {
 	notifySignals(sigChan)
 
 	// Start policy file watcher (active on Windows; no-op on Unix where SIGHUP is used)
-	reloadCh := make(chan struct{}, 1)
 	stopWatcher := startPolicyWatcher(*policyPath, reloadCh)
 	defer stopWatcher()
+
+	if policyClient != nil {
+		clientCtx, stopClient := context.WithCancel(ctx)
+		defer stopClient()
+		go runPolicyClient(clientCtx, policyClient, *pollInterval)
+	}
 
 	// Print stats periodically
 	statsTicker := time.NewTicker(*statsInterval)

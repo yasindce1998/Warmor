@@ -1,6 +1,7 @@
 package container
 
 import (
+	"math"
 	"strings"
 	"sync"
 )
@@ -59,26 +60,59 @@ func (ps *PolicyScope) Lookup(containerID string) (string, bool) {
 	return b.PolicyID, true
 }
 
+// LookupByImage returns the policy bound to the given image. An exact image
+// match wins over a "repo:*" wildcard, and among wildcards the longest one
+// wins. Remaining ties are broken by the lowest container ID so the result
+// does not depend on map iteration order. An empty image matches nothing.
 func (ps *PolicyScope) LookupByImage(image string) (string, bool) {
+	if image == "" {
+		return "", false
+	}
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
+	var best *PolicyBinding
+	bestRank := 0
 	for _, b := range ps.bindings {
-		if b.Image == image || matchImagePrefix(b.Image, image) {
-			return b.PolicyID, true
+		rank := 0
+		switch {
+		case b.Image == "":
+			continue
+		case b.Image == image:
+			rank = math.MaxInt // exact matches outrank any wildcard
+		case matchImagePrefix(b.Image, image):
+			rank = len(b.Image)
+		default:
+			continue
+		}
+		if best == nil || rank > bestRank || (rank == bestRank && b.ContainerID < best.ContainerID) {
+			best, bestRank = b, rank
 		}
 	}
-	return "", false
+	if best == nil {
+		return "", false
+	}
+	return best.PolicyID, true
 }
 
+// LookupByNamespace returns the policy bound to the given namespace. If
+// several containers in the namespace are bound, the lowest container ID
+// wins so the result is deterministic. An empty namespace matches nothing.
 func (ps *PolicyScope) LookupByNamespace(ns string) (string, bool) {
+	if ns == "" {
+		return "", false
+	}
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
+	var best *PolicyBinding
 	for _, b := range ps.bindings {
-		if b.Namespace == ns {
-			return b.PolicyID, true
+		if b.Namespace == ns && (best == nil || b.ContainerID < best.ContainerID) {
+			best = b
 		}
 	}
-	return "", false
+	if best == nil {
+		return "", false
+	}
+	return best.PolicyID, true
 }
 
 func (ps *PolicyScope) All() []*PolicyBinding {

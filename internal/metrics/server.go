@@ -2,7 +2,9 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"time"
@@ -12,7 +14,8 @@ import (
 
 // Server serves Prometheus metrics
 type Server struct {
-	server *http.Server
+	server   *http.Server
+	listener net.Listener
 }
 
 // NewServer creates a new metrics server
@@ -40,13 +43,24 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to listen on %s: %w", s.server.Addr, err)
 	}
 
+	s.listener = listener
+
 	go func() {
-		if err := s.server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			fmt.Printf("metrics server error: %v\n", err)
+		if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("metrics: server error: %v", err)
 		}
 	}()
 
 	return nil
+}
+
+// Addr returns the address the server is listening on, which is useful when
+// it was created with port 0. It returns "" before a successful Start.
+func (s *Server) Addr() string {
+	if s.listener == nil {
+		return ""
+	}
+	return s.listener.Addr().String()
 }
 
 // Stop gracefully stops the metrics server

@@ -40,17 +40,9 @@ func NewNetFilter(cfg NetFilterConfig) (*NetFilter, error) {
 		nf.window = time.Minute
 	}
 	for _, cidr := range cfg.BlockCIDRs {
-		_, ipnet, err := net.ParseCIDR(cidr)
+		ipnet, err := parseCIDROrIP(cidr)
 		if err != nil {
-			ip := net.ParseIP(cidr)
-			if ip == nil {
-				return nil, fmt.Errorf("invalid CIDR or IP: %s", cidr)
-			}
-			mask := net.CIDRMask(32, 32)
-			if ip.To4() == nil {
-				mask = net.CIDRMask(128, 128)
-			}
-			ipnet = &net.IPNet{IP: ip, Mask: mask}
+			return nil, err
 		}
 		nf.blocklists = append(nf.blocklists, ipnet)
 	}
@@ -101,19 +93,29 @@ func (nf *NetFilter) CheckRateLimit(pid uint32) bool {
 	return w.count > nf.rateLimit
 }
 
+// parseCIDROrIP parses a CIDR, or a bare IP as a single-host /32 (IPv4) or
+// /128 (IPv6) network.
+func parseCIDROrIP(cidr string) (*net.IPNet, error) {
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err == nil {
+		return ipnet, nil
+	}
+	ip := net.ParseIP(cidr)
+	if ip == nil {
+		return nil, fmt.Errorf("invalid CIDR or IP: %s", cidr)
+	}
+	mask := net.CIDRMask(32, 32)
+	if ip.To4() == nil {
+		mask = net.CIDRMask(128, 128)
+	}
+	return &net.IPNet{IP: ip, Mask: mask}, nil
+}
+
 // AddCIDR dynamically adds a CIDR to the blocklist.
 func (nf *NetFilter) AddCIDR(cidr string) error {
-	_, ipnet, err := net.ParseCIDR(cidr)
+	ipnet, err := parseCIDROrIP(cidr)
 	if err != nil {
-		ip := net.ParseIP(cidr)
-		if ip == nil {
-			return fmt.Errorf("invalid CIDR or IP: %s", cidr)
-		}
-		mask := net.CIDRMask(32, 32)
-		if ip.To4() == nil {
-			mask = net.CIDRMask(128, 128)
-		}
-		ipnet = &net.IPNet{IP: ip, Mask: mask}
+		return err
 	}
 	nf.mu.Lock()
 	nf.blocklists = append(nf.blocklists, ipnet)
@@ -121,12 +123,18 @@ func (nf *NetFilter) AddCIDR(cidr string) error {
 	return nil
 }
 
-// RemoveCIDR removes a CIDR from the blocklist.
+// RemoveCIDR removes a CIDR from the blocklist. The argument is normalized
+// the same way as AddCIDR, so a bare IP removes its /32 (or /128) entry.
 func (nf *NetFilter) RemoveCIDR(cidr string) {
+	ipnet, err := parseCIDROrIP(cidr)
+	if err != nil {
+		return
+	}
+	want := ipnet.String()
 	nf.mu.Lock()
 	defer nf.mu.Unlock()
 	for i, block := range nf.blocklists {
-		if block.String() == cidr {
+		if block.String() == want {
 			nf.blocklists = append(nf.blocklists[:i], nf.blocklists[i+1:]...)
 			return
 		}

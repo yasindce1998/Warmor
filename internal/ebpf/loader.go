@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"reflect"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -132,7 +133,7 @@ func (l *Loader) readEvent(rd *ringbuf.Reader, kind EventKind) (*Event, error) {
 	switch kind {
 	case EventKindProcess:
 		var raw ExecveEvent
-		if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
+		if err := binary.Read(reader, binary.NativeEndian, &raw); err != nil {
 			return nil, fmt.Errorf("parse execve event: %w", err)
 		}
 		ev := raw.ToEvent()
@@ -140,7 +141,7 @@ func (l *Loader) readEvent(rd *ringbuf.Reader, kind EventKind) (*Event, error) {
 
 	case EventKindFile:
 		var raw OpenatEvent
-		if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
+		if err := binary.Read(reader, binary.NativeEndian, &raw); err != nil {
 			return nil, fmt.Errorf("parse openat event: %w", err)
 		}
 		ev := raw.ToEvent()
@@ -148,7 +149,7 @@ func (l *Loader) readEvent(rd *ringbuf.Reader, kind EventKind) (*Event, error) {
 
 	case EventKindNetwork:
 		var raw ConnectEvent
-		if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
+		if err := binary.Read(reader, binary.NativeEndian, &raw); err != nil {
 			return nil, fmt.Errorf("parse connect event: %w", err)
 		}
 		ev := raw.ToEvent()
@@ -225,8 +226,11 @@ func (l *Loader) Close() error {
 		}
 	}
 
+	// Guard the pointer value, not just the interface: a nil *xxxObjects (a
+	// load step that never ran) is a non-nil interface holding a nil pointer,
+	// and calling Close() on it panics. See LSMLoader.Close.
 	for _, obj := range []interface{ Close() error }{l.execveObjs, l.openatObjs, l.connectObjs} {
-		if obj != nil {
+		if obj != nil && !reflect.ValueOf(obj).IsNil() {
 			if err := obj.Close(); err != nil {
 				errs = append(errs, err)
 			}

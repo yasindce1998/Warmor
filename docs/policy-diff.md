@@ -1,6 +1,6 @@
 # Policy Diff
 
-`warmor-policy-diff` compares two warmor policy YAML files and shows which rules are unique to each source versus confirmed by both. This is useful for understanding the overlap between SBOM-derived and audit-derived policies.
+`warmor-policy-diff` compares two warmor policy YAML files and shows which rules are unique to each source, which rules changed their decision, and which are confirmed by both. This is useful for understanding the overlap between SBOM-derived and audit-derived policies.
 
 ## Installation
 
@@ -17,8 +17,9 @@ warmor-policy-diff sbom-policy.yaml audit-policy.yaml
 # Summary only (just counts)
 warmor-policy-diff --summary sbom.yaml audit.yaml
 
-# Save output to file
-warmor-policy-diff sbom.yaml audit.yaml -o diff-report.txt
+# Save output to file (flags may appear before, between or after the files;
+# use -- to pass a file name that starts with "-")
+warmor-policy-diff sbom.yaml audit.yaml -o diff-report.txt --summary
 ```
 
 ## Flags
@@ -44,6 +45,9 @@ warmor-policy-diff sbom.yaml audit.yaml -o diff-report.txt
   - [network] allow-apt-repo-access (allow)
   - [process] allow-cron-job (allow)
 
+=== Changed (1 rules) ===
+  - [file] protect-shadow: action deny -> allow
+
 === In both (5 rules) ===
   - [process] allow-nginx (allow)
   - [process] allow-curl (allow)
@@ -57,14 +61,18 @@ warmor-policy-diff sbom.yaml audit.yaml -o diff-report.txt
 ```
 Only in sbom-policy.yaml: 3 rules
 Only in audit-policy.yaml: 2 rules
+Changed:    1 rules
 In both:    5 rules
 ```
 
 ## How It Works
 
-Rules are fingerprinted by `(event, conditions)` — the same algorithm used by `warmor-policy-merge`. Two rules with the same event type and conditions are considered the same rule regardless of their name or action.
+Rules are matched by `(event, conditions)`. A matched pair is reported:
 
-This means if one policy has `action: allow` and the other has `action: deny` for the same event+conditions, they are still considered "in both" — use `warmor-policy-merge --strategy deny-wins` to resolve the conflict.
+- **In both** when `action`, `mode` and `reason` are also equal (the name may differ; the rule from the first policy is shown);
+- **Changed** when any of `action`, `mode` or `reason` differs — e.g. one policy allows what the other denies. The line lists each differing field (`action deny -> allow`, `mode "audit" -> "enforce"`, ...). Use `warmor-policy-merge --strategy deny-wins` to resolve such conflicts.
+
+Duplicate rules (same event and conditions) within one policy are kept and matched one-for-one, so a rule present twice in A and once in B shows one copy "in both" and one "only in A". Condition values JSON cannot represent (YAML `.nan`, `.inf`) are fingerprinted by their Go rendering, so they stay distinct. Each section is sorted by rule name, then event, action, mode, reason and conditions, so the output is deterministic.
 
 ## Typical Workflow
 

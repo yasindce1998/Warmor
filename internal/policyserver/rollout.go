@@ -3,6 +3,7 @@ package policyserver
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -18,17 +19,23 @@ type RolloutManager struct {
 // RolloutState tracks a live rollout's progress.
 type RolloutState struct {
 	Rollout
-	BaseVersion int64  `json:"base_version"`
+	BaseVersion  int64  `json:"base_version"`
 	BasePolicyID string `json:"base_policy_id,omitempty"`
 }
 
 // RolloutConfig defines a new rollout.
 type RolloutConfig struct {
-	ID            string `json:"id"`
-	PolicyID      string `json:"policy_id"`
-	TargetVersion int64  `json:"target_version"`
-	Percentage    int    `json:"percentage"`
+	ID       string `json:"id"`
+	PolicyID string `json:"policy_id"`
+	// TargetVersion is the stored policy version being rolled out; zero
+	// means the policy's latest version.
+	TargetVersion int64 `json:"target_version"`
+	Percentage    int   `json:"percentage"`
 }
+
+// ErrRolloutNotActive is returned when modifying a rollout that has already
+// completed or been aborted.
+var ErrRolloutNotActive = errors.New("rollout is not active")
 
 // NewRolloutManager creates a rollout manager backed by the given store.
 func NewRolloutManager(store *Store) *RolloutManager {
@@ -56,23 +63,51 @@ func (rm *RolloutManager) CreateRollout(cfg RolloutConfig) (*RolloutState, error
 		return nil, fmt.Errorf("percentage must be 0-100, got %d", cfg.Percentage)
 	}
 
+	for _, r := range rm.rollouts {
+		if r.PolicyID == cfg.PolicyID && r.Status == "active" {
+			return nil, fmt.Errorf("policy %s already has active rollout %s", cfg.PolicyID, r.ID)
+		}
+	}
+
+	target := cfg.TargetVersion
+	if target == 0 {
+		target = policy.Version
+	}
+	if !rm.store.HasVersion(cfg.PolicyID, target) {
+		return nil, fmt.Errorf("policy %s has no version %d", cfg.PolicyID, target)
+	}
+
+	// The base is what non-canary agents keep receiving: the active version,
+	// or, if the target was already activated by a plain update, the version
+	// it replaced.
+	base := policy.ActiveVersion
+	if base == target {
+		base = rm.store.previousVersion(cfg.PolicyID, target)
+	}
+	if base == 0 {
+		return nil, fmt.Errorf("policy %s has no version to roll out from", cfg.PolicyID)
+	}
+
 	state := &RolloutState{
 		Rollout: Rollout{
 			ID:            cfg.ID,
 			PolicyID:      cfg.PolicyID,
-			TargetVersion: cfg.TargetVersion,
+			TargetVersion: target,
 			Percentage:    cfg.Percentage,
 			StartedAt:     time.Now(),
 			Status:        "active",
 		},
-		BaseVersion: policy.Version - 1,
+		BaseVersion: base,
 	}
 
 	rm.rollouts[cfg.ID] = state
-	return state, nil
+	cp := *state
+	return &cp, nil
 }
 
 // UpdatePercentage changes the rollout percentage (for gradual ramp-up).
+// Reaching 100% completes the rollout and promotes the target version to the
+// policy's active version.
 func (rm *RolloutManager) UpdatePercentage(rolloutID string, pct int) error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
@@ -81,16 +116,22 @@ func (rm *RolloutManager) UpdatePercentage(rolloutID string, pct int) error {
 	if !ok {
 		return fmt.Errorf("rollout %s not found", rolloutID)
 	}
+	if state.Status != "active" {
+		return fmt.Errorf("rollout %s is %s: %w", rolloutID, state.Status, ErrRolloutNotActive)
+	}
 	if pct < 0 || pct > 100 {
 		return fmt.Errorf("percentage must be 0-100")
 	}
 
-	state.Percentage = pct
 	if pct == 100 {
+		if err := rm.store.SetActiveVersion(state.PolicyID, state.TargetVersion); err != nil {
+			return fmt.Errorf("promote target version: %w", err)
+		}
 		now := time.Now()
 		state.CompletedAt = &now
 		state.Status = "completed"
 	}
+	state.Percentage = pct
 	return nil
 }
 
@@ -108,6 +149,12 @@ func (rm *RolloutManager) AbortRollout(rolloutID string) error {
 	if !ok {
 		return fmt.Errorf("rollout %s not found", rolloutID)
 	}
+	if state.Status != "active" {
+		return fmt.Errorf("rollout %s is %s: %w", rolloutID, state.Status, ErrRolloutNotActive)
+	}
+	// Pin the policy back to the base version. This only fails if the policy
+	// was deleted, in which case there is nothing left to serve anyway.
+	_ = rm.store.SetActiveVersion(state.PolicyID, state.BaseVersion)
 	now := time.Now()
 	state.CompletedAt = &now
 	state.Status = "aborted"
@@ -163,16 +210,20 @@ func (rm *RolloutManager) ShouldUseNewVersion(rolloutID, agentID string) bool {
 }
 
 // ResolvePolicy returns the effective policy assignment for an agent,
-// taking active rollouts into account.
+// taking active rollouts into account: during a rollout the canary cohort
+// receives the target version and everyone else the base version.
 func (rm *RolloutManager) ResolvePolicy(agentID string, labels map[string]string) *PolicyAssignment {
+	// Hold the rollout lock across the store reads so an abort or completion
+	// (which update the store under this lock) is observed atomically.
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+
 	basePolicy := rm.store.MatchPolicy(labels)
 	if basePolicy == nil {
 		return nil
 	}
 
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
-
+	version := basePolicy.ActiveVersion
 	for _, state := range rm.rollouts {
 		if state.Status != "active" {
 			continue
@@ -181,23 +232,18 @@ func (rm *RolloutManager) ResolvePolicy(agentID string, labels map[string]string
 			continue
 		}
 
-		bucket := consistentBucket(state.ID, agentID)
-		if bucket < state.Percentage {
-			return &PolicyAssignment{
-				PolicyID: basePolicy.ID,
-				Version:  state.TargetVersion,
-				WASMHash: basePolicy.WASMHash,
-				WASMPath: basePolicy.WASMPath,
-			}
+		version = state.BaseVersion
+		if consistentBucket(state.ID, agentID) < state.Percentage {
+			version = state.TargetVersion
 		}
+		break
 	}
 
-	return &PolicyAssignment{
-		PolicyID: basePolicy.ID,
-		Version:  basePolicy.Version,
-		WASMHash: basePolicy.WASMHash,
-		WASMPath: basePolicy.WASMPath,
+	assignment, ok := rm.store.assignment(basePolicy.ID, version)
+	if !ok {
+		return nil
 	}
+	return assignment
 }
 
 // consistentBucket returns a stable 0-99 bucket for a (rollout, agent) pair.

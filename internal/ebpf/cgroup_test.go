@@ -5,6 +5,7 @@ package ebpf
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -95,5 +96,188 @@ func TestGetPIDCgroupID_Invalid(t *testing.T) {
 	_, err := GetPIDCgroupID(99999999)
 	if err == nil {
 		t.Fatal("expected error for invalid PID")
+	}
+}
+
+func TestDiscoverPodCgroups_KubepodsSlice(t *testing.T) {
+	tmpDir := t.TempDir()
+	base := filepath.Join(tmpDir, "kubepods.slice")
+	// Pod slices and the container scopes beneath them are returned; the QoS
+	// slices (which merely contain "kubepods") are not pods and are skipped.
+	qosDirs := []string{
+		filepath.Join(base, "kubepods-besteffort.slice"),
+		filepath.Join(base, "kubepods-burstable.slice"),
+	}
+	podDirs := []string{
+		filepath.Join(base, "kubepods-pod9f8e7d6c_1234_4abc_8def_0123456789ab.slice"),
+		filepath.Join(base, "kubepods-besteffort.slice", "kubepods-besteffort-pod1234.slice"),
+		filepath.Join(base, "kubepods-burstable.slice", "kubepods-burstable-podabcd.slice"),
+		filepath.Join(base, "kubepods-burstable.slice", "kubepods-burstable-podabcd.slice", "cri-containerd-0123.scope"),
+		filepath.Join(base, "kubepods-burstable.slice", "kubepods-burstable-podabcd.slice", "crio-4567.scope"),
+	}
+	for _, d := range append(qosDirs, podDirs...) {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A regular file whose name contains "pod" must be ignored.
+	if err := os.WriteFile(filepath.Join(base, "pod-notadir"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := DiscoverPodCgroups(tmpDir)
+	if err != nil {
+		t.Fatalf("DiscoverPodCgroups failed: %v", err)
+	}
+
+	want := make(map[uint64]bool)
+	for _, d := range podDirs {
+		id, err := ResolveCgroupID(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[id] = true
+	}
+	if len(ids) != len(want) {
+		t.Fatalf("got %d IDs %v, want %d", len(ids), ids, len(want))
+	}
+	for _, id := range ids {
+		if !want[id] {
+			t.Errorf("unexpected cgroup ID %d", id)
+		}
+	}
+}
+
+func TestDiscoverPodCgroups_CgroupfsKubepods(t *testing.T) {
+	// cgroupfs driver layout: kubepods/<qos>/pod<uid>/<container-id>, plus
+	// guaranteed pods directly under kubepods/. Container dirs are bare hex
+	// IDs that contain no "pod" substring but must still be included.
+	tmpDir := t.TempDir()
+	base := filepath.Join(tmpDir, "kubepods")
+	pod := filepath.Join(base, "besteffort", "pod5678abcd-1234-4abc-8def-0123456789ab")
+	podDirs := []string{
+		pod,
+		filepath.Join(pod, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+		filepath.Join(pod, "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"),
+		filepath.Join(base, "pod1111aaaa-2222-4333-8444-555566667777"),
+	}
+	for _, d := range podDirs {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The QoS dir and a non-pod sibling must not be returned.
+	if err := os.MkdirAll(filepath.Join(base, "burstable", "system"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := DiscoverPodCgroups(tmpDir)
+	if err != nil {
+		t.Fatalf("DiscoverPodCgroups failed: %v", err)
+	}
+	want := make(map[uint64]bool)
+	for _, d := range podDirs {
+		id, err := ResolveCgroupID(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[id] = true
+	}
+	if len(ids) != len(want) {
+		t.Fatalf("got %d IDs %v, want %d", len(ids), ids, len(want))
+	}
+	for _, id := range ids {
+		if !want[id] {
+			t.Errorf("unexpected cgroup ID %d", id)
+		}
+	}
+}
+
+func TestIsPodCgroupDir(t *testing.T) {
+	for name, want := range map[string]bool{
+		"kubepods-pod9f8e7d6c_1234_4abc_8def_0123456789ab.slice":            true,
+		"kubepods-besteffort-pod9f8e7d6c_1234_4abc_8def_0123456789ab.slice": true,
+		"kubepods-burstable-podabcd.slice":                                  true,
+		"pod9f8e7d6c-1234-4abc-8def-0123456789ab":                           true,
+		"kubepods-besteffort.slice":                                         false,
+		"kubepods-burstable.slice":                                          false,
+		"kubepods.slice":                                                    false,
+		"besteffort":                                                        false,
+		"cri-containerd-0123.scope":                                         false,
+		"0123456789abcdef":                                                  false,
+		"podman.slice":                                                      false,
+	} {
+		if got := isPodCgroupDir(name); got != want {
+			t.Errorf("isPodCgroupDir(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestDiscoverPodCgroups_PrefersSlice(t *testing.T) {
+	tmpDir := t.TempDir()
+	slicePod := filepath.Join(tmpDir, "kubepods.slice", "pod-a")
+	plainPod := filepath.Join(tmpDir, "kubepods", "pod-b")
+	for _, d := range []string{slicePod, plainPod} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ids, err := DiscoverPodCgroups(tmpDir)
+	if err != nil {
+		t.Fatalf("DiscoverPodCgroups failed: %v", err)
+	}
+	wantID, _ := ResolveCgroupID(slicePod)
+	if len(ids) != 1 || ids[0] != wantID {
+		t.Errorf("ids = %v, want only kubepods.slice pod [%d]", ids, wantID)
+	}
+}
+
+func TestDiscoverPodCgroups_KubepodsIsFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "kubepods.slice"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DiscoverPodCgroups(tmpDir); err == nil {
+		t.Fatal("expected error when kubepods.slice is a regular file")
+	}
+}
+
+func TestDiscoverPodCgroups_NoMatchingDirs(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, "kubepods", "besteffort", "system"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DiscoverPodCgroups(tmpDir); err == nil {
+		t.Fatal("expected error when no pod-like directories exist")
+	}
+}
+
+func TestResolveCgroupIDs_Empty(t *testing.T) {
+	ids, err := ResolveCgroupIDs(nil)
+	if err != nil {
+		t.Fatalf("ResolveCgroupIDs(nil) failed: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected empty result, got %v", ids)
+	}
+}
+
+func TestResolveCgroupID_MatchesInode(t *testing.T) {
+	dir := t.TempDir()
+	id, err := ResolveCgroupID(dir)
+	if err != nil {
+		t.Fatalf("ResolveCgroupID failed: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("no syscall.Stat_t available")
+	}
+	if id != st.Ino {
+		t.Errorf("ResolveCgroupID = %d, want inode %d", id, st.Ino)
 	}
 }

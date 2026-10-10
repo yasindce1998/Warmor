@@ -99,16 +99,32 @@ If `auto_rollback` is false, the verdict becomes `degraded` but the rollout cont
 ## Typical Workflow
 
 ```bash
-# 1. Push new policy version to server
-# 2. Create rollout at 10%
-curl -X POST http://localhost:8443/api/v1/admin/rollouts \
+AUTH="Authorization: Bearer $ADMIN_TOKEN"   # JWT with role "admin"
+
+# 1. Stage the new policy version (path relative to --policy-dir); "stage"
+#    stores it as version 2 without serving it to any agent yet
+curl -X PUT http://localhost:8443/api/v1/admin/policies/myapp -H "$AUTH" \
+  -d '{"wasm_path":"myapp-v2.wasm","stage":true}'
+
+# 2. Create rollout at 10% (target_version defaults to the latest version)
+curl -X POST http://localhost:8443/api/v1/admin/rollouts -H "$AUTH" \
   -d '{"id":"v2-canary","policy_id":"myapp","target_version":2,"percentage":10}'
 
 # 3. Monitor canary metrics; if healthy, ramp up
-curl -X PUT http://localhost:8443/api/v1/admin/rollouts/v2-canary \
+curl -X PUT http://localhost:8443/api/v1/admin/rollouts/v2-canary -H "$AUTH" \
   -d '{"percentage":50}'
 
-# 4. Complete rollout
-curl -X PUT http://localhost:8443/api/v1/admin/rollouts/v2-canary \
+# 4. Complete rollout: version 2 becomes the policy's active version
+curl -X PUT http://localhost:8443/api/v1/admin/rollouts/v2-canary -H "$AUTH" \
   -d '{"percentage":100}'
+
+# Or abort: every agent goes back to the base version
+curl -X DELETE http://localhost:8443/api/v1/admin/rollouts/v2-canary -H "$AUTH"
 ```
+
+The server keeps every uploaded version. While a rollout is active the canary
+cohort is served `target_version` and everyone else `base_version` (the
+version that was active before the target). Completed and aborted rollouts
+cannot be modified (`409 Conflict`), and a policy can have only one active
+rollout at a time. Agents re-download whenever their assigned version
+changes, including moving back to a lower version after an abort.

@@ -22,6 +22,8 @@ int BPF_PROG(lsm_listen_check, struct socket *sock, int backlog)
 	if (port == 0)
 		return 0;
 
+	__u16 family = BPF_CORE_READ(sock, sk, __sk_common.skc_family);
+
 	__u32 hash = hash_port(port);
 
 	struct policy_key key = {
@@ -41,21 +43,22 @@ int BPF_PROG(lsm_listen_check, struct socket *sock, int backlog)
 
 		if (val->action == ACTION_DENY) {
 			emit_lsm_event(EVENT_TYPE_LISTEN, 1, 0, 0,
-				cgid, port, 0, 0);
+				cgid, family, port, 0, 0);
 
-			if (is_enforce_enabled())
+			// An audit-flagged deny is a would-be denial: log it, never block.
+			if (is_enforce_enabled() && !val->audit)
 				return -1;
 			return 0;
 		}
 
 		if (val->audit) {
 			emit_lsm_event(EVENT_TYPE_LISTEN, 0, 0, 0,
-				cgid, port, 0, 0);
+				cgid, family, port, 0, 0);
 		}
 		return 0;
 	}
 
-	emit_lsm_event(EVENT_TYPE_LISTEN, 0, 0, 0, cgid, port, 0, 0);
+	emit_lsm_event(EVENT_TYPE_LISTEN, 0, 0, 0, cgid, family, port, 0, 0);
 	return 0;
 }
 

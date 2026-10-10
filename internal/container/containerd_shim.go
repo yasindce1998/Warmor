@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"time"
 )
 
@@ -42,7 +43,7 @@ func NewShimPlugin(socketPath string, scope *PolicyScope, logger *slog.Logger) *
 }
 
 func (s *ShimPlugin) ListTasks(ctx context.Context, namespace string) ([]ContainerdTask, error) {
-	url := fmt.Sprintf("http://localhost/containerd.services.tasks.v1.Tasks/List?namespace=%s", namespace)
+	url := "http://localhost/containerd.services.tasks.v1.Tasks/List?namespace=" + neturl.QueryEscape(namespace)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -53,6 +54,10 @@ func (s *ShimPlugin) ListTasks(ctx context.Context, namespace string) ([]Contain
 		return nil, fmt.Errorf("list tasks: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list tasks: unexpected status %s", resp.Status)
+	}
 
 	var result struct {
 		Tasks []ContainerdTask `json:"tasks"`

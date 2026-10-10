@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/yasindce1998/warmor/internal/streaming"
 )
@@ -334,5 +336,154 @@ func TestLookupFastHash(t *testing.T) {
 	}
 	if entry.SHA256 != "abc123" {
 		t.Errorf("unexpected SHA256: %s", entry.SHA256)
+	}
+}
+
+type fakeInfo struct {
+	name string
+	mode os.FileMode
+}
+
+func (f fakeInfo) Name() string       { return f.name }
+func (f fakeInfo) Size() int64        { return 0 }
+func (f fakeInfo) Mode() os.FileMode  { return f.mode }
+func (f fakeInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeInfo) IsDir() bool        { return false }
+func (f fakeInfo) Sys() any           { return nil }
+
+func TestIsExecutable(t *testing.T) {
+	tests := []struct {
+		name string
+		mode os.FileMode
+		goos string
+		want bool
+	}{
+		{"nginx", 0755, "linux", true},
+		{"nginx", 0644, "linux", false}, // extensionless but not +x
+		{"run.sh", 0644, "linux", false},
+		{"app.exe", 0644, "darwin", false},
+		{"nginx", 0644, "windows", true},
+		{"run.sh", 0644, "windows", true},
+		{"APP.EXE", 0644, "windows", true},
+		{"readme.txt", 0644, "windows", false},
+	}
+	for _, tt := range tests {
+		if got := isExecutable(fakeInfo{tt.name, tt.mode}, tt.goos); got != tt.want {
+			t.Errorf("isExecutable(%s, %o, %s) = %v, want %v", tt.name, tt.mode, tt.goos, got, tt.want)
+		}
+	}
+}
+
+func TestScanRootFSSkipsNonExecutableExtensionless(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("extensionless files are executables on Windows")
+	}
+	root := t.TempDir()
+	binDir := filepath.Join(root, "usr", "bin")
+	mkdirAll(t, binDir)
+	writeFile(t, filepath.Join(binDir, "app"), []byte("app"), 0755)
+	writeFile(t, filepath.Join(binDir, "LICENSE"), []byte("text"), 0644)
+
+	db, err := ScanRootFS(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := db.Binaries["/usr/bin/LICENSE"]; ok || len(db.Binaries) != 1 {
+		t.Errorf("binaries = %v, want only /usr/bin/app", db.Binaries)
+	}
+}
+
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+}
+
+func TestHashFileInRootSymlinksStayInRoot(t *testing.T) {
+	host := t.TempDir()
+	hostBin := filepath.Join(host, "busybox")
+	writeFile(t, hostBin, []byte("HOST"), 0755)
+
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	mkdirAll(t, binDir)
+	writeFile(t, filepath.Join(binDir, "busybox"), []byte("CONTAINER"), 0755)
+	want, _ := HashFile(filepath.Join(binDir, "busybox"))
+
+	// Absolute target: must resolve to <root>/bin/busybox, not the host path.
+	symlinkOrSkip(t, "/bin/busybox", filepath.Join(binDir, "sh"))
+	// Relative target climbing past the root is clamped at the root.
+	symlinkOrSkip(t, "../../../../../../bin/busybox", filepath.Join(binDir, "ash"))
+	// A target naming a host absolute path is re-anchored and thus missing.
+	symlinkOrSkip(t, hostBin, filepath.Join(binDir, "escape"))
+
+	for _, name := range []string{"/bin/sh", "/bin/ash"} {
+		got, err := HashFileInRoot(root, name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got.SHA256 != want.SHA256 || got.Path != name {
+			t.Errorf("%s: got %+v, want container busybox", name, got)
+		}
+	}
+	if _, err := HashFileInRoot(root, "/bin/escape"); err == nil {
+		t.Error("/bin/escape: expected error, symlink must not reach the host")
+	}
+
+	db, err := ScanRootFS(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if db.Binaries["/bin/sh"] == nil || db.Binaries["/bin/sh"].SHA256 != want.SHA256 {
+		t.Errorf("scan hashed /bin/sh = %+v, want container busybox", db.Binaries["/bin/sh"])
+	}
+	if _, ok := db.Binaries["/bin/escape"]; ok {
+		t.Error("scan must skip symlinks escaping the rootfs")
+	}
+}
+
+func TestHashFileInRootErrors(t *testing.T) {
+	root := t.TempDir()
+	mkdirAll(t, filepath.Join(root, "bin"))
+	if _, err := HashFileInRoot(filepath.Join(root, "nope"), "/bin/x"); err == nil {
+		t.Error("expected error for missing rootfs")
+	}
+	if _, err := HashFileInRoot(root, "/bin"); err == nil {
+		t.Error("expected error for directory")
+	}
+	if _, err := HashFileInRoot(root, "/bin/missing"); err == nil {
+		t.Error("expected error for missing file")
+	}
+	loop := filepath.Join(root, "bin", "loop")
+	symlinkOrSkip(t, "/bin/loop", loop)
+	if _, err := HashFileInRoot(root, "/bin/loop"); err == nil {
+		t.Error("expected error for symlink loop")
+	}
+}
+
+func TestDatabaseVerifyInRoot(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "usr", "bin")
+	mkdirAll(t, binDir)
+	writeFile(t, filepath.Join(binDir, "app"), []byte("original"), 0755)
+	db, err := ScanRootFS(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ok, err := db.VerifyInRoot(root, "/usr/bin/app"); err != nil || !ok {
+		t.Fatalf("VerifyInRoot = %v, %v; want true", ok, err)
+	}
+	if ok, err := db.VerifyInRoot(root, "/usr/bin/unknown"); err != nil || ok {
+		t.Errorf("unknown path = %v, %v; want false, nil", ok, err)
+	}
+	writeFile(t, filepath.Join(binDir, "app"), []byte("tampered"), 0755)
+	if ok, err := db.VerifyInRoot(root, "/usr/bin/app"); err != nil || ok {
+		t.Errorf("tampered = %v, %v; want false, nil", ok, err)
+	}
+	os.Remove(filepath.Join(binDir, "app"))
+	if _, err := db.VerifyInRoot(root, "/usr/bin/app"); err == nil {
+		t.Error("expected error for missing file")
 	}
 }

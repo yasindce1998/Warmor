@@ -73,6 +73,10 @@ type Enforcer struct {
 	wg            sync.WaitGroup
 }
 
+// newPlatform constructs the platform monitor. It is a variable so tests can
+// substitute a fake that does not require root or kernel support.
+var newPlatform = platform.New
+
 // New creates a new enforcer instance with Phase 2 features
 func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, error) {
 	hostname, _ := os.Hostname()
@@ -90,9 +94,23 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	logger := logging.NewLogger("info")
 	logger.LogStartup(policyPath)
 
+	// Initialize network filter if configured. This only validates config,
+	// so do it before acquiring the platform, WASM runtime, pool or pipeline
+	// and a bad CIDR can't leak any of them.
+	var netFilter *NetFilter
+	if opts.NetFilterConfig != nil {
+		nf, err := NewNetFilter(*opts.NetFilterConfig)
+		if err != nil {
+			return nil, fmt.Errorf("initialize net filter: %w", err)
+		}
+		netFilter = nf
+		logger.LogInfo(fmt.Sprintf("✓ Network filter active (%d CIDRs blocked, rate limit=%d/window)",
+			nf.BlocklistSize(), opts.NetFilterConfig.RateLimit))
+	}
+
 	// Initialize the platform-specific monitor (eBPF on Linux, ETW on
 	// Windows, ESF on macOS).
-	plat, err := platform.New(platform.Config{
+	plat, err := newPlatform(platform.Config{
 		CgroupFilter: opts.CgroupFilter,
 		LSMEnforce:   opts.LSMEnforce,
 		RequireLSM:   opts.RequireLSM,
@@ -103,6 +121,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	}
 	logger.LogInfo(fmt.Sprintf("Loading %s platform monitor...", plat.Name()))
 	if err := plat.Load(ctx); err != nil {
+		plat.Close()
 		return nil, fmt.Errorf("load platform: %w", err)
 	}
 	logger.LogInfo(fmt.Sprintf("✓ %s platform loaded", plat.Name()))
@@ -185,20 +204,6 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 			Enrichers: enrichers,
 		})
 		logger.LogInfo(fmt.Sprintf("✓ Streaming pipeline active (%d sinks)", len(opts.StreamSinks)))
-	}
-
-	// Initialize network filter if configured
-	var netFilter *NetFilter
-	if opts.NetFilterConfig != nil {
-		nf, err := NewNetFilter(*opts.NetFilterConfig)
-		if err != nil {
-			wasmRuntime.Close(ctx)
-			plat.Close()
-			return nil, fmt.Errorf("initialize net filter: %w", err)
-		}
-		netFilter = nf
-		logger.LogInfo(fmt.Sprintf("✓ Network filter active (%d CIDRs blocked, rate limit=%d/window)",
-			nf.BlocklistSize(), opts.NetFilterConfig.RateLimit))
 	}
 
 	// Initialize sandbox manager
@@ -294,6 +299,8 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 				Action:    api.ActionDeny,
 				Reason:    fmt.Sprintf("network blocked: %s in CIDR blocklist", remoteAddr),
 				Timestamp: time.Now(),
+				// Learning mode records a would-deny but never kills.
+				Audit: e.learningMode,
 			}
 			_ = e.actionHandler.Enforce(e.ctx, event, result)
 			e.logger.LogEvent(event, result)
@@ -308,6 +315,8 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 				Action:    api.ActionDeny,
 				Reason:    fmt.Sprintf("rate limit exceeded for pid %d", event.PID),
 				Timestamp: time.Now(),
+				// Learning mode records a would-deny but never kills.
+				Audit: e.learningMode,
 			}
 			_ = e.actionHandler.Enforce(e.ctx, event, result)
 			e.logger.LogEvent(event, result)
@@ -328,6 +337,8 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 					Action:    api.ActionDeny,
 					Reason:    reason,
 					Timestamp: time.Now(),
+					// Learning mode records a would-deny but never kills.
+					Audit: e.learningMode,
 				}
 				_ = e.actionHandler.Enforce(e.ctx, event, result)
 				e.logger.LogEvent(event, result)
@@ -347,6 +358,8 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 			Reason:    "learning mode",
 			Timestamp: time.Now(),
 		}
+		// Count the event in stats; an allow never kills or blocks anything.
+		_ = e.actionHandler.Enforce(e.ctx, event, result)
 		e.logger.LogEvent(event, result)
 		metrics.RecordEvent(result.Action.String())
 		if e.pipeline != nil {
@@ -387,14 +400,17 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 			Cached:    false,
 			Latency:   0,
 		}
-	}
+	} else {
+		// Only persist real policy decisions. An error-derived deny is
+		// transient and must not outlive this event, otherwise a single
+		// failed evaluation would keep denying until the cache TTL expires
+		// (or indefinitely in the kernel policy map).
+		e.cache.Put(event, result)
 
-	// Cache the decision
-	e.cache.Put(event, result)
-
-	// Compile decision into BPF policy map for kernel fast-path
-	if e.policyMap != nil && !event.LSMEvent {
-		e.syncToPolicyMap(event, result)
+		// Compile decision into BPF policy map for kernel fast-path
+		if e.policyMap != nil && !event.LSMEvent {
+			e.syncToPolicyMap(event, result)
+		}
 	}
 
 	// Enforce the decision
@@ -423,6 +439,18 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	metrics.UpdateCacheSize(cacheStats.Size)
 }
 
+// endpointPolicyMapSyncer is implemented by policy maps whose kernel programs
+// key network rules on the binary address+port rather than a string (the
+// Linux LSM connect hook hashes the raw sockaddr). Port is in host order.
+type endpointPolicyMapSyncer interface {
+	SetEndpointRule(cgroupID uint64, eventType uint8, addr string, port uint16, action uint8, audit bool) error
+}
+
+// syncToPolicyMap compiles a decision into the kernel policy map. The syncer
+// owns the kernel-side key: it refuses rules its BPF programs cannot match
+// exactly (on Linux, file rules, since lsm/file_open only sees the dentry
+// basename and a basename rule would hit every same-named file), so a cached
+// decision never applies to events userspace did not evaluate.
 func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult) {
 	var eventType uint8
 	var pattern string
@@ -456,7 +484,19 @@ func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult) {
 		action = 1
 	}
 
-	_ = e.policyMap.SetRule(event.CgroupID, eventType, pattern, action, result.Audit)
+	// Sync runs before ActionHandler.Enforce applies the audit downgrade, so
+	// fold global audit mode in here: the kernel must never be stricter than
+	// userspace, and an audit-flagged deny is only logged by the BPF side.
+	audit := result.Audit || e.auditMode
+
+	if eventType == 2 {
+		if ep, ok := e.policyMap.(endpointPolicyMapSyncer); ok {
+			_ = ep.SetEndpointRule(event.CgroupID, eventType, pattern, event.Network.RemotePort, action, audit)
+			return
+		}
+	}
+
+	_ = e.policyMap.SetRule(event.CgroupID, eventType, pattern, action, audit)
 }
 
 // GetStats returns current statistics

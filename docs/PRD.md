@@ -761,7 +761,7 @@ Cold Path (Cache Miss):
 #### Policy Server API
 
 ```bash
-warmor-server --listen :8443 --policy-dir ./policies
+warmor-server --addr :8443 --jwt-secret "$WARMOR_JWT_SECRET" --policy-dir ./policies
 ```
 
 | Method | Path | Description |
@@ -899,7 +899,7 @@ warmorctl certs generate --server --ca-cert ./certs/ca.crt --ca-key ./certs/ca.k
 warmorctl certs generate --agent --ca-cert ./certs/ca.crt --ca-key ./certs/ca.key --name agent-01 --out ./certs/
 
 # Start server with mTLS
-warmor-server --listen :8443 --tls-cert ./certs/server.crt --tls-key ./certs/server.key --tls-ca ./certs/ca.crt
+warmor-server --addr :8443 --tls-cert ./certs/server.crt --tls-key ./certs/server.key --ca-cert ./certs/ca.crt
 
 # Start agent with mTLS
 warmor-daemon --server https://warmor-server:8443 --tls-cert ./certs/agent-01.crt --tls-key ./certs/agent-01.key --tls-ca ./certs/ca.crt

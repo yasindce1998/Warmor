@@ -171,3 +171,57 @@ func TestPolicyScope_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+// Plain Bind leaves Image/Namespace empty; looking up an empty key used to
+// match every such binding.
+func TestPolicyScope_EmptyLookupKeysMatchNothing(t *testing.T) {
+	ps := NewPolicyScope()
+	ps.Bind("c1", "p1")
+	ps.BindWithInfo(&ContainerInfo{ID: "c2"}, "p2")
+
+	if got, ok := ps.LookupByImage(""); ok {
+		t.Errorf("LookupByImage(\"\") = %q, true; want no match", got)
+	}
+	if got, ok := ps.LookupByNamespace(""); ok {
+		t.Errorf("LookupByNamespace(\"\") = %q, true; want no match", got)
+	}
+	// Bindings without an image must not match a real image either.
+	if got, ok := ps.LookupByImage("nginx:1"); ok {
+		t.Errorf("LookupByImage(nginx:1) = %q, true; want no match", got)
+	}
+}
+
+func TestPolicyScope_LookupByImage_MostSpecificWins(t *testing.T) {
+	// Repeat to defeat lucky map iteration order.
+	for i := 0; i < 50; i++ {
+		ps := NewPolicyScope()
+		ps.BindWithInfo(&ContainerInfo{ID: "a", Image: "docker.io/library/nginx:*"}, "wild")
+		ps.BindWithInfo(&ContainerInfo{ID: "b", Image: "docker.io/library/nginx:1.25"}, "exact")
+		ps.BindWithInfo(&ContainerInfo{ID: "c", Image: "nginx:*"}, "short-wild")
+
+		if got, _ := ps.LookupByImage("docker.io/library/nginx:1.25"); got != "exact" {
+			t.Fatalf("exact match should win, got %q", got)
+		}
+		if got, _ := ps.LookupByImage("docker.io/library/nginx:1.26"); got != "wild" {
+			t.Fatalf("only wildcard should match, got %q", got)
+		}
+		if got, _ := ps.LookupByImage("nginx:latest"); got != "short-wild" {
+			t.Fatalf("short wildcard should match, got %q", got)
+		}
+	}
+}
+
+func TestPolicyScope_LookupDeterministicTiebreak(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		ps := NewPolicyScope()
+		for _, id := range []string{"c3", "c1", "c2"} {
+			ps.BindWithInfo(&ContainerInfo{ID: id, Namespace: "prod", Image: "redis:7"}, "p-"+id)
+		}
+		if got, _ := ps.LookupByNamespace("prod"); got != "p-c1" {
+			t.Fatalf("LookupByNamespace = %q, want p-c1 (lowest container ID)", got)
+		}
+		if got, _ := ps.LookupByImage("redis:7"); got != "p-c1" {
+			t.Fatalf("LookupByImage = %q, want p-c1 (lowest container ID)", got)
+		}
+	}
+}
