@@ -48,6 +48,20 @@ type lsm_fileWarmorEvent struct {
 	Pad          [3]uint16
 }
 
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	lsm_fileMapLsmCgroupFilter   = "lsm_cgroup_filter"
+	lsm_fileMapLsmEnforce        = "lsm_enforce"
+	lsm_fileMapLsmEvents         = "lsm_events"
+	lsm_fileMapPolicyMap         = "policy_map"
+	lsm_fileProgLsmFileCheck     = "lsm_file_check"
+	lsm_fileVarUnusedPolicyKey   = "unused_policy_key"
+	lsm_fileVarUnusedPolicyValue = "unused_policy_value"
+	lsm_fileVarUnusedWarmorEvent = "unused_warmor_event"
+)
+
 // loadLsm_file returns the embedded CollectionSpec for lsm_file.
 func loadLsm_file() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_Lsm_fileBytes)
@@ -68,7 +82,7 @@ func loadLsm_file() (*ebpf.CollectionSpec, error) {
 //	*lsm_fileMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadLsm_fileObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadLsm_fileObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadLsm_file()
 	if err != nil {
 		return err

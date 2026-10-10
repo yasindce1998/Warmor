@@ -8,11 +8,13 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"structs"
 
 	"github.com/cilium/ebpf"
 )
 
 type openat_monitorFileEvent struct {
+	_         structs.HostLayout
 	Pid       uint32
 	Uid       uint32
 	Gid       uint32
@@ -24,6 +26,16 @@ type openat_monitorFileEvent struct {
 	Timestamp uint64
 	CgroupId  uint64
 }
+
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	openat_monitorMapCgroupFilter                      = "cgroup_filter"
+	openat_monitorMapFileEvents                        = "file_events"
+	openat_monitorProgTracepointSyscallsSysEnterOpenat = "tracepoint__syscalls__sys_enter_openat"
+	openat_monitorVarUnusedFileEvent                   = "unused_file_event"
+)
 
 // loadOpenat_monitor returns the embedded CollectionSpec for openat_monitor.
 func loadOpenat_monitor() (*ebpf.CollectionSpec, error) {
@@ -45,7 +57,7 @@ func loadOpenat_monitor() (*ebpf.CollectionSpec, error) {
 //	*openat_monitorMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadOpenat_monitorObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadOpenat_monitorObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadOpenat_monitor()
 	if err != nil {
 		return err
