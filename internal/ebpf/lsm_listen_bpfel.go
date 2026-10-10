@@ -29,6 +29,20 @@ type lsm_listenPolicyValue struct {
 	HitCount uint32
 }
 
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	lsm_listenMapLsmCgroupFilter   = "lsm_cgroup_filter"
+	lsm_listenMapLsmEnforce        = "lsm_enforce"
+	lsm_listenMapLsmEvents         = "lsm_events"
+	lsm_listenMapPolicyMap         = "policy_map"
+	lsm_listenProgLsmListenCheck   = "lsm_listen_check"
+	lsm_listenVarUnusedPolicyKey   = "unused_policy_key"
+	lsm_listenVarUnusedPolicyValue = "unused_policy_value"
+	lsm_listenVarUnusedWarmorEvent = "unused_warmor_event"
+)
+
 // loadLsm_listen returns the embedded CollectionSpec for lsm_listen.
 func loadLsm_listen() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_Lsm_listenBytes)
@@ -49,7 +63,7 @@ func loadLsm_listen() (*ebpf.CollectionSpec, error) {
 //	*lsm_listenMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadLsm_listenObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadLsm_listenObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadLsm_listen()
 	if err != nil {
 		return err

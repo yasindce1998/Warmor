@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	ciliumebpf "github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
@@ -170,9 +171,14 @@ func LoadLSM() (*LSMLoader, error) {
 
 	l := &LSMLoader{}
 
+	// All seven programs are CO-RE relocated against the same kernel BTF.
+	// cilium/ebpf no longer caches vmlinux globally, so share one cache
+	// across the loads instead of decoding vmlinux seven times.
+	btfCache := btf.NewCache()
+
 	// Load exec LSM
 	l.execObjs = &lsm_execObjects{}
-	if err := loadLsm_execObjects(l.execObjs, nil); err != nil {
+	if err := loadLsm_execObjects(l.execObjs, &ciliumebpf.CollectionOptions{Cache: btfCache}); err != nil {
 		return nil, fmt.Errorf("load lsm_exec objects: %w", err)
 	}
 
@@ -188,7 +194,8 @@ func LoadLSM() (*LSMLoader, error) {
 	// Load file LSM — reuse policy_map from exec via MapReplacements
 	l.fileObjs = &lsm_fileObjects{}
 	fileOpts := &ciliumebpf.CollectionOptions{
-		Maps: ciliumebpf.MapOptions{},
+		Maps:  ciliumebpf.MapOptions{},
+		Cache: btfCache,
 	}
 	fileOpts.MapReplacements = map[string]*ciliumebpf.Map{
 		"policy_map":        l.execObjs.PolicyMap,
@@ -213,7 +220,8 @@ func LoadLSM() (*LSMLoader, error) {
 	// Load connect LSM — reuse maps from exec
 	l.connectObjs = &lsm_connectObjects{}
 	connectOpts := &ciliumebpf.CollectionOptions{
-		Maps: ciliumebpf.MapOptions{},
+		Maps:  ciliumebpf.MapOptions{},
+		Cache: btfCache,
 	}
 	connectOpts.MapReplacements = map[string]*ciliumebpf.Map{
 		"policy_map":        l.execObjs.PolicyMap,
@@ -238,7 +246,8 @@ func LoadLSM() (*LSMLoader, error) {
 	// Load bind LSM — reuse maps from exec
 	l.bindObjs = &lsm_bindObjects{}
 	bindOpts := &ciliumebpf.CollectionOptions{
-		Maps: ciliumebpf.MapOptions{},
+		Maps:  ciliumebpf.MapOptions{},
+		Cache: btfCache,
 	}
 	bindOpts.MapReplacements = map[string]*ciliumebpf.Map{
 		"policy_map":        l.execObjs.PolicyMap,
@@ -263,7 +272,8 @@ func LoadLSM() (*LSMLoader, error) {
 	// Load listen LSM — reuse maps from exec
 	l.listenObjs = &lsm_listenObjects{}
 	listenOpts := &ciliumebpf.CollectionOptions{
-		Maps: ciliumebpf.MapOptions{},
+		Maps:  ciliumebpf.MapOptions{},
+		Cache: btfCache,
 	}
 	listenOpts.MapReplacements = map[string]*ciliumebpf.Map{
 		"policy_map":        l.execObjs.PolicyMap,
@@ -288,7 +298,8 @@ func LoadLSM() (*LSMLoader, error) {
 	// Load ptrace LSM — reuse maps from exec
 	l.ptraceObjs = &lsm_ptraceObjects{}
 	ptraceOpts := &ciliumebpf.CollectionOptions{
-		Maps: ciliumebpf.MapOptions{},
+		Maps:  ciliumebpf.MapOptions{},
+		Cache: btfCache,
 	}
 	ptraceOpts.MapReplacements = map[string]*ciliumebpf.Map{
 		"policy_map":        l.execObjs.PolicyMap,
@@ -313,7 +324,8 @@ func LoadLSM() (*LSMLoader, error) {
 	// Load mount LSM — reuse maps from exec
 	l.mountObjs = &lsm_mountObjects{}
 	mountOpts := &ciliumebpf.CollectionOptions{
-		Maps: ciliumebpf.MapOptions{},
+		Maps:  ciliumebpf.MapOptions{},
+		Cache: btfCache,
 	}
 	mountOpts.MapReplacements = map[string]*ciliumebpf.Map{
 		"policy_map":        l.execObjs.PolicyMap,

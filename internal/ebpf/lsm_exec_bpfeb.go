@@ -48,6 +48,20 @@ type lsm_execWarmorEvent struct {
 	Pad          [3]uint16
 }
 
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	lsm_execMapLsmCgroupFilter   = "lsm_cgroup_filter"
+	lsm_execMapLsmEnforce        = "lsm_enforce"
+	lsm_execMapLsmEvents         = "lsm_events"
+	lsm_execMapPolicyMap         = "policy_map"
+	lsm_execProgLsmExecCheck     = "lsm_exec_check"
+	lsm_execVarUnusedPolicyKey   = "unused_policy_key"
+	lsm_execVarUnusedPolicyValue = "unused_policy_value"
+	lsm_execVarUnusedWarmorEvent = "unused_warmor_event"
+)
+
 // loadLsm_exec returns the embedded CollectionSpec for lsm_exec.
 func loadLsm_exec() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_Lsm_execBytes)
@@ -68,7 +82,7 @@ func loadLsm_exec() (*ebpf.CollectionSpec, error) {
 //	*lsm_execMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadLsm_execObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadLsm_execObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadLsm_exec()
 	if err != nil {
 		return err

@@ -29,6 +29,20 @@ type lsm_connectPolicyValue struct {
 	HitCount uint32
 }
 
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	lsm_connectMapLsmCgroupFilter   = "lsm_cgroup_filter"
+	lsm_connectMapLsmEnforce        = "lsm_enforce"
+	lsm_connectMapLsmEvents         = "lsm_events"
+	lsm_connectMapPolicyMap         = "policy_map"
+	lsm_connectProgLsmConnectCheck  = "lsm_connect_check"
+	lsm_connectVarUnusedPolicyKey   = "unused_policy_key"
+	lsm_connectVarUnusedPolicyValue = "unused_policy_value"
+	lsm_connectVarUnusedWarmorEvent = "unused_warmor_event"
+)
+
 // loadLsm_connect returns the embedded CollectionSpec for lsm_connect.
 func loadLsm_connect() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_Lsm_connectBytes)
@@ -49,7 +63,7 @@ func loadLsm_connect() (*ebpf.CollectionSpec, error) {
 //	*lsm_connectMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadLsm_connectObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadLsm_connectObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadLsm_connect()
 	if err != nil {
 		return err

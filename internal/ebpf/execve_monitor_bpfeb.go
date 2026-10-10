@@ -8,11 +8,13 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"structs"
 
 	"github.com/cilium/ebpf"
 )
 
 type execve_monitorExecveEvent struct {
+	_         structs.HostLayout
 	Pid       uint32
 	Uid       uint32
 	Gid       uint32
@@ -22,6 +24,16 @@ type execve_monitorExecveEvent struct {
 	Timestamp uint64
 	CgroupId  uint64
 }
+
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	execve_monitorMapCgroupFilter                      = "cgroup_filter"
+	execve_monitorMapEvents                            = "events"
+	execve_monitorProgTracepointSyscallsSysEnterExecve = "tracepoint__syscalls__sys_enter_execve"
+	execve_monitorVarUnusedExecveEvent                 = "unused_execve_event"
+)
 
 // loadExecve_monitor returns the embedded CollectionSpec for execve_monitor.
 func loadExecve_monitor() (*ebpf.CollectionSpec, error) {
@@ -43,7 +55,7 @@ func loadExecve_monitor() (*ebpf.CollectionSpec, error) {
 //	*execve_monitorMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadExecve_monitorObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadExecve_monitorObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadExecve_monitor()
 	if err != nil {
 		return err

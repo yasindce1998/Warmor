@@ -29,6 +29,20 @@ type lsm_mountPolicyValue struct {
 	HitCount uint32
 }
 
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	lsm_mountMapLsmCgroupFilter   = "lsm_cgroup_filter"
+	lsm_mountMapLsmEnforce        = "lsm_enforce"
+	lsm_mountMapLsmEvents         = "lsm_events"
+	lsm_mountMapPolicyMap         = "policy_map"
+	lsm_mountProgLsmMountCheck    = "lsm_mount_check"
+	lsm_mountVarUnusedPolicyKey   = "unused_policy_key"
+	lsm_mountVarUnusedPolicyValue = "unused_policy_value"
+	lsm_mountVarUnusedWarmorEvent = "unused_warmor_event"
+)
+
 // loadLsm_mount returns the embedded CollectionSpec for lsm_mount.
 func loadLsm_mount() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_Lsm_mountBytes)
@@ -49,7 +63,7 @@ func loadLsm_mount() (*ebpf.CollectionSpec, error) {
 //	*lsm_mountMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadLsm_mountObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadLsm_mountObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadLsm_mount()
 	if err != nil {
 		return err

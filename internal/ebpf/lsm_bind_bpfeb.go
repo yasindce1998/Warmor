@@ -29,6 +29,20 @@ type lsm_bindPolicyValue struct {
 	HitCount uint32
 }
 
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	lsm_bindMapLsmCgroupFilter   = "lsm_cgroup_filter"
+	lsm_bindMapLsmEnforce        = "lsm_enforce"
+	lsm_bindMapLsmEvents         = "lsm_events"
+	lsm_bindMapPolicyMap         = "policy_map"
+	lsm_bindProgLsmBindCheck     = "lsm_bind_check"
+	lsm_bindVarUnusedPolicyKey   = "unused_policy_key"
+	lsm_bindVarUnusedPolicyValue = "unused_policy_value"
+	lsm_bindVarUnusedWarmorEvent = "unused_warmor_event"
+)
+
 // loadLsm_bind returns the embedded CollectionSpec for lsm_bind.
 func loadLsm_bind() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_Lsm_bindBytes)
@@ -49,7 +63,7 @@ func loadLsm_bind() (*ebpf.CollectionSpec, error) {
 //	*lsm_bindMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadLsm_bindObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadLsm_bindObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadLsm_bind()
 	if err != nil {
 		return err

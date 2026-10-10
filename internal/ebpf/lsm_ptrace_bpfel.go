@@ -29,6 +29,20 @@ type lsm_ptracePolicyValue struct {
 	HitCount uint32
 }
 
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	lsm_ptraceMapLsmCgroupFilter   = "lsm_cgroup_filter"
+	lsm_ptraceMapLsmEnforce        = "lsm_enforce"
+	lsm_ptraceMapLsmEvents         = "lsm_events"
+	lsm_ptraceMapPolicyMap         = "policy_map"
+	lsm_ptraceProgLsmPtraceCheck   = "lsm_ptrace_check"
+	lsm_ptraceVarUnusedPolicyKey   = "unused_policy_key"
+	lsm_ptraceVarUnusedPolicyValue = "unused_policy_value"
+	lsm_ptraceVarUnusedWarmorEvent = "unused_warmor_event"
+)
+
 // loadLsm_ptrace returns the embedded CollectionSpec for lsm_ptrace.
 func loadLsm_ptrace() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_Lsm_ptraceBytes)
@@ -49,7 +63,7 @@ func loadLsm_ptrace() (*ebpf.CollectionSpec, error) {
 //	*lsm_ptraceMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadLsm_ptraceObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadLsm_ptraceObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadLsm_ptrace()
 	if err != nil {
 		return err
