@@ -113,8 +113,9 @@ func main() {
 	runCtx, stopRun := context.WithCancel(ctx)
 	defer stopRun()
 	feedErr := make(chan error, 1)
+	pollEvery := followPollInterval
 	go func() {
-		feedErr <- feedEvents(runCtx, input, session.Recorder(), *follow)
+		feedErr <- feedEvents(runCtx, input, session.Recorder(), *follow, pollEvery)
 		stopRun()
 	}()
 
@@ -123,16 +124,24 @@ func main() {
 		os.Exit(1)
 	}
 	stopRun()
-	// Freeze the profiles: a reader still blocked on stdin must not record
-	// into them while the policy is synthesized.
+	// A file or directory reader notices the cancelled context within one
+	// poll, so wait for it to finish before freezing the profiles. A stdin
+	// read can block indefinitely: freeze the profiles so it can no longer
+	// record into them, and only collect its result if it is ready.
+	var feedResult error
+	if *eventsPath != "-" {
+		feedResult = <-feedErr
+	}
 	_ = session.Recorder().Close()
-	select {
-	case err := <-feedErr:
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error reading events: %v\n", err)
-			os.Exit(1)
+	if *eventsPath == "-" {
+		select {
+		case feedResult = <-feedErr:
+		default:
 		}
-	default:
+	}
+	if feedResult != nil {
+		fmt.Fprintf(os.Stderr, "error reading events: %v\n", feedResult)
+		os.Exit(1)
 	}
 
 	stats := session.Stats()
@@ -251,9 +260,9 @@ func (m *multiFileReader) Close() error {
 
 // feedEvents decodes newline-delimited SecurityEvents from r into sink until
 // EOF. With follow set, EOF means "no new events yet": reading resumes after
-// followPollInterval until ctx is done, and a trailing partial line is held
-// back until its newline arrives. Malformed lines are skipped with a warning.
-func feedEvents(ctx context.Context, r io.Reader, sink streaming.Sink, follow bool) error {
+// pollEvery until ctx is done, and a trailing partial line is held back until
+// its newline arrives. Malformed lines are skipped with a warning.
+func feedEvents(ctx context.Context, r io.Reader, sink streaming.Sink, follow bool, pollEvery time.Duration) error {
 	br := bufio.NewReader(r)
 	var line []byte
 	lineNum := 0
@@ -282,7 +291,7 @@ func feedEvents(ctx context.Context, r io.Reader, sink streaming.Sink, follow bo
 			}
 			select {
 			case <-ctx.Done():
-			case <-time.After(followPollInterval):
+			case <-time.After(pollEvery):
 			}
 		}
 	}
