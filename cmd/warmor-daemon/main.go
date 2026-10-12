@@ -48,18 +48,24 @@ func main() {
 		return
 	}
 
-	// Run as Windows Service if launched by SCM
-	if isWindowsService() {
-		runService()
-		return
-	}
-
 	// Handle version flag
 	if *showVersion {
 		log.Printf("warmor version %s", version.Version)
 		return
 	}
 
+	// Run as Windows Service if launched by SCM
+	if isWindowsService() {
+		runService(runDaemon)
+		return
+	}
+
+	runDaemon(nil)
+}
+
+// runDaemon runs the enforcer until a shutdown signal arrives or stop is
+// closed (the Windows service manager's stop request).
+func runDaemon(stop <-chan struct{}) {
 	// Print banner
 	printBanner()
 
@@ -229,14 +235,15 @@ func main() {
 			} else if isShutdownSignal(sig) {
 				log.Println("")
 				log.Println("📥 Received shutdown signal")
-				enf.Stop()
-				log.Println("")
-				log.Println("=== Final Statistics ===")
-				enf.PrintStats()
-				log.Println("")
-				log.Println("👋 warmor shutdown complete")
+				shutdown(enf)
 				return
 			}
+
+		case <-stop:
+			log.Println("")
+			log.Println("📥 Service stop requested")
+			shutdown(enf)
+			return
 
 		case <-reloadCh:
 			log.Println("")
@@ -252,6 +259,15 @@ func main() {
 			log.Println("")
 		}
 	}
+}
+
+func shutdown(enf *enforcer.Enforcer) {
+	enf.Stop()
+	log.Println("")
+	log.Println("=== Final Statistics ===")
+	enf.PrintStats()
+	log.Println("")
+	log.Println("👋 warmor shutdown complete")
 }
 
 func printBanner() {

@@ -19,9 +19,21 @@ jobs:
       - name: Build all packages
         run: go build ./...
 
+      - name: Vet Windows packages
+        run: go vet ./internal/platform/... ./internal/enforcer/... ./internal/logging/... ./cmd/warmor-daemon/...
+
       - name: Run unit tests
         shell: bash
         run: go test -race -short -coverprofile=coverage.out ./...
+
+      # Hosted runners are elevated, so a real ETW session against the
+      # kernel providers can run here. eBPF-for-Windows cannot: it needs
+      # test-signed kernel drivers, i.e. a self-hosted VM.
+      - name: ETW smoke test (real kernel providers)
+        shell: bash
+        env:
+          WARMOR_ETW_SMOKE: "1"
+        run: go test -v -count=1 -run 'TestConsumerSmoke|TestStructLayout' ./internal/platform/etw/
 
       - name: Check coverage threshold
         shell: bash

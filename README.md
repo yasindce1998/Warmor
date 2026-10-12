@@ -74,7 +74,7 @@ That's it. Your system is now enforcing security policy at the kernel level.
 | Platform | Technology | Mode |
 |----------|-----------|------|
 | **Linux** | eBPF + LSM-BPF (7 hooks) | Most mature — kernel-level blocking |
-| **Windows** | eBPF + ETW (hybrid mode) | Beta — kernel network enforcement + reliable telemetry |
+| **Windows** | eBPF-for-Windows + ETW (per event type) | Beta — kernel blocking for network and process (eBPF), detect-then-terminate for files and as fallback (ETW) |
 | **macOS** | Endpoint Security Framework | Beta — AUTH event blocking |
 
 ### Performance
@@ -238,7 +238,7 @@ internal/
   blastradius/    — Container relationship graph + BFS reachability
   temporal/       — Time-dimension enricher + constraint evaluation
   compiler/       — YAML → Rust → WASM compilation pipeline
-  platform/       — OS abstraction (Linux eBPF, Windows ETW, macOS ESF)
+  platform/       — OS abstraction (Linux eBPF, Windows eBPF-for-Windows + ETW, macOS ESF)
   crypto/         — mTLS (Ed25519), JWT (HMAC+EdDSA), policy signing
   metrics/        — Prometheus counters, histograms, gauges
   logging/        — Structured JSON (zerolog), Windows Event Viewer integration

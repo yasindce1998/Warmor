@@ -7,7 +7,7 @@ func isWindowsService() bool {
 	return false
 }
 
-func runService() {}
+func runService(func(stop <-chan struct{})) {}
 
 func handleServiceCommand(_ []string) bool {
 	return false
