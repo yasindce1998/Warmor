@@ -60,7 +60,7 @@ func (h *ActionHandler) handleDeny(event *api.Event, result *api.ActionResult) e
 
 	log.Printf("DENY pid=%d type=%s reason=%q", event.PID, event.Type, result.Reason)
 
-	if err := terminateProcess(event.PID); err != nil {
+	if err := terminateEventProcess(event.PID, event.Timestamp); err != nil {
 		log.Printf("DENY pid=%d: terminate failed (process may have exited): %v", event.PID, err)
 	}
 

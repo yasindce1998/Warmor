@@ -1,255 +1,243 @@
 //go:build windows
-// +build windows
 
 package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"sync"
 
+	"github.com/yasindce1998/warmor/internal/platform/efw"
 	"github.com/yasindce1998/warmor/internal/platform/etw"
+	"github.com/yasindce1998/warmor/internal/platform/winutil"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
-// Monitoring modes
+// Backends a Windows event type can be served by.
 const (
-	ModeEBPF   = "ebpf"
-	ModeETW    = "etw"
-	ModeHybrid = "hybrid" // eBPF for network + ETW for process/file
+	BackendEBPF = "ebpf" // eBPF-for-Windows hook: blocks in the kernel
+	BackendETW  = "etw"  // ETW provider: detect, then terminate
+	BackendNone = "none"
 )
 
-// WindowsPlatform implements Platform for Windows using ETW
-// with optional eBPF-for-Windows support and automatic fallback
-type WindowsPlatform struct {
-	etwConsumer *etw.Consumer
-	ebpfLoader  *etw.EBPFLoader
-	eventChan   chan<- *api.Event
-	stopChan    chan struct{}
-	mode        string // "etw", "ebpf", or "hybrid"
+// WindowsConfig selects how kernel enforcement is set up.
+type WindowsConfig struct {
+	// SkipEBPF uses ETW for every event type (--no-lsm).
+	SkipEBPF bool
+	// RequireEBPF fails Load unless at least one eBPF hook attaches
+	// (--require-lsm).
+	RequireEBPF bool
+	// ProgramDir overrides where the native eBPF images are looked up.
+	ProgramDir string
 }
 
-// NewWindowsPlatform creates a new Windows platform
-func NewWindowsPlatform() (Platform, error) {
+// WindowsPlatform picks a backend per event type: eBPF-for-Windows where a
+// hook exists and loads (network; process with ntosebpfext), ETW for
+// everything else (always for files). ETW providers are only enabled for the
+// event types eBPF does not own, so no event is reported twice.
+type WindowsPlatform struct {
+	cfg WindowsConfig
+
+	procs *winutil.ProcTable
+	paths *winutil.DevicePathMap
+
+	ebpf *efw.Loader
+	etw  *etw.Consumer
+
+	mu       sync.RWMutex
+	backends map[api.EventType]string
+
+	stopOnce sync.Once
+	stopErr  error
+}
+
+// NewWindowsPlatform creates the Windows platform.
+func NewWindowsPlatform(cfg WindowsConfig) (Platform, error) {
 	return &WindowsPlatform{
-		stopChan: make(chan struct{}),
-		mode:     "etw", // Default to ETW
+		cfg:      cfg,
+		procs:    winutil.NewProcTable(),
+		backends: make(map[api.EventType]string),
 	}, nil
 }
 
-func (p *WindowsPlatform) Name() string {
-	return "windows"
-}
+func (p *WindowsPlatform) Name() string { return "windows" }
 
 func (p *WindowsPlatform) Load(ctx context.Context) error {
-	log.Println("Windows platform: Initializing monitoring")
-	log.Println("Note: Windows support is EXPERIMENTAL/BETA")
+	p.paths = winutil.NewDevicePathMap(winutil.LoadDriveDevices())
 
-	// Step 1: Try to detect eBPF-for-Windows
-	ebpfAvailable, err := etw.DetectEBPFForWindows()
-	if err != nil {
-		log.Printf("Warning: Failed to detect eBPF-for-Windows: %v", err)
-	}
-
-	ebpfOK := false
-	if ebpfAvailable != nil && ebpfAvailable.Available {
-		log.Println("✓ eBPF-for-Windows detected!")
-		log.Printf("  Service: %v", ebpfAvailable.ServiceRunning)
-		log.Printf("  Driver: %v", ebpfAvailable.DriverLoaded)
-		log.Printf("  Version: %s", ebpfAvailable.Version)
-
-		if err := p.initializeEBPF(ctx); err != nil {
-			log.Printf("⚠ Failed to initialize eBPF-for-Windows: %v", err)
-			log.Println("⚠ eBPF unavailable, will use ETW only")
-		} else {
-			ebpfOK = true
-		}
+	if p.cfg.SkipEBPF {
+		log.Println("Windows: eBPF disabled by configuration; using ETW only")
+	} else if err := efw.Available(); err != nil {
+		log.Printf("Windows: eBPF-for-Windows unavailable, using ETW: %v", err)
+	} else if loader, err := efw.Load(efw.Options{Dir: p.cfg.ProgramDir, Procs: p.procs, Paths: p.paths}); err != nil {
+		log.Printf("Windows: eBPF programs not loaded, using ETW: %v", err)
 	} else {
-		log.Println("ℹ eBPF-for-Windows not available")
-		if ebpfAvailable != nil && ebpfAvailable.ErrorMessage != "" {
-			log.Printf("  Reason: %s", ebpfAvailable.ErrorMessage)
+		p.ebpf = loader
+	}
+
+	if p.cfg.RequireEBPF && p.ebpf == nil {
+		return errors.New("eBPF kernel enforcement required (--require-lsm) but no eBPF-for-Windows hook could be attached")
+	}
+
+	p.backends[api.EventTypeProcess] = BackendETW
+	p.backends[api.EventTypeNetwork] = BackendETW
+	p.backends[api.EventTypeFile] = BackendETW
+	if p.ebpf != nil && p.ebpf.Process() {
+		p.backends[api.EventTypeProcess] = BackendEBPF
+	}
+	if p.ebpf != nil && p.ebpf.Network() {
+		p.backends[api.EventTypeNetwork] = BackendEBPF
+	}
+
+	// Processes started before us: the process table resolves their PIDs
+	// for file/network events, and the network hooks need their images.
+	if procs, err := winutil.SnapshotProcesses(p.paths); err != nil {
+		log.Printf("Windows: process snapshot failed: %v", err)
+	} else {
+		for _, info := range procs {
+			p.procs.Put(info)
+			p.trackProcess(info)
 		}
 	}
 
-	// Step 2: Initialize ETW consumer (needed for hybrid and ETW-only modes)
-	log.Println("Initializing ETW consumer...")
-	consumer, err := etw.NewConsumer("WarmorETWSession")
+	var providers []etw.Provider
+	if p.backends[api.EventTypeProcess] == BackendETW {
+		providers = append(providers, etw.ProviderProcess)
+	}
+	if p.backends[api.EventTypeNetwork] == BackendETW {
+		providers = append(providers, etw.ProviderNetwork)
+	}
+	providers = append(providers, etw.ProviderFile)
+
+	consumer, err := etw.NewConsumer(etw.Options{
+		Providers:      providers,
+		Procs:          p.procs,
+		Paths:          p.paths,
+		OnProcessStart: p.trackProcess,
+		OnProcessExit:  p.forgetProcess,
+	})
 	if err != nil {
-		if ebpfOK {
-			// eBPF works but ETW failed — pure eBPF mode
-			log.Printf("⚠ ETW init failed: %v; running eBPF-only mode", err)
-			p.mode = ModeEBPF
-			log.Printf("✓ Windows platform loaded in %s mode", p.mode)
-			return nil
-		}
+		p.closeEBPF()
 		return fmt.Errorf("create ETW consumer: %w", err)
 	}
-	p.etwConsumer = consumer
+	p.etw = consumer
 
-	// Step 3: Select mode based on what's available
-	if ebpfOK {
-		// Hybrid: eBPF for network (kernel enforcement) + ETW for process/file
-		p.mode = ModeHybrid
-		log.Println("✓ Using hybrid mode: eBPF (network) + ETW (process/file)")
-	} else {
-		p.mode = ModeETW
-		log.Println("✓ Using ETW-only mode")
-	}
-
-	log.Printf("✓ Windows platform loaded in %s mode", p.mode)
+	p.logBackends()
 	return nil
+}
+
+// trackProcess feeds processes seen by ETW or the snapshot to the eBPF
+// network hooks. Processes reported by the eBPF process hook are tracked by
+// the loader itself.
+func (p *WindowsPlatform) trackProcess(info winutil.ProcInfo) {
+	if p.ebpf != nil {
+		p.ebpf.PolicyMap().TrackProcess(info)
+	}
+}
+
+func (p *WindowsPlatform) forgetProcess(pid uint32) {
+	if p.ebpf != nil {
+		p.ebpf.PolicyMap().ForgetProcess(pid)
+	}
 }
 
 func (p *WindowsPlatform) Start(ctx context.Context, eventChan chan<- *api.Event) error {
-	p.eventChan = eventChan
-
-	switch p.mode {
-	case ModeEBPF:
-		if p.ebpfLoader == nil {
-			return fmt.Errorf("platform not loaded")
-		}
-		if err := p.ebpfLoader.Start(ctx, eventChan); err != nil {
-			return fmt.Errorf("start eBPF loader: %w", err)
-		}
-		log.Println("Enabling eBPF process monitoring...")
-		if err := p.ebpfLoader.EnableProcessMonitoring(); err != nil {
-			log.Printf("Warning: Failed to enable eBPF process monitoring: %v", err)
-		}
-		log.Println("Enabling eBPF file monitoring...")
-		if err := p.ebpfLoader.EnableFileMonitoring(); err != nil {
-			log.Printf("Warning: Failed to enable eBPF file monitoring: %v", err)
-		}
-		log.Println("Enabling eBPF network monitoring...")
-		if err := p.ebpfLoader.EnableNetworkMonitoring(); err != nil {
-			log.Printf("Warning: Failed to enable eBPF network monitoring: %v", err)
-		}
-		log.Println("Windows platform started successfully (eBPF mode)")
-
-	case ModeHybrid:
-		// eBPF handles network (kernel-level enforcement via SOCK_OPS)
-		if p.ebpfLoader == nil {
-			return fmt.Errorf("hybrid mode requires eBPF loader")
-		}
-		if err := p.ebpfLoader.Start(ctx, eventChan); err != nil {
-			return fmt.Errorf("start eBPF loader: %w", err)
-		}
-		log.Println("Enabling eBPF network monitoring (kernel enforcement)...")
-		if err := p.ebpfLoader.EnableNetworkMonitoring(); err != nil {
-			log.Printf("Warning: Failed to enable eBPF network monitoring: %v", err)
-		}
-
-		// ETW handles process + file (most reliable on Windows)
-		if p.etwConsumer == nil {
-			return fmt.Errorf("hybrid mode requires ETW consumer")
-		}
-		if err := p.etwConsumer.Start(ctx, eventChan); err != nil {
-			return fmt.Errorf("start ETW consumer: %w", err)
-		}
-		log.Println("Enabling ETW process monitoring...")
-		if err := p.etwConsumer.EnableProcessMonitoring(); err != nil {
-			log.Printf("Warning: Failed to enable process monitoring: %v", err)
-		}
-		log.Println("Enabling ETW file monitoring...")
-		if err := p.etwConsumer.EnableFileMonitoring(); err != nil {
-			log.Printf("Warning: Failed to enable file monitoring: %v", err)
-		}
-		log.Println("Windows platform started successfully (hybrid mode)")
-
-	default: // ModeETW
-		if p.etwConsumer == nil {
-			return fmt.Errorf("platform not loaded")
-		}
-		if err := p.etwConsumer.Start(ctx, eventChan); err != nil {
-			return fmt.Errorf("start ETW consumer: %w", err)
-		}
-		log.Println("Enabling process monitoring...")
-		if err := p.etwConsumer.EnableProcessMonitoring(); err != nil {
-			log.Printf("Warning: Failed to enable process monitoring: %v", err)
-		}
-		log.Println("Enabling file monitoring...")
-		if err := p.etwConsumer.EnableFileMonitoring(); err != nil {
-			log.Printf("Warning: Failed to enable file monitoring: %v", err)
-		}
-		log.Println("Enabling network monitoring...")
-		if err := p.etwConsumer.EnableNetworkMonitoring(); err != nil {
-			log.Printf("Warning: Failed to enable network monitoring: %v", err)
-		}
-		log.Println("Windows platform started successfully (ETW mode)")
+	if p.etw == nil {
+		return errors.New("platform not loaded")
+	}
+	if p.ebpf != nil {
+		p.ebpf.Start(ctx, eventChan)
 	}
 
+	if err := p.etw.Start(eventChan); err != nil {
+		if p.ebpf == nil {
+			return fmt.Errorf("start ETW consumer: %w", err)
+		}
+		log.Printf("Windows: ETW unavailable, continuing with eBPF only: %v", err)
+	}
+
+	// A provider that failed to enable leaves its event type unmonitored.
+	p.mu.Lock()
+	for et, provider := range map[api.EventType]etw.Provider{
+		api.EventTypeProcess: etw.ProviderProcess,
+		api.EventTypeNetwork: etw.ProviderNetwork,
+		api.EventTypeFile:    etw.ProviderFile,
+	} {
+		if p.backends[et] == BackendETW && !p.etw.Enabled(provider) {
+			p.backends[et] = BackendNone
+		}
+	}
+	p.mu.Unlock()
+
+	p.logBackends()
 	return nil
 }
 
-func (p *WindowsPlatform) Stop() error {
-	close(p.stopChan)
-	var firstErr error
-	if p.ebpfLoader != nil {
-		if err := p.ebpfLoader.Stop(); err != nil {
-			firstErr = err
+func (p *WindowsPlatform) logBackends() {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, et := range []api.EventType{api.EventTypeProcess, api.EventTypeNetwork, api.EventTypeFile} {
+		switch b := p.backends[et]; b {
+		case BackendEBPF:
+			log.Printf("Windows: %-7s → eBPF-for-Windows (kernel blocking)", et)
+		case BackendETW:
+			log.Printf("Windows: %-7s → ETW (detect, then terminate)", et)
+		default:
+			log.Printf("Windows: %-7s → not monitored", et)
 		}
 	}
-	if p.etwConsumer != nil {
-		if err := p.etwConsumer.Stop(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
 }
 
-func (p *WindowsPlatform) Close() error {
-	var firstErr error
-	if p.ebpfLoader != nil {
-		if err := p.ebpfLoader.Stop(); err != nil {
-			firstErr = err
-		}
+// Backends reports which backend serves each event type.
+func (p *WindowsPlatform) Backends() map[api.EventType]string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make(map[api.EventType]string, len(p.backends))
+	for k, v := range p.backends {
+		out[k] = v
 	}
-	if p.etwConsumer != nil {
-		if err := p.etwConsumer.Stop(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
+	return out
 }
+
+// Stop stops event delivery and detaches eBPF programs. Safe to call more
+// than once (the enforcer calls Stop and then Close).
+func (p *WindowsPlatform) Stop() error {
+	p.stopOnce.Do(func() {
+		if p.etw != nil {
+			p.stopErr = p.etw.Stop()
+		}
+		p.closeEBPF()
+	})
+	return p.stopErr
+}
+
+func (p *WindowsPlatform) closeEBPF() {
+	if p.ebpf != nil {
+		_ = p.ebpf.Stop()
+	}
+}
+
+func (p *WindowsPlatform) Close() error { return p.Stop() }
 
 func (p *WindowsPlatform) Capabilities() Capabilities {
-	caps := Capabilities{
-		ProcessMonitoring: true,
-		FileMonitoring:    true,
-		NetworkMonitoring: true,
-		Enforcement:       true,
+	b := p.Backends()
+	return Capabilities{
+		ProcessMonitoring: b[api.EventTypeProcess] != BackendNone,
+		FileMonitoring:    b[api.EventTypeFile] != BackendNone,
+		NetworkMonitoring: b[api.EventTypeNetwork] != BackendNone,
+		// Every backend can at least terminate the offending process.
+		Enforcement: true,
+		// Kernel blocking for the event types served by eBPF.
+		LSMEnforcement: p.ebpf != nil,
 	}
-	// Enable LSM enforcement when eBPF policy map is available
-	if p.ebpfLoader != nil && p.ebpfLoader.PolicyMapAvailable() {
-		caps.LSMEnforcement = true
-	}
-	return caps
 }
 
-// initializeEBPF initializes eBPF-for-Windows monitoring
-func (p *WindowsPlatform) initializeEBPF(ctx context.Context) error {
-	loader, err := etw.NewEBPFLoader("")
-	if err != nil {
-		return fmt.Errorf("create eBPF loader: %w", err)
-	}
-
-	if err := loader.Load(ctx); err != nil {
-		return fmt.Errorf("load eBPF programs: %w", err)
-	}
-
-	p.ebpfLoader = loader
-	return nil
-}
-
-// PolicyMap returns the eBPF policy map syncer when available,
-// enabling kernel-level enforcement via the BPF hash map.
+// PolicyMap returns the eBPF policy map syncer when any hook is attached.
 func (p *WindowsPlatform) PolicyMap() any {
-	if p.ebpfLoader != nil && p.ebpfLoader.PolicyMapAvailable() {
-		return p.ebpfLoader.GetPolicyMap()
+	if p.ebpf == nil {
+		return nil
 	}
-	return nil
-}
-
-// GetMode returns the current monitoring mode
-func (p *WindowsPlatform) GetMode() string {
-	return p.mode
+	return p.ebpf.PolicyMap()
 }

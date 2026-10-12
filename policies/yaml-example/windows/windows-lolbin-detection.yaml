@@ -153,15 +153,9 @@ rules:
     action: log
     reason: "Reconnaissance command (host/network enumeration)"
 
-  # Block cmd.exe spawning from Office processes
-  - name: block-office-cmd-spawn
-    event: process
-    conditions:
-      all:
-        - comm: { any_of: ["cmd.exe", "powershell.exe"] }
-        - parent_comm: { any_of: ["winword.exe", "excel.exe", "outlook.exe", "powerpnt.exe", "msaccess.exe"] }
-    action: deny
-    reason: "Shell spawned from Office application (macro execution)"
+  # Shells spawned from Office (macro execution) need a parent-process
+  # condition, which the policy schema does not have yet; the rule is omitted
+  # rather than blocking every cmd.exe/powershell.exe.
 
   # Block rundll32 with suspicious DLL paths
   - name: block-rundll32-suspicious

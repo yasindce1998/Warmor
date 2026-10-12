@@ -327,46 +327,32 @@ Second occurrence: LSM hit → kernel allows/denies immediately (no userspace tr
 
 ### Windows (ETW + eBPF-for-Windows) - Beta 🚧
 
-**Dual-Mode Architecture:**
+**Per-event-type backends:** each event type is served by one backend,
+chosen at startup.
 
-**Mode 1: ETW (Stable Fallback)**
+| Event | eBPF-for-Windows (primary) | ETW (fallback) |
+|---|---|---|
+| Process | `process` hook (ntosebpfext): creation denied in the kernel | Kernel-Process: detect, then terminate |
+| Network | `cgroup/connect4/6`, `recv_accept4/6`: rejected in the kernel | Kernel-Network: detect, then terminate |
+| File | no hook exists | Kernel-File (always) |
+
 ```
-Application → Syscall → ETW Provider → ETW Session → warmor Daemon → WASM → Decision
+eBPF hook ──(cached verdict)──▶ allow / reject in kernel
+    │
+    └─ ring buffer ─▶ daemon ─▶ WASM ─▶ decision ─▶ kernel map (next attempt)
+ETW provider ─▶ daemon ─▶ WASM ─▶ decision ─▶ TerminateProcess (PID-reuse checked)
 ```
 
-**Mode 2: eBPF-for-Windows (Experimental)**
-```
-Application → Syscall → eBPF Hook → Ring Buffer → warmor Daemon → WASM → Decision
-```
-
-**Automatic Fallback (multi-step detection):**
-1. Check for eBPF-for-Windows service (`ebpfsvc`) via SCM
-2. Probe `\\.\ebpfctl` driver device
-3. Query `ebpfapi.dll` file version (VS_FIXEDFILEINFO)
-4. Verify API entry points (libbpf or legacy)
-5. Load eBPF programs and start ring buffer
-6. Fall back to ETW if any step fails
-
-**ETW Providers:**
-- `Microsoft-Windows-Kernel-Process` - Process events
-- `Microsoft-Windows-Kernel-File` - File I/O events
-- `Microsoft-Windows-Kernel-Network` - Network events
-
-**eBPF Programs:**
-- `process_monitor.bpf.c` - Process monitoring
-- `file_monitor.bpf.c` - File monitoring
-- `network_monitor.bpf.c` - Network monitoring
-
-**Key Features:**
-- User-space monitoring (ETW: ~200μs, eBPF: <50μs)
-- Automatic mode detection
-- Graceful fallback
-- Enforcement in eBPF mode
+**Fallback:** eBPF is used when `ebpfapi.dll` and the driver are present and
+the native images load and attach. Otherwise, per event type, the matching
+ETW provider is enabled instead. `--no-lsm` forces ETW and `--require-lsm`
+makes eBPF mandatory.
 
 **Implementation Files:**
 - `internal/platform/windows.go` - Platform implementation
-- `internal/platform/etw/*.go` - ETW consumer
-- `bpf-windows/*.bpf.c` - eBPF programs
+- `internal/platform/etw/` - ETW consumer (fallback; always used for files)
+- `internal/platform/efw/` - eBPF-for-Windows loader and kernel policy maps
+- `bpf-windows/` - eBPF-for-Windows programs (network, process)
 
 **Documentation:** [PLATFORM_WINDOWS.md](PLATFORM_WINDOWS.md)
 

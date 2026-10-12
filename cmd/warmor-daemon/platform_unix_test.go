@@ -70,7 +70,7 @@ func TestServiceStubs(t *testing.T) {
 	if handleServiceCommand([]string{"install"}) || handleServiceCommand(nil) {
 		t.Error("handleServiceCommand should never handle commands off Windows")
 	}
-	runService() // must be a harmless no-op
+	runService(func(<-chan struct{}) { t.Error("daemon must not run") }) // must be a harmless no-op
 }
 
 func TestIsElevated(t *testing.T) {

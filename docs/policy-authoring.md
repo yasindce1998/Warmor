@@ -219,4 +219,4 @@ The `windows/` category contains policies targeting Windows-specific attack vect
 | `windows-lateral-movement.yaml` | PsExec, WMI remote execution, WinRM abuse, RDP tunneling |
 | `windows-ransomware-prevention.yaml` | VSS deletion, backup destruction, mass file encryption patterns |
 
-These policies use the same YAML format as Linux policies but target Windows-specific paths, processes, and behaviors. They work with both ETW and hybrid modes.
+These policies use the same YAML format as Linux policies but target Windows-specific paths, processes, and behaviors. They work with both backends (eBPF-for-Windows and ETW). On Windows, file opens are reported as `open` (there is no `read` event), and `comm` is the lowercased image name.

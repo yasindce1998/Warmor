@@ -446,12 +446,30 @@ type endpointPolicyMapSyncer interface {
 	SetEndpointRule(cgroupID uint64, eventType uint8, addr string, port uint16, action uint8, audit bool) error
 }
 
+// eventPolicyMapSyncer is implemented by policy maps whose kernel keys need
+// more of the event than a pattern string (on Windows, network rules are
+// keyed on the connecting image as well as the endpoint, so a decision made
+// for one executable never applies to another). It takes precedence over
+// SetRule/SetEndpointRule.
+type eventPolicyMapSyncer interface {
+	SyncEvent(event *api.Event, action uint8, audit bool) error
+}
+
 // syncToPolicyMap compiles a decision into the kernel policy map. The syncer
 // owns the kernel-side key: it refuses rules its BPF programs cannot match
 // exactly (on Linux, file rules, since lsm/file_open only sees the dentry
 // basename and a basename rule would hit every same-named file), so a cached
 // decision never applies to events userspace did not evaluate.
 func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult) {
+	if es, ok := e.policyMap.(eventPolicyMapSyncer); ok {
+		action := uint8(0)
+		if result.Action == api.ActionDeny {
+			action = 1
+		}
+		_ = es.SyncEvent(event, action, result.Audit || e.auditMode)
+		return
+	}
+
 	var eventType uint8
 	var pattern string
 

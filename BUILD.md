@@ -177,26 +177,20 @@ go build -o warmor.exe cmd\warmor-daemon\main.go
 
 #### Build eBPF Programs for Windows (Optional)
 
-If you have eBPF-for-Windows installed and want to use eBPF mode:
+With eBPF-for-Windows installed, network (and, with ntosebpfext, process)
+events are blocked in the kernel. The programs are built as native, signed
+`.sys` images:
 
 ```powershell
-# Install LLVM/Clang
-winget install LLVM.LLVM
-
-# Build eBPF programs
 cd bpf-windows
-make all
-make install
-cd ..
-
-# Verify
-ls internal\platform\etw\programs\*.o
+.\build.ps1 -EbpfIncludeDir <eBPF SDK include dir> `
+            -NtosIncludeDir <ntosebpfext include dir> `
+            -ConvertScript  <path to Convert-BpfToNative.ps1>
 ```
 
-This will compile:
-- `process_monitor.o` - Process monitoring
-- `file_monitor.o` - File monitoring  
-- `network_monitor.o` - Network monitoring
+Copy `out\warmor_net.sys` and `out\warmor_proc.sys` into a `bpf\` directory
+next to `warmor-daemon.exe`. See [bpf-windows/README.md](bpf-windows/README.md)
+for signing requirements.
 
 **Note:** eBPF programs are optional. warmor will automatically fall back to ETW if eBPF-for-Windows is not available.
 
