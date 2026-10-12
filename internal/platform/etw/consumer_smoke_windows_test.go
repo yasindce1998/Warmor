@@ -60,11 +60,14 @@ func TestConsumerSmoke(t *testing.T) {
 	// Give the session a moment to start delivering.
 	time.Sleep(2 * time.Second)
 
-	// Process: run a child with a recognizable command line.
-	cmd := exec.Command("cmd.exe", "/c", "echo", "warmor-smoke")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("run child: %v", err)
+	// Process: a child with a recognizable command line. It must outlive
+	// ETW's delivery delay: Kernel-Process has no command line, so the
+	// consumer reads it from the live process.
+	cmd := exec.Command("cmd.exe", "/c", "ping -n 6 127.0.0.1 >nul & rem warmor-smoke")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
 	}
+	defer func() { _ = cmd.Wait() }()
 
 	// File: create and write a file from a child process (our own PID's
 	// file I/O is filtered out on purpose).
@@ -101,12 +104,16 @@ func TestConsumerSmoke(t *testing.T) {
 	}
 
 	var sawProcess, sawFile, sawNetwork bool
+	var cmdEvents []string // for diagnostics
 	deadline := time.After(20 * time.Second)
 	for !(sawProcess && sawFile && sawNetwork) {
 		select {
 		case ev := <-events:
 			switch ev.GetType() {
 			case api.EventTypeProcess:
+				if ev.Comm == "cmd.exe" && ev.Process != nil && len(cmdEvents) < 20 {
+					cmdEvents = append(cmdEvents, ev.Filename+" "+strconv.Quote(strings.Join(ev.Process.Args, " ")))
+				}
 				if ev.Comm == "cmd.exe" && ev.Process != nil &&
 					strings.Contains(strings.Join(ev.Process.Args, " "), "warmor-smoke") {
 					if !strings.Contains(ev.Filename, `:\`) {
@@ -128,8 +135,8 @@ func TestConsumerSmoke(t *testing.T) {
 				}
 			}
 		case <-deadline:
-			t.Fatalf("timed out: process=%v file=%v network=%v (stats %v)",
-				sawProcess, sawFile, sawNetwork, c.Stats())
+			t.Fatalf("timed out: process=%v file=%v network=%v (stats %v); cmd.exe events seen: %q",
+				sawProcess, sawFile, sawNetwork, c.Stats(), cmdEvents)
 		}
 	}
 }

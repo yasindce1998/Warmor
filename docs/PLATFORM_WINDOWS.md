@@ -77,7 +77,7 @@ alone. The check and `TerminateProcess` use the same handle.
 |---|---|
 | `comm` | Lowercased image file name, e.g. `powershell.exe` (Windows names are case-insensitive) |
 | `path` (process) | Drive-letter image path, e.g. `C:\Windows\System32\cmd.exe` (translated from the NT device path) |
-| `args` (process) | Command line split with `CommandLineToArgvW` rules. ETW reads it from the live process; the eBPF hook copies it in the kernel. **Note:** the WASM policy ABI does not pass `args` yet on any platform, so `args` conditions in YAML currently compile to a path check. |
+| `args` (process) | Command line split with `CommandLineToArgvW` rules. The eBPF hook copies it in the kernel. ETW has no command line, so the consumer reads it from the live process; processes that exit within ETW's ~1 s delivery delay have no `args` in ETW mode. **Note:** the WASM policy ABI does not pass `args` yet on any platform, so `args` conditions in YAML currently compile to a path check. |
 | file `operation` | `open`, `create`, `write` (first write per handle only), `delete`, `rename`. There is no `read`: ETW has no read-intent event, and read I/O events are too noisy to subscribe to. |
 | network `operation` | `connect`, `accept`, `sendto` (UDP, deduplicated per peer for 10 s) |
 | network `protocol` | `tcp`, `udp`, `tcp6`, `udp6` (IPv4-mapped addresses are unmapped) |
