@@ -67,8 +67,6 @@ const (
 	processTraceModeEventRecord = 0x10000000
 
 	invalidProcessTraceHandle = ^uint64(0)
-
-	eventHeaderFlag32BitHeader = 0x0020
 )
 
 // wnodeHeader mirrors WNODE_HEADER.

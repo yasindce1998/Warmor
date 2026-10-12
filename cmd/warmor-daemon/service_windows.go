@@ -178,7 +178,7 @@ func installService(daemonArgs []string) error {
 	if err != nil {
 		return fmt.Errorf("connect to service manager: %w", err)
 	}
-	defer m.Disconnect()
+	defer func() { _ = m.Disconnect() }()
 
 	s, err := m.OpenService(serviceName)
 	if err == nil {
@@ -222,7 +222,7 @@ func uninstallService() error {
 	if err != nil {
 		return fmt.Errorf("connect to service manager: %w", err)
 	}
-	defer m.Disconnect()
+	defer func() { _ = m.Disconnect() }()
 
 	s, err := m.OpenService(serviceName)
 	if err != nil {
@@ -245,7 +245,7 @@ func startService() error {
 	if err != nil {
 		return fmt.Errorf("connect to service manager: %w", err)
 	}
-	defer m.Disconnect()
+	defer func() { _ = m.Disconnect() }()
 	s, err := m.OpenService(serviceName)
 	if err != nil {
 		return fmt.Errorf("open service: %w", err)
@@ -259,7 +259,7 @@ func stopService() error {
 	if err != nil {
 		return fmt.Errorf("connect to service manager: %w", err)
 	}
-	defer m.Disconnect()
+	defer func() { _ = m.Disconnect() }()
 	s, err := m.OpenService(serviceName)
 	if err != nil {
 		return fmt.Errorf("open service: %w", err)

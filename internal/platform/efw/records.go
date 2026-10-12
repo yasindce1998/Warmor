@@ -285,15 +285,3 @@ func policyValue(deny, audit bool) []byte {
 	}
 	return v
 }
-
-func u64Bytes(v uint64) []byte {
-	b := make([]byte, 8)
-	binary.LittleEndian.PutUint64(b, v)
-	return b
-}
-
-func u32Bytes(v uint32) []byte {
-	b := make([]byte, 4)
-	binary.LittleEndian.PutUint32(b, v)
-	return b
-}

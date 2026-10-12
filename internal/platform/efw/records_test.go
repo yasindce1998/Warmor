@@ -45,7 +45,7 @@ func TestParseProcessCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := v.(*ProcessRecord)
+	r := asProcess(t, v)
 	if r.Exit || r.Verdict != VerdictBlocked || r.PID != 4242 || r.PPID != 100 ||
 		r.CreationTime != 133500000000000000 || r.ImageHash != 0xfeed ||
 		r.NTImage != img || r.CmdLine != cmd {
@@ -62,7 +62,7 @@ func TestParseProcessExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := v.(*ProcessRecord); !r.Exit || r.PID != 77 || r.ExitCode != 3 {
+	if r := asProcess(t, v); !r.Exit || r.PID != 77 || r.ExitCode != 3 {
 		t.Fatalf("unexpected exit record: %+v", r)
 	}
 }
@@ -84,7 +84,7 @@ func TestParseNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := v.(*NetworkRecord)
+	r := asNetwork(t, v)
 	if r.Remote != netip.MustParseAddrPort("1.2.3.4:443") || r.Local != netip.MustParseAddrPort("10.0.0.1:50000") ||
 		r.Operation() != "connect" || r.ProtocolName() != "tcp" || r.ImageHash != 0xabc || r.PID != 9 {
 		t.Fatalf("unexpected record: %+v", r)
@@ -94,8 +94,11 @@ func TestParseNetwork(t *testing.T) {
 	b[netOffDirection] = DirAccept
 	b[netOffProtocol] = protoUDP
 	copy(b[netOffRemoteAddr:], netip.MustParseAddr("2001:db8::7").AsSlice())
-	v, _ = parseRecord(b)
-	r = v.(*NetworkRecord)
+	v, err = parseRecord(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = asNetwork(t, v)
 	if r.Remote.Addr().String() != "2001:db8::7" || r.Operation() != "accept" || r.ProtocolName() != "udp6" || !r.IPv6Family {
 		t.Fatalf("unexpected IPv6 record: %+v", r)
 	}
@@ -150,8 +153,11 @@ func TestNetKey(t *testing.T) {
 	rec[netOffProtocol] = protoTCP
 	binary.BigEndian.PutUint16(rec[netOffRemotePort:], 22)
 	copy(rec[netOffRemoteAddr:], netip.MustParseAddr("2001:db8::1").AsSlice())
-	v, _ := parseRecord(rec)
-	r := v.(*NetworkRecord)
+	v, err := parseRecord(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := asNetwork(t, v)
 	k, err = netKey(r.ImageHash, r.Operation(), r.ProtocolName(), r.Remote)
 	if err != nil {
 		t.Fatal(err)
@@ -180,4 +186,22 @@ func TestPolicyValue(t *testing.T) {
 	if v := policyValue(true, true); v[1] != 1 {
 		t.Fatalf("audit value = %v", v)
 	}
+}
+
+func asProcess(t *testing.T, v any) *ProcessRecord {
+	t.Helper()
+	r, ok := v.(*ProcessRecord)
+	if !ok {
+		t.Fatalf("got %T, want *ProcessRecord", v)
+	}
+	return r
+}
+
+func asNetwork(t *testing.T, v any) *NetworkRecord {
+	t.Helper()
+	r, ok := v.(*NetworkRecord)
+	if !ok {
+		t.Fatalf("got %T, want *NetworkRecord", v)
+	}
+	return r
 }

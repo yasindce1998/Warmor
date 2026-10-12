@@ -42,13 +42,8 @@ func (p Provider) String() string {
 	}
 }
 
-// Microsoft-Windows-Kernel-Process event IDs and keywords.
-const (
-	processEventStart = 1
-	processEventStop  = 2
-
-	processKeywordProcess = 0x10 // WINEVENT_KEYWORD_PROCESS
-)
+// Microsoft-Windows-Kernel-Process keywords.
+const processKeywordProcess = 0x10 // WINEVENT_KEYWORD_PROCESS
 
 // Microsoft-Windows-Kernel-File event IDs and keywords.
 const (

@@ -89,7 +89,11 @@ func TestConsumerSmoke(t *testing.T) {
 			conn.Close()
 		}
 	}()
-	port := ln.Addr().(*net.TCPAddr).Port
+	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address %T", ln.Addr())
+	}
+	port := tcpAddr.Port
 	ps := exec.Command("powershell.exe", "-NoProfile", "-Command",
 		"(New-Object Net.Sockets.TcpClient).Connect('127.0.0.1', "+strconv.Itoa(port)+")")
 	if out, err := ps.CombinedOutput(); err != nil {

@@ -35,12 +35,14 @@ var errNoProperty = errors.New("property not present")
 var propertyNames sync.Map // string → *uint16
 
 func propertyName(name string) *uint16 {
-	if p, ok := propertyNames.Load(name); ok {
-		return p.(*uint16)
+	if v, ok := propertyNames.Load(name); ok {
+		if p, ok := v.(*uint16); ok {
+			return p
+		}
 	}
 	p, _ := windows.UTF16PtrFromString(name)
-	actual, _ := propertyNames.LoadOrStore(name, p)
-	return actual.(*uint16)
+	propertyNames.Store(name, p)
+	return p
 }
 
 // propBytes returns the raw bytes of a top-level property, decoded with the

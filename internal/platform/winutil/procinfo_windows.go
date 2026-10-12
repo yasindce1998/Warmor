@@ -48,7 +48,7 @@ func QueryImageNT(pid uint32) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer windows.CloseHandle(h)
+	defer func() { _ = windows.CloseHandle(h) }()
 
 	buf := make([]uint16, 1024)
 	for {
@@ -71,7 +71,7 @@ func QueryCommandLine(pid uint32) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer windows.CloseHandle(h)
+	defer func() { _ = windows.CloseHandle(h) }()
 
 	size := uint32(4096)
 	for attempt := 0; attempt < 3; attempt++ {
@@ -101,7 +101,7 @@ func ProcessCreateTime(pid uint32) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
-	defer windows.CloseHandle(h)
+	defer func() { _ = windows.CloseHandle(h) }()
 	return processHandleCreateTime(h)
 }
 
@@ -120,7 +120,7 @@ func SnapshotProcesses(paths *DevicePathMap) ([]ProcInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("CreateToolhelp32Snapshot: %w", err)
 	}
-	defer windows.CloseHandle(snap)
+	defer func() { _ = windows.CloseHandle(snap) }()
 
 	var entry windows.ProcessEntry32
 	entry.Size = uint32(unsafe.Sizeof(entry))

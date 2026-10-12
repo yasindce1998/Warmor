@@ -14,11 +14,6 @@ import (
 // event, so the process the event was about has already exited.
 var errPIDReused = errors.New("PID reused by a newer process")
 
-// terminateProcess forcefully terminates a process by PID using the Win32 API.
-func terminateProcess(pid uint32) error {
-	return terminateEventProcess(pid, time.Time{})
-}
-
 // terminateEventProcess terminates the process an event came from. Windows
 // recycles PIDs quickly and ETW delivers events late, so the PID may already
 // belong to another process: the process is only terminated if it was
@@ -29,7 +24,7 @@ func terminateEventProcess(pid uint32, seen time.Time) error {
 	if err != nil {
 		return fmt.Errorf("OpenProcess(%d): %w", pid, err)
 	}
-	defer windows.CloseHandle(handle)
+	defer func() { _ = windows.CloseHandle(handle) }()
 
 	if !seen.IsZero() {
 		var created, exited, kernel, user windows.Filetime

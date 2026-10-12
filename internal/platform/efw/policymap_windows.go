@@ -3,6 +3,7 @@
 package efw
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -126,4 +127,16 @@ func (m *PolicyMap) ForgetProcess(pid uint32) {
 		return
 	}
 	_ = m.procInfo.Delete(u32Bytes(pid))
+}
+
+func u64Bytes(v uint64) []byte {
+	b := make([]byte, 8)
+	binary.LittleEndian.PutUint64(b, v)
+	return b
+}
+
+func u32Bytes(v uint32) []byte {
+	b := make([]byte, 4)
+	binary.LittleEndian.PutUint32(b, v)
+	return b
 }

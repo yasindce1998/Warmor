@@ -16,6 +16,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// Microsoft-Windows-Kernel-Process event IDs.
+const (
+	processEventStart = 1
+	processEventStop  = 2
+)
+
 // DefaultSessionName is the real-time session the daemon owns.
 const DefaultSessionName = "WarmorETW"
 
