@@ -14,7 +14,7 @@ import (
 // rawLSMEvent builds a struct warmor_event exactly as laid out by the C
 // compiler in bpf/warmor_lsm.h (little-endian, natural alignment).
 func rawLSMEvent(eventType, decision uint8, filename string, portLE uint16, v4 [4]byte, v6 [16]byte, family uint16) []byte {
-	buf := make([]byte, 336)
+	buf := make([]byte, 408)
 	binary.LittleEndian.PutUint32(buf[0:], 1234)
 	binary.LittleEndian.PutUint32(buf[4:], 1000)
 	binary.LittleEndian.PutUint32(buf[8:], 1000)
@@ -30,12 +30,46 @@ func rawLSMEvent(eventType, decision uint8, filename string, portLE uint16, v4 [
 	copy(buf[312:328], v6[:])
 	binary.LittleEndian.PutUint16(buf[328:], family)
 	// 6 bytes of padding at 330..336
+	putCString(buf, 336, 64, "/dev/sda1")
+	binary.LittleEndian.PutUint64(buf[400:], 31337)
 	return buf
 }
 
 func TestLSMEvent_Size(t *testing.T) {
-	if got := binary.Size(LSMEvent{}); got != 336 {
-		t.Errorf("binary.Size(LSMEvent) = %d, want 336 (sizeof(struct warmor_event))", got)
+	if got := binary.Size(LSMEvent{}); got != 408 {
+		t.Errorf("binary.Size(LSMEvent) = %d, want 408 (sizeof(struct warmor_event))", got)
+	}
+	// The bpf2go type is generated from the C struct, so this catches any
+	// drift between bpf/warmor_lsm.h and the hand-written LSMEvent.
+	if got, want := binary.Size(LSMEvent{}), binary.Size(lsm_execWarmorEvent{}); got != want {
+		t.Errorf("binary.Size(LSMEvent) = %d, generated warmor_event is %d", got, want)
+	}
+}
+
+func TestLSMEvent_HookExtras(t *testing.T) {
+	decode := func(eventType uint8, filename string, family uint16) Event {
+		var ev LSMEvent
+		raw := rawLSMEvent(eventType, 0, filename, 0, [4]byte{}, [16]byte{}, family)
+		if err := binary.Read(bytes.NewReader(raw), binary.LittleEndian, &ev); err != nil {
+			t.Fatalf("binary.Read: %v", err)
+		}
+		return ev.ToEvent()
+	}
+
+	m := decode(EventTypeMount, "ext4", 0)
+	if m.Hook != "mount" || m.Filename != "ext4" || m.MountSource != "/dev/sda1" {
+		t.Errorf("mount: Hook=%q Filename=%q MountSource=%q", m.Hook, m.Filename, m.MountSource)
+	}
+	p := decode(EventTypePtrace, "sshd", 0)
+	if p.Hook != "ptrace" || p.TargetCgroupID != 31337 {
+		t.Errorf("ptrace: Hook=%q TargetCgroupID=%d", p.Hook, p.TargetCgroupID)
+	}
+	u := decode(EventTypeNetwork, "/run/docker.sock", 1)
+	if u.Hook != "connect_unix" || u.Filename != "/run/docker.sock" || u.RemoteAddr != "" {
+		t.Errorf("unix connect: Hook=%q Filename=%q RemoteAddr=%q", u.Hook, u.Filename, u.RemoteAddr)
+	}
+	if e := decode(EventTypeExec, "/bin/sh", 0); e.Hook != "exec" || e.MountSource != "" || e.TargetCgroupID != 0 {
+		t.Errorf("exec: Hook=%q extras leaked: %q %d", e.Hook, e.MountSource, e.TargetCgroupID)
 	}
 }
 
@@ -77,7 +111,7 @@ func TestLSMEvent_DecodeFieldOffsets(t *testing.T) {
 
 func TestLSMEvent_DecodeShortInput(t *testing.T) {
 	var ev LSMEvent
-	if err := binary.Read(bytes.NewReader(make([]byte, 335)), binary.LittleEndian, &ev); !errors.Is(err, io.ErrUnexpectedEOF) {
+	if err := binary.Read(bytes.NewReader(make([]byte, 407)), binary.LittleEndian, &ev); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Errorf("err = %v, want io.ErrUnexpectedEOF", err)
 	}
 }

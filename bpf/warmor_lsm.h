@@ -50,8 +50,12 @@ struct warmor_event {
 	__u16 remote_port;
 	__u32 remote_addr_v4;
 	__u8  remote_addr_v6[16];
-	__u16 family;       // AF_INET/AF_INET6 for network events, 0 otherwise
+	__u16 family;       // AF_INET/AF_INET6/AF_UNIX for network events, 0 otherwise
 	__u16 pad[3];
+	// Hook-specific extras. mount: aux = source (dev_name). ptrace: aux_id =
+	// the target task's cgroup id. Zero for every other hook.
+	char  aux[64];
+	__u64 aux_id;
 };
 
 // Shared policy map — all LSM programs reference the same map via BTF.
@@ -144,13 +148,24 @@ static __always_inline int is_enforce_enabled(void)
 	return 0;
 }
 
-// Emit an LSM event to the ring buffer
-static __always_inline void emit_lsm_event(
+// Unix socket paths whose connects are reported (key: fnv1a of sun_path,
+// populated by userspace). Unix connects are far too frequent to report all
+// of them, but the container runtime sockets are a classic escape route.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 64);
+	__type(key, __u32);
+	__type(value, __u8);
+} unix_watch SEC(".maps");
+
+// Emit an LSM event with hook-specific extras (see warmor_event.aux).
+static __always_inline void emit_lsm_event_aux(
 	__u8 event_type, __u8 decision,
 	const char *filename, int filename_len,
 	__u64 cgroup_id, __u16 family,
 	__u16 remote_port, __u32 remote_addr_v4,
-	const __u8 *remote_addr_v6)
+	const __u8 *remote_addr_v6,
+	const char *aux, __u64 aux_id)
 {
 	struct warmor_event *event;
 
@@ -187,7 +202,24 @@ static __always_inline void emit_lsm_event(
 		__builtin_memset(event->remote_addr_v6, 0, 16);
 	}
 
+	event->aux[0] = 0;
+	if (aux)
+		bpf_probe_read_kernel_str(&event->aux, sizeof(event->aux), aux);
+	event->aux_id = aux_id;
+
 	bpf_ringbuf_submit(event, 0);
+}
+
+// Emit an LSM event to the ring buffer
+static __always_inline void emit_lsm_event(
+	__u8 event_type, __u8 decision,
+	const char *filename, int filename_len,
+	__u64 cgroup_id, __u16 family,
+	__u16 remote_port, __u32 remote_addr_v4,
+	const __u8 *remote_addr_v6)
+{
+	emit_lsm_event_aux(event_type, decision, filename, filename_len, cgroup_id,
+			   family, remote_port, remote_addr_v4, remote_addr_v6, 0, 0);
 }
 
 // Force BTF type emission for bpf2go -type flag

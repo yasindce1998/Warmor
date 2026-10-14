@@ -361,6 +361,9 @@ func (e *Enforcer) eventLoop() {
 // handleEvent processes a single event with caching and metrics
 func (e *Enforcer) handleEvent(event *api.Event) {
 	metrics.RecordEventProcessed(event.GetType().String())
+	if e.handleKernelVerdict(event) {
+		return
+	}
 
 	// Record process exec in lineage tracker
 	if event.GetType() == api.EventTypeProcess {

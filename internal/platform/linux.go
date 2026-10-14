@@ -21,6 +21,7 @@ type LinuxConfig struct {
 	LSMEnforce   bool
 	RequireLSM   bool
 	SkipLSM      bool
+	UnixWatch    []string
 }
 
 type LinuxPlatform struct {
@@ -119,6 +120,12 @@ func (p *LinuxPlatform) Load(ctx context.Context) error {
 			if err := lsmLoader.SetCgroupFilter(cgroupIDs); err != nil {
 				fmt.Printf("WARNING: failed to set LSM cgroup filter: %v\n", err)
 			}
+		}
+	}
+
+	if p.lsmLoader != nil && len(p.config.UnixWatch) > 0 {
+		if err := p.lsmLoader.SetUnixWatch(p.config.UnixWatch); err != nil {
+			fmt.Printf("WARNING: runtime socket watch unavailable: %v\n", err)
 		}
 	}
 
@@ -344,15 +351,20 @@ func (p *LinuxPlatform) monitorLSMEvents(ctx context.Context) {
 		metrics.RecordLSMDecision(ebpf.LSMHookName(ev.LSMHook), ebpf.LSMDecisionAction(ev.LSMDecision))
 
 		event := &api.Event{
-			Type:     api.EventType(ev.Kind),
-			PID:      ev.PID,
-			UID:      ev.UID,
-			GID:      ev.GID,
-			Comm:     ev.Comm,
-			Filename: ev.Filename,
+			Type:      api.EventType(ev.Kind),
+			PID:       ev.PID,
+			UID:       ev.UID,
+			GID:       ev.GID,
+			Comm:      ev.Comm,
+			Filename:  ev.Filename,
 			Timestamp: ev.Timestamp,
-			CgroupID: ev.CgroupID,
-			LSMEvent: true,
+			CgroupID:  ev.CgroupID,
+			LSMEvent:  true,
+
+			KernelDenied:   ev.KernelDenied,
+			Hook:           ev.Hook,
+			MountSource:    ev.MountSource,
+			TargetCgroupID: ev.TargetCgroupID,
 		}
 
 		switch ev.Kind {

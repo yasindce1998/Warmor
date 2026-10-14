@@ -129,6 +129,21 @@ type Event struct {
 
 	// LSM fields
 	LSMEvent bool `json:"lsm_event,omitempty"`
+	// KernelDenied is set when the kernel already refused the operation
+	// (policy-map deny). The enforcer
+	// records such events but does not evaluate or act on them again.
+	KernelDenied bool `json:"kernel_denied,omitempty"`
+	// Hook is the LSM hook that produced the event (exec, file, connect,
+	// connect_unix, bind, listen, ptrace, mount); empty for tracepoints.
+	// Type folds several hooks together (mount is a file event, ptrace a
+	// process event), Hook keeps them apart.
+	Hook string `json:"hook,omitempty"`
+	// MountSource is the mount source for mount events (Filename holds the
+	// filesystem type).
+	MountSource string `json:"mount_source,omitempty"`
+	// TargetCgroupID is the ptrace target's cgroup for ptrace events
+	// (Filename holds the target's comm).
+	TargetCgroupID uint64 `json:"target_cgroup_id,omitempty"`
 
 	// processSet records that Type was explicitly set to EventTypeProcess
 	// (the zero value), via SetType or a JSON "type" key, so GetType does
