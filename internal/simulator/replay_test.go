@@ -327,3 +327,48 @@ func TestTruncate(t *testing.T) {
 		}
 	}
 }
+
+// daemonRecording is ndjson exactly as warmor-daemon's streaming pipeline
+// writes it: decisions are lowercase ("allow", "deny", "log").
+const daemonRecording = `{"id":"e1","timestamp":"2026-01-02T03:04:05Z","hostname":"node-1","event_type":"exec","pid":42,"uid":0,"gid":0,"comm":"bash","filename":"/bin/bash","decision":"allow","cached":false,"enforced":false,"latency_us":12}
+{"id":"e2","timestamp":"2026-01-02T03:04:06Z","hostname":"node-1","event_type":"file","pid":43,"uid":1000,"gid":1000,"comm":"cat","filename":"/etc/hosts","decision":"deny","reason":"blocked","cached":false,"enforced":true,"latency_us":9}
+{"id":"e3","timestamp":"2026-01-02T03:04:07Z","hostname":"node-1","event_type":"exec","pid":44,"uid":0,"gid":0,"comm":"bash","filename":"/usr/bin/bash","decision":"log","cached":false,"enforced":false,"latency_us":7}
+{"id":"e4","timestamp":"2026-01-02T03:04:08Z","hostname":"node-1","event_type":"exec","pid":45,"uid":1000,"gid":1000,"comm":"python3","filename":"/usr/bin/python3","decision":"log","cached":false,"enforced":false,"latency_us":7}
+`
+
+func TestReplay_DaemonRecordingLowercaseDecisions(t *testing.T) {
+	var events []*streaming.SecurityEvent
+	for _, line := range strings.Split(strings.TrimSpace(daemonRecording), "\n") {
+		var e streaming.SecurityEvent
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, &e)
+	}
+
+	res, err := Replay(context.Background(), events, newTestEvaluator(t))
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if res.WouldDeny != 2 || res.WouldAllow != 1 || res.WouldLog != 1 {
+		t.Errorf("breakdown allow/deny/log = %d/%d/%d, want 1/2/1", res.WouldAllow, res.WouldDeny, res.WouldLog)
+	}
+	// allow->DENY and log->DENY (log permits the event) are both new denials.
+	if len(res.UniqueNewDenials) != 2 {
+		t.Errorf("UniqueNewDenials = %+v, want 2 entries", res.UniqueNewDenials)
+	}
+	// deny->ALLOW is a new allow; log->LOG is unchanged.
+	if len(res.UniqueNewAllows) != 1 || res.UniqueNewAllows[0].Target != "/etc/hosts" {
+		t.Errorf("UniqueNewAllows = %+v, want only /etc/hosts", res.UniqueNewAllows)
+	}
+}
+
+func TestNormalizeDecision(t *testing.T) {
+	for in, want := range map[string]string{
+		"allow": "allow", "ALLOW": "allow", " Deny ": "deny", "LOG": "log", "": "", "weird": "weird",
+	} {
+		if got := normalizeDecision(in); got != want {
+			t.Errorf("normalizeDecision(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
