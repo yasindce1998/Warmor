@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/yasindce1998/warmor/internal/metrics"
 )
 
 // Client connects to the policy management server for policy distribution.
@@ -82,7 +84,8 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 }
 
 // Register sends a registration request to the server.
-func (c *Client) Register(ctx context.Context) error {
+func (c *Client) Register(ctx context.Context) (err error) {
+	defer func() { metrics.RecordRegistration(err) }()
 	req := RegisterRequest{
 		ID:       c.agentID,
 		Hostname: c.hostname,
@@ -220,7 +223,8 @@ func (c *Client) fetchWASM(ctx context.Context, policyID string, version int64) 
 }
 
 // SendHeartbeat sends a heartbeat to the server.
-func (c *Client) SendHeartbeat(ctx context.Context) error {
+func (c *Client) SendHeartbeat(ctx context.Context) (err error) {
+	defer func() { metrics.RecordHeartbeat(c.agentID, err) }()
 	c.mu.Lock()
 	version := c.policyVersion
 	c.mu.Unlock()

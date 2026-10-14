@@ -3,13 +3,20 @@ package enforcer
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/yasindce1998/warmor/internal/cache"
+	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/lineage"
 	"github.com/yasindce1998/warmor/internal/logging"
 	"github.com/yasindce1998/warmor/internal/metrics"
@@ -39,19 +46,27 @@ type Options struct {
 	// <policy>.sig. The policy file is read once, verified, and loaded from
 	// memory; YAML policies are refused.
 	PolicyVerifyKey ed25519.PublicKey
+	// EvalTimeout bounds each WASM policy evaluation; an evaluation that
+	// exceeds it is denied (fail closed) and its instance replaced. Zero
+	// means wasm.DefaultEvalTimeout.
+	EvalTimeout time.Duration
 
 	// Streaming pipeline configuration
 	StreamSinks []streaming.Sink
 	Labels      map[string]string
 
 	// Advanced enforcement
-	NetFilterConfig  *NetFilterConfig
-	SandboxProfiles  []*SandboxProfile
+	NetFilterConfig *NetFilterConfig
+	SandboxProfiles []*SandboxProfile
 }
 
 // PolicyMapSyncer compiles WASM policy decisions into a kernel BPF map for fast-path enforcement.
 type PolicyMapSyncer interface {
 	SetRule(cgroupID uint64, eventType uint8, pattern string, action uint8, audit bool) error
+	// Clear removes every decision from the kernel map. It is called after a
+	// successful policy reload so the kernel never keeps enforcing decisions
+	// made by the previous policy.
+	Clear() error
 }
 
 // Enforcer integrates platform-specific event capture (eBPF/ETW/ESF) with
@@ -68,17 +83,30 @@ type Enforcer struct {
 	logger        *logging.Logger
 	metricsServer *metrics.Server
 	policyMap     PolicyMapSyncer
-	pipeline      *streaming.Pipeline
+	// decisionMu orders persisting decisions (decision cache and kernel
+	// map) against the reset on reload: persistDecision holds it shared,
+	// ReloadPolicy holds it exclusively while clearing both.
+	decisionMu sync.RWMutex
+	// policyGen is bumped (under evaluatorMu) every time a new policy is
+	// swapped in. A decision is only written to the kernel map if the policy
+	// that made it is still current, so an evaluation that was in flight
+	// during a reload cannot repopulate the map with a stale decision after
+	// it was cleared.
+	policyGen      atomic.Uint64
+	pipeline       *streaming.Pipeline
 	lineageTracker *lineage.Tracker
-	netFilter     *NetFilter
-	sandbox       *SandboxManager
-	policyPath    string
-	verifyKey     ed25519.PublicKey
-	auditMode     bool
-	learningMode  bool
-	ctx           context.Context
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
+	netFilter      *NetFilter
+	sandbox        *SandboxManager
+	policyPath     string
+	verifyKey      ed25519.PublicKey
+	evalTimeout    time.Duration
+	policyID       string // metrics label (see policyID()); guarded by evaluatorMu
+	syncFailLog    logLimiter
+	auditMode      bool
+	learningMode   bool
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
 }
 
 // newPlatform constructs the platform monitor. It is a variable so tests can
@@ -98,8 +126,17 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		port = 9090
 	}
 
-	// Initialize logger
-	logger := logging.NewLogger("info")
+	// Initialize logger at the requested level (--log-level). An empty
+	// level means the default; an unknown one is a configuration error
+	// rather than something to silently ignore.
+	logLevel := opts.LogLevel
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	if _, err := zerolog.ParseLevel(logLevel); err != nil {
+		return nil, fmt.Errorf("invalid log level %q: %w", opts.LogLevel, err)
+	}
+	logger := logging.NewLogger(logLevel)
 	logger.LogStartup(policyPath)
 
 	// Initialize network filter if configured. This only validates config,
@@ -147,6 +184,9 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	logger.LogInfo(fmt.Sprintf("✓ %s platform loaded", plat.Name()))
 
 	caps := plat.Capabilities()
+	// Degraded if kernel LSM enforcement was asked for but is not active
+	// (RequireLSM already failed Load in that case).
+	metrics.SetEBPFLoaderStatus(caps.LSMEnforcement || !opts.LSMEnforce)
 	var policyMapSyncer PolicyMapSyncer
 	if caps.LSMEnforcement {
 		logger.LogInfo("✓ LSM-BPF kernel enforcement active")
@@ -168,6 +208,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	logger.LogInfo("✓ WASM runtime created (compilation cache enabled)")
 
 	// Load policy (supports both .wasm and .yaml/.yml)
+	pid := policyID(policyPath)
 	logger.LogInfo(fmt.Sprintf("Loading policy from: %s", policyPath))
 	if verifiedPolicy != nil {
 		if err := wasmRuntime.LoadPolicyBytes(ctx, verifiedPolicy); err != nil {
@@ -178,12 +219,14 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	} else if wasm.IsYAMLPolicy(policyPath) {
 		logger.LogInfo("Detected YAML policy, compiling...")
 		if err := wasmRuntime.LoadPolicyFromYAML(ctx, policyPath); err != nil {
+			metrics.RecordPolicyLoad(pid, err)
 			wasmRuntime.Close(ctx)
 			plat.Close()
 			return nil, fmt.Errorf("load YAML policy: %w", err)
 		}
 	} else {
 		if err := wasmRuntime.LoadPolicy(ctx, policyPath); err != nil {
+			metrics.RecordPolicyLoad(pid, err)
 			wasmRuntime.Close(ctx)
 			plat.Close()
 			return nil, fmt.Errorf("load policy: %w", err)
@@ -195,6 +238,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	poolSize := runtime.NumCPU()
 	logger.LogInfo(fmt.Sprintf("Creating policy instance pool (size=%d)...", poolSize))
 	pool, err := wasm.NewPool(ctx, wasmRuntime, poolSize)
+	metrics.RecordPolicyLoad(pid, err)
 	if err != nil {
 		wasmRuntime.Close(ctx)
 		plat.Close()
@@ -204,10 +248,13 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 
 	// Create pool-backed policy evaluator
 	evaluator := wasm.NewPolicyEvaluator(pool, hostname)
+	evaluator.SetTimeout(opts.EvalTimeout)
+	logger.LogInfo(fmt.Sprintf("✓ Policy evaluation deadline %v", evaluator.Timeout()))
 
 	// Initialize decision cache (10k entries, 5min TTL)
 	decisionCache := cache.NewDecisionCache(10000, 5*time.Minute)
-	logger.LogInfo("✓ Decision cache initialized (10k entries, 5min TTL)")
+	decisionCache.SetPIDRelevant(pidRelevance(evaluator))
+	logger.LogInfo("✓ Decision cache initialized (10k-entry LRU, 5min TTL)")
 
 	// Initialize action handler
 	actionHandler := NewActionHandler(opts.AuditMode)
@@ -258,6 +305,8 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		sandbox:        sandboxMgr,
 		policyPath:     policyPath,
 		verifyKey:      opts.PolicyVerifyKey,
+		policyID:       pid,
+		evalTimeout:    opts.EvalTimeout,
 		auditMode:      opts.AuditMode,
 		learningMode:   opts.LearningMode,
 		ctx:            ctx,
@@ -281,6 +330,11 @@ func (e *Enforcer) Start() error {
 	// Start event processing
 	e.wg.Add(1)
 	go e.eventLoop()
+
+	if _, ok := e.policyMap.(policyMapCounter); ok {
+		e.wg.Add(1)
+		go e.mapEntriesLoop(mapEntriesInterval)
+	}
 
 	e.logger.LogInfo("Enforcer started, processing events...")
 	return nil
@@ -306,6 +360,8 @@ func (e *Enforcer) eventLoop() {
 
 // handleEvent processes a single event with caching and metrics
 func (e *Enforcer) handleEvent(event *api.Event) {
+	metrics.RecordEventProcessed(event.GetType().String())
+
 	// Record process exec in lineage tracker
 	if event.GetType() == api.EventTypeProcess {
 		filename := event.Filename
@@ -413,9 +469,13 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	// Evaluate with policy
 	e.evaluatorMu.RLock()
 	evaluator := e.evaluator
+	gen := e.policyGen.Load()
+	pid := e.policyID
 	e.evaluatorMu.RUnlock()
 
+	evalStart := time.Now()
 	result, err := evaluator.Evaluate(e.ctx, event)
+	metrics.RecordWASMExec(pid, time.Since(evalStart).Seconds(), err, errors.Is(err, wasm.ErrEvaluationTimeout))
 	if err != nil {
 		e.logger.LogError(err, "policy evaluation failed")
 		metrics.RecordProcessingError()
@@ -432,12 +492,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 		// transient and must not outlive this event, otherwise a single
 		// failed evaluation would keep denying until the cache TTL expires
 		// (or indefinitely in the kernel policy map).
-		e.cache.Put(event, result)
-
-		// Compile decision into BPF policy map for kernel fast-path
-		if e.policyMap != nil && !event.LSMEvent {
-			e.syncToPolicyMap(event, result)
-		}
+		e.persistDecision(event, result, gen, evaluator)
 	}
 
 	// Enforce the decision
@@ -466,6 +521,102 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	metrics.UpdateCacheSize(cacheStats.Size)
 }
 
+// kernelKeyFielder is implemented by policy maps to report which event fields
+// (compiler field names, e.g. "path", "remote_addr") their kernel key for an
+// event type covers. A syncer that does not implement it never receives
+// decisions, since nothing can be proven about its keys.
+type kernelKeyFielder interface {
+	KernelKeyFields(t api.EventType) []string
+}
+
+// decisionDeterminedByKernelKey reports whether a decision of a policy that
+// reads fieldsRead (for events of type t) depends only on fields the kernel
+// key of pm covers.
+func decisionDeterminedByKernelKey(pm PolicyMapSyncer, t api.EventType, fieldsRead uint32) bool {
+	kf, ok := pm.(kernelKeyFielder)
+	if !ok || fieldsRead == wasm.FieldsUnknown {
+		return false
+	}
+	keyFields := kf.KernelKeyFields(t)
+	if len(keyFields) == 0 {
+		return false
+	}
+	return fieldsRead&^compiler.FieldMask(keyFields...) == 0
+}
+
+// policyID is the policy_id metrics label for a policy file: its base name.
+func policyID(path string) string {
+	if path == "" {
+		return "unknown"
+	}
+	return filepath.Base(path)
+}
+
+// policyMapCounter is implemented by policy maps that can report their size
+// (Linux PolicyMapManager.Stats).
+type policyMapCounter interface {
+	Stats() (int, error)
+}
+
+// mapEntriesInterval is how often warmor_ebpf_map_entries is refreshed;
+// counting iterates the whole map, so it is not done per event.
+const mapEntriesInterval = 15 * time.Second
+
+// updateMapEntries refreshes warmor_ebpf_map_entries{map_name="policy_map"}.
+func (e *Enforcer) updateMapEntries() {
+	pc, ok := e.policyMap.(policyMapCounter)
+	if !ok {
+		return
+	}
+	if n, err := pc.Stats(); err == nil {
+		metrics.SetMapEntries("policy_map", n)
+	}
+}
+
+func (e *Enforcer) mapEntriesLoop(interval time.Duration) {
+	defer e.wg.Done()
+	e.updateMapEntries()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-t.C:
+			e.updateMapEntries()
+		}
+	}
+}
+
+// persistDecision stores a policy decision in the decision cache and, when
+// sound, the kernel policy map. Nothing is stored if the policy that made the
+// decision (generation gen) has been replaced by a reload in the meantime,
+// since the reload has already reset both.
+func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, gen uint64, evaluator *wasm.PolicyEvaluator) {
+	e.decisionMu.RLock()
+	defer e.decisionMu.RUnlock()
+	if e.policyGen.Load() != gen {
+		return
+	}
+	e.cache.Put(event, result)
+
+	// Compile decision into BPF policy map for kernel fast-path
+	if e.policyMap != nil && !event.LSMEvent {
+		// Failures are counted and rate-limit logged inside; the event
+		// itself is already enforced in userspace.
+		_ = e.syncToPolicyMap(event, result, gen, evaluator.FieldsRead(event.GetType()))
+	}
+}
+
+// pidRelevance derives the decision cache's PID rule from the policy's
+// fields-read declaration: the PID is only left out of cache keys for event
+// types whose policy has declared it never reads the PID.
+func pidRelevance(evaluator *wasm.PolicyEvaluator) func(api.EventType) bool {
+	return func(t api.EventType) bool {
+		return evaluator.FieldsRead(t)&compiler.FieldBitPID != 0
+	}
+}
+
 // endpointPolicyMapSyncer is implemented by policy maps whose kernel programs
 // key network rules on the binary address+port rather than a string (the
 // Linux LSM connect hook hashes the raw sockaddr). Port is in host order.
@@ -487,14 +638,76 @@ type eventPolicyMapSyncer interface {
 // exactly (on Linux, file rules, since lsm/file_open only sees the dentry
 // basename and a basename rule would hit every same-named file), so a cached
 // decision never applies to events userspace did not evaluate.
-func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult) {
-	if es, ok := e.policyMap.(eventPolicyMapSyncer); ok {
-		action := uint8(0)
-		if result.Action == api.ActionDeny {
-			action = 1
+//
+// gen is the policy generation that produced result; the write is dropped if
+// a reload has replaced that policy since.
+//
+// fieldsRead is the policy's declared fields-read mask for the event type
+// (wasm.PolicyEvaluator.FieldsRead). The kernel applies a synced decision to
+// every event with the same kernel key, so a decision is only synced when
+// it is fully determined by that key: every field the policy reads must be
+// part of it (see kernelKeyFielder). A decision that depends on, say, uid
+// or comm would otherwise be enforced for other users or binaries. Policies
+// that declare nothing are never synced.
+//
+// Callers hold decisionMu (shared); see persistDecision.
+func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult, gen uint64, fieldsRead uint32) error {
+	err := e.syncDecision(event, result, gen, fieldsRead)
+	e.recordSync(event, err)
+	return err
+}
+
+var (
+	// errStaleDecision: the policy that made the decision was replaced.
+	errStaleDecision = errors.New("decision made by a replaced policy")
+	// errNotKeyDetermined: the decision depends on fields the kernel key
+	// does not cover (or the policy did not declare what it reads).
+	errNotKeyDetermined = errors.New("decision not determined by the kernel key")
+)
+
+// recordSync counts the outcome of one kernel sync and logs failures, at
+// most once per syncFailureLogInterval.
+func (e *Enforcer) recordSync(event *api.Event, err error) {
+	switch {
+	case err == nil:
+		metrics.RecordPolicyMapSync(metrics.SyncSynced)
+	case errors.Is(err, errStaleDecision):
+		metrics.RecordPolicyMapSync(metrics.SyncSkippedStale)
+	case errors.Is(err, errNotKeyDetermined):
+		metrics.RecordPolicyMapSync(metrics.SyncSkippedUnsound)
+	case errors.Is(err, kernelmap.ErrNotKernelMatchable):
+		metrics.RecordPolicyMapSync(metrics.SyncSkippedUnmatchable)
+	default:
+		metrics.RecordPolicyMapSync(metrics.SyncFailed)
+		if ok, suppressed := e.syncFailLog.allow(time.Now()); ok && e.logger != nil {
+			msg := fmt.Sprintf("sync %s decision to kernel policy map (userspace still enforces it)", event.GetType())
+			if suppressed > 0 {
+				msg += fmt.Sprintf("; %d similar failures suppressed", suppressed)
+			}
+			e.logger.LogError(err, msg)
 		}
-		_ = es.SyncEvent(event, action, result.Audit || e.auditMode)
-		return
+	}
+}
+
+func (e *Enforcer) syncDecision(event *api.Event, result *api.ActionResult, gen uint64, fieldsRead uint32) error {
+	if e.policyGen.Load() != gen {
+		return errStaleDecision
+	}
+	if !decisionDeterminedByKernelKey(e.policyMap, event.GetType(), fieldsRead) {
+		return errNotKeyDetermined
+	}
+
+	action := uint8(0)
+	if result.Action == api.ActionDeny {
+		action = 1
+	}
+	// Sync runs before ActionHandler.Enforce applies the audit downgrade, so
+	// fold global audit mode in here: the kernel must never be stricter than
+	// userspace, and an audit-flagged deny is only logged by the BPF side.
+	audit := result.Audit || e.auditMode
+
+	if es, ok := e.policyMap.(eventPolicyMapSyncer); ok {
+		return es.SyncEvent(event, action, audit)
 	}
 
 	var eventType uint8
@@ -521,27 +734,44 @@ func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult) {
 	}
 
 	if pattern == "" {
-		return
+		return fmt.Errorf("empty pattern: %w", kernelmap.ErrNotKernelMatchable)
 	}
-
-	action := uint8(0)
-	if result.Action == api.ActionDeny {
-		action = 1
-	}
-
-	// Sync runs before ActionHandler.Enforce applies the audit downgrade, so
-	// fold global audit mode in here: the kernel must never be stricter than
-	// userspace, and an audit-flagged deny is only logged by the BPF side.
-	audit := result.Audit || e.auditMode
 
 	if eventType == 2 {
 		if ep, ok := e.policyMap.(endpointPolicyMapSyncer); ok {
-			_ = ep.SetEndpointRule(event.CgroupID, eventType, pattern, event.Network.RemotePort, action, audit)
-			return
+			return ep.SetEndpointRule(event.CgroupID, eventType, pattern, event.Network.RemotePort, action, audit)
 		}
 	}
 
-	_ = e.policyMap.SetRule(event.CgroupID, eventType, pattern, action, audit)
+	return e.policyMap.SetRule(event.CgroupID, eventType, pattern, action, audit)
+}
+
+// syncFailureLogInterval rate-limits kernel sync failure logs: a full or
+// broken map fails every sync, and the event loop must not drown in logs.
+const syncFailureLogInterval = 10 * time.Second
+
+// logLimiter allows one log per interval and counts what it suppressed.
+type logLimiter struct {
+	mu         sync.Mutex
+	interval   time.Duration
+	last       time.Time
+	suppressed int
+}
+
+func (l *logLimiter) allow(now time.Time) (bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	interval := l.interval
+	if interval == 0 {
+		interval = syncFailureLogInterval
+	}
+	if !l.last.IsZero() && now.Sub(l.last) < interval {
+		l.suppressed++
+		return false, 0
+	}
+	n := l.suppressed
+	l.last, l.suppressed = now, 0
+	return true, n
 }
 
 // GetStats returns current statistics
@@ -606,53 +836,17 @@ func (e *Enforcer) PrintStats() {
 func (e *Enforcer) ReloadPolicy() error {
 	e.logger.LogInfo(fmt.Sprintf("Reloading policy from: %s", e.policyPath))
 
-	var verifiedPolicy []byte
-	if e.verifyKey != nil {
-		data, err := ReadVerifiedPolicy(e.policyPath, e.verifyKey)
-		if err != nil {
-			return fmt.Errorf("verify new policy: %w", err)
-		}
-		verifiedPolicy = data
-	}
-
-	// Create new runtime with compilation cache
-	newRuntime, err := wasm.NewRuntime(e.ctx, wasm.RuntimeConfig{
-		CacheDir: wasm.DefaultCacheDir(),
-		PoolSize: runtime.NumCPU(),
-	})
+	pid := policyID(e.policyPath)
+	newRuntime, newPool, err := e.loadPolicy()
+	metrics.RecordPolicyLoad(pid, err)
 	if err != nil {
-		return fmt.Errorf("create new runtime: %w", err)
-	}
-
-	// Load new policy (supports both .wasm and .yaml/.yml)
-	if verifiedPolicy != nil {
-		if err := newRuntime.LoadPolicyBytes(e.ctx, verifiedPolicy); err != nil {
-			newRuntime.Close(e.ctx)
-			return fmt.Errorf("load new policy: %w", err)
-		}
-	} else if wasm.IsYAMLPolicy(e.policyPath) {
-		if err := newRuntime.LoadPolicyFromYAML(e.ctx, e.policyPath); err != nil {
-			newRuntime.Close(e.ctx)
-			return fmt.Errorf("load new YAML policy: %w", err)
-		}
-	} else {
-		if err := newRuntime.LoadPolicy(e.ctx, e.policyPath); err != nil {
-			newRuntime.Close(e.ctx)
-			return fmt.Errorf("load new policy: %w", err)
-		}
-	}
-
-	// Create new pool
-	poolSize := runtime.NumCPU()
-	newPool, err := wasm.NewPool(e.ctx, newRuntime, poolSize)
-	if err != nil {
-		newRuntime.Close(e.ctx)
-		return fmt.Errorf("create new policy pool: %w", err)
+		return err
 	}
 
 	// Create new evaluator
 	hostname, _ := os.Hostname()
 	newEvaluator := wasm.NewPolicyEvaluator(newPool, hostname)
+	newEvaluator.SetTimeout(e.evalTimeout)
 
 	// Atomic swap with mutex protection
 	e.evaluatorMu.Lock()
@@ -662,10 +856,24 @@ func (e *Enforcer) ReloadPolicy() error {
 	e.evaluator = newEvaluator
 	e.pool = newPool
 	e.wasmRuntime = newRuntime
+	e.policyID = pid
+	e.policyGen.Add(1)
 	e.evaluatorMu.Unlock()
 
-	// Clear cache on policy reload
-	e.cache.Clear()
+	// Drop every decision the old policy made: the userspace cache (whose
+	// keying also follows the new policy's declaration) and the kernel map,
+	// otherwise the kernel keeps enforcing old decisions until the entries
+	// are evicted. Holding decisionMu exclusively waits out any
+	// persistDecision already past its generation check; later ones from
+	// the old policy see the bumped generation and are dropped.
+	var clearErr error
+	e.decisionMu.Lock()
+	e.cache.SetPIDRelevant(pidRelevance(newEvaluator))
+	if e.policyMap != nil {
+		clearErr = e.policyMap.Clear()
+	}
+	e.decisionMu.Unlock()
+	e.updateMapEntries()
 
 	// Clean up old resources
 	if oldEvaluator != nil {
@@ -678,9 +886,65 @@ func (e *Enforcer) ReloadPolicy() error {
 		oldRuntime.Close(e.ctx)
 	}
 
-	e.logger.LogInfo("✓ Policy reloaded successfully")
 	metrics.SetPolicyInfo(e.policyPath, version.Version)
+	if clearErr != nil {
+		// The new policy is active in userspace, but stale kernel decisions
+		// may remain; surface it rather than report a clean reload.
+		e.logger.LogError(clearErr, "clear kernel policy map after reload")
+		return fmt.Errorf("policy reloaded, but clearing the kernel policy map failed (stale kernel decisions may remain): %w", clearErr)
+	}
+	e.logger.LogInfo("✓ Policy reloaded successfully")
 	return nil
+}
+
+// loadPolicy compiles e.policyPath into a fresh runtime and instance pool.
+func (e *Enforcer) loadPolicy() (*wasm.Runtime, *wasm.Pool, error) {
+	// With a verify key, read the file once, verify it and load exactly
+	// those bytes, before creating anything.
+	var verifiedPolicy []byte
+	if e.verifyKey != nil {
+		data, err := ReadVerifiedPolicy(e.policyPath, e.verifyKey)
+		if err != nil {
+			return nil, nil, fmt.Errorf("verify new policy: %w", err)
+		}
+		verifiedPolicy = data
+	}
+
+	// Create new runtime with compilation cache
+	newRuntime, err := wasm.NewRuntime(e.ctx, wasm.RuntimeConfig{
+		CacheDir: wasm.DefaultCacheDir(),
+		PoolSize: runtime.NumCPU(),
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("create new runtime: %w", err)
+	}
+
+	// Load new policy (supports both .wasm and .yaml/.yml)
+	if verifiedPolicy != nil {
+		if err := newRuntime.LoadPolicyBytes(e.ctx, verifiedPolicy); err != nil {
+			newRuntime.Close(e.ctx)
+			return nil, nil, fmt.Errorf("load new policy: %w", err)
+		}
+	} else if wasm.IsYAMLPolicy(e.policyPath) {
+		if err := newRuntime.LoadPolicyFromYAML(e.ctx, e.policyPath); err != nil {
+			newRuntime.Close(e.ctx)
+			return nil, nil, fmt.Errorf("load new YAML policy: %w", err)
+		}
+	} else {
+		if err := newRuntime.LoadPolicy(e.ctx, e.policyPath); err != nil {
+			newRuntime.Close(e.ctx)
+			return nil, nil, fmt.Errorf("load new policy: %w", err)
+		}
+	}
+
+	// Create new pool
+	poolSize := runtime.NumCPU()
+	newPool, err := wasm.NewPool(e.ctx, newRuntime, poolSize)
+	if err != nil {
+		newRuntime.Close(e.ctx)
+		return nil, nil, fmt.Errorf("create new policy pool: %w", err)
+	}
+	return newRuntime, newPool, nil
 }
 
 // NetFilter returns the enforcer's network filter (nil if not configured).

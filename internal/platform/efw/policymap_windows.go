@@ -10,13 +10,14 @@ import (
 
 	"github.com/cilium/ebpf"
 
+	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/platform/winutil"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 // ErrNotKernelMatchable is returned for decisions the kernel programs could
 // not apply exactly, so they are left to userspace.
-var ErrNotKernelMatchable = errors.New("efw: decision not expressible in the kernel map")
+var ErrNotKernelMatchable = kernelmap.ErrNotKernelMatchable
 
 // PolicyMap writes WASM decisions into the kernel maps so the next identical
 // operation is decided in the kernel, synchronously.
@@ -139,4 +140,59 @@ func u32Bytes(v uint32) []byte {
 	b := make([]byte, 4)
 	binary.LittleEndian.PutUint32(b, v)
 	return b
+}
+
+// Clear implements enforcer.PolicyMapSyncer: it removes every decision the
+// previous policy compiled into the kernel maps, so a reload never leaves the
+// kernel enforcing stale rules. Per-PID image tracking (procInfo) is not a
+// policy decision and is kept. All deletes are attempted; failures are
+// returned joined.
+func (m *PolicyMap) Clear() error {
+	var errs []error
+	for _, mp := range []*ebpf.Map{m.procDeny, m.netPolicy} {
+		if mp == nil {
+			continue
+		}
+		if err := clearMap(mp); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func clearMap(mp *ebpf.Map) error {
+	var (
+		keys [][]byte
+		errs []error
+	)
+	key := make([]byte, mp.KeySize())
+	val := make([]byte, mp.ValueSize())
+	iter := mp.Iterate()
+	for iter.Next(&key, &val) {
+		keys = append(keys, append([]byte(nil), key...))
+	}
+	if err := iter.Err(); err != nil {
+		errs = append(errs, fmt.Errorf("iterate policy map: %w", err))
+	}
+	for _, k := range keys {
+		if err := mp.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			errs = append(errs, fmt.Errorf("delete policy map key %x: %w", k, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// KernelKeyFields reports which event fields (compiler field names) the
+// kernel keys cover. Process keys are the image path; network keys are the
+// image plus operation, protocol and remote endpoint (the image is not a
+// policy-visible field of network events, so it only narrows the key).
+func (m *PolicyMap) KernelKeyFields(t api.EventType) []string {
+	switch t {
+	case api.EventTypeProcess:
+		return []string{"path"}
+	case api.EventTypeNetwork:
+		return []string{"operation", "protocol", "remote_addr", "remote_port"}
+	default:
+		return nil
+	}
 }

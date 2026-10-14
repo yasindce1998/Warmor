@@ -226,8 +226,13 @@ default_action: allow
 - `warmor_policy_info{path, version}`
 - `warmor_events_processing_errors_total`
 - `warmor_audit_denied_total`
-
-A second metric set in `internal/metrics/exporter.go` (LSM decisions, policy loads, heartbeats, WASM exec) is registered but **never updated** on `main`.
+- `warmor_events_processed_total{event_type}`, `warmor_events_dropped_total` (Windows monitors only; Linux readers block instead of dropping)
+- `warmor_lsm_decisions_total{hook, action="deny|pass"}` (outcomes the kernel reports to userspace)
+- `warmor_policy_map_syncs_total{result="synced|failed|skipped_unmatchable|skipped_unsound|skipped_stale"}`, `warmor_ebpf_map_entries{map_name}`
+- `warmor_ebpf_loader_status` (1 = requested kernel enforcement active, 0 = degraded)
+- `warmor_wasm_exec_duration_seconds{policy_id}`, `warmor_wasm_exec_errors_total{policy_id, kind="timeout|error"}`
+- `warmor_policy_loads_total{policy_id, status}`
+- `warmor_agent_registrations_total{status}`, `warmor_agent_heartbeats_total{status}`, `warmor_agent_last_heartbeat_timestamp{agent_id}` (agents connected to a policy server)
 
 **Grafana Dashboards** (provisioned via ConfigMap or JSON import):
 - Events/sec rate, Actions breakdown (pie chart)

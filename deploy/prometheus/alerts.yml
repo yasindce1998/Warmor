@@ -10,14 +10,23 @@ groups:
           summary: "High deny rate detected"
           description: "Warmor is denying more than 10 operations per second for 2 minutes."
 
-      - alert: WarmorHookLatencyHigh
-        expr: histogram_quantile(0.99, sum(rate(warmor_lsm_decision_duration_seconds_bucket[5m])) by (hook, le)) > 0.001
+      - alert: WarmorWASMLatencyHigh
+        expr: histogram_quantile(0.99, sum(rate(warmor_wasm_exec_duration_seconds_bucket[5m])) by (policy_id, le)) > 0.01
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "LSM hook latency too high"
-          description: "Hook {{ $labels.hook }} p99 latency exceeds 1ms for 5 minutes."
+          summary: "WASM policy evaluation latency too high"
+          description: "Policy {{ $labels.policy_id }} p99 evaluation latency exceeds 10ms for 5 minutes."
+
+      - alert: WarmorPolicyMapSyncFailures
+        expr: sum(rate(warmor_policy_map_syncs_total{result="failed"}[5m])) by (instance) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kernel policy map writes failing"
+          description: "Decisions on {{ $labels.instance }} cannot be written to the kernel policy map; they are still enforced in userspace, without the kernel fast path."
 
       - alert: WarmorEventsDropped
         expr: rate(warmor_events_dropped_total[5m]) > 0
@@ -26,10 +35,10 @@ groups:
           severity: critical
         annotations:
           summary: "Events being dropped"
-          description: "Warmor is dropping events due to backpressure. Ring buffer may be too small."
+          description: "The platform monitor (Windows eBPF/ETW consumers) is discarding events because the enforcer cannot keep up."
 
       - alert: WarmorPolicyLoadFailure
-        expr: sum(rate(warmor_policy_loads_total{status="error"}[5m])) > 0
+        expr: sum(rate(warmor_policy_loads_total{status="error"}[5m])) by (policy_id) > 0
         for: 1m
         labels:
           severity: critical
@@ -38,13 +47,13 @@ groups:
           description: "Policy {{ $labels.policy_id }} is failing to load."
 
       - alert: WarmorWASMErrors
-        expr: sum(rate(warmor_wasm_exec_errors_total[5m])) by (policy_id) > 0
+        expr: sum(rate(warmor_wasm_exec_errors_total[5m])) by (policy_id, kind) > 0
         for: 2m
         labels:
           severity: warning
         annotations:
           summary: "WASM execution errors"
-          description: "Policy {{ $labels.policy_id }} is producing WASM execution errors."
+          description: "Policy {{ $labels.policy_id }} evaluations are failing ({{ $labels.kind }}); each failure is denied (fail closed)."
 
       - alert: WarmorAgentStale
         expr: time() - warmor_agent_last_heartbeat_timestamp > 120
@@ -55,11 +64,20 @@ groups:
           summary: "Agent missed heartbeat"
           description: "Agent has not sent a heartbeat in over 2 minutes."
 
-      - alert: WarmorNoAgentsRegistered
-        expr: warmor_agent_registrations_total == 0
+      - alert: WarmorAgentRegistrationFailing
+        expr: sum by (instance) (rate(warmor_agent_registrations_total{status="error"}[10m])) > 0 unless on (instance) sum by (instance) (warmor_agent_registrations_total{status="success"}) > 0
         for: 10m
         labels:
-          severity: info
+          severity: warning
         annotations:
-          summary: "No agents registered"
-          description: "No agents have registered with the policy server in 10 minutes."
+          summary: "Agent cannot register with the policy server"
+          description: "Agent {{ $labels.instance }} has been failing to register with the policy server for 10 minutes."
+
+      - alert: WarmorEBPFLoaderDegraded
+        expr: warmor_ebpf_loader_status == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kernel enforcement not active"
+          description: "Warmor on {{ $labels.instance }} was started with kernel LSM enforcement, but it is not active; only userspace enforcement is running."

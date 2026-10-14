@@ -112,3 +112,8 @@ func (l *Logger) LogStartup(policyPath string) {
 func (l *Logger) LogShutdown() {
 	l.logger.Info().Msg("warmor_shutting_down")
 }
+
+// Level returns the minimum level this logger emits (e.g. "info").
+func (l *Logger) Level() string {
+	return l.logger.GetLevel().String()
+}

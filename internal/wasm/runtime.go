@@ -2,6 +2,8 @@ package wasm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,7 +24,17 @@ type RuntimeConfig struct {
 	// PoolSize sets the number of WASM instances in the evaluation pool.
 	// Defaults to runtime.NumCPU() if zero.
 	PoolSize int
+
+	// MemoryLimitPages caps each policy instance's linear memory, in 64 KiB
+	// pages. Defaults to DefaultMemoryLimitPages if zero. A module whose
+	// declared minimum exceeds it fails to compile; memory.grow beyond it
+	// fails inside the policy.
+	MemoryLimitPages uint32
 }
+
+// DefaultMemoryLimitPages is the default per-instance memory cap (16 MiB),
+// ample for generated policies (64 KiB heap + 1 MiB stack).
+const DefaultMemoryLimitPages = 256
 
 // DefaultCacheDir returns the platform-appropriate default cache directory.
 func DefaultCacheDir() string {
@@ -39,6 +51,9 @@ type Runtime struct {
 	config   wazero.ModuleConfig
 	cache    wazero.CompilationCache
 	poolSize int
+	// cacheDir is RuntimeConfig.CacheDir; compiled YAML policies are kept
+	// under it (see LoadPolicyFromYAML).
+	cacheDir string
 }
 
 // NewRuntime creates a new WASM runtime with compilation cache support.
@@ -53,7 +68,16 @@ func NewRuntime(ctx context.Context, cfgs ...RuntimeConfig) (*Runtime, error) {
 		poolSize = runtime.NumCPU()
 	}
 
-	runtimeCfg := wazero.NewRuntimeConfig()
+	memPages := cfg.MemoryLimitPages
+	if memPages == 0 {
+		memPages = DefaultMemoryLimitPages
+	}
+	// Close-on-context-done makes a cancelled or timed-out context abort a
+	// running policy (e.g. an infinite loop) instead of hanging the caller;
+	// see PolicyEvaluator's per-evaluation deadline.
+	runtimeCfg := wazero.NewRuntimeConfig().
+		WithMemoryLimitPages(memPages).
+		WithCloseOnContextDone(true)
 
 	var compilationCache wazero.CompilationCache
 	if cfg.CacheDir != "" {
@@ -93,6 +117,7 @@ func NewRuntime(ctx context.Context, cfgs ...RuntimeConfig) (*Runtime, error) {
 		config:   wazero.NewModuleConfig(),
 		cache:    compilationCache,
 		poolSize: poolSize,
+		cacheDir: cfg.CacheDir,
 	}, nil
 }
 
@@ -162,30 +187,88 @@ func (r *Runtime) validateModule(ctx context.Context, compiled wazero.CompiledMo
 }
 
 // LoadPolicyFromYAML compiles a YAML policy to WASM and loads it.
-// If a pre-compiled .wasm file exists next to the .yaml with the same base name,
-// it is loaded directly. Otherwise the YAML is compiled via the Rust toolchain.
+//
+// The compiled module is cached under the runtime's cache directory, keyed by
+// the YAML content and the compiler that produced it (see yamlCacheKey), so
+// editing the YAML always yields a fresh compile and an unchanged YAML is not
+// rebuilt. Nothing is ever read from or written next to the YAML file: it may
+// live on a read-only volume (e.g. a ConfigMap), and a stale sibling .wasm
+// must never shadow the YAML that was actually configured. Without a cache
+// directory the module is compiled into a temporary directory each time.
 func (r *Runtime) LoadPolicyFromYAML(ctx context.Context, yamlPath string) error {
-	ext := filepath.Ext(yamlPath)
-	wasmPath := strings.TrimSuffix(yamlPath, ext) + ".wasm"
-
-	if _, err := os.Stat(wasmPath); err == nil {
-		return r.LoadPolicy(ctx, wasmPath)
+	data, err := os.ReadFile(yamlPath)
+	if err != nil {
+		return fmt.Errorf("read YAML policy: %w", err)
 	}
-
-	policy, err := compiler.ParseFile(yamlPath)
+	policy, err := compiler.Parse(data)
 	if err != nil {
 		return fmt.Errorf("parse YAML policy: %w", err)
 	}
 
-	result, err := compiler.Build(policy, compiler.BuildOptions{
-		OutputPath: wasmPath,
-	})
+	outDir := ""
+	if r.cacheDir != "" {
+		outDir = filepath.Join(r.cacheDir, "yaml")
+		if err := os.MkdirAll(outDir, 0o750); err != nil {
+			return fmt.Errorf("create YAML policy cache dir: %w", err)
+		}
+	} else {
+		tmp, err := os.MkdirTemp("", "warmor-yaml-*")
+		if err != nil {
+			return fmt.Errorf("create temp dir: %w", err)
+		}
+		defer os.RemoveAll(tmp)
+		outDir = tmp
+	}
+
+	key, err := yamlCacheKey(data, policy)
 	if err != nil {
 		return fmt.Errorf("compile YAML policy: %w", err)
 	}
-	compiler.Cleanup(result)
+	wasmPath := filepath.Join(outDir, key+".wasm")
+	if _, err := os.Stat(wasmPath); err == nil {
+		if err := r.LoadPolicy(ctx, wasmPath); err == nil {
+			return nil
+		}
+		// A corrupt cache entry is rebuilt rather than trusted.
+		_ = os.Remove(wasmPath)
+	}
 
+	// Build to a temporary name and rename into place, so a concurrent or
+	// interrupted build never leaves a truncated module at the cache key.
+	tmpPath := fmt.Sprintf("%s.tmp-%d", wasmPath, os.Getpid())
+	if err := buildYAMLPolicy(policy, tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("compile YAML policy: %w", err)
+	}
+	if err := os.Rename(tmpPath, wasmPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("store compiled YAML policy: %w", err)
+	}
 	return r.LoadPolicy(ctx, wasmPath)
+}
+
+// yamlCacheKey identifies a compiled YAML policy: sha256 over the YAML bytes,
+// the compiler version and the generated Rust source (which changes whenever
+// codegen does, even if compiler.Version was not bumped).
+func yamlCacheKey(yamlBytes []byte, policy *compiler.Policy) (string, error) {
+	src, err := compiler.GenerateRust(policy)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "warmor-yaml\x00%s\x00%d\x00", compiler.Version, len(yamlBytes))
+	h.Write(yamlBytes)
+	h.Write([]byte{0})
+	h.Write([]byte(src))
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// buildYAMLPolicy compiles policy to a WASM module at outPath. It is a
+// variable so tests can avoid invoking the Rust toolchain.
+var buildYAMLPolicy = func(policy *compiler.Policy, outPath string) error {
+	result, err := compiler.Build(policy, compiler.BuildOptions{OutputPath: outPath})
+	compiler.Cleanup(result)
+	return err
 }
 
 // IsYAMLPolicy returns true if the path has a .yaml or .yml extension.

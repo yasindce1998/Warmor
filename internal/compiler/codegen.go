@@ -23,6 +23,7 @@ func GenerateRust(policy *Policy) (string, error) {
 	writeReasonTable(&b, policy)
 	writeEvaluateEventFunction(&b, policy)
 	writeGetLastMatchedRule(&b)
+	writeFieldsRead(&b, policy)
 
 	// Host callback extern declarations
 	writeHostExterns(&b)

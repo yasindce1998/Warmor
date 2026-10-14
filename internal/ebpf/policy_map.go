@@ -12,6 +12,9 @@ import (
 	"sync"
 
 	"github.com/cilium/ebpf"
+
+	"github.com/yasindce1998/warmor/internal/kernelmap"
+	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 const (
@@ -54,13 +57,40 @@ type CachedDecision struct {
 
 // PolicyMapManager manages the BPF policy map from userspace.
 type PolicyMapManager struct {
-	policyMap *ebpf.Map
+	policyMap policyMapBackend
 	mu        sync.Mutex
+}
+
+// policyMapBackend is the subset of *ebpf.Map the manager uses, so the
+// userspace logic can be tested without loading BPF into a kernel.
+type policyMapBackend interface {
+	Put(key, value any) error
+	Delete(key any) error
+	// keys returns every key currently in the map.
+	keys() ([]PolicyKey, error)
+}
+
+// kernelPolicyMap adapts a loaded *ebpf.Map to policyMapBackend.
+type kernelPolicyMap struct{ *ebpf.Map }
+
+func (m kernelPolicyMap) keys() ([]PolicyKey, error) {
+	var (
+		key  PolicyKey
+		keys []PolicyKey
+	)
+	iter := m.Iterate()
+	for iter.Next(&key, new(PolicyValue)) {
+		keys = append(keys, key)
+	}
+	return keys, iter.Err()
 }
 
 // NewPolicyMapManager wraps an existing BPF map.
 func NewPolicyMapManager(m *ebpf.Map) *PolicyMapManager {
-	return &PolicyMapManager{policyMap: m}
+	if m == nil {
+		return &PolicyMapManager{}
+	}
+	return &PolicyMapManager{policyMap: kernelPolicyMap{m}}
 }
 
 // HashPattern computes the FNV-1a hash of a pattern string, matching the BPF-side implementation.
@@ -84,7 +114,7 @@ const (
 // match exactly. Such rules are refused rather than written: a key that only
 // covers part of what userspace decided on would apply the decision to other
 // events, which is worse than no kernel fast-path at all.
-var ErrNotKernelMatchable = errors.New("rule cannot be matched exactly by the BPF programs")
+var ErrNotKernelMatchable = kernelmap.ErrNotKernelMatchable
 
 // ruleHash returns the policy_map rule_hash the BPF program for eventType
 // computes for pattern, or ErrNotKernelMatchable if the program never sees
@@ -281,22 +311,30 @@ func (m *PolicyMapManager) DeleteRule(cgroupID uint64, eventType uint8, pattern 
 	return m.policyMap.Delete(key)
 }
 
-// Clear removes all entries from the policy map.
+// Clear removes all entries from the policy map. Every delete is attempted;
+// failures (other than a key that vanished concurrently, e.g. by LRU
+// eviction) are returned joined, so a caller never believes stale kernel
+// decisions are gone when they are not.
 func (m *PolicyMapManager) Clear() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var key PolicyKey
-	iter := m.policyMap.Iterate()
-	var keysToDelete []PolicyKey
-	for iter.Next(&key, new(PolicyValue)) {
-		keysToDelete = append(keysToDelete, key)
+	if m.policyMap == nil {
+		return errors.New("policy map not loaded")
+	}
+
+	keysToDelete, err := m.policyMap.keys()
+	var errs []error
+	if err != nil {
+		errs = append(errs, fmt.Errorf("iterate policy map: %w", err))
 	}
 
 	for _, k := range keysToDelete {
-		_ = m.policyMap.Delete(k)
+		if err := m.policyMap.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			errs = append(errs, fmt.Errorf("delete policy map key %+v: %w", k, err))
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // SyncFromWASM batch-updates the policy map from WASM evaluation results.
@@ -338,13 +376,11 @@ func (m *PolicyMapManager) Stats() (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	count := 0
-	var key PolicyKey
-	iter := m.policyMap.Iterate()
-	for iter.Next(&key, new(PolicyValue)) {
-		count++
+	if m.policyMap == nil {
+		return 0, errors.New("policy map not loaded")
 	}
-	return count, nil
+	keys, err := m.policyMap.keys()
+	return len(keys), err
 }
 
 // SetEnforce updates the lsm_enforce map to enable/disable kernel blocking.
@@ -395,4 +431,20 @@ func (k PolicyKey) MarshalBinary() ([]byte, error) {
 	buf[14] = 0
 	buf[15] = 0
 	return buf, nil
+}
+
+// KernelKeyFields reports which event fields (compiler field names) the BPF
+// programs' policy_map key covers per event type, besides the cgroup: the
+// exec filename for process events and the remote endpoint for connects.
+// File events are never keyed (lsm_file only sees the basename). The
+// enforcer only syncs decisions that depend on nothing else.
+func (m *PolicyMapManager) KernelKeyFields(t api.EventType) []string {
+	switch t {
+	case api.EventTypeProcess:
+		return []string{"path"}
+	case api.EventTypeNetwork:
+		return []string{"remote_addr", "remote_port"}
+	default:
+		return nil
+	}
 }

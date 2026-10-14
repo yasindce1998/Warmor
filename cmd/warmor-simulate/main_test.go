@@ -70,15 +70,15 @@ func TestSimulate_TextReportToStdout(t *testing.T) {
 	assertContains(t, "report", stdout, "Policy Simulation Report", "Events replayed: 3", "Decision breakdown:")
 }
 
-func TestSimulate_JSONReportToFile_YAMLWithCompiledSibling(t *testing.T) {
+func TestSimulate_JSONReportToFile(t *testing.T) {
 	data := writeEvents(t, sampleEvents())
-	pdir := t.TempDir()
-	// A .yaml policy with a pre-compiled sibling .wasm is loaded without cargo.
-	copyWasm(t, pdir, "candidate.wasm")
-	yamlPolicy := writeFile(t, filepath.Join(pdir, "candidate.yaml"), "name: candidate\n")
+	// YAML policies are always compiled from the YAML itself (a sibling
+	// .wasm is never substituted), so use the prebuilt module directly to
+	// stay independent of cargo.
+	policy := copyWasm(t, t.TempDir(), "candidate.wasm")
 	outPath := filepath.Join(t.TempDir(), "report.json")
 
-	stdout, stderr := runMain(t, "", "-policy", yamlPolicy, "-data", data, "-since", "72h", "-format", "json", "-o", outPath)
+	stdout, stderr := runMain(t, "", "-policy", policy, "-data", data, "-since", "72h", "-format", "json", "-o", outPath)
 	if stdout != "" {
 		t.Errorf("stdout should be empty with -o, got %q", stdout)
 	}
