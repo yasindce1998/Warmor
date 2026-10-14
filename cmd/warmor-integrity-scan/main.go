@@ -14,6 +14,7 @@ func main() {
 	rootfs := flag.String("rootfs", "", "Path to container rootfs to scan")
 	output := flag.String("o", "integrity-db.json", "Output database file")
 	verify := flag.String("verify", "", "Verify against existing database")
+	all := flag.Bool("all", false, "Hash every executable in the rootfs, not just bin/sbin directories (needed when the image ships binaries in /app, /opt, ...)")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 
 	flag.Usage = func() {
@@ -44,7 +45,11 @@ func main() {
 	}
 
 	fmt.Fprintf(os.Stderr, "Scanning %s...\n", *rootfs)
-	db, err := integrity.ScanRootFS(*rootfs)
+	scan := integrity.ScanRootFS
+	if *all {
+		scan = integrity.ScanRootFSAll
+	}
+	db, err := scan(*rootfs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

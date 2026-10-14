@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -486,4 +487,52 @@ func TestDatabaseVerifyInRoot(t *testing.T) {
 	if _, err := db.VerifyInRoot(root, "/usr/bin/app"); err == nil {
 		t.Error("expected error for missing file")
 	}
+}
+
+func TestScanRootFSAll(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec bits")
+	}
+	root := t.TempDir()
+	write := func(rel string, mode os.FileMode) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(rel), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("usr/bin/tool", 0o755)
+	write("app/server", 0o755)
+	write("opt/x/run.sh", 0o755)
+	write("app/config.json", 0o644)
+	write("proc/1/exe", 0o755) // a pseudo-fs in a live root: skipped
+	write("dev/fake", 0o755)
+
+	std, err := ScanRootFS(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := std.Binaries["/app/server"]; ok || len(std.Binaries) != 1 {
+		t.Errorf("standard scan = %v, want only /usr/bin/tool", keys(std.Binaries))
+	}
+
+	all, err := ScanRootFSAll(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/app/server", "/opt/x/run.sh", "/usr/bin/tool"}
+	if got := keys(all.Binaries); !slices.Equal(got, want) {
+		t.Errorf("full scan = %v, want %v", got, want)
+	}
+}
+
+func keys(m map[string]*BinaryHash) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
 }
