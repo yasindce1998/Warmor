@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "hook": {
+    "path": "/usr/local/bin/warmor-oci-hook",
+    "args": ["warmor-oci-hook", "--action", "stop"]
+  },
+  "when": {
+    "always": true
+  },
+  "stages": ["poststop"]
+}
