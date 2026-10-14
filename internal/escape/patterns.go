@@ -1,7 +1,9 @@
 package escape
 
 import (
+	"path"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -44,21 +46,42 @@ type StepMatcher struct {
 }
 
 // EventView provides a read-only view of event fields for pattern matching.
+//
+// EventType is the streaming event type: exec, file, network, connect_unix,
+// bind, listen, ptrace or mount. For exec, Filename is the binary being
+// executed and Comm is still the *calling* process's name (the LSM hook runs
+// before the exec completes), so patterns match on the binary, never Comm.
 type EventView struct {
-	EventType  string
-	Comm       string
-	Filename   string
-	CgroupID   uint64
-	PID        uint32
-	PPID       uint32
-	UID        uint32
-	MountType  string
-	PtraceComm string
-	RemoteAddr string
-	LocalPort  uint16
+	EventType          string
+	Comm               string
+	Filename           string
+	CgroupID           uint64
+	PID                uint32
+	PPID               uint32
+	UID                uint32
+	MountType          string
+	MountSource        string
+	PtraceComm         string
+	PtraceTargetCgroup uint64
+	RemoteAddr         string
+	LocalPort          uint16
 }
 
-// DefaultPatterns returns all known container escape patterns.
+// RuntimeSockets are the container runtime API sockets. Connecting to one
+// from inside a container hands over control of the host. The daemon also
+// loads them into the kernel's unix_watch map so these connects are reported.
+var RuntimeSockets = []string{
+	"/var/run/docker.sock",
+	"/run/docker.sock",
+	"/var/run/containerd/containerd.sock",
+	"/run/containerd/containerd.sock",
+	"/var/run/crio/crio.sock",
+	"/run/crio/crio.sock",
+	"/run/podman/podman.sock",
+	"/var/run/podman/podman.sock",
+}
+
+// DefaultPatterns returns the built-in escape patterns.
 func DefaultPatterns() []*Pattern {
 	return []*Pattern{
 		nsenterPattern(),
@@ -71,42 +94,58 @@ func DefaultPatterns() []*Pattern {
 	}
 }
 
+func execBase(ev *EventView) string {
+	return path.Base(ev.Filename)
+}
+
+// isRuntimeInit reports whether the event comes from the container
+// runtime's own setup, which legitimately mounts filesystems inside the new
+// container's cgroup before handing over to the workload.
+func isRuntimeInit(comm string) bool {
+	return strings.HasPrefix(comm, "runc") || comm == "crun" || comm == "youki" ||
+		comm == "conmon" || strings.HasPrefix(comm, "containerd-shim")
+}
+
 func nsenterPattern() *Pattern {
 	return &Pattern{
 		ID:          TechNsenter,
 		Name:        "nsenter from container",
-		Description: "Container process executes nsenter to enter host namespace",
+		Description: "Container process executes nsenter to enter another (host) namespace",
 		Severity:    SeverityCritical,
-		Window:      0,
-		Steps: []StepMatcher{
-			{
-				EventType: "exec",
-				Match: func(ev *EventView) bool {
-					return ev.Filename == "/usr/bin/nsenter" ||
-						ev.Filename == "/bin/nsenter" ||
-						ev.Comm == "nsenter"
-				},
-			},
-		},
+		Steps: []StepMatcher{{
+			EventType: "exec",
+			Match:     func(ev *EventView) bool { return execBase(ev) == "nsenter" },
+		}},
 	}
 }
+
+// blockDevicePrefixes are disk device nodes. Mounting one from a container
+// gives raw access to a host filesystem.
+var blockDevicePrefixes = []string{"/dev/sd", "/dev/vd", "/dev/xvd", "/dev/hd", "/dev/nvme", "/dev/mmcblk", "/dev/mapper/", "/dev/dm-"}
 
 func hostMountPattern() *Pattern {
 	return &Pattern{
 		ID:          TechHostMount,
 		Name:        "host filesystem mount",
-		Description: "Container attempts to mount host paths (/, /etc, /var, /proc/1/root)",
+		Description: "Container mounts a host block device or a cgroup v1 hierarchy (release_agent escape)",
 		Severity:    SeverityCritical,
-		Window:      0,
-		Steps: []StepMatcher{
-			{
-				EventType: "mount",
-				Match: func(ev *EventView) bool {
-					hostPaths := []string{"/", "/etc", "/var", "/proc/1/root", "/host"}
-					return slices.Contains(hostPaths, ev.Filename)
-				},
+		Steps: []StepMatcher{{
+			EventType: "mount",
+			Match: func(ev *EventView) bool {
+				if isRuntimeInit(ev.Comm) {
+					return false
+				}
+				if ev.MountType == "cgroup" {
+					return true
+				}
+				for _, p := range blockDevicePrefixes {
+					if strings.HasPrefix(ev.MountSource, p) {
+						return true
+					}
+				}
+				return false
 			},
-		},
+		}},
 	}
 }
 
@@ -116,15 +155,12 @@ func ptraceCrossPattern() *Pattern {
 		Name:        "cross-cgroup ptrace",
 		Description: "Container process attempts to ptrace a process in a different cgroup",
 		Severity:    SeverityCritical,
-		Window:      0,
-		Steps: []StepMatcher{
-			{
-				EventType: "ptrace",
-				Match: func(ev *EventView) bool {
-					return ev.PtraceComm != "" && ev.CgroupID != 0
-				},
+		Steps: []StepMatcher{{
+			EventType: "ptrace",
+			Match: func(ev *EventView) bool {
+				return ev.PtraceTargetCgroup != 0 && ev.PtraceTargetCgroup != ev.CgroupID
 			},
-		},
+		}},
 	}
 }
 
@@ -132,19 +168,12 @@ func procNSPattern() *Pattern {
 	return &Pattern{
 		ID:          TechProcNS,
 		Name:        "/proc namespace access",
-		Description: "Container accesses /proc/*/ns/* indicating namespace escape attempt",
+		Description: "Container opens /proc/<pid>/ns/*, the handles setns needs to join another namespace",
 		Severity:    SeverityHigh,
-		Window:      0,
-		Steps: []StepMatcher{
-			{
-				EventType: "file",
-				Match: func(ev *EventView) bool {
-					return len(ev.Filename) > 10 &&
-						ev.Filename[:6] == "/proc/" &&
-						containsNS(ev.Filename)
-				},
-			},
-		},
+		Steps: []StepMatcher{{
+			EventType: "file",
+			Match:     func(ev *EventView) bool { return containsNS(ev.Filename) },
+		}},
 	}
 }
 
@@ -152,23 +181,17 @@ func unshareSetnsPattern() *Pattern {
 	return &Pattern{
 		ID:          TechUnshareSetns,
 		Name:        "unshare + setns sequence",
-		Description: "Container executes unshare followed by namespace access within time window",
+		Description: "Container executes unshare followed by namespace handle access within 5s",
 		Severity:    SeverityCritical,
 		Window:      5 * time.Second,
 		Steps: []StepMatcher{
 			{
 				EventType: "exec",
-				Match: func(ev *EventView) bool {
-					return ev.Comm == "unshare" ||
-						ev.Filename == "/usr/bin/unshare" ||
-						ev.Filename == "/bin/unshare"
-				},
+				Match:     func(ev *EventView) bool { return execBase(ev) == "unshare" },
 			},
 			{
 				EventType: "file",
-				Match: func(ev *EventView) bool {
-					return containsNS(ev.Filename)
-				},
+				Match:     func(ev *EventView) bool { return containsNS(ev.Filename) },
 			},
 		},
 	}
@@ -177,62 +200,55 @@ func unshareSetnsPattern() *Pattern {
 func dockerSocketPattern() *Pattern {
 	return &Pattern{
 		ID:          TechDockerSocket,
-		Name:        "docker socket access",
-		Description: "Container accesses Docker/containerd socket for escape or lateral movement",
+		Name:        "container runtime socket access",
+		Description: "Container connects to the Docker/containerd/CRI-O/podman API socket",
 		Severity:    SeverityHigh,
-		Window:      0,
-		Steps: []StepMatcher{
-			{
-				EventType: "file",
-				Match: func(ev *EventView) bool {
-					sockets := []string{
-						"/var/run/docker.sock",
-						"/run/docker.sock",
-						"/var/run/containerd/containerd.sock",
-						"/run/containerd/containerd.sock",
-					}
-					return slices.Contains(sockets, ev.Filename)
-				},
-			},
-		},
+		Steps: []StepMatcher{{
+			EventType: "connect_unix",
+			Match:     func(ev *EventView) bool { return slices.Contains(RuntimeSockets, ev.Filename) },
+		}},
 	}
+}
+
+// escapeTools are binaries with no business running inside an application
+// container and a long history in breakout write-ups.
+var escapeTools = []string{
+	"runc", "ctr", "crictl", "kubectl", "docker", "nerdctl",
+	"chroot", "capsh", "setcap", "debugfs",
 }
 
 func sensitiveExecPattern() *Pattern {
 	return &Pattern{
 		ID:          TechSensitiveExec,
 		Name:        "sensitive binary execution",
-		Description: "Container executes known escape/exploitation tools",
+		Description: "Container executes a container-runtime or capability tool",
 		Severity:    SeverityHigh,
-		Window:      0,
-		Steps: []StepMatcher{
-			{
-				EventType: "exec",
-				Match: func(ev *EventView) bool {
-					tools := []string{
-						"runc", "ctr", "crictl", "kubectl",
-						"mount", "umount", "chroot",
-						"capsh", "setcap", "getcap",
-					}
-					return slices.Contains(tools, ev.Comm)
-				},
-			},
-		},
+		Steps: []StepMatcher{{
+			EventType: "exec",
+			Match:     func(ev *EventView) bool { return slices.Contains(escapeTools, execBase(ev)) },
+		}},
 	}
 }
 
+// containsNS reports whether path is a namespace handle under /proc:
+// /proc/<pid>/ns/<type>, /proc/self/ns/<type> or /proc/thread-self/ns/<type>.
 func containsNS(path string) bool {
-	// Match /proc/<pid>/ns/<type>
-	if len(path) < 10 {
+	rest, ok := strings.CutPrefix(path, "/proc/")
+	if !ok {
 		return false
 	}
-	i := 6 // skip "/proc/"
-	for i < len(path) && path[i] >= '0' && path[i] <= '9' {
-		i++
-	}
-	if i == 6 || i >= len(path) {
+	slash := strings.IndexByte(rest, '/')
+	if slash <= 0 {
 		return false
 	}
-	rest := path[i:]
-	return len(rest) > 4 && rest[:4] == "/ns/"
+	who := rest[:slash]
+	if who != "self" && who != "thread-self" {
+		for _, c := range who {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	typ, ok := strings.CutPrefix(rest[slash:], "/ns/")
+	return ok && typ != "" && !strings.Contains(typ, "/")
 }
