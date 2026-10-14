@@ -54,7 +54,7 @@ sudo ./bin/warmor-daemon --policy crypto.wasm --audit --event-sink stdout
 sudo ./bin/warmor-daemon --policy crypto.wasm --lsm-enforce
 ```
 
-> **Do not run the daemon with its default `--policy` (`policies/example/policy.wasm`) without `--audit`.** On `main` that example policy denies every file and network event (known issue, being fixed), so the daemon would kill almost every process. Pass a policy compiled from YAML, as above.
+> **Start with `--audit`.** Without it, denied processes are SIGKILLed even when `--lsm-enforce` is off. The daemon's default `--policy` (`policies/example/policy.wasm`, built with `make build-policy`) is a starter example, not a production policy.
 
 The daemon prints a `Security posture:` line at startup that tells you whether LSM blocking is active, audit-only, or unavailable (tracepoint observe mode).
 
@@ -110,7 +110,7 @@ These are **targets, not measurements**. None of them has been benchmarked on `m
 ### Policy Engine
 
 - **YAML DSL** — Declarative rules with glob matching, variables and conditions, compiled by `warmor-compile` (needs `cargo` and the `wasm32-unknown-unknown` target). Unknown keys are silently ignored, so check rules with `--rust-only` if in doubt.
-- **Rust WASM** — Full Rust policies compiled to `wasm32-unknown-unknown` for complex logic (see the known issues under [Rust WASM Policy Library](#rust-wasm-policy-library))
+- **Rust WASM** — Full Rust policies compiled to `wasm32-unknown-unknown` for complex logic
 - **Hot-Reload** — SIGHUP swaps the WASM module without a restart. Kernel map entries from the old policy are not cleared yet.
 - **Two-Tier Cache** — A userspace decision cache, plus the kernel policy map for exec and connect decisions
 - **Policy Signing** — Ed25519-signed OCI policy bundles via `warmor-policy-bundle` (`--sign-key` / `--pull --verify-key`). The daemon itself does **not** verify signatures yet.
@@ -200,23 +200,17 @@ There is no `warmor-dashboard` binary on `main`. The SSE dashboard in `internal/
 
 10 example Rust policy crates covering threat scenarios.
 
-> **Known issues on `main` (being fixed):**
-> - `container-escape`, `crypto-mining`, `lateral-movement`, `multi` and `supply-chain` export a JSON `evaluate_event`, but the host treats that export name as its binary ABI, so these crates **deny every event**.
-> - `example`, `advanced` and `zero-trust-net` require a `filename` field that the host omits for file and network events, so they **deny every file and network event**.
-> - `cross-platform` and `temporal-access` do not compile.
-> - CI builds none of these crates.
->
-> Until this is fixed, YAML policies compiled with `warmor-compile` are the reliable path.
+All 10 crates build for `wasm32-unknown-unknown` and use the JSON ABI (`evaluate_syscall`). CI builds every crate and runs each through the real WASM host (`TestPolicyCrates`): benign events must be allowed and the crate's own attack examples denied. The host does not send `args`, `parent_comm`, `cgroup_id` or time context yet, so rules on those fields never fire.
 
 | Policy | Threat Domain | Pattern |
 |--------|--------------|---------|
 | [`advanced`](policies/advanced/) | Process/file enforcement | evaluate_syscall |
-| [`cross-platform`](policies/cross-platform/) | Platform-aware security | C FFI + evaluate |
+| [`cross-platform`](policies/cross-platform/) | Platform-aware security | Flat struct |
 | [`multi`](policies/multi/) | Multi-event dispatch | Tagged enum |
 | [`container-escape`](policies/container-escape/) | Container breakout (12 techniques) | Tagged enum |
 | [`supply-chain`](policies/supply-chain/) | Runtime integrity (9 controls) | Tagged enum |
-| [`temporal-access`](policies/temporal-access/) | Time-based access control (8 rules) | Cross-platform |
-| [`zero-trust-net`](policies/zero-trust-net/) | Network microsegmentation (10 controls) | Cross-platform |
+| [`temporal-access`](policies/temporal-access/) | Time-based access control (8 rules) | Flat struct |
+| [`zero-trust-net`](policies/zero-trust-net/) | Network microsegmentation (10 controls) | Flat struct |
 | [`lateral-movement`](policies/lateral-movement/) | Lateral movement detection (10 techniques) | Tagged enum |
 | [`crypto-mining`](policies/crypto-mining/) | Cryptojacking detection (12 indicators) | Tagged enum |
 | [`example`](policies/example/) | Starter template | evaluate_syscall |
@@ -226,7 +220,10 @@ Build any policy:
 rustup target add wasm32-unknown-unknown
 cd policies/container-escape
 cargo build --release --target wasm32-unknown-unknown
-# Output: target/wasm32-unknown-unknown/release/<crate_name>.wasm
+# Output: target/wasm32-unknown-unknown/release/warmor_policy_container_escape.wasm
+
+# Or build every crate at once:
+./scripts/build-rust-policies.sh
 ```
 
 See [Rust Policy Examples](docs/rust-policy-examples.md) for full documentation and authoring guide.

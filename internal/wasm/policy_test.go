@@ -237,3 +237,34 @@ func TestMarshalEventForWASM_UnknownType(t *testing.T) {
 		t.Errorf("unknown type should default to PROCESS, got %v", m["type"])
 	}
 }
+
+// Policies deserialize into fixed structs; a missing key is a parse error and
+// the policy denies. "filename" must therefore be present for every type.
+func TestMarshalEventForWASM_FilenameAlwaysPresent(t *testing.T) {
+	events := map[string]*api.Event{
+		"FILE": {Type: api.EventTypeFile, Filename: "/etc/passwd",
+			File: &api.FileEvent{Operation: "open", Path: "/etc/passwd"}},
+		"FILE fallback": {Type: api.EventTypeFile, Filename: "/etc/passwd"},
+		"NETWORK": {Type: api.EventTypeNetwork,
+			Network: &api.NetworkEvent{RemoteAddr: "1.2.3.4", RemotePort: 443}},
+		"NETWORK fallback": {Type: api.EventTypeNetwork},
+	}
+	for name, ev := range events {
+		data, err := marshalEventForWASM(ev)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		v, ok := m["filename"]
+		if !ok {
+			t.Errorf("%s: filename key missing", name)
+			continue
+		}
+		if v != "" {
+			t.Errorf("%s: filename = %q, want empty for non-process events", name, v)
+		}
+	}
+}

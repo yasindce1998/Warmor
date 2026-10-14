@@ -161,6 +161,7 @@ cd warmor
 # Build WASM policy
 cd policies\example
 cargo build --release --target wasm32-unknown-unknown
+copy target\wasm32-unknown-unknown\release\warmor_policy_example.wasm policy.wasm
 cd ..\..
 
 # Build warmor daemon
@@ -207,6 +208,7 @@ xcode-select --install
 # Build WASM policy
 cd policies/example
 cargo build --release --target wasm32-unknown-unknown
+cp target/wasm32-unknown-unknown/release/warmor_policy_example.wasm policy.wasm
 cd ../..
 
 # Build warmor daemon with ESF support
@@ -321,7 +323,7 @@ cd ../..
 This compiles the Rust policy to `policies/example/policy.wasm`.
 
 **Troubleshooting:**
-- If you get "error: can't find crate for `std`", add WASI target: `rustup target add wasm32-unknown-unknown`
+- If you get "error: can't find crate for `std`", add the WASM target: `rustup target add wasm32-unknown-unknown`
 - If build is slow, it's normal for the first build (Rust compiles dependencies)
 
 ### Step 5: Build warmor Daemon
@@ -525,7 +527,7 @@ Enforcer started, processing events...
 .\warmor.exe
 
 # Or with custom policy
-.\warmor.exe --policy policies\cross-platform\policy.wasm
+.\warmor.exe --policy policies\cross-platform\target\wasm32-unknown-unknown\release\cross_platform_policy.wasm
 
 # With debug logging
 .\warmor.exe --log-level debug
@@ -539,7 +541,7 @@ Expected output:
 WASM-Powered Security Enforcer
 Version: 1.1.0-beta (EXPERIMENTAL)
 
-Policy: policies\cross-platform\policy.wasm
+Policy: policies\cross-platform\target\wasm32-unknown-unknown\release\cross_platform_policy.wasm
 Platform: windows (ETW - Beta)
 Stats Interval: 30s
 Log Level: info
@@ -556,7 +558,7 @@ Enabling network monitoring...
 Windows platform started successfully
 Creating WASM runtime...
 ✓ WASM runtime created
-Loading policy from: policies\cross-platform\policy.wasm
+Loading policy from: policies\cross-platform\target\wasm32-unknown-unknown\release\cross_platform_policy.wasm
 ✓ Policy loaded
 
 ✓ warmor enforcer initialized successfully

@@ -12,22 +12,23 @@ enum Event {
     Network(NetworkEvent),
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct ProcessEvent {
     pid: u32,
     uid: u32,
     gid: u32,
     comm: String,
     filename: String,
-    #[serde(default)]
     parent_comm: String,
-    #[serde(default)]
     cgroup_id: u64,
-    #[serde(default)]
     namespace_id: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct FileEvent {
     pid: u32,
     uid: u32,
@@ -36,11 +37,12 @@ struct FileEvent {
     operation: String,
     path: String,
     flags: u32,
-    #[serde(default)]
     cgroup_id: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct NetworkEvent {
     pid: u32,
     uid: u32,
@@ -49,7 +51,6 @@ struct NetworkEvent {
     protocol: String,
     remote_addr: String,
     remote_port: u16,
-    #[serde(default)]
     cgroup_id: u64,
 }
 
@@ -128,7 +129,7 @@ pub extern "C" fn abi_version() -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn evaluate_event(event_ptr: *const u8, event_len: usize) -> i32 {
+pub extern "C" fn evaluate_syscall(event_ptr: *const u8, event_len: usize) -> i32 {
     let event_bytes = unsafe { slice::from_raw_parts(event_ptr, event_len) };
 
     let event: Event = match serde_json::from_slice(event_bytes) {

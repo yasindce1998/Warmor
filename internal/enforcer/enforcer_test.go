@@ -1221,15 +1221,27 @@ func TestReloadPolicy_YAMLWithPrecompiledWasm(t *testing.T) {
 func TestReloadPolicy_Errors(t *testing.T) {
 	dir := t.TempDir()
 
-	// A valid module whose import can't be satisfied: compiles, but fails to
-	// instantiate, exercising the pool-creation error path.
+	// A valid module whose import can't be satisfied: it compiles and
+	// exports a well-formed JSON ABI (so LoadPolicy's export validation
+	// accepts it), but fails to instantiate, exercising the pool-creation
+	// error path.
 	unresolvable := []byte{
 		0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
-		0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: () -> ()
+		0x01, 0x0f, 0x03, // type section, 3 types
+		0x60, 0x00, 0x00, // 0: () -> ()
+		0x60, 0x01, 0x7f, 0x01, 0x7f, // 1: (i32) -> i32
+		0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // 2: (i32, i32) -> i32
 		0x02, 0x0d, 0x01, // import section, 1 import
 		0x04, 'n', 'o', 'p', 'e', // module "nope"
 		0x04, 'n', 'o', 'p', 'e', // name "nope"
 		0x00, 0x00, // func, type 0
+		0x03, 0x03, 0x02, 0x01, 0x02, // function section: types 1, 2
+		0x07, 0x1d, 0x02, // export section, 2 exports
+		0x06, 'm', 'a', 'l', 'l', 'o', 'c', 0x00, 0x01,
+		0x10, 'e', 'v', 'a', 'l', 'u', 'a', 't', 'e', '_', 's', 'y', 's', 'c', 'a', 'l', 'l', 0x00, 0x02,
+		0x0a, 0x0b, 0x02, // code section, 2 bodies: i32.const 0
+		0x04, 0x00, 0x41, 0x00, 0x0b,
+		0x04, 0x00, 0x41, 0x00, 0x0b,
 	}
 	badImport := filepath.Join(dir, "bad_import.wasm")
 	if err := os.WriteFile(badImport, unresolvable, 0o600); err != nil {

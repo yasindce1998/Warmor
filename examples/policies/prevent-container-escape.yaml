@@ -63,9 +63,9 @@ rules:
     event: process
     conditions:
       all:
-        - uid: { equals: 0 }
+        - uid: { eq: 0 }
         - path: { any_of: $escape_tools }
-    action: audit
+    action: log
     reason: "Root using namespace tools"
 
 default_action: allow

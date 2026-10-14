@@ -70,6 +70,27 @@ jobs:
       - name: Compile example YAML policy
         run: ./warmor-compile policies/yaml-example/policy.yaml -o /tmp/test-policy.wasm
 
+  rust-policies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build Rust policy crates
+        run: ./scripts/build-rust-policies.sh
+
+      - name: Evaluate each crate through the WASM host
+        env:
+          WARMOR_REQUIRE_POLICY_CRATES: "1"
+        run: go test ./internal/wasm/ -run TestPolicyCrates -v
+
   docker:
     runs-on: ubuntu-latest
     steps:

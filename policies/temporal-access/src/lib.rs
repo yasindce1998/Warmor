@@ -3,7 +3,9 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::slice;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct Event {
     #[serde(rename = "type")]
     event_type: String,
@@ -12,22 +14,36 @@ struct Event {
     gid: u32,
     comm: String,
     filename: String,
-    #[serde(default)]
     path: String,
-    #[serde(default)]
     operation: String,
-    #[serde(default)]
     remote_addr: String,
-    #[serde(default)]
     remote_port: u16,
-    #[serde(default)]
-    container_age_secs: u64,
-    #[serde(default)]
-    hour_of_day: u8,
-    #[serde(default)]
-    day_of_week: u8,
-    #[serde(default)]
+    parent_comm: String,
+    // Temporal context. The Warmor host does not currently send these, so
+    // each is optional and the rules that depend on it only fire when it is
+    // present. Absent maintenance flag means "not in a maintenance window".
+    container_age_secs: Option<u64>,
+    hour_of_day: Option<u8>,
+    day_of_week: Option<u8>,
     is_maintenance_window: bool,
+}
+
+impl Event {
+    fn age_over(&self, secs: u64) -> bool {
+        matches!(self.container_age_secs, Some(age) if age > secs)
+    }
+
+    fn hour_in(&self, start: u8, end: u8) -> Option<bool> {
+        self.hour_of_day.map(|h| h >= start && h < end)
+    }
+
+    /// Mon-Fri within [start, end) hours, if the time is known.
+    fn within_hours(&self, start: u8, end: u8) -> Option<bool> {
+        match (self.day_of_week, self.hour_of_day) {
+            (Some(d), Some(h)) => Some((1..=5).contains(&d) && h >= start && h < end),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -179,7 +195,7 @@ fn evaluate_process(event: &Event) -> Decision {
     // Startup-only binaries: entrypoints/init systems allowed only during first 60s
     for init_bin in INIT_BINARIES {
         if event.filename.contains(init_bin) {
-            if event.container_age_secs > STARTUP_WINDOW_SECS {
+            if event.age_over(STARTUP_WINDOW_SECS) {
                 return Decision::deny(&format!(
                     "Init binary {} not allowed after startup window ({}s)",
                     init_bin, STARTUP_WINDOW_SECS
@@ -205,35 +221,38 @@ fn evaluate_process(event: &Event) -> Decision {
     // Business-hours-only tools (SSH, SCP): Mon-Fri 08:00-18:00
     for tool in BUSINESS_HOURS_ONLY {
         if event.filename == *tool {
-            let is_weekday = event.day_of_week >= 1 && event.day_of_week <= 5;
-            let is_business_hours = event.hour_of_day >= 8 && event.hour_of_day < 18;
-
-            if !is_weekday || !is_business_hours {
-                return Decision::deny(&format!(
-                    "{} only allowed Mon-Fri 08:00-18:00 (current: day={}, hour={})",
+            return match event.within_hours(8, 18) {
+                Some(true) => Decision::allow("Within business hours"),
+                Some(false) => Decision::deny(&format!(
+                    "{} only allowed Mon-Fri 08:00-18:00 (current: day={:?}, hour={:?})",
                     tool, event.day_of_week, event.hour_of_day
-                ));
-            }
-            return Decision::allow("Within business hours");
+                )),
+                None => Decision::log(&format!("{} executed; time of day unknown", tool)),
+            };
         }
     }
 
     // Cron-like processes only allowed during their scheduled windows
     if event.comm == "cron" || event.comm == "crond" || event.parent_comm == "cron" {
-        let in_window = CRON_ALLOWED_HOURS.iter().any(|(start, end)| {
-            event.hour_of_day >= *start && event.hour_of_day < *end
-        });
+        let in_window = CRON_ALLOWED_HOURS
+            .iter()
+            .map(|(start, end)| event.hour_in(*start, *end))
+            .try_fold(false, |acc, w| w.map(|w| acc || w));
 
-        if !in_window {
-            return Decision::deny(&format!(
-                "Cron execution outside allowed windows (hour={})",
-                event.hour_of_day
-            ));
+        match in_window {
+            Some(false) => {
+                return Decision::deny(&format!(
+                    "Cron execution outside allowed windows (hour={:?})",
+                    event.hour_of_day
+                ))
+            }
+            None => return Decision::log("Cron execution; time of day unknown"),
+            Some(true) => {}
         }
     }
 
     // After container startup (>5min), deny new binary first-execution
-    if event.container_age_secs > 300 {
+    if event.age_over(300) {
         let suspicious_first_exec_paths = ["/tmp/", "/dev/shm/", "/var/tmp/", "/root/"];
         for path in &suspicious_first_exec_paths {
             if event.filename.starts_with(path) {
@@ -250,12 +269,12 @@ fn evaluate_process(event: &Event) -> Decision {
 
 fn evaluate_file(event: &Event) -> Decision {
     // Block config writes after startup period
-    if event.container_age_secs > STARTUP_WINDOW_SECS {
+    if event.age_over(STARTUP_WINDOW_SECS) {
         let config_paths = ["/etc/", "/usr/local/etc/", "/opt/conf/"];
         for cfg_path in &config_paths {
             if event.path.starts_with(cfg_path) && event.operation == "write" {
                 return Decision::deny(&format!(
-                    "Config modification of {} blocked after startup (container age: {}s)",
+                    "Config modification of {} blocked after startup (container age: {:?}s)",
                     event.path, event.container_age_secs
                 ));
             }
@@ -266,12 +285,9 @@ fn evaluate_file(event: &Event) -> Decision {
     let sensitive_data_paths = ["/var/lib/data/", "/opt/data/", "/mnt/secrets/"];
     for data_path in &sensitive_data_paths {
         if event.path.starts_with(data_path) {
-            let is_weekday = event.day_of_week >= 1 && event.day_of_week <= 5;
-            let is_business_hours = event.hour_of_day >= 8 && event.hour_of_day < 18;
-
-            if !is_weekday || !is_business_hours {
+            if event.within_hours(8, 18) == Some(false) {
                 return Decision::log(&format!(
-                    "Sensitive data access outside business hours: {} (day={}, hour={})",
+                    "Sensitive data access outside business hours: {} (day={:?}, hour={:?})",
                     event.path, event.day_of_week, event.hour_of_day
                 ));
             }
@@ -282,10 +298,9 @@ fn evaluate_file(event: &Event) -> Decision {
     let backup_indicators = [".bak", ".dump", ".sql", ".tar.gz", ".backup"];
     for indicator in &backup_indicators {
         if event.path.ends_with(indicator) && event.operation == "write" {
-            let in_backup_window = event.hour_of_day >= 2 && event.hour_of_day < 4;
-            if !in_backup_window {
+            if event.hour_in(2, 4) == Some(false) {
                 return Decision::deny(&format!(
-                    "Backup file creation outside window: {} (hour={})",
+                    "Backup file creation outside window: {} (hour={:?})",
                     event.path, event.hour_of_day
                 ));
             }
@@ -297,28 +312,27 @@ fn evaluate_file(event: &Event) -> Decision {
 
 fn evaluate_network(event: &Event) -> Decision {
     // Block all outbound during container first 5 seconds (prevent container-start exfiltration)
-    if event.container_age_secs < 5 && event.remote_port != 53 {
-        return Decision::deny(&format!(
-            "Outbound network blocked during container initialization (age={}s)",
-            event.container_age_secs
-        ));
+    if let Some(age) = event.container_age_secs {
+        if age < 5 && event.remote_port != 53 {
+            return Decision::deny(&format!(
+                "Outbound network blocked during container initialization (age={}s)",
+                age
+            ));
+        }
     }
 
     // Log network activity outside business hours
-    let is_weekday = event.day_of_week >= 1 && event.day_of_week <= 5;
-    let is_business_hours = event.hour_of_day >= 6 && event.hour_of_day < 22;
-
-    if !is_weekday || !is_business_hours {
+    if event.within_hours(6, 22) == Some(false) {
         // Allow critical infra ports even outside hours
         let always_allowed = [53, 443, 5432, 6379, 3306];
         if !always_allowed.contains(&event.remote_port) {
             return Decision::deny(&format!(
-                "Non-critical network connection outside operating hours (port={}, hour={})",
+                "Non-critical network connection outside operating hours (port={}, hour={:?})",
                 event.remote_port, event.hour_of_day
             ));
         }
         return Decision::log(&format!(
-            "Network activity outside business hours: {}:{} (hour={})",
+            "Network activity outside business hours: {}:{} (hour={:?})",
             event.remote_addr, event.remote_port, event.hour_of_day
         ));
     }

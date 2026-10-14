@@ -1,13 +1,22 @@
 use serde::Deserialize;
 use std::slice;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct Event {
+    /// "PROCESS", "FILE" or "NETWORK". Empty for legacy hosts that only
+    /// sent process events.
+    #[serde(rename = "type")]
+    event_type: String,
     pid: u32,
     uid: u32,
     gid: u32,
     comm: String,
+    /// Executed binary (PROCESS events).
     filename: String,
+    /// Target path (FILE events).
+    path: String,
 }
 
 // Action constants matching Go
@@ -63,6 +72,24 @@ pub extern "C" fn evaluate_syscall(event_ptr: *const u8, event_len: usize) -> i3
         Err(_) => return ACTION_DENY, // Deny on parse error
     };
 
+    match event.event_type.as_str() {
+        "" | "PROCESS" => evaluate_process(&event),
+        "FILE" => evaluate_file(&event),
+        _ => ACTION_ALLOW,
+    }
+}
+
+fn evaluate_file(event: &Event) -> i32 {
+    // Log access to sensitive files/directories
+    for sensitive in SENSITIVE_DIRS {
+        if event.path.starts_with(sensitive) {
+            return ACTION_LOG;
+        }
+    }
+    ACTION_ALLOW
+}
+
+fn evaluate_process(event: &Event) -> i32 {
     // Rule 1: Block network tools for non-root users
     if event.uid != 0 {
         for blocked in BLOCKED_BINARIES {

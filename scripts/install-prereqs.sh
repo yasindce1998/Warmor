@@ -426,18 +426,18 @@ install_rust() {
         fi
     fi
 
-    # Install wasm32-wasi target
-    if rustup target list --installed | grep -q "wasm32-wasi"; then
-        log_skip "wasm32-wasi target"
-        SKIPPED+=("wasm32-wasi")
+    # Install the wasm32-unknown-unknown target (policies are built for it)
+    if rustup target list --installed | grep -qx "wasm32-unknown-unknown"; then
+        log_skip "wasm32-unknown-unknown target"
+        SKIPPED+=("wasm32-unknown-unknown")
     else
-        log_info "Adding wasm32-wasi target..."
-        if rustup target add wasm32-wasi; then
-            log_ok "wasm32-wasi target"
-            INSTALLED+=("wasm32-wasi target")
+        log_info "Adding wasm32-unknown-unknown target..."
+        if rustup target add wasm32-unknown-unknown; then
+            log_ok "wasm32-unknown-unknown target"
+            INSTALLED+=("wasm32-unknown-unknown target")
         else
-            log_fail "wasm32-wasi" "rustup target add failed. Try: rustup target add wasm32-wasi"
-            FAILED+=("wasm32-wasi target")
+            log_fail "wasm32-unknown-unknown" "rustup target add failed. Try: rustup target add wasm32-unknown-unknown"
+            FAILED+=("wasm32-unknown-unknown target")
         fi
     fi
 }

@@ -13,7 +13,9 @@ enum Event {
     Network(NetworkEvent),
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct ProcessEvent {
     pid: u32,
     uid: u32,
@@ -22,7 +24,9 @@ struct ProcessEvent {
     filename: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct FileEvent {
     pid: u32,
     uid: u32,
@@ -33,7 +37,9 @@ struct FileEvent {
     flags: u32,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct NetworkEvent {
     pid: u32,
     uid: u32,
@@ -90,7 +96,7 @@ pub extern "C" fn free(ptr: *mut u8, size: usize) {
 }
 
 #[no_mangle]
-pub extern "C" fn evaluate_event(event_ptr: *const u8, event_len: usize) -> i32 {
+pub extern "C" fn evaluate_syscall(event_ptr: *const u8, event_len: usize) -> i32 {
     let event_bytes = unsafe { slice::from_raw_parts(event_ptr, event_len) };
     
     let event: Event = match serde_json::from_slice(event_bytes) {
@@ -159,7 +165,7 @@ fn evaluate_file(event: &FileEvent) -> i32 {
         // Extract username from path
         let parts: Vec<&str> = event.path.split('/').collect();
         if parts.len() >= 3 {
-            let target_user = parts[2];
+            let _target_user = parts[2];
             // This is a simplified check - in production, map UID to username
             if event.uid >= 1000 && !event.path.contains(&format!("/home/{}", event.uid)) {
                 return ACTION_DENY;

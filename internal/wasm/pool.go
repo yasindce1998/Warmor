@@ -63,24 +63,7 @@ func (p *Pool) instantiate(ctx context.Context) (*Policy, error) {
 		return nil, err
 	}
 
-	pol := &Policy{runtime: p.runtime, instance: instance}
-
-	if instance.ExportedFunction("evaluate_event") != nil {
-		pol.useBinaryABI = true
-		malloc := instance.ExportedFunction("malloc")
-		if malloc == nil {
-			instance.Close(ctx)
-			return nil, fmt.Errorf("binary ABI module missing malloc export")
-		}
-		results, err := malloc.Call(ctx, uint64(eventStructSize))
-		if err != nil {
-			instance.Close(ctx)
-			return nil, fmt.Errorf("malloc for event buffer: %w", err)
-		}
-		pol.eventBufPtr = uint32(results[0])
-	}
-
-	return pol, nil
+	return initPolicy(ctx, p.runtime, instance)
 }
 
 // Get retrieves a policy instance from the pool. Blocks if all instances are

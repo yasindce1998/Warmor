@@ -45,28 +45,7 @@ func NewPolicy(ctx context.Context, runtime *Runtime) (*Policy, error) {
 		return nil, fmt.Errorf("instantiate module: %w", err)
 	}
 
-	p := &Policy{
-		runtime:  runtime,
-		instance: instance,
-	}
-
-	// Detect ABI: prefer evaluate_event (binary) over evaluate_syscall (JSON)
-	if instance.ExportedFunction("evaluate_event") != nil {
-		p.useBinaryABI = true
-		malloc := instance.ExportedFunction("malloc")
-		if malloc == nil {
-			instance.Close(ctx)
-			return nil, fmt.Errorf("binary ABI module missing malloc export")
-		}
-		results, err := malloc.Call(ctx, uint64(eventStructSize))
-		if err != nil {
-			instance.Close(ctx)
-			return nil, fmt.Errorf("malloc for event buffer: %w", err)
-		}
-		p.eventBufPtr = uint32(results[0])
-	}
-
-	return p, nil
+	return initPolicy(ctx, runtime, instance)
 }
 
 // Evaluate evaluates an event against the policy.
@@ -229,13 +208,24 @@ func copyStringToBuffer(dst []byte, s string) {
 	copy(dst[:n], s[:n])
 }
 
-// marshalEventForWASM produces the flat JSON structure for legacy WASM modules.
+// marshalEventForWASM produces the flat JSON document passed to the JSON ABI
+// (evaluate_syscall). Keys sent per "type":
+//
+//	all:     type, pid, uid, gid, comm, filename
+//	PROCESS: filename = executed binary
+//	FILE:    operation, path, flags
+//	NETWORK: operation, protocol, remote_addr, remote_port, local_port
 func marshalEventForWASM(event *api.Event) ([]byte, error) {
+	// Every key below is always present so policies that deserialize into a
+	// fixed struct do not fail to parse (and deny) on event types that lack a
+	// field. "filename" is the executed binary and is only non-empty for
+	// PROCESS events; file events carry their target in "path".
 	m := map[string]any{
-		"pid":  event.PID,
-		"uid":  event.UID,
-		"gid":  event.GID,
-		"comm": event.Comm,
+		"pid":      event.PID,
+		"uid":      event.UID,
+		"gid":      event.GID,
+		"comm":     event.Comm,
+		"filename": "",
 	}
 
 	switch event.GetType() {

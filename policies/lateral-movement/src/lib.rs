@@ -12,22 +12,23 @@ enum Event {
     Network(NetworkEvent),
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct ProcessEvent {
     pid: u32,
     uid: u32,
     gid: u32,
     comm: String,
     filename: String,
-    #[serde(default)]
     parent_comm: String,
-    #[serde(default)]
     args: Vec<String>,
-    #[serde(default)]
     cgroup_id: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct FileEvent {
     pid: u32,
     uid: u32,
@@ -36,11 +37,12 @@ struct FileEvent {
     operation: String,
     path: String,
     flags: u32,
-    #[serde(default)]
     cgroup_id: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct NetworkEvent {
     pid: u32,
     uid: u32,
@@ -49,13 +51,9 @@ struct NetworkEvent {
     protocol: String,
     remote_addr: String,
     remote_port: u16,
-    #[serde(default)]
     local_port: u16,
-    #[serde(default)]
     direction: String,
-    #[serde(default)]
     cgroup_id: u64,
-    #[serde(default)]
     bytes_sent: u64,
 }
 
@@ -138,8 +136,6 @@ const PIVOT_BINARIES: &[&str] = &[
     "/usr/bin/stunnel",
 ];
 
-const INTERNAL_SCAN_THRESHOLD_PORTS: u16 = 10;
-
 #[no_mangle]
 pub extern "C" fn malloc(size: usize) -> *mut u8 {
     let mut buf = Vec::with_capacity(size);
@@ -161,7 +157,7 @@ pub extern "C" fn abi_version() -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn evaluate_event(event_ptr: *const u8, event_len: usize) -> i32 {
+pub extern "C" fn evaluate_syscall(event_ptr: *const u8, event_len: usize) -> i32 {
     let event_bytes = unsafe { slice::from_raw_parts(event_ptr, event_len) };
 
     let event: Event = match serde_json::from_slice(event_bytes) {

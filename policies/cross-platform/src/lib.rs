@@ -3,15 +3,38 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::slice;
 
-/// Event represents a security event from any platform
-#[derive(Debug, Deserialize)]
+/// Event represents a security event from any platform. Field names match
+/// the JSON the Warmor host sends to `evaluate_syscall`; every field is
+/// optional because each event type only carries a subset of them.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct Event {
+    /// "PROCESS", "FILE" or "NETWORK".
     #[serde(rename = "type")]
     event_type: String,
     pid: u32,
     uid: u32,
     gid: u32,
     comm: String,
+    /// Executed binary (PROCESS).
+    filename: String,
+    args: Vec<String>,
+    /// Target path (FILE).
+    path: String,
+    operation: String,
+    flags: u32,
+    /// Peer address and port (NETWORK).
+    remote_addr: String,
+    remote_port: u16,
+    protocol: String,
+}
+
+impl Event {
+    fn is(&self, kind: &str) -> bool {
+        self.event_type.eq_ignore_ascii_case(kind)
+    }
+}
 
 // Action constants matching Go
 const ACTION_ALLOW: i32 = 0;
@@ -61,19 +84,6 @@ pub extern "C" fn evaluate_syscall(event_ptr: *const u8, event_len: usize) -> i3
 }
 
 
-    filename: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    path: String,
-    #[serde(default)]
-    flags: u32,
-    #[serde(default)]
-    dest_ip: String,
-    #[serde(default)]
-    dest_port: u16,
-}
-
 /// Decision represents the policy decision
 #[derive(Debug, Serialize)]
 struct Decision {
@@ -120,13 +130,13 @@ fn evaluate_policy(event: &Event) -> Decision {
     ];
 
     for binary in &dangerous_binaries {
-        if event.filename.contains(binary) {
+        if event.is("process") && event.filename.contains(binary) {
             return Decision::deny(&format!("Blocked dangerous binary: {}", binary));
         }
     }
 
     // Rule 2: Block execution from temp directories (platform-aware)
-    if event.event_type == "process" {
+    if event.is("process") {
         let is_temp = event.filename.contains("/tmp/")
             || event.filename.contains("\\Temp\\")
             || event.filename.contains("\\AppData\\Local\\Temp\\")
@@ -138,7 +148,7 @@ fn evaluate_policy(event: &Event) -> Decision {
     }
 
     // Rule 3: Monitor sensitive file access (cross-platform)
-    if event.event_type == "file" {
+    if event.is("file") {
         let sensitive_paths = [
             // Linux
             "/etc/passwd",
@@ -146,32 +156,32 @@ fn evaluate_policy(event: &Event) -> Decision {
             "/root/.ssh",
             // Windows
             "C:\\Windows\\System32\\config\\SAM",
-            "C:\\Users\\*\\.ssh",
+            "\\.ssh\\",
             // macOS
             "/etc/master.passwd",
             "/var/root/.ssh",
         ];
 
         for path in &sensitive_paths {
-            if event.path.contains(path) || event.filename.contains(path) {
+            if event.path.contains(path) {
                 return Decision::log(&format!("Sensitive file access: {}", path));
             }
         }
     }
 
     // Rule 4: Monitor network connections to suspicious ports
-    if event.event_type == "network" {
+    if event.is("network") {
         let suspicious_ports = [4444, 5555, 6666, 7777, 8888, 9999];
-        if suspicious_ports.contains(&event.dest_port) {
+        if suspicious_ports.contains(&event.remote_port) {
             return Decision::log(&format!(
                 "Suspicious network connection to {}:{}",
-                event.dest_ip, event.dest_port
+                event.remote_addr, event.remote_port
             ));
         }
     }
 
     // Rule 5: Block root/admin execution of untrusted binaries
-    if event.uid == 0 && event.event_type == "process" {
+    if event.uid == 0 && event.is("process") {
         let untrusted_paths = [
             "/home/",
             "/Users/",
@@ -186,7 +196,7 @@ fn evaluate_policy(event: &Event) -> Decision {
     }
 
     // Rule 6: Monitor package manager execution (cross-platform)
-    if event.event_type == "process" {
+    if event.is("process") {
         let package_managers = [
             "apt", "apt-get", "yum", "dnf",           // Linux
             "brew",                                    // macOS
@@ -201,7 +211,7 @@ fn evaluate_policy(event: &Event) -> Decision {
     }
 
     // Rule 7: Block execution with suspicious arguments
-    if event.event_type == "process" {
+    if event.is("process") {
         let suspicious_args = [
             "curl", "wget", "powershell", "cmd.exe",
             "bash -c", "sh -c", "/bin/sh",
@@ -271,5 +281,3 @@ pub extern "C" fn free_string(s: *mut c_char) {
         }
     }
 }
-
-
