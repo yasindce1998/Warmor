@@ -76,9 +76,10 @@ type Enforcer struct {
 	logger        *logging.Logger
 	metricsServer *metrics.Server
 	policyMap     PolicyMapSyncer
-	// policyMapMu orders kernel map writes against the clear on reload:
-	// syncs hold it shared, ReloadPolicy holds it exclusively while clearing.
-	policyMapMu sync.RWMutex
+	// decisionMu orders persisting decisions (decision cache and kernel
+	// map) against the reset on reload: persistDecision holds it shared,
+	// ReloadPolicy holds it exclusively while clearing both.
+	decisionMu sync.RWMutex
 	// policyGen is bumped (under evaluatorMu) every time a new policy is
 	// swapped in. A decision is only written to the kernel map if the policy
 	// that made it is still current, so an evaluation that was in flight
@@ -233,7 +234,8 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 
 	// Initialize decision cache (10k entries, 5min TTL)
 	decisionCache := cache.NewDecisionCache(10000, 5*time.Minute)
-	logger.LogInfo("✓ Decision cache initialized (10k entries, 5min TTL)")
+	decisionCache.SetPIDRelevant(pidRelevance(evaluator))
+	logger.LogInfo("✓ Decision cache initialized (10k-entry LRU, 5min TTL)")
 
 	// Initialize action handler
 	actionHandler := NewActionHandler(opts.AuditMode)
@@ -459,12 +461,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 		// transient and must not outlive this event, otherwise a single
 		// failed evaluation would keep denying until the cache TTL expires
 		// (or indefinitely in the kernel policy map).
-		e.cache.Put(event, result)
-
-		// Compile decision into BPF policy map for kernel fast-path
-		if e.policyMap != nil && !event.LSMEvent {
-			e.syncToPolicyMap(event, result, gen, evaluator.FieldsRead(event.GetType()))
-		}
+		e.persistDecision(event, result, gen, evaluator)
 	}
 
 	// Enforce the decision
@@ -516,6 +513,33 @@ func decisionDeterminedByKernelKey(pm PolicyMapSyncer, t api.EventType, fieldsRe
 	return fieldsRead&^compiler.FieldMask(keyFields...) == 0
 }
 
+// persistDecision stores a policy decision in the decision cache and, when
+// sound, the kernel policy map. Nothing is stored if the policy that made the
+// decision (generation gen) has been replaced by a reload in the meantime,
+// since the reload has already reset both.
+func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, gen uint64, evaluator *wasm.PolicyEvaluator) {
+	e.decisionMu.RLock()
+	defer e.decisionMu.RUnlock()
+	if e.policyGen.Load() != gen {
+		return
+	}
+	e.cache.Put(event, result)
+
+	// Compile decision into BPF policy map for kernel fast-path
+	if e.policyMap != nil && !event.LSMEvent {
+		e.syncToPolicyMap(event, result, gen, evaluator.FieldsRead(event.GetType()))
+	}
+}
+
+// pidRelevance derives the decision cache's PID rule from the policy's
+// fields-read declaration: the PID is only left out of cache keys for event
+// types whose policy has declared it never reads the PID.
+func pidRelevance(evaluator *wasm.PolicyEvaluator) func(api.EventType) bool {
+	return func(t api.EventType) bool {
+		return evaluator.FieldsRead(t)&compiler.FieldBitPID != 0
+	}
+}
+
 // endpointPolicyMapSyncer is implemented by policy maps whose kernel programs
 // key network rules on the binary address+port rather than a string (the
 // Linux LSM connect hook hashes the raw sockaddr). Port is in host order.
@@ -548,9 +572,9 @@ type eventPolicyMapSyncer interface {
 // part of it (see kernelKeyFielder). A decision that depends on, say, uid
 // or comm would otherwise be enforced for other users or binaries. Policies
 // that declare nothing are never synced.
+//
+// Callers hold decisionMu (shared); see persistDecision.
 func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult, gen uint64, fieldsRead uint32) {
-	e.policyMapMu.RLock()
-	defer e.policyMapMu.RUnlock()
 	if e.policyGen.Load() != gen {
 		return
 	}
@@ -735,20 +759,19 @@ func (e *Enforcer) ReloadPolicy() error {
 	e.policyGen.Add(1)
 	e.evaluatorMu.Unlock()
 
-	// Clear cache on policy reload
-	e.cache.Clear()
-
-	// Drop every decision the old policy compiled into the kernel map,
-	// otherwise the kernel keeps enforcing it until the entries are evicted.
-	// Holding policyMapMu exclusively waits out any sync already past its
-	// generation check; later syncs from the old policy see the bumped
-	// generation and are dropped.
+	// Drop every decision the old policy made: the userspace cache (whose
+	// keying also follows the new policy's declaration) and the kernel map,
+	// otherwise the kernel keeps enforcing old decisions until the entries
+	// are evicted. Holding decisionMu exclusively waits out any
+	// persistDecision already past its generation check; later ones from
+	// the old policy see the bumped generation and are dropped.
 	var clearErr error
+	e.decisionMu.Lock()
+	e.cache.SetPIDRelevant(pidRelevance(newEvaluator))
 	if e.policyMap != nil {
-		e.policyMapMu.Lock()
 		clearErr = e.policyMap.Clear()
-		e.policyMapMu.Unlock()
 	}
+	e.decisionMu.Unlock()
 
 	// Clean up old resources
 	if oldEvaluator != nil {

@@ -88,3 +88,28 @@ func TestHandleEvent_KernelSyncOnlyForKeyDeterminedDecisions(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleEvent_CacheKeyFollowsPIDDeclaration(t *testing.T) {
+	ls := func(pid uint32) *api.Event {
+		return &api.Event{PID: pid, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"}
+	}
+
+	// pathPolicy declares it does not read the PID: a new process running
+	// the same binary is a cache hit.
+	e, _ := newTestEnforcer(t, testEnforcerOpts{policyWasm: pathPolicy})
+	e.cache.SetPIDRelevant(pidRelevance(e.evaluator))
+	e.handleEvent(ls(0))
+	e.handleEvent(ls(0x7fffffff)) // non-existent PID: never signalled
+	if hits := e.GetStats().CacheHits; hits != 1 {
+		t.Errorf("declared PID-independent policy: CacheHits = %d, want 1", hits)
+	}
+
+	// The undeclared fixture might read the PID, so every process misses.
+	e2, _ := newTestEnforcer(t, testEnforcerOpts{})
+	e2.cache.SetPIDRelevant(pidRelevance(e2.evaluator))
+	e2.handleEvent(ls(0))
+	e2.handleEvent(ls(0x7fffffff))
+	if hits := e2.GetStats().CacheHits; hits != 0 {
+		t.Errorf("undeclared policy: CacheHits = %d, want 0", hits)
+	}
+}

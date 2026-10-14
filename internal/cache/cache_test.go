@@ -1,653 +1,432 @@
 package cache
 
 import (
+	"bytes"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/wasm"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
-func TestNewDecisionCache(t *testing.T) {
-	tests := []struct {
-		name     string
-		maxSize  int
-		ttl      time.Duration
-		wantSize int
-		wantTTL  time.Duration
-	}{
-		{
-			name:     "default values",
-			maxSize:  1000,
-			ttl:      5 * time.Minute,
-			wantSize: 1000,
-			wantTTL:  5 * time.Minute,
-		},
-		{
-			name:     "custom values",
-			maxSize:  500,
-			ttl:      10 * time.Minute,
-			wantSize: 500,
-			wantTTL:  10 * time.Minute,
-		},
-	}
+// fakeClock lets tests control expiry without sleeping.
+type fakeClock struct{ t time.Time }
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := NewDecisionCache(tt.maxSize, tt.ttl)
-			if c == nil {
-				t.Fatal("NewDecisionCache() returned nil")
-			}
-			if c.maxSize != tt.wantSize {
-				t.Errorf("maxSize = %d, want %d", c.maxSize, tt.wantSize)
-			}
-			if c.ttl != tt.wantTTL {
-				t.Errorf("ttl = %v, want %v", c.ttl, tt.wantTTL)
-			}
-			if c.entries == nil {
-				t.Error("entries map is nil")
-			}
-		})
+func (f *fakeClock) now() time.Time          { return f.t }
+func (f *fakeClock) advance(d time.Duration) { f.t = f.t.Add(d) }
+
+func newTestCache(size int, ttl time.Duration) (*DecisionCache, *fakeClock) {
+	c := NewDecisionCache(size, ttl)
+	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+	c.now = clk.now
+	return c, clk
+}
+
+func exec(path string, uid uint32) *api.Event {
+	return &api.Event{UID: uid, Filename: path}
+}
+
+var allow = &api.ActionResult{Action: api.ActionAllow, Reason: "test"}
+
+func TestNewDecisionCache(t *testing.T) {
+	c := NewDecisionCache(500, 10*time.Minute)
+	if c.maxSize != 500 || c.ttl != 10*time.Minute {
+		t.Fatalf("maxSize=%d ttl=%v", c.maxSize, c.ttl)
+	}
+	if s := c.Stats(); s.Size != 0 || s.MaxSize != 500 {
+		t.Fatalf("stats = %+v", s)
 	}
 }
 
 func TestDecisionCache_GetPut(t *testing.T) {
-	c := NewDecisionCache(10, 5*time.Minute)
+	c, _ := newTestCache(10, time.Minute)
+	ev := &api.Event{PID: 1234, UID: 1000, Comm: "bash", Filename: "/bin/bash"}
+	res := &api.ActionResult{Action: api.ActionDeny, Reason: "r", Latency: time.Millisecond}
 
-	event := &api.Event{
-		PID:      1234,
-		UID:      1000,
-		GID:      1000,
-		Comm:     "test",
-		Filename: "/bin/test",
+	if _, ok := c.Get(ev); ok {
+		t.Fatal("hit on empty cache")
 	}
+	c.Put(ev, res)
+	got, ok := c.Get(ev)
+	if !ok || got.Action != api.ActionDeny || got.Reason != "r" || !got.Cached {
+		t.Fatalf("Get = %+v, %v", got, ok)
+	}
+	if res.Cached {
+		t.Error("Put must not alias the caller's result")
+	}
+	got.Reason = "mutated"
+	if again, _ := c.Get(ev); again.Reason != "r" {
+		t.Error("Get must return a copy")
+	}
+}
 
-	result := &api.ActionResult{
-		Action: api.ActionAllow,
-		Reason: "test allow",
+func TestDecisionCache_PutOverwrites(t *testing.T) {
+	c, _ := newTestCache(10, time.Minute)
+	ev := exec("/bin/x", 1)
+	c.Put(ev, allow)
+	c.Put(ev, &api.ActionResult{Action: api.ActionDeny})
+	if got, _ := c.Get(ev); got.Action != api.ActionDeny {
+		t.Fatalf("Action = %v, want overwritten deny", got.Action)
 	}
-
-	// Test Put and Get
-	c.Put(event, result)
-
-	got, ok := c.Get(event)
-	if !ok {
-		t.Error("Get() returned false for existing entry")
-	}
-	if got.Action != result.Action {
-		t.Errorf("Get() action = %v, want %v", got.Action, result.Action)
-	}
-	if got.Reason != result.Reason {
-		t.Errorf("Get() reason = %v, want %v", got.Reason, result.Reason)
-	}
-	if !got.Cached {
-		t.Error("Get() should mark result as cached")
-	}
-
-	// Test Get for non-existent entry
-	nonExistentEvent := &api.Event{
-		PID:      5678,
-		UID:      2000,
-		Filename: "/bin/nonexistent",
-	}
-	_, ok = c.Get(nonExistentEvent)
-	if ok {
-		t.Error("Get() returned true for non-existent entry")
+	if c.Stats().Size != 1 {
+		t.Fatalf("size = %d, want 1", c.Stats().Size)
 	}
 }
 
 func TestDecisionCache_Expiration(t *testing.T) {
-	c := NewDecisionCache(10, 100*time.Millisecond)
-
-	event := &api.Event{
-		UID:      1000,
-		Filename: "/bin/expire",
+	c, clk := newTestCache(10, 100*time.Millisecond)
+	ev := exec("/bin/expire", 1000)
+	c.Put(ev, allow)
+	clk.advance(99 * time.Millisecond)
+	if _, ok := c.Get(ev); !ok {
+		t.Fatal("entry expired early")
 	}
-
-	result := &api.ActionResult{
-		Action: api.ActionDeny,
-		Reason: "test deny",
+	clk.advance(time.Millisecond)
+	if _, ok := c.Get(ev); ok {
+		t.Fatal("expired entry returned")
 	}
-
-	c.Put(event, result)
-
-	// Should exist immediately
-	_, ok := c.Get(event)
-	if !ok {
-		t.Error("Get() returned false immediately after Put()")
-	}
-
-	// Wait for expiration
-	time.Sleep(150 * time.Millisecond)
-
-	// Should be expired
-	_, ok = c.Get(event)
-	if ok {
-		t.Error("Get() returned true for expired entry")
+	if c.Stats().Size != 0 {
+		t.Error("expired entry not removed on Get")
 	}
 }
 
-func TestDecisionCache_Eviction(t *testing.T) {
-	c := NewDecisionCache(3, 5*time.Minute) // Small cache for testing eviction
+func TestDecisionCache_EvictsLeastRecentlyUsed(t *testing.T) {
+	c, _ := newTestCache(3, time.Minute)
+	a, b, d := exec("/bin/a", 1), exec("/bin/b", 1), exec("/bin/d", 1)
+	c.Put(a, allow)
+	c.Put(b, allow)
+	c.Put(d, allow)
 
-	result := &api.ActionResult{
-		Action: api.ActionAllow,
-		Reason: "test",
+	// Reading a makes b the least recently used, even though a is oldest.
+	if _, ok := c.Get(a); !ok {
+		t.Fatal("a missing")
 	}
+	c.Put(exec("/bin/e", 1), allow)
 
-	// Fill cache to capacity
-	for i := 1; i <= 3; i++ {
-		event := &api.Event{
-			UID:      uint32(i),
-			Filename: fmt.Sprintf("/bin/test%d", i),
-		}
-		c.Put(event, result)
+	if _, ok := c.Get(a); !ok {
+		t.Error("recently read entry was evicted: Get must refresh recency")
 	}
-
-	// Verify all exist
-	for i := 1; i <= 3; i++ {
-		event := &api.Event{
-			UID:      uint32(i),
-			Filename: fmt.Sprintf("/bin/test%d", i),
-		}
-		if _, ok := c.Get(event); !ok {
-			t.Errorf("event %d should exist", i)
-		}
+	if _, ok := c.Get(b); ok {
+		t.Error("least recently used entry survived eviction")
 	}
-
-	// Add one more, should trigger eviction
-	event4 := &api.Event{
-		UID:      4,
-		Filename: "/bin/test4",
+	if s := c.Stats(); s.Size != 3 || s.Evictions != 1 {
+		t.Errorf("stats = %+v, want size 3, 1 eviction", s)
 	}
-	c.Put(event4, result)
+}
 
-	// Cache should still have 3 entries (one was evicted)
-	stats := c.Stats()
-	if stats.Size != 3 {
-		t.Errorf("cache size = %d, want 3", stats.Size)
+func TestDecisionCache_ZeroCapacityDisables(t *testing.T) {
+	c, _ := newTestCache(0, time.Minute)
+	c.Put(exec("/bin/a", 1), allow)
+	if _, ok := c.Get(exec("/bin/a", 1)); ok || c.Stats().Size != 0 {
+		t.Fatal("zero-capacity cache stored an entry")
 	}
 }
 
 func TestDecisionCache_Clear(t *testing.T) {
-	c := NewDecisionCache(10, 5*time.Minute)
-
-	result := &api.ActionResult{
-		Action: api.ActionAllow,
-		Reason: "test",
+	c, _ := newTestCache(10, time.Minute)
+	for i := 0; i < 3; i++ {
+		c.Put(exec(fmt.Sprintf("/bin/t%d", i), 1), allow)
 	}
-
-	// Add some entries
-	for i := 1; i <= 3; i++ {
-		event := &api.Event{
-			UID:      uint32(i),
-			Filename: fmt.Sprintf("/bin/test%d", i),
-		}
-		c.Put(event, result)
-	}
-
-	// Clear cache
 	c.Clear()
-
-	// All entries should be gone
-	for i := 1; i <= 3; i++ {
-		event := &api.Event{
-			UID:      uint32(i),
-			Filename: fmt.Sprintf("/bin/test%d", i),
-		}
-		if _, ok := c.Get(event); ok {
-			t.Errorf("event %d should not exist after Clear()", i)
-		}
+	if c.Stats().Size != 0 {
+		t.Fatal("Clear left entries")
 	}
-
-	// Cache should be empty
-	stats := c.Stats()
-	if stats.Size != 0 {
-		t.Errorf("cache size = %d, want 0", stats.Size)
+	if _, ok := c.Get(exec("/bin/t0", 1)); ok {
+		t.Fatal("hit after Clear")
+	}
+	// Still usable after Clear.
+	c.Put(exec("/bin/t0", 1), allow)
+	if _, ok := c.Get(exec("/bin/t0", 1)); !ok {
+		t.Fatal("cache unusable after Clear")
 	}
 }
 
 func TestDecisionCache_Stats(t *testing.T) {
-	c := NewDecisionCache(10, 5*time.Minute)
-
-	// Initial stats
-	stats := c.Stats()
-	if stats.Size != 0 {
-		t.Errorf("initial size = %d, want 0", stats.Size)
-	}
-	if stats.MaxSize != 10 {
-		t.Errorf("maxSize = %d, want 10", stats.MaxSize)
-	}
-	if stats.TotalHits != 0 {
-		t.Errorf("initial hits = %d, want 0", stats.TotalHits)
-	}
-
-	// Add entry
-	event := &api.Event{
-		UID:      1000,
-		Filename: "/bin/test",
-	}
-	result := &api.ActionResult{
-		Action: api.ActionAllow,
-		Reason: "test",
-	}
-	c.Put(event, result)
-
-	stats = c.Stats()
-	if stats.Size != 1 {
-		t.Errorf("size after put = %d, want 1", stats.Size)
-	}
-
-	// Hit the cache multiple times
-	c.Get(event)
-	c.Get(event)
-	c.Get(event)
-
-	stats = c.Stats()
-	if stats.TotalHits != 3 {
-		t.Errorf("total hits = %d, want 3", stats.TotalHits)
+	c, _ := newTestCache(10, time.Minute)
+	ev := exec("/bin/test", 1000)
+	c.Get(ev)
+	c.Put(ev, allow)
+	c.Get(ev)
+	c.Get(ev)
+	c.Get(ev)
+	s := c.Stats()
+	if s.Size != 1 || s.TotalHits != 3 || s.Misses != 1 {
+		t.Fatalf("stats = %+v, want size 1, 3 hits, 1 miss", s)
 	}
 }
 
-func TestDecisionCache_HitCount(t *testing.T) {
-	c := NewDecisionCache(10, 5*time.Minute)
-
-	event := &api.Event{
-		UID:      1000,
-		Filename: "/bin/test",
+func TestDecisionCache_PIDIncludedByDefault(t *testing.T) {
+	c, _ := newTestCache(10, time.Minute)
+	c.Put(&api.Event{PID: 1, Filename: "/bin/x"}, allow)
+	if _, ok := c.Get(&api.Event{PID: 2, Filename: "/bin/x"}); ok {
+		t.Fatal("without a declaration the PID must be part of the key")
 	}
-	result := &api.ActionResult{
-		Action: api.ActionAllow,
-		Reason: "test",
-	}
+}
 
-	c.Put(event, result)
-
-	// Hit multiple times
-	for i := 0; i < 5; i++ {
-		c.Get(event)
+func TestDecisionCache_PIDDroppedWhenPolicyIgnoresIt(t *testing.T) {
+	c, _ := newTestCache(10, time.Minute)
+	c.Put(&api.Event{PID: 1, Filename: "/bin/x"}, allow) // cleared below
+	c.SetPIDRelevant(func(t api.EventType) bool { return t != api.EventTypeProcess })
+	if c.Stats().Size != 0 {
+		t.Fatal("SetPIDRelevant must clear entries keyed under the old rule")
 	}
 
-	// Check hit count
-	c.mu.RLock()
-	key := c.makeKey(event)
-	entry := c.entries[key]
-	hitCount := entry.HitCount.Load()
-	c.mu.RUnlock()
+	c.Put(&api.Event{PID: 1, Filename: "/bin/x"}, allow)
+	if _, ok := c.Get(&api.Event{PID: 2, Filename: "/bin/x"}); !ok {
+		t.Error("new process missed although the policy does not read the PID")
+	}
+	// Network decisions still depend on the PID.
+	net := func(pid uint32) *api.Event {
+		return &api.Event{PID: pid, Network: &api.NetworkEvent{BaseEvent: api.BaseEvent{Type: api.EventTypeNetwork}, RemoteAddr: "1.1.1.1"}}
+	}
+	c.Put(net(1), allow)
+	if _, ok := c.Get(net(2)); ok {
+		t.Error("PID dropped for an event type whose policy reads it")
+	}
+}
 
-	if hitCount != 5 {
-		t.Errorf("hit count = %d, want 5", hitCount)
+// fullEvent returns an event with every exported field set to a non-zero
+// value, typed as typ (or untyped if typ < 0).
+func fullEvent(typ api.EventType) *api.Event {
+	ev := &api.Event{
+		PID: 10, UID: 11, GID: 12, Comm: "comm", Filename: "/file/name",
+		Timestamp: time.Unix(1, 0), CgroupID: 13, LSMEvent: true,
+		Process: &api.ProcessEvent{
+			BaseEvent: api.BaseEvent{Type: api.EventTypeProcess, PID: 20, UID: 21, GID: 22, Comm: "pcomm", CgroupID: 23},
+			Filename:  "/proc/file", Args: []string{"a", "b"},
+		},
+		File: &api.FileEvent{
+			BaseEvent: api.BaseEvent{Type: api.EventTypeFile, PID: 30},
+			Operation: "write", Path: "/etc/x", Flags: 31, Mode: 32,
+		},
+		Network: &api.NetworkEvent{
+			BaseEvent: api.BaseEvent{Type: api.EventTypeNetwork, PID: 40},
+			Operation: "connect", Protocol: "tcp", RemoteAddr: "10.0.0.1", RemotePort: 41,
+			LocalAddr: "10.0.0.2", LocalPort: 42, DataSize: 43,
+		},
+	}
+	if typ >= 0 {
+		ev.SetType(typ)
+	}
+	return ev
+}
+
+// forEachMutation calls visit with a fresh event in which exactly one leaf
+// field (found by reflection, so new api fields are covered automatically)
+// was changed, or one sub-event pointer was set to nil.
+func forEachMutation(t *testing.T, mk func() *api.Event, visit func(desc string, ev *api.Event)) {
+	t.Helper()
+	timeType := reflect.TypeOf(time.Time{})
+	// count leaves first using a dry walk
+	var walk func(v reflect.Value, path string, target int, n *int, ev *api.Event) bool
+	walk = func(v reflect.Value, path string, target int, n *int, ev *api.Event) bool {
+		switch v.Kind() {
+		case reflect.Ptr:
+			if v.IsNil() {
+				return false
+			}
+			if *n == target {
+				v.Set(reflect.Zero(v.Type()))
+				visit(path+"=nil", ev)
+				return true
+			}
+			*n++
+			return walk(v.Elem(), path, target, n, ev)
+		case reflect.Struct:
+			if v.Type() == timeType {
+				return false
+			}
+			for i := 0; i < v.NumField(); i++ {
+				f := v.Field(i)
+				if !f.CanSet() {
+					continue
+				}
+				if walk(f, path+"."+v.Type().Field(i).Name, target, n, ev) {
+					return true
+				}
+			}
+			return false
+		}
+		if *n != target {
+			*n++
+			return false
+		}
+		switch v.Kind() {
+		case reflect.String:
+			v.SetString(v.String() + "x")
+		case reflect.Bool:
+			v.SetBool(!v.Bool())
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			v.SetInt(v.Int() + 1)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			v.SetUint(v.Uint() + 1)
+		case reflect.Slice:
+			v.Set(reflect.Append(v, reflect.ValueOf("extra")))
+		default:
+			t.Fatalf("%s: unhandled kind %v; extend forEachMutation", path, v.Kind())
+		}
+		visit(path, ev)
+		return true
+	}
+	for target := 0; ; target++ {
+		ev := mk()
+		n := 0
+		if !walk(reflect.ValueOf(ev).Elem(), "Event", target, &n, ev) {
+			if target < 20 {
+				t.Fatalf("only %d mutations found; reflection walk broken", target)
+			}
+			return
+		}
+	}
+}
+
+func inputsEqual(a, b *api.Event) bool {
+	ia, ib := wasm.PolicyInputs(a), wasm.PolicyInputs(b)
+	for i := range ia {
+		if !bytes.Equal(ia[i], ib[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// TestKey_CoversEveryPolicyInput: whenever a change to an event is visible
+// to a policy module (through the binary ABI, the JSON ABI or the host
+// callbacks), the cache key must change too, or the cached decision of one
+// event would be reused for an event the policy may decide differently.
+func TestKey_CoversEveryPolicyInput(t *testing.T) {
+	for _, typ := range []api.EventType{-1, api.EventTypeProcess, api.EventTypeFile, api.EventTypeNetwork} {
+		mk := func() *api.Event { return fullEvent(typ) }
+		for _, pidRelevant := range []bool{true, false} {
+			c := NewDecisionCache(1, time.Minute)
+			if !pidRelevant {
+				c.SetPIDRelevant(func(api.EventType) bool { return false })
+			}
+			base := mk()
+			baseKey := c.makeKey(base)
+			forEachMutation(t, mk, func(desc string, ev *api.Event) {
+				if inputsEqual(base, ev) {
+					return
+				}
+				if !pidRelevant && desc == "Event.PID" {
+					// Allowed to collide: the policy declared it ignores the PID.
+					return
+				}
+				if c.makeKey(ev) == baseKey {
+					t.Errorf("type %v, pidRelevant=%v: mutating %s changes what the policy sees but not the cache key", typ, pidRelevant, desc)
+				}
+			})
+		}
+	}
+}
+
+func TestKey_ArgsUnambiguous(t *testing.T) {
+	c := NewDecisionCache(1, time.Minute)
+	a := &api.Event{Process: &api.ProcessEvent{Args: []string{"ab", "c"}}}
+	b := &api.Event{Process: &api.ProcessEvent{Args: []string{"a", "bc"}}}
+	if c.makeKey(a) == c.makeKey(b) {
+		t.Fatal("different argument vectors share a key")
 	}
 }
 
 func TestDecisionCache_ConcurrentAccess(t *testing.T) {
-	c := NewDecisionCache(100, 5*time.Minute)
+	c := NewDecisionCache(100, time.Minute)
 	var wg sync.WaitGroup
-
-	result := &api.ActionResult{
-		Action: api.ActionAllow,
-		Reason: "test",
-	}
-
-	// Concurrent writes
 	for i := 0; i < 50; i++ {
-		wg.Add(1)
+		wg.Add(2)
 		go func(n int) {
 			defer wg.Done()
-			event := &api.Event{
-				UID:      uint32(n),
-				Filename: fmt.Sprintf("/bin/test%d", n),
-			}
-			c.Put(event, result)
+			c.Put(exec(fmt.Sprintf("/bin/t%d", n), uint32(n)), allow)
 		}(i)
-	}
-
-	// Concurrent reads
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			event := &api.Event{
-				UID:      uint32(n),
-				Filename: fmt.Sprintf("/bin/test%d", n),
-			}
-			c.Get(event)
+			c.Get(exec(fmt.Sprintf("/bin/t%d", n), uint32(n)))
+			c.Stats()
 		}(i)
 	}
-
 	wg.Wait()
-
-	// Verify no race conditions (test will fail with -race if there are)
-	stats := c.Stats()
-	if stats.Size == 0 {
-		t.Error("cache should have entries after concurrent access")
+	if c.Stats().Size == 0 {
+		t.Error("no entries after concurrent puts")
 	}
 }
 
-func TestDecisionCache_MakeKey(t *testing.T) {
-	c := NewDecisionCache(10, 5*time.Minute)
-
-	tests := []struct {
-		name  string
-		event *api.Event
-	}{
-		{
-			name: "basic event",
-			event: &api.Event{
-				UID:      1000,
-				Filename: "/bin/bash",
-			},
-		},
-		{
-			name: "different uid",
-			event: &api.Event{
-				UID:      0,
-				Filename: "/bin/bash",
-			},
-		},
-		{
-			name: "different filename",
-			event: &api.Event{
-				UID:      1000,
-				Filename: "/usr/bin/python",
-			},
-		},
+func benchEvents(n int) []*api.Event {
+	evs := make([]*api.Event, n)
+	for i := range evs {
+		evs[i] = &api.Event{
+			PID: uint32(i), UID: uint32(i % 7), Comm: "bench",
+			Process: &api.ProcessEvent{Filename: fmt.Sprintf("/usr/bin/tool%d", i)},
+		}
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			key1 := c.makeKey(tt.event)
-			key2 := c.makeKey(tt.event)
-
-			// Should be consistent
-			if key1 != key2 {
-				t.Error("makeKey() should return consistent results")
-			}
-
-			// Should contain UID
-			if len(key1) == 0 {
-				t.Error("makeKey() returned empty string")
-			}
-		})
-	}
-}
-
-func TestDecisionCache_DifferentKeys(t *testing.T) {
-	c := NewDecisionCache(10, 5*time.Minute)
-
-	event1 := &api.Event{
-		UID:      1000,
-		Filename: "/bin/bash",
-	}
-	event2 := &api.Event{
-		UID:      1001,
-		Filename: "/bin/bash",
-	}
-	event3 := &api.Event{
-		UID:      1000,
-		Filename: "/bin/sh",
-	}
-
-	key1 := c.makeKey(event1)
-	key2 := c.makeKey(event2)
-	key3 := c.makeKey(event3)
-
-	// Different UIDs should produce different keys
-	if key1 == key2 {
-		t.Error("different UIDs should produce different keys")
-	}
-
-	// Different filenames should produce different keys
-	if key1 == key3 {
-		t.Error("different filenames should produce different keys")
-	}
-}
-
-func TestDecisionCache_MakeKey_FileEvent(t *testing.T) {
-	c := NewDecisionCache(10, 5*time.Minute)
-
-	// File event with File sub-struct — key should use File.Path
-	fileEvent := &api.Event{
-		PID:  1234,
-		UID:  1000,
-		Type: api.EventTypeFile,
-		File: &api.FileEvent{
-			Path: "/etc/passwd",
-		},
-	}
-	key1 := c.makeKey(fileEvent)
-
-	// Same path, different PID — different key
-	fileEvent2 := &api.Event{
-		PID:  5678,
-		UID:  1000,
-		Type: api.EventTypeFile,
-		File: &api.FileEvent{
-			Path: "/etc/passwd",
-		},
-	}
-	key2 := c.makeKey(fileEvent2)
-	if key1 == key2 {
-		t.Error("different PIDs should produce different keys")
-	}
-
-	// Different path — different key
-	fileEvent3 := &api.Event{
-		PID:  1234,
-		UID:  1000,
-		Type: api.EventTypeFile,
-		File: &api.FileEvent{
-			Path: "/etc/shadow",
-		},
-	}
-	key3 := c.makeKey(fileEvent3)
-	if key1 == key3 {
-		t.Error("different paths should produce different keys")
-	}
-
-	// File.Path takes priority over legacy Filename field
-	fileEventLegacy := &api.Event{
-		PID:      1234,
-		UID:      1000,
-		Type:     api.EventTypeFile,
-		Filename: "/etc/passwd",
-	}
-	keyLegacy := c.makeKey(fileEventLegacy)
-	// Without File sub-struct, falls through to Filename
-	// With File sub-struct, uses File.Path — both resolve to same content here
-	if key1 != keyLegacy {
-		t.Error("File.Path and Filename with same value should produce same key")
-	}
-
-	// File event with nil File falls back to Filename
-	fileEventNilFile := &api.Event{
-		PID:      1234,
-		UID:      1000,
-		Type:     api.EventTypeFile,
-		Filename: "/tmp/other",
-	}
-	keyNilFile := c.makeKey(fileEventNilFile)
-	if key1 == keyNilFile {
-		t.Error("different fallback filename should produce different key")
-	}
-}
-
-func TestDecisionCache_MakeKey_NetworkEvent(t *testing.T) {
-	c := NewDecisionCache(10, 5*time.Minute)
-
-	netEvent := &api.Event{
-		PID:  1234,
-		UID:  1000,
-		Type: api.EventTypeNetwork,
-		Network: &api.NetworkEvent{
-			RemoteAddr: "192.168.1.1",
-			RemotePort: 443,
-		},
-	}
-	key1 := c.makeKey(netEvent)
-
-	// Different remote addr — different key
-	netEvent2 := &api.Event{
-		PID:  1234,
-		UID:  1000,
-		Type: api.EventTypeNetwork,
-		Network: &api.NetworkEvent{
-			RemoteAddr: "10.0.0.1",
-			RemotePort: 443,
-		},
-	}
-	key2 := c.makeKey(netEvent2)
-	if key1 == key2 {
-		t.Error("different remote addresses should produce different keys")
-	}
-
-	// Different remote port — different key
-	netEvent3 := &api.Event{
-		PID:  1234,
-		UID:  1000,
-		Type: api.EventTypeNetwork,
-		Network: &api.NetworkEvent{
-			RemoteAddr: "192.168.1.1",
-			RemotePort: 80,
-		},
-	}
-	key3 := c.makeKey(netEvent3)
-	if key1 == key3 {
-		t.Error("different remote ports should produce different keys")
-	}
-
-	// Same addr+port, different PID — different key
-	netEvent4 := &api.Event{
-		PID:  9999,
-		UID:  1000,
-		Type: api.EventTypeNetwork,
-		Network: &api.NetworkEvent{
-			RemoteAddr: "192.168.1.1",
-			RemotePort: 443,
-		},
-	}
-	key4 := c.makeKey(netEvent4)
-	if key1 == key4 {
-		t.Error("different PIDs should produce different keys")
-	}
-
-	// Consistent — same event produces same key
-	key1Again := c.makeKey(netEvent)
-	if key1 != key1Again {
-		t.Error("makeKey should be deterministic")
-	}
-}
-
-func TestDecisionCache_MakeKey_CrossType(t *testing.T) {
-	c := NewDecisionCache(10, 5*time.Minute)
-
-	// Process event using Filename
-	processEvent := &api.Event{
-		PID:      1234,
-		UID:      1000,
-		Type:     api.EventTypeProcess,
-		Filename: "/bin/bash",
-	}
-
-	// File event using the same path string
-	fileEvent := &api.Event{
-		PID:  1234,
-		UID:  1000,
-		Type: api.EventTypeFile,
-		File: &api.FileEvent{
-			Path: "/bin/bash",
-		},
-	}
-
-	keyProcess := c.makeKey(processEvent)
-	keyFile := c.makeKey(fileEvent)
-
-	if keyProcess == keyFile {
-		t.Error("process and file events with same path should have different keys (type prefix differs)")
-	}
-
-	// Network event — totally different key structure
-	netEvent := &api.Event{
-		PID:  1234,
-		UID:  1000,
-		Type: api.EventTypeNetwork,
-		Network: &api.NetworkEvent{
-			RemoteAddr: "127.0.0.1",
-			RemotePort: 8080,
-		},
-	}
-	keyNet := c.makeKey(netEvent)
-	if keyNet == keyProcess || keyNet == keyFile {
-		t.Error("network event key should differ from process and file keys")
-	}
+	return evs
 }
 
 func BenchmarkDecisionCache_Put(b *testing.B) {
 	c := NewDecisionCache(10000, 5*time.Minute)
-	result := &api.ActionResult{
-		Action: api.ActionAllow,
-		Reason: "benchmark",
-	}
-
+	evs := benchEvents(20000) // twice the capacity: every Put past 10k evicts
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		event := &api.Event{
-			UID:      uint32(i % 1000),
-			Filename: fmt.Sprintf("/bin/test%d", i%1000),
-		}
-		c.Put(event, result)
+		c.Put(evs[i%len(evs)], allow)
 	}
 }
 
 func BenchmarkDecisionCache_Get(b *testing.B) {
 	c := NewDecisionCache(10000, 5*time.Minute)
-	result := &api.ActionResult{
-		Action: api.ActionAllow,
-		Reason: "benchmark",
+	evs := benchEvents(10000)
+	for _, ev := range evs {
+		c.Put(ev, allow)
 	}
-
-	// Pre-populate cache
-	for i := 0; i < 1000; i++ {
-		event := &api.Event{
-			UID:      uint32(i),
-			Filename: fmt.Sprintf("/bin/test%d", i),
-		}
-		c.Put(event, result)
-	}
-
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		event := &api.Event{
-			UID:      uint32(i % 1000),
-			Filename: fmt.Sprintf("/bin/test%d", i%1000),
+		if _, ok := c.Get(evs[i%len(evs)]); !ok {
+			b.Fatal("miss")
 		}
-		c.Get(event)
 	}
 }
 
 func BenchmarkDecisionCache_GetMiss(b *testing.B) {
 	c := NewDecisionCache(10000, 5*time.Minute)
-
+	evs := benchEvents(1000)
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		event := &api.Event{
-			UID:      uint32(i),
-			Filename: fmt.Sprintf("/bin/nonexistent%d", i),
-		}
-		c.Get(event)
+		c.Get(evs[i%len(evs)])
 	}
 }
 
-func BenchmarkDecisionCache_MakeKey(b *testing.B) {
+func BenchmarkDecisionCache_GetParallel(b *testing.B) {
 	c := NewDecisionCache(10000, 5*time.Minute)
-	event := &api.Event{
-		UID:      1000,
-		Filename: "/bin/bash",
+	evs := benchEvents(10000)
+	for _, ev := range evs {
+		c.Put(ev, allow)
 	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			c.Get(evs[i%len(evs)])
+			i++
+		}
+	})
+}
 
+// BenchmarkDecisionCache_PutFull100k shows eviction cost does not grow with
+// capacity (the previous implementation scanned every entry per eviction).
+func BenchmarkDecisionCache_PutFull100k(b *testing.B) {
+	c := NewDecisionCache(100000, 5*time.Minute)
+	evs := benchEvents(200000)
+	for _, ev := range evs[:100000] {
+		c.Put(ev, allow)
+	}
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		c.makeKey(event)
+		c.Put(evs[100000+i%100000], allow)
 	}
 }
