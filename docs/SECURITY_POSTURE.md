@@ -29,6 +29,12 @@ Each LSM hook consults the kernel `policy_map`:
 > synchronous gate for never-before-seen actions. Mitigations: pre-seed deny
 > rules for known-bad patterns, and scope enforcement to specific cgroups so the
 > rule set converges quickly.
+>
+> **Coverage on `main`:** userspace writes rules only for **exec** (exact path)
+> and **connect** (endpoint) decisions. `file_open`, `socket_bind`,
+> `socket_listen`, `ptrace_access_check` and `sb_mount` never get rules, so
+> they never block in the kernel. Pre-seeding deny rules from the compiled
+> policy is not implemented yet. See [STATUS.md](STATUS.md).
 
 ### 2. Userspace policy (WASM)
 
@@ -36,13 +42,20 @@ When an event reaches the WASM evaluator and evaluation **errors**, Warmor fails
 **closed** — the decision becomes `DENY` (`internal/enforcer/enforcer.go`). A
 broken or misbehaving policy denies rather than silently allows.
 
+A userspace `DENY` (without `--audit`) is enforced by sending `SIGKILL` to the
+process, after the event was observed. This applies in **every** mode below
+except `--audit`, including tracepoint-only mode.
+
+There is no WASM memory or time limit on `main`. A policy that loops forever
+blocks the event loop instead of failing closed.
+
 ## Enforcement modes
 
 | Mode | How to select | Behavior |
 |---|---|---|
-| **Observe-only** | default (no `--lsm-enforce`, or LSM unavailable), or `--no-lsm` | Events logged/evaluated; nothing blocked in-kernel. |
-| **Audit** | LSM loaded, `--audit` | Would-be denials are logged (`audit` events) but not enforced. |
-| **Enforce** | `--lsm-enforce` | `DENY` rules are blocked in-kernel. |
+| **Kernel audit-only** | default (no `--lsm-enforce`, or LSM unavailable), or `--no-lsm` | Nothing is blocked in-kernel. The daemon still `SIGKILL`s processes whose events the policy denies. |
+| **Audit** | `--audit` | Would-be denials are logged (`audit` events). Nothing is killed or blocked. This is the only true dry-run mode. |
+| **Enforce** | `--lsm-enforce` | Exec/connect `DENY` rules already in the map are blocked in-kernel. All other denies are `SIGKILL`ed. |
 
 The daemon prints a one-line **Security posture** summary at startup so the
 active mode is unambiguous in logs.
@@ -79,7 +92,8 @@ recommended posture for production enforcement nodes, typically paired with
   startup; deny rules blocked in-kernel; no silent downgrade.
 - **Rollout / canary:** `--lsm-enforce` (no `--require-lsm`). Enforces where the
   kernel supports it, degrades gracefully elsewhere while you assess coverage.
-- **Pure monitoring:** defaults. Observe and evaluate, block nothing.
+- **Pure monitoring:** `--audit`. Observe and evaluate, kill and block nothing.
+  The defaults are **not** pure monitoring: denied processes are still killed.
 
 See [BPF_COMPATIBILITY.md](BPF_COMPATIBILITY.md) for the kernel requirements
 that determine whether LSM enforcement can load at all.
