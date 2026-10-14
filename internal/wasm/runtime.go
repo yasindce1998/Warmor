@@ -119,8 +119,31 @@ func (r *Runtime) LoadPolicy(ctx context.Context, path string) error {
 		return fmt.Errorf("compile module: %w", err)
 	}
 
+	if err := r.validateModule(ctx, compiled); err != nil {
+		compiled.Close(ctx)
+		return fmt.Errorf("invalid policy module %s: %w", path, err)
+	}
+
 	r.module = compiled
 	return nil
+}
+
+// validateModule rejects modules that do not implement a host ABI the host
+// can call, or that declare an unsupported abi_version, so a bad policy fails
+// at load time instead of denying every event at runtime.
+func (r *Runtime) validateModule(ctx context.Context, compiled wazero.CompiledModule) error {
+	if err := validateCompiledModule(compiled); err != nil {
+		return err
+	}
+	if _, ok := compiled.ExportedFunctions()[exportABIVersion]; !ok {
+		return nil
+	}
+	probe, err := r.runtime.InstantiateModule(ctx, compiled, r.config.WithName(""))
+	if err != nil {
+		return fmt.Errorf("instantiate module: %w", err)
+	}
+	defer probe.Close(ctx)
+	return checkABIVersion(ctx, probe)
 }
 
 // LoadPolicyFromYAML compiles a YAML policy to WASM and loads it.
