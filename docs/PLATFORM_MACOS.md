@@ -1,5 +1,7 @@
 # macOS Platform Guide
 
+> **Status on `main`: Experimental, detection only.** The ESF client answers **every AUTH event with ALLOW**, so nothing is blocked on macOS today. The cgo ESF code is never compiled in CI (`CGO_ENABLED=0`). Release binaries are also built with `CGO_ENABLED=0`, so the released macOS `warmor-daemon` cannot start the ESF platform; build from source with cgo and the macOS SDK. Claims of "enforcement capable" below describe the design. See [Feature Status](STATUS.md).
+
 **Status:** 🚧 EXPERIMENTAL/BETA  
 **Implementation:** ESF (Endpoint Security Framework)  
 **Version:** 1.1.0-beta  

@@ -142,14 +142,15 @@ GOOS=linux GOARCH=amd64 go build -o warmor cmd/warmor/main.go
 
 ### Basic Usage
 ```bash
-# Run with default policy
-sudo ./warmor
+# Audit first (deny decisions logged, nothing killed)
+sudo ./warmor-daemon --policy /path/to/policy.wasm --audit
 
-# Run with custom policy
-sudo ./warmor --policy /path/to/policy.wasm
+# Enforce (SIGKILL on deny; cached exec/connect denies blocked in-kernel)
+sudo ./warmor-daemon --policy /path/to/policy.wasm --lsm-enforce
 
-# Run with specific eBPF programs
-sudo ./warmor --ebpf-dir ./bpf
+# The BPF programs are embedded in the binary; there is no --ebpf-dir flag.
+# Do not rely on the default --policy (policies/example/policy.wasm): on main
+# it denies every file and network event. See docs/STATUS.md.
 ```
 
 ### Systemd Service
