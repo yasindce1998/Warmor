@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/yasindce1998/warmor/internal/cache"
 	"github.com/yasindce1998/warmor/internal/lineage"
 	"github.com/yasindce1998/warmor/internal/logging"
@@ -46,8 +48,8 @@ type Options struct {
 	Labels      map[string]string
 
 	// Advanced enforcement
-	NetFilterConfig  *NetFilterConfig
-	SandboxProfiles  []*SandboxProfile
+	NetFilterConfig *NetFilterConfig
+	SandboxProfiles []*SandboxProfile
 }
 
 // PolicyMapSyncer compiles WASM policy decisions into a kernel BPF map for fast-path enforcement.
@@ -81,18 +83,18 @@ type Enforcer struct {
 	// that made it is still current, so an evaluation that was in flight
 	// during a reload cannot repopulate the map with a stale decision after
 	// it was cleared.
-	policyGen atomic.Uint64
-	pipeline      *streaming.Pipeline
+	policyGen      atomic.Uint64
+	pipeline       *streaming.Pipeline
 	lineageTracker *lineage.Tracker
-	netFilter     *NetFilter
-	sandbox       *SandboxManager
-	policyPath    string
-	verifyKey     ed25519.PublicKey
-	auditMode     bool
-	learningMode  bool
-	ctx           context.Context
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
+	netFilter      *NetFilter
+	sandbox        *SandboxManager
+	policyPath     string
+	verifyKey      ed25519.PublicKey
+	auditMode      bool
+	learningMode   bool
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
 }
 
 // newPlatform constructs the platform monitor. It is a variable so tests can
@@ -112,8 +114,17 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		port = 9090
 	}
 
-	// Initialize logger
-	logger := logging.NewLogger("info")
+	// Initialize logger at the requested level (--log-level). An empty
+	// level means the default; an unknown one is a configuration error
+	// rather than something to silently ignore.
+	logLevel := opts.LogLevel
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	if _, err := zerolog.ParseLevel(logLevel); err != nil {
+		return nil, fmt.Errorf("invalid log level %q: %w", opts.LogLevel, err)
+	}
+	logger := logging.NewLogger(logLevel)
 	logger.LogStartup(policyPath)
 
 	// Initialize network filter if configured. This only validates config,

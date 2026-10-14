@@ -1,6 +1,7 @@
 package enforcer
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -76,5 +77,30 @@ func TestSyncToPolicyMap_DropsDecisionFromReplacedPolicy(t *testing.T) {
 	e.syncToPolicyMap(&api.Event{Filename: "/bin/sh"}, &api.ActionResult{Action: api.ActionAllow}, e.policyGen.Load())
 	if len(pm.snapshot()) != 1 {
 		t.Fatal("current-generation decision not written")
+	}
+}
+
+func TestNew_HonoursLogLevel(t *testing.T) {
+	isolateCacheDir(t)
+	for _, tc := range []struct{ in, want string }{
+		{"", "info"},
+		{"debug", "debug"},
+		{"error", "error"},
+	} {
+		stubPlatform(t, &fakePlatform{}, nil)
+		e, err := New(context.Background(), testPolicyPath, &Options{MetricsPort: -1, LogLevel: tc.in})
+		if err != nil {
+			t.Fatalf("New(LogLevel=%q): %v", tc.in, err)
+		}
+		got := e.logger.Level()
+		e.Close()
+		if got != tc.want {
+			t.Errorf("LogLevel %q: logger level = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	stubPlatform(t, &fakePlatform{}, nil)
+	if _, err := New(context.Background(), testPolicyPath, &Options{MetricsPort: -1, LogLevel: "loud"}); err == nil {
+		t.Error("an unknown log level must be rejected")
 	}
 }
