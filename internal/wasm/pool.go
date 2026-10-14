@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // ErrPoolClosed is returned by Get after the pool has been closed.
@@ -107,6 +108,35 @@ func (p *Pool) Put(policy *Policy) {
 		policy.Close(context.Background())
 	}
 }
+
+// Replace discards an instance that may be unusable (it trapped, or was
+// closed because its evaluation deadline expired) and puts a freshly
+// instantiated one in its place, so the pool keeps its capacity. If the new
+// instance cannot be created the pool shrinks by one and the error is
+// returned; callers bound Get with a deadline, so an empty pool fails
+// closed rather than blocking forever.
+func (p *Pool) Replace(broken *Policy) error {
+	if broken != nil {
+		broken.Close(context.Background())
+	}
+	select {
+	case <-p.done:
+		return nil
+	default:
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), instantiateTimeout)
+	defer cancel()
+	fresh, err := p.instantiate(ctx)
+	if err != nil {
+		return fmt.Errorf("replace policy instance: %w", err)
+	}
+	p.Put(fresh)
+	return nil
+}
+
+// instantiateTimeout bounds instantiating a replacement instance (which runs
+// the module's start function and malloc).
+const instantiateTimeout = 5 * time.Second
 
 // Size returns the pool capacity.
 func (p *Pool) Size() int {

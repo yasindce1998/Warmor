@@ -43,6 +43,10 @@ type Options struct {
 	// <policy>.sig. The policy file is read once, verified, and loaded from
 	// memory; YAML policies are refused.
 	PolicyVerifyKey ed25519.PublicKey
+	// EvalTimeout bounds each WASM policy evaluation; an evaluation that
+	// exceeds it is denied (fail closed) and its instance replaced. Zero
+	// means wasm.DefaultEvalTimeout.
+	EvalTimeout time.Duration
 
 	// Streaming pipeline configuration
 	StreamSinks []streaming.Sink
@@ -92,6 +96,7 @@ type Enforcer struct {
 	sandbox        *SandboxManager
 	policyPath     string
 	verifyKey      ed25519.PublicKey
+	evalTimeout    time.Duration
 	auditMode      bool
 	learningMode   bool
 	ctx            context.Context
@@ -231,6 +236,8 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 
 	// Create pool-backed policy evaluator
 	evaluator := wasm.NewPolicyEvaluator(pool, hostname)
+	evaluator.SetTimeout(opts.EvalTimeout)
+	logger.LogInfo(fmt.Sprintf("✓ Policy evaluation deadline %v", evaluator.Timeout()))
 
 	// Initialize decision cache (10k entries, 5min TTL)
 	decisionCache := cache.NewDecisionCache(10000, 5*time.Minute)
@@ -286,6 +293,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		sandbox:        sandboxMgr,
 		policyPath:     policyPath,
 		verifyKey:      opts.PolicyVerifyKey,
+		evalTimeout:    opts.EvalTimeout,
 		auditMode:      opts.AuditMode,
 		learningMode:   opts.LearningMode,
 		ctx:            ctx,
@@ -747,6 +755,7 @@ func (e *Enforcer) ReloadPolicy() error {
 	// Create new evaluator
 	hostname, _ := os.Hostname()
 	newEvaluator := wasm.NewPolicyEvaluator(newPool, hostname)
+	newEvaluator.SetTimeout(e.evalTimeout)
 
 	// Atomic swap with mutex protection
 	e.evaluatorMu.Lock()

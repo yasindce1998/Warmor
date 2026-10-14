@@ -24,7 +24,17 @@ type RuntimeConfig struct {
 	// PoolSize sets the number of WASM instances in the evaluation pool.
 	// Defaults to runtime.NumCPU() if zero.
 	PoolSize int
+
+	// MemoryLimitPages caps each policy instance's linear memory, in 64 KiB
+	// pages. Defaults to DefaultMemoryLimitPages if zero. A module whose
+	// declared minimum exceeds it fails to compile; memory.grow beyond it
+	// fails inside the policy.
+	MemoryLimitPages uint32
 }
+
+// DefaultMemoryLimitPages is the default per-instance memory cap (16 MiB),
+// ample for generated policies (64 KiB heap + 1 MiB stack).
+const DefaultMemoryLimitPages = 256
 
 // DefaultCacheDir returns the platform-appropriate default cache directory.
 func DefaultCacheDir() string {
@@ -58,7 +68,16 @@ func NewRuntime(ctx context.Context, cfgs ...RuntimeConfig) (*Runtime, error) {
 		poolSize = runtime.NumCPU()
 	}
 
-	runtimeCfg := wazero.NewRuntimeConfig()
+	memPages := cfg.MemoryLimitPages
+	if memPages == 0 {
+		memPages = DefaultMemoryLimitPages
+	}
+	// Close-on-context-done makes a cancelled or timed-out context abort a
+	// running policy (e.g. an infinite loop) instead of hanging the caller;
+	// see PolicyEvaluator's per-evaluation deadline.
+	runtimeCfg := wazero.NewRuntimeConfig().
+		WithMemoryLimitPages(memPages).
+		WithCloseOnContextDone(true)
 
 	var compilationCache wazero.CompilationCache
 	if cfg.CacheDir != "" {

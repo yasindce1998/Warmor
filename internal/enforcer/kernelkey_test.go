@@ -1,6 +1,9 @@
 package enforcer
 
 import (
+	"context"
+	"time"
+
 	"testing"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
@@ -111,5 +114,56 @@ func TestHandleEvent_CacheKeyFollowsPIDDeclaration(t *testing.T) {
 	e2.handleEvent(ls(0x7fffffff))
 	if hits := e2.GetStats().CacheHits; hits != 0 {
 		t.Errorf("undeclared policy: CacheHits = %d, want 0", hits)
+	}
+}
+
+func TestHandleEvent_LoopingPolicyFailsClosedWithoutCaching(t *testing.T) {
+	pm := &fakePolicyMap{}
+	// uid 0 loops forever inside the policy; other uids are allowed.
+	e, _ := newTestEnforcer(t, testEnforcerOpts{policyMap: pm, poolSize: 1, policyWasm: wasmtest.LoopOnUIDPolicy()})
+	e.evaluator.SetTimeout(20 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// PID 0: handleDeny never signals anything.
+		e.handleEvent(&api.Event{PID: 0, UID: 0, Filename: "/bin/spin"})
+		e.handleEvent(&api.Event{PID: 0, UID: 1000, Filename: "/bin/ok"})
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("looping policy hung the event loop")
+	}
+
+	stats := e.GetStats()
+	if stats.Denied != 1 || stats.Allowed != 1 {
+		t.Fatalf("stats = %+v, want the timed-out event denied and the next allowed", stats)
+	}
+	if _, hit := e.cache.Get(&api.Event{PID: 0, UID: 0, Filename: "/bin/spin"}); hit {
+		t.Error("timed-out evaluation was cached")
+	}
+	if len(pm.snapshot()) != 0 {
+		t.Error("timed-out evaluation was synced to the kernel")
+	}
+}
+
+func TestNew_EvalTimeoutOption(t *testing.T) {
+	isolateCacheDir(t)
+	stubPlatform(t, &fakePlatform{}, nil)
+	e, err := New(context.Background(), testPolicyPath, &Options{MetricsPort: -1, EvalTimeout: 123 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if got := e.evaluator.Timeout(); got != 123*time.Millisecond {
+		t.Fatalf("evaluator timeout = %v, want 123ms", got)
+	}
+	e.evaluator = nil // let ReloadPolicy close the old pool only once
+	if err := e.ReloadPolicy(); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.evaluator.Timeout(); got != 123*time.Millisecond {
+		t.Fatalf("timeout after reload = %v, want 123ms", got)
 	}
 }
