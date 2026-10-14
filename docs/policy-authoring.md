@@ -137,9 +137,9 @@ warmor-compile --validate policy.yaml
 warmor-compile --rust-only policy.yaml > policy.rs
 ```
 
-The daemon accepts both `.yaml` and `.wasm` files via `--policy`. When given a `.yaml` file, it checks for a `.wasm` file with the same base name and loads it directly if found — skipping compilation entirely.
+The daemon accepts both `.yaml` and `.wasm` files via `--policy`. A `.yaml` file is always compiled from its own content (requires the Rust toolchain); the result is cached under the WASM cache directory keyed by the SHA-256 of the YAML and the compiler version, so an unchanged YAML is not rebuilt and an edited one always is. Nothing is written next to the YAML, so it may live on a read-only volume such as a ConfigMap. A `.wasm` file next to the YAML is never substituted for it — to run a precompiled policy, pass the `.wasm` to `--policy` directly.
 
-Pre-compilation is useful when:
+Passing a precompiled `.wasm` is useful when:
 - The Rust toolchain isn't available on the target host
 - You want reproducible builds in CI
 - You want faster daemon startup (no compile step)

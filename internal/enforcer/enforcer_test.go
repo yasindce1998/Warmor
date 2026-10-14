@@ -1214,10 +1214,14 @@ func TestReloadPolicy_DoubleClose(t *testing.T) {
 	}
 }
 
-func TestReloadPolicy_YAMLWithPrecompiledWasm(t *testing.T) {
+func TestReloadPolicy_YAMLIgnoresSiblingWasm(t *testing.T) {
 	isolateCacheDir(t)
 	e, _ := newTestEnforcer(t, testEnforcerOpts{})
 
+	// Regression: a .wasm next to the YAML used to be loaded instead of the
+	// YAML, so edits to the YAML were silently ignored after the first
+	// compile. The YAML is the source of truth: here it is invalid, and the
+	// reload must fail even though a loadable sibling module exists.
 	dir := t.TempDir()
 	data, err := os.ReadFile(testPolicyPath)
 	if err != nil {
@@ -1227,14 +1231,17 @@ func TestReloadPolicy_YAMLWithPrecompiledWasm(t *testing.T) {
 		t.Fatal(err)
 	}
 	yamlPath := filepath.Join(dir, "policy.yaml")
-	if err := os.WriteFile(yamlPath, []byte("# precompiled sibling is used\n"), 0o600); err != nil {
+	if err := os.WriteFile(yamlPath, []byte("# not a policy\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	e.policyPath = yamlPath
-	e.evaluator = nil
+	oldEval := e.evaluator
 
-	if err := e.ReloadPolicy(); err != nil {
-		t.Fatalf("ReloadPolicy(yaml): %v", err)
+	if err := e.ReloadPolicy(); err == nil || !strings.Contains(err.Error(), "load new YAML policy") {
+		t.Fatalf("ReloadPolicy(yaml) error = %v, want YAML load failure", err)
+	}
+	if e.evaluator != oldEval {
+		t.Error("failed reload must keep the old policy")
 	}
 }
 
