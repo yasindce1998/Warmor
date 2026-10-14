@@ -54,7 +54,7 @@ sudo ./bin/warmor-daemon --policy crypto.wasm --audit --event-sink stdout
 sudo ./bin/warmor-daemon --policy crypto.wasm --lsm-enforce
 ```
 
-> **Do not run the daemon with its default `--policy` (`policies/example/policy.wasm`) without `--audit`.** On `main` that example policy denies every file and network event (known issue, being fixed), so the daemon would kill almost every process. Pass a policy compiled from YAML, as above.
+> **Start with `--audit`.** Without it, denied processes are SIGKILLed even when `--lsm-enforce` is off. The daemon's default `--policy` (`policies/example/policy.wasm`, built with `make build-policy`) is a starter example, not a production policy.
 
 The daemon prints a `Security posture:` line at startup that tells you whether LSM blocking is active, audit-only, or unavailable (tracepoint observe mode).
 
@@ -200,13 +200,7 @@ There is no `warmor-dashboard` binary on `main`. The SSE dashboard in `internal/
 
 10 example Rust policy crates covering threat scenarios.
 
-> **Known issues on `main` (being fixed):**
-> - `container-escape`, `crypto-mining`, `lateral-movement`, `multi` and `supply-chain` export a JSON `evaluate_event`, but the host treats that export name as its binary ABI, so these crates **deny every event**.
-> - `example`, `advanced` and `zero-trust-net` require a `filename` field that the host omits for file and network events, so they **deny every file and network event**.
-> - `cross-platform` and `temporal-access` do not compile.
-> - CI builds none of these crates.
->
-> Until this is fixed, YAML policies compiled with `warmor-compile` are the reliable path.
+All 10 crates build for `wasm32-unknown-unknown` and use the JSON ABI (`evaluate_syscall`). CI builds every crate and runs each through the real WASM host (`TestPolicyCrates`): benign events must be allowed and the crate's own attack examples denied. The host does not send `args`, `parent_comm`, `cgroup_id` or time context yet, so rules on those fields never fire.
 
 | Policy | Threat Domain | Pattern |
 |--------|--------------|---------|

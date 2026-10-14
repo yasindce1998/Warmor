@@ -149,8 +149,8 @@ sudo ./warmor-daemon --policy /path/to/policy.wasm --audit
 sudo ./warmor-daemon --policy /path/to/policy.wasm --lsm-enforce
 
 # The BPF programs are embedded in the binary; there is no --ebpf-dir flag.
-# Do not rely on the default --policy (policies/example/policy.wasm): on main
-# it denies every file and network event. See docs/STATUS.md.
+# The default --policy (policies/example/policy.wasm) is a starter example;
+# pass your own policy and start with --audit. See docs/STATUS.md.
 ```
 
 ### Systemd Service

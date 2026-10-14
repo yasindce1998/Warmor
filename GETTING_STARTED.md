@@ -117,7 +117,7 @@ This builds every tool into `bin/`. The compiled BPF objects and their Go bindin
 
 ## Step 3: Write Your First Policy
 
-> **Don't start the daemon with its default policy.** `warmor-daemon` defaults to `--policy policies/example/policy.wasm`. On `main` that example Rust policy denies **every file and network event** (known issue, being fixed), so without `--audit` the daemon would kill nearly every process. Use a YAML policy compiled with `warmor-compile` instead, as below.
+> **Write your own policy rather than relying on the default.** `warmor-daemon` defaults to `--policy policies/example/policy.wasm`, a starter example. And start with `--audit`: without it, denied processes are SIGKILLed even if `--lsm-enforce` is off.
 
 The easiest way to write a policy is YAML. Create a file called `my-policy.yaml`:
 
@@ -282,7 +282,7 @@ warmor/
 │   ├── lateral-movement/
 │   ├── yaml-example/       #   53 categorized YAML policies
 │   └── ...
-├── examples/policies/      # 6 YAML examples (4 currently fail validation)
+├── examples/policies/      # 6 YAML examples
 ├── bpf/                    # Linux eBPF C source code
 ├── deploy/helm/warmor/     # Kubernetes Helm chart
 └── docs/                   # Full documentation

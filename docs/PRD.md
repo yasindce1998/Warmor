@@ -56,7 +56,7 @@ None of the following has been measured on `main`. They are **design targets**, 
 - 30 internal packages. 9 of them (`attackgraph`, `blastradius`, `container`, `dashboard`, `drift`, `escape`, `patterns`, `temporal`, `testing`) are imported by no binary.
 - 15 binaries under `cmd/` (13 released tools plus `test-ebpf` and `test-wasm`)
 - 10 Rust policy crates. 8 compile; on `main` all of them deny some or all events due to ABI/field mismatches (see [STATUS.md](STATUS.md#2-policy-engine-and-toolchain)).
-- 59 YAML example policies: 53 in `policies/yaml-example/` (all validate) and 6 in `examples/policies/` (4 fail validation)
+- 59 YAML example policies: 53 in `policies/yaml-example/` (all validate) and 6 in `examples/policies/` (all validate; CI fails on an invalid policy)
 - Tests: Go unit tests with a 40% coverage gate on Linux; LSM attach integration tests in a VM; Windows ETW smoke tests on a real runner
 
 **Documentation:**

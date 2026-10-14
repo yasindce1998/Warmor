@@ -53,18 +53,16 @@ Use `linux-arm64` for ARM64 hosts.
 ./bin/warmor-compile -o crypto.wasm examples/policies/block-crypto-miners.yaml
 ```
 
-> On `main`, 4 of the 6 files in `examples/policies/` fail validation
-> (`equals` instead of `eq`, `audit` instead of `log`). Use
-> `block-crypto-miners.yaml`, `kubernetes-hardening.yaml` or any file under
-> `policies/yaml-example/`, all of which validate.
+> Every file in `examples/policies/` and `policies/yaml-example/` validates;
+> CI fails if one doesn't.
 
 You can also pass a `.yaml` file directly to `warmor-daemon --policy`. The daemon
 then compiles it at startup, which needs `cargo` and the wasm32 target **on the
 enforcing host**. A precompiled `.wasm` avoids that.
 
-> **Do not run the daemon with its default `--policy`
-> (`policies/example/policy.wasm`) without `--audit`.** That example Rust policy
-> denies every file and network event on `main` (known issue).
+> **Start with `--audit`.** Without it, denied processes are SIGKILLed even
+> when `--lsm-enforce` is off. The default `--policy`
+> (`policies/example/policy.wasm`) is a starter example.
 
 ## 3. Run in audit mode
 

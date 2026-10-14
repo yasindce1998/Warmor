@@ -1,10 +1,6 @@
 # Rust WASM Policy Examples
 
-> **Status on `main`: example crates have known ABI bugs (being fixed).** Use YAML policies compiled with `warmor-compile` for anything you plan to enforce.
-> - `container-escape`, `crypto-mining`, `lateral-movement`, `multi` and `supply-chain` export a JSON `evaluate_event`. The host treats an export with that name as its binary ABI, so these crates **deny every event**.
-> - `advanced`, `example` and `zero-trust-net` require a `filename` field that the host omits for file and network events, so they **deny every file and network event**.
-> - `cross-platform` and `temporal-access` do not compile.
-> - The `abi_version` export is never checked, and CI builds none of these crates.
+> **Status:** all 10 crates build and are checked against the real host in CI (`TestPolicyCrates`). The host sends only the fields listed under [Host contract](#host-contract); rules on other fields (`args`, `parent_comm`, `cgroup_id`, time) never fire yet.
 >
 > See [Feature Status](STATUS.md).
 
