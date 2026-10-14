@@ -16,18 +16,50 @@ Warmor ships with advanced Rust-based WASM policy examples in the `policies/` di
 policies/
   advanced/           # Basic process/file policy (evaluate_syscall ABI)
   cross-platform/     # Platform-aware flat struct + C FFI ABI
-  multi/              # Tagged enum dispatch (evaluate_event ABI)
+  multi/              # Tagged enum dispatch
   container-escape/   # Container breakout detection
   supply-chain/       # Runtime supply chain integrity
   temporal-access/    # Time-based access control
   zero-trust-net/     # Zero-trust network microsegmentation
   lateral-movement/   # Lateral movement detection
   crypto-mining/      # Cryptojacking detection
+  example/            # Starter template
 ```
 
 ## ABI Patterns
 
 All policies compile to `wasm32-unknown-unknown` with `crate-type = ["cdylib"]` and export `malloc`/`free` for host memory management.
+
+### Host contract
+
+Every crate in `policies/` uses the JSON ABI. The host picks the ABI from the
+module's export *signatures* and rejects a module it cannot call at load time:
+
+| Export | Signature | Meaning |
+|--------|-----------|---------|
+| `evaluate_syscall` | `(ptr: i32, len: i32) -> i32` | JSON ABI: `ptr`/`len` is a UTF-8 JSON event |
+| `evaluate_event` | `(ptr: i32) -> i32` | Binary ABI: `ptr` is a fixed 256-byte struct (used by YAML-compiled policies) |
+| `malloc` | `(size: i32) -> i32` | Required for both ABIs |
+| `free` | `(ptr: i32, size: i32)` | Optional |
+| `abi_version` | `() -> i32` | Optional; the host accepts 1 and 2 and refuses anything else |
+
+A JSON policy must name its entry point `evaluate_syscall`. Exporting
+`evaluate_event(ptr, len)` is an error: `evaluate_event` is reserved for the
+binary ABI and such a module fails to load.
+
+The JSON document has these keys (all of them are always present for the
+listed type):
+
+| `type` | Keys |
+|--------|------|
+| all | `type`, `pid`, `uid`, `gid`, `comm`, `filename` |
+| `PROCESS` | `filename` is the executed binary |
+| `FILE` | `operation`, `path`, `flags` (`filename` is empty) |
+| `NETWORK` | `operation`, `protocol`, `remote_addr`, `remote_port`, `local_port` (`filename` is empty) |
+
+Anything else (`args`, `parent_comm`, `cgroup_id`, temporal context, ...) is
+not sent today. Mark every struct `#[serde(default)]`: a missing key is
+otherwise a parse error, and the crates deny on parse errors.
 
 ### Pattern 1: Tagged Enum (Multi-Event)
 
@@ -45,18 +77,23 @@ enum Event {
     Network(NetworkEvent),
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ProcessEvent { /* pid, uid, gid, comm, filename, ... */ }
+
 #[no_mangle]
-pub extern "C" fn evaluate_event(event_ptr: *const u8, event_len: usize) -> i32
+pub extern "C" fn evaluate_syscall(event_ptr: *const u8, event_len: usize) -> i32
 ```
 
 The host passes a JSON byte slice with a `"type"` discriminator. The policy deserializes into the appropriate variant and evaluates.
 
-### Pattern 2: Cross-Platform (Flat Struct + C FFI)
+### Pattern 2: Flat Struct
 
 Used by: `cross-platform/`, `temporal-access/`, `zero-trust-net/`
 
 ```rust
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct Event {
     #[serde(rename = "type")]
     event_type: String,
@@ -73,7 +110,7 @@ pub extern "C" fn evaluate(event_json: *const c_char) -> *mut c_char
 pub extern "C" fn free_string(s: *mut c_char)
 ```
 
-Exports both the byte-slice ABI and a C-string ABI for cross-language compatibility. Returns a JSON `Decision` struct with action and reason fields.
+Internally the rules build a `Decision` (action + reason) that `evaluate_syscall` maps to an action code. `cross-platform`, `temporal-access` and `zero-trust-net` also export a C-string `evaluate(json) -> json` helper and `free_string` for non-Warmor embedders; the Warmor host never calls them.
 
 ### ABI Version
 
@@ -180,7 +217,16 @@ cd policies/<name>
 cargo build --release --target wasm32-unknown-unknown
 ```
 
-The output WASM file will be at `target/wasm32-unknown-unknown/release/<crate_name>.wasm`.
+The output WASM file will be at `target/wasm32-unknown-unknown/release/<lib>.wasm`,
+where `<lib>` is the crate name with `-` replaced by `_` (for example
+`policies/container-escape` produces `warmor_policy_container_escape.wasm`).
+
+To build every crate and check each one against the host:
+
+```bash
+./scripts/build-rust-policies.sh
+go test ./internal/wasm/ -run TestPolicyCrates -v
+```
 
 All crates use an optimized release profile:
 
@@ -207,7 +253,7 @@ All policies use the same action constants:
 1. Create a new Rust crate with `cargo init --lib`
 2. Set `crate-type = ["cdylib"]` in `Cargo.toml`
 3. Add `serde`, `serde_json` dependencies
-4. Export `malloc`, `free`, and one of `evaluate_syscall`/`evaluate_event`/`evaluate`
-5. Optionally export `abi_version() -> u32` (return 2 for multi-event support)
+4. Export `malloc`, `free`, and `evaluate_syscall(ptr, len) -> i32`; mark event structs `#[serde(default)]`
+5. Optionally export `abi_version() -> u32` (return 2 for multi-event support; other values are rejected)
 6. Build with `cargo build --release --target wasm32-unknown-unknown`
 7. Load with `warmor-daemon --policy path/to/policy.wasm`
