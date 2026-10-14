@@ -21,6 +21,8 @@ func main() {
 	policyVersion := flag.String("policy-version", "1.0.0", "Policy version metadata")
 	description := flag.String("description", "", "Policy description metadata")
 	keygen := flag.Bool("keygen", false, "Generate an ed25519 signing key pair at --sign-key and --verify-key")
+	signFile := flag.Bool("sign", false, "Write a detached signature for --wasm to <wasm>.sig using --sign-key (for warmor-daemon/warmor-server --verify-key)")
+	verifyFile := flag.Bool("verify", false, "Verify the detached signature <wasm>.sig of --wasm against --verify-key")
 	signKey := flag.String("sign-key", "", "Path to ed25519 private key PEM (PKCS#8) used to sign on push")
 	verifyKey := flag.String("verify-key", "", "Path to ed25519 public key PEM (PKIX) used to verify on pull")
 	allowUnsigned := flag.Bool("allow-unsigned", false, "Push without signing (INSECURE: such bundles only pull with --insecure-skip-verify)")
@@ -33,6 +35,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Package compiled .wasm policies as OCI artifacts for registry push/pull.\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  warmor-policy-bundle --keygen --sign-key signing.key --verify-key signing.pub\n")
+		fmt.Fprintf(os.Stderr, "  warmor-policy-bundle --sign --wasm policy.wasm --sign-key signing.key        # writes policy.wasm.sig\n")
+		fmt.Fprintf(os.Stderr, "  warmor-policy-bundle --verify --wasm policy.wasm --verify-key signing.pub\n")
 		fmt.Fprintf(os.Stderr, "  warmor-policy-bundle --push --ref ghcr.io/org/policy:v1 --wasm policy.wasm --sign-key signing.key\n")
 		fmt.Fprintf(os.Stderr, "  warmor-policy-bundle --pull --ref ghcr.io/org/policy:v1 --wasm policy.wasm --verify-key signing.pub\n")
 		fmt.Fprintf(os.Stderr, "  warmor-policy-bundle --pull --ref ghcr.io/org/policy@sha256:... --wasm policy.wasm --verify-key signing.pub\n\n")
@@ -57,6 +61,32 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "Wrote private key %s and public key %s\n", *signKey, *verifyKey)
+		return
+	}
+
+	if *signFile || *verifyFile {
+		if *push || *pull || *keygen || (*signFile && *verifyFile) {
+			fmt.Fprintf(os.Stderr, "error: --sign and --verify cannot be combined with each other or with --push, --pull or --keygen\n")
+			os.Exit(1)
+		}
+		if *wasmFile == "" {
+			fmt.Fprintf(os.Stderr, "error: --wasm is required\n")
+			os.Exit(1)
+		}
+		if *signFile {
+			sigPath, err := signDetached(*wasmFile, *signKey)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: sign: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Signed %s → %s\n", *wasmFile, sigPath)
+			return
+		}
+		if err := verifyDetached(*wasmFile, *verifyKey); err != nil {
+			fmt.Fprintf(os.Stderr, "error: verify: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Verified %s (signature %s)\n", *wasmFile, crypto.PolicySignaturePath(*wasmFile))
 		return
 	}
 
@@ -128,6 +158,41 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "Pulled %s → %s (digest: %s)\n", *ref, *wasmFile, desc.Digest)
 	}
+}
+
+// signDetached writes the detached signature of wasmPath (the format
+// warmor-daemon --verify-key and warmor-server --verify-key check) to
+// wasmPath + ".sig" and returns that path.
+func signDetached(wasmPath, keyPath string) (string, error) {
+	if keyPath == "" {
+		return "", fmt.Errorf("--sign-key is required")
+	}
+	sk, err := crypto.LoadSigningKey(keyPath)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(wasmPath)
+	if err != nil {
+		return "", err
+	}
+	sigPath := crypto.PolicySignaturePath(wasmPath)
+	if err := os.WriteFile(sigPath, sk.SignPolicyFile(data), 0644); err != nil {
+		return "", err
+	}
+	return sigPath, nil
+}
+
+// verifyDetached checks wasmPath against its detached signature.
+func verifyDetached(wasmPath, keyPath string) error {
+	if keyPath == "" {
+		return fmt.Errorf("--verify-key is required")
+	}
+	pub, err := crypto.LoadPublicKey(keyPath)
+	if err != nil {
+		return err
+	}
+	_, err = crypto.ReadVerifiedPolicy(pub, wasmPath, policybundle.DefaultMaxWasmSize)
+	return err
 }
 
 // generateKeys writes a new ed25519 key pair: the private key (0600) to

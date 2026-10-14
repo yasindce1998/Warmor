@@ -160,3 +160,50 @@ func TestBundle_Version(t *testing.T) {
 	}
 	assertContains(t, "stdout", r.stdout, "warmor-policy-bundle dev")
 }
+
+func TestBundle_SignVerifyDetached(t *testing.T) {
+	priv, pub := genKeys(t)
+	_, otherPub := genKeys(t)
+	wasm := writeFile(t, filepath.Join(t.TempDir(), "p.wasm"), "\x00asm module")
+
+	_, stderr := runMain(t, "", "-sign", "-wasm", wasm, "-sign-key", priv)
+	assertContains(t, "sign", stderr, "Signed "+wasm, wasm+".sig")
+	pk, err := crypto.LoadPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := crypto.ReadVerifiedPolicy(pk, wasm, 1<<20); err != nil {
+		t.Fatalf("signature written by --sign does not verify: %v", err)
+	}
+	_, stderr = runMain(t, "", "-verify", "-wasm", wasm, "-verify-key", pub)
+	assertContains(t, "verify", stderr, "Verified "+wasm)
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"wrong key", []string{"-verify", "-wasm", wasm, "-verify-key", otherPub}, "signature verification failed"},
+		{"sign without key", []string{"-sign", "-wasm", wasm}, "--sign-key is required"},
+		{"verify without key", []string{"-verify", "-wasm", wasm}, "--verify-key is required"},
+		{"without wasm", []string{"-sign", "-sign-key", priv}, "--wasm is required"},
+		{"sign and push", []string{"-sign", "-push", "-wasm", wasm, "-sign-key", priv}, "cannot be combined"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := runChild(t, nil, tc.args...)
+			if r.code != 1 {
+				t.Errorf("exit = %d, want 1 (stderr: %s)", r.code, r.stderr)
+			}
+			assertContains(t, "stderr", r.stderr, tc.want)
+		})
+	}
+
+	if err := os.WriteFile(wasm, []byte("\x00asm tampered"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := runChild(t, nil, "-verify", "-wasm", wasm, "-verify-key", pub)
+	if r.code != 1 {
+		t.Errorf("tampered: exit = %d, want 1", r.code)
+	}
+	assertContains(t, "stderr", r.stderr, "signature verification failed")
+}
