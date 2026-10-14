@@ -1,71 +1,107 @@
 # Quick Start
 
-Get warmor running in under 5 minutes.
+Get warmor running on a Linux host.
 
-## Install Options
+> **Status on `main`:** Standalone Linux is the supported path. The Helm chart
+> and the Kubernetes manifests do **not** work yet; they are being fixed (see
+> [Kubernetes](#kubernetes-not-working-on-main-yet) below). Kernel blocking covers
+> repeat exec/connect denies only; everything else is detected and then killed
+> with `SIGKILL`. See [Feature Status](STATUS.md) for the full picture.
 
-### Option A: Kubernetes (Helm)
+## Prerequisites
 
-Deploy as a DaemonSet in **audit-only mode** — nothing is blocked, safe to try on any cluster.
+- Linux kernel 5.8+ with BTF (`ls /sys/kernel/btf/vmlinux`), x86_64 or arm64
+- Root (required for eBPF)
+- For kernel-level blocking: `CONFIG_BPF_LSM=y` and `bpf` listed in
+  `/sys/kernel/security/lsm`. Without it, warmor falls back to tracepoint-only
+  mode (detect, then kill).
+- To compile YAML policies: Rust with the `wasm32-unknown-unknown` target
+  (`rustup target add wasm32-unknown-unknown`). Compiling can happen on a build
+  machine; the enforcing host only needs the resulting `.wasm`.
 
-**Prerequisites:**
-- Kubernetes 1.25+ cluster with Linux nodes (kernel 5.8+)
-- `helm` v3.10+ (OCI support requires 3.8+)
-- `kubectl` configured for your cluster
+## 1. Get the binaries
+
+### From source (tracks `main`)
 
 ```bash
-helm install warmor oci://ghcr.io/yasindce1998/warmor/charts/warmor \
-  --version 0.2.0 \
-  --namespace warmor-system --create-namespace \
-  --set daemon.auditMode=true
+git clone https://github.com/yasindce1998/warmor.git && cd warmor
+go build -o bin/ ./cmd/...
 ```
 
-Or from a local clone:
+The compiled BPF objects are checked in, so no clang is needed for this step.
+
+### From a release
+
+Releases ship one archive per platform containing all tools and a
+`SHA256SUMS` file. Release binaries are built from the tag, not from `main`.
+
 ```bash
-git clone https://github.com/yasindce1998/warmor.git
-helm install warmor ./warmor/deploy/helm/warmor \
-  --namespace warmor-system --create-namespace \
-  --set daemon.auditMode=true
+VERSION=v0.3.0   # pick from https://github.com/yasindce1998/warmor/releases
+curl -LO https://github.com/yasindce1998/warmor/releases/download/${VERSION}/warmor-${VERSION}-linux-amd64.tar.gz
+tar -xzf warmor-${VERSION}-linux-amd64.tar.gz
+cd warmor-${VERSION}-linux-amd64 && sha256sum -c SHA256SUMS
+sudo install -m 0755 warmor-daemon warmor-compile /usr/local/bin/
 ```
 
-### Option B: Standalone Binary
+Use `linux-arm64` for ARM64 hosts.
 
-Run directly on a Linux host (bare-metal, VM, or for local testing).
-
-**Prerequisites:**
-- Linux kernel 5.8+ (x86_64 or arm64)
-- Root access (required for eBPF)
+## 2. Compile a policy
 
 ```bash
-# Download latest release
-curl -LO https://github.com/yasindce1998/warmor/releases/latest/download/warmor-daemon-linux-amd64
-chmod +x warmor-daemon-linux-amd64
-sudo mv warmor-daemon-linux-amd64 /usr/local/bin/warmor-daemon
-
-# Verify
-warmor-daemon --version
+# Flags must come before the file name
+./bin/warmor-compile --validate examples/policies/block-crypto-miners.yaml
+./bin/warmor-compile -o crypto.wasm examples/policies/block-crypto-miners.yaml
 ```
 
-For ARM64 (AWS Graviton, Raspberry Pi):
+> On `main`, 4 of the 6 files in `examples/policies/` fail validation
+> (`equals` instead of `eq`, `audit` instead of `log`). Use
+> `block-crypto-miners.yaml`, `kubernetes-hardening.yaml` or any file under
+> `policies/yaml-example/`, all of which validate.
+
+You can also pass a `.yaml` file directly to `warmor-daemon --policy`. The daemon
+then compiles it at startup, which needs `cargo` and the wasm32 target **on the
+enforcing host**. A precompiled `.wasm` avoids that.
+
+> **Do not run the daemon with its default `--policy`
+> (`policies/example/policy.wasm`) without `--audit`.** That example Rust policy
+> denies every file and network event on `main` (known issue).
+
+## 3. Run in audit mode
+
 ```bash
-curl -LO https://github.com/yasindce1998/warmor/releases/latest/download/warmor-daemon-linux-arm64
-chmod +x warmor-daemon-linux-arm64
-sudo mv warmor-daemon-linux-arm64 /usr/local/bin/warmor-daemon
+sudo ./bin/warmor-daemon --policy crypto.wasm --audit --event-sink stdout
 ```
 
-**Verify checksum:**
+Deny decisions are logged and nothing is killed. The startup `Security posture:`
+line tells you whether LSM-BPF loaded.
+
+## 4. Enforce
+
 ```bash
-curl -LO https://github.com/yasindce1998/warmor/releases/latest/download/warmor-daemon-linux-amd64.sha256
-sha256sum -c warmor-daemon-linux-amd64.sha256
+sudo ./bin/warmor-daemon --policy crypto.wasm --lsm-enforce
 ```
 
-**Run with a policy:**
-```bash
-sudo warmor-daemon --policy examples/policies/kubernetes-hardening.yaml
-```
+What this does on `main`:
 
-**Run as a systemd service:**
+- Every event is evaluated by the WASM policy in userspace. On **DENY** the
+  process is killed with `SIGKILL` after the event arrives.
+- For **exec** (exact path) and **connect** (address and port) the decision is
+  also written into the kernel policy map. With `--lsm-enforce`, later
+  identical attempts in the same cgroup are refused in the kernel with `EPERM`.
+- File, bind, listen, ptrace and mount denies are never blocked in the kernel.
+- `--require-lsm` refuses to start if LSM-BPF can't be loaded, and `--no-lsm`
+  skips it.
+
+Leaving out `--lsm-enforce` makes the kernel side audit-only, but the daemon
+still kills denied processes. Use `--audit` for a true dry run.
+
+`SIGHUP` reloads the policy file. Kernel map entries from the old policy are not
+cleared on reload yet.
+
+### Run as a systemd service
+
 ```bash
+sudo install -D -m 0644 crypto.wasm /etc/warmor/policy.wasm
 sudo tee /etc/systemd/system/warmor.service <<EOF
 [Unit]
 Description=Warmor eBPF Security Daemon
@@ -73,7 +109,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/warmor-daemon --policy /etc/warmor/policy.yaml
+ExecStart=/usr/local/bin/warmor-daemon --policy /etc/warmor/policy.wasm --audit
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=5
 
@@ -85,119 +122,52 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now warmor
 ```
 
----
-
-## Kubernetes Deployment
-
-## 1. Install (Audit Mode)
-
-```bash
-helm install warmor oci://ghcr.io/yasindce1998/warmor/charts/warmor \
-  --version 0.2.0 \
-  --namespace warmor-system --create-namespace \
-  --set daemon.auditMode=true
-```
-
-That's it. Warmor is now observing process executions, file access, and network connections without blocking anything.
-
-## 2. Verify
-
-```bash
-# Check pods are running
-kubectl -n warmor-system get pods -l app.kubernetes.io/name=warmor
-
-# Check logs for events
-kubectl -n warmor-system logs -l app.kubernetes.io/name=warmor --tail=20
-
-# Check metrics endpoint
-kubectl -n warmor-system port-forward ds/warmor 9090:9090 &
-curl -s http://localhost:9090/metrics | grep warmor_events_total
-```
-
-## 3. Apply a Policy
-
-Copy one of the [example policies](../examples/policies/) into your values:
-
-```bash
-helm upgrade warmor oci://ghcr.io/yasindce1998/warmor/charts/warmor \
-  --version 0.2.0 \
-  --namespace warmor-system \
-  --set daemon.auditMode=true \
-  --set-file policy.yaml=examples/policies/block-crypto-miners.yaml
-```
-
-Review the audit logs — denied events are logged but **not enforced** in audit mode.
-
-## 4. Switch to Enforce Mode
-
-Once you're confident the policy won't disrupt workloads:
-
-```bash
-helm upgrade warmor oci://ghcr.io/yasindce1998/warmor/charts/warmor \
-  --version 0.2.0 \
-  --namespace warmor-system \
-  --set daemon.auditMode=false
-```
-
-## 5. Enable LSM-BPF Kernel Enforcement (Optional)
-
-For synchronous kernel-level blocking (denied operations never execute):
-
-```bash
-helm upgrade warmor oci://ghcr.io/yasindce1998/warmor/charts/warmor \
-  --version 0.2.0 \
-  --namespace warmor-system \
-  --set daemon.auditMode=false \
-  --set daemon.lsmEnforce=true
-```
-
-**Requirements:** Linux kernel 5.7+ with `CONFIG_BPF_LSM=y`. If your kernel doesn't support LSM-BPF, warmor automatically falls back to tracepoint-only mode.
-
-**Standalone:**
-```bash
-sudo warmor-daemon --policy policy.yaml --lsm-enforce
-```
+Swap `--audit` for `--lsm-enforce` once you trust the policy.
 
 ---
 
-## warmorctl CLI
+## Kubernetes (not working on main yet)
 
-`warmorctl` is a terminal UI for managing warmor fleets, policies, and certificates.
+The Helm chart in `deploy/helm/warmor` is being fixed. On `main`:
 
-### Install
+- The initContainer runs `warmor-daemon --validate-policy`, a flag that does
+  not exist, so pods stay in `Init`.
+- The chart has no `lsmEnforce` value and never passes `--lsm-enforce`.
+- The policy is shipped as YAML in a ConfigMap. The daemon would need `cargo`
+  to compile it, and the distroless image does not include it.
+- The `ValidatingWebhookConfiguration` has no handler, and the `WarmorPolicy`
+  CRD has no controller (see [CRD usage](crd-usage.md)).
+- `deploy/kubernetes/warmor-daemonset.yaml` configures the daemon through
+  environment variables it does not read.
+
+Instructions will return here once the chart works.
+
+---
+
+## warmorctl TUI
+
+`warmorctl` is an interactive terminal UI for `warmor-server`. It has no
+subcommands.
 
 ```bash
 go install github.com/yasindce1998/warmor/cmd/warmorctl@latest
-```
 
-### Usage
-
-```bash
-# Launch interactive TUI dashboard
-warmorctl
-
-# Connect to a specific server: the admin API needs a JWT with the admin
-# role (--token or $WARMOR_TOKEN); --ca-cert trusts a private CA, and
-# --client-cert/--client-key present a certificate if the server requires mTLS
+# The admin API needs a JWT with the admin role (--token or $WARMOR_TOKEN);
+# --ca-cert trusts a private CA; --client-cert/--client-key for mTLS servers
 export WARMOR_TOKEN=<admin-jwt>
 warmorctl --server https://warmor-server:8443 --ca-cert ca.crt --client-cert admin.crt --client-key admin.key
 ```
 
-The TUI provides tabs for:
-- **Dashboard** — Real-time event stream and summary stats
-- **Agents** — Connected agents, heartbeat status, assigned policies
-- **Policies** — List/create/update/delete policies
-- **Rollouts** — A/B testing rollout management
-- **Certs** — Generate mTLS certificates for agents
+Tabs:
+- **Dashboard** — agent and policy summary from the server
+- **Agents** — registered agents, heartbeat status, assigned policies
+- **Policies** — list, create, update and delete policies
+- **Rollouts** — percentage rollout management
+- **Certs** — press `g` to generate a CA plus server and agent certificates, or
+  `s` to generate a policy-signing key pair
 
-### Generate Certificates
-
-```bash
-# Generate CA + server + agent certificates
-warmorctl certs generate --ca --out ./certs/
-warmorctl certs generate --server --ca-cert ./certs/ca.crt --ca-key ./certs/ca.key --out ./certs/
-warmorctl certs generate --agent --ca-cert ./certs/ca.crt --ca-key ./certs/ca.key --name agent-01 --out ./certs/
-```
+There is no non-interactive `warmorctl certs generate` command. For signing
+keys you can also use `warmor-policy-bundle --keygen`.
 
 ---
 
@@ -240,11 +210,12 @@ auth pass `--server-token` (or `WARMOR_SERVER_TOKEN`) instead of a client
 certificate. Admin `wasm_path` values must point inside `--policy-dir`; without
 it, policies cannot be created or updated over the API.
 
+Policies downloaded from the server are **not** signature-verified by the
+daemon on `main`.
+
 ---
 
 ## Monitoring Stack
-
-Deploy Prometheus + Grafana alongside warmor for full observability:
 
 ```bash
 cd deploy/
@@ -252,54 +223,41 @@ docker compose -f docker-compose.monitoring.yml up -d
 ```
 
 This starts:
-- **Prometheus** on `http://localhost:9091` — scrapes warmor metrics
-- **Grafana** on `http://localhost:3000` — pre-provisioned dashboard (login: admin/warmor)
+- **Prometheus** on `http://localhost:9091`, which scrapes warmor metrics
+- **Grafana** on `http://localhost:3000` with a pre-provisioned dashboard (login: admin/warmor)
 
-The Grafana dashboard shows:
-- LSM hook decisions (allow/deny/audit) by type
-- Decision latency histogram (P50/P95/P99)
-- Policy load success/failure rates
-- Agent heartbeat status
+The daemon exports `warmor_events_total`, `warmor_cache_hits_total`,
+`warmor_cache_misses_total`, `warmor_cache_size`,
+`warmor_evaluation_latency_microseconds`, `warmor_policy_info`,
+`warmor_events_processing_errors_total` and `warmor_audit_denied_total` on
+`--metrics-port` (default 9090).
 
-Alert rules fire on:
-- Deny rate exceeding threshold (possible attack)
-- Agent heartbeat missing > 5 minutes
-- Policy load failures
+> Panels and alerts built on the LSM-decision, policy-load and heartbeat
+> metrics stay empty on `main`. Those metrics are registered but never updated,
+> and the eBPF-loader-failure alert references a metric that does not exist.
 
 ---
 
 ## Container Runtime Integration
 
-### containerd
-
-Warmor integrates as a containerd shim plugin to receive container lifecycle events and scope policies per-container:
-
-```bash
-warmor-daemon \
-  --policy policy.yaml \
-  --containerd-socket /run/containerd/containerd.sock \
-  --per-container-policy
-```
-
-### CRI-O (OCI Hooks)
-
-Install the OCI hook configuration:
+### CRI-O / OCI hook (experimental)
 
 ```bash
 sudo cp deploy/crio/warmor-hook.json /etc/containers/oci/hooks.d/
 ```
 
-### Kubernetes DaemonSet
+`warmor-oci-hook` reports container start/stop to `warmor-server`
+(`/api/v1/containers/bind`). On `main`:
 
-The Helm chart deploys warmor with container runtime integration automatically:
+- It has no auth or TLS, so it only works against `warmor-server --insecure`.
+- The server stores the bindings but nothing consumes them, so there is no
+  per-container policy yet.
+- The shipped hook config passes `--action start` for both stages.
 
-```bash
-helm install warmor oci://ghcr.io/yasindce1998/warmor/charts/warmor \
-  --version 0.2.0 \
-  --namespace warmor-system --create-namespace \
-  --set daemon.containerRuntime=containerd \
-  --set daemon.perContainerPolicy=true
-```
+### containerd / per-container policy
+
+Not available on `main`. There are no `--containerd-socket` or
+`--per-container-policy` flags. `internal/container` is library-only.
 
 ---
 
@@ -307,48 +265,13 @@ helm install warmor oci://ghcr.io/yasindce1998/warmor/charts/warmor \
 
 | Goal | Guide |
 |------|-------|
+| See what ships and what doesn't | [Feature Status](STATUS.md) |
 | Auto-generate policies from audit logs | [Policy Generation](policy-generation.md) |
 | Enforce SBOM-declared binaries only | [SBOM Enforcement](sbom-enforcement.md) |
 | Merge multiple policies into one | [Policy Merge](policy-merge.md) |
 | Compare two policies (SBOM vs audit) | [Policy Diff](policy-diff.md) |
 | Push/pull compiled policies to OCI registries | [Policy Bundle](policy-bundle.md) |
 | Write custom policies | [Policy Authoring](policy-authoring.md) |
-| Manage fleet with warmorctl | Run `warmorctl` for interactive TUI |
-| Set up mTLS | See [mTLS Setup](#mtls-setup) above |
-| Monitor with Grafana | `docker compose -f deploy/docker-compose.monitoring.yml up` |
-| Enable alerting | Set `alerting.enabled=true` — see [values.yaml](../deploy/helm/warmor/values.yaml) |
-| Restrict to specific containers | Use `daemon.cgroupFilter` or `--per-container-policy` |
-| Deploy per-namespace policies | Install the WarmorPolicy CRD — see [CRD guide](crd-usage.md) |
-| Advanced features (Phase 7+8) | [PRD — Phase 7 & 8](PRD.md#phase-7-advanced-features-weeks-23-28--complete) |
-
-## Common Operations
-
-```bash
-# Check what warmor is seeing (top denied events)
-kubectl -n warmor-system logs -l app.kubernetes.io/name=warmor | grep DENY
-
-# View real-time dashboard
-warmorctl
-
-# List connected agents
-warmorctl agents list
-
-# Temporarily disable enforcement on a node
-kubectl -n warmor-system delete pod <pod-name>  # respawns in audit mode if set
-
-# Rollback
-helm rollback warmor -n warmor-system
-
-# Uninstall
-helm uninstall warmor -n warmor-system
-```
-
-## Sizing Guide
-
-| Cluster Size | CPU Request | Memory Request | Notes |
-|-------------|-------------|----------------|-------|
-| < 50 nodes  | 100m        | 128Mi          | Default values |
-| 50-200 nodes | 200m       | 256Mi          | Increase if high event rate |
-| 200+ nodes  | 500m        | 512Mi          | Consider per-namespace policies |
-
-Warmor runs as a DaemonSet — one pod per node. Resource usage scales with event rate, not cluster size.
+| Replay events against a candidate policy | [Policy Simulator](policy-simulator.md) |
+| Manage a fleet | Run `warmorctl`; see [Canary Rollout](canary-rollout.md) |
+| Restrict to specific containers | `--cgroup-filter` (cgroup paths or `auto`) |
