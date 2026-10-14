@@ -16,8 +16,29 @@ type Database struct {
 	Binaries map[string]*BinaryHash `json:"binaries"`
 }
 
-// ScanRootFS walks the rootfs scanning all executable files and builds an integrity database.
+// standardExecDirs are the conventional binary directories ScanRootFS
+// covers. Images that ship executables elsewhere (/app, /opt, /usr/libexec)
+// need ScanRootFSAll, or enforce mode will refuse them.
+var standardExecDirs = []string{"bin", "sbin", "usr/bin", "usr/sbin", "usr/local/bin", "usr/local/sbin"}
+
+// pseudoFSDirs hold kernel-provided filesystems in a live root, never image
+// content; ScanRootFSAll skips them.
+var pseudoFSDirs = map[string]bool{"proc": true, "sys": true, "dev": true}
+
+// ScanRootFS hashes the executables in the standard binary directories of
+// rootfs and builds an integrity database.
 func ScanRootFS(rootfs string) (*Database, error) {
+	return scanRootFS(rootfs, standardExecDirs)
+}
+
+// ScanRootFSAll hashes every executable regular file in rootfs (except under
+// proc, sys and dev). Use it for images whose binaries live outside the
+// standard directories.
+func ScanRootFSAll(rootfs string) (*Database, error) {
+	return scanRootFS(rootfs, []string{"."})
+}
+
+func scanRootFS(rootfs string, execDirs []string) (*Database, error) {
 	db := &Database{
 		Version:  1,
 		RootFS:   rootfs,
@@ -30,8 +51,6 @@ func ScanRootFS(rootfs string) (*Database, error) {
 	}
 	defer root.Close()
 
-	execDirs := []string{"bin", "sbin", "usr/bin", "usr/sbin", "usr/local/bin", "usr/local/sbin"}
-
 	for _, dir := range execDirs {
 		fullDir := filepath.Join(rootfs, dir)
 		if _, err := os.Stat(fullDir); os.IsNotExist(err) {
@@ -42,14 +61,17 @@ func ScanRootFS(rootfs string) (*Database, error) {
 			if err != nil {
 				return nil
 			}
+			relPath, _ := filepath.Rel(rootfs, path)
 			if info.IsDir() {
+				if pseudoFSDirs[filepath.ToSlash(relPath)] {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			if !isExecutable(info, runtime.GOOS) {
 				return nil
 			}
 
-			relPath, _ := filepath.Rel(rootfs, path)
 			relPath = "/" + filepath.ToSlash(relPath)
 
 			// Hash through the rootfs so symlinks such as /bin/sh -> /bin/busybox

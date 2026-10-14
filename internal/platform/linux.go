@@ -21,7 +21,10 @@ type LinuxConfig struct {
 	LSMEnforce   bool
 	RequireLSM   bool
 	SkipLSM      bool
-	UnixWatch    []string
+
+	IntegrityMode    string
+	IntegrityDigests []string
+	UnixWatch        []string
 }
 
 type LinuxPlatform struct {
@@ -129,7 +132,41 @@ func (p *LinuxPlatform) Load(ctx context.Context) error {
 		}
 	}
 
+	if err := p.loadIntegrity(); err != nil {
+		p.Close()
+		return err
+	}
+
 	p.logSecurityPosture()
+	return nil
+}
+
+// loadIntegrity enables the content-hash exec check when configured. It needs
+// the LSM programs, so asking for it without them is an error rather than a
+// silent downgrade.
+func (p *LinuxPlatform) loadIntegrity() error {
+	mode, err := ebpf.ParseIntegrityMode(p.config.IntegrityMode)
+	if err != nil {
+		return err
+	}
+	if mode == ebpf.IntegrityOff {
+		return nil
+	}
+	if p.lsmLoader == nil {
+		return fmt.Errorf("--integrity-mode=%s requires BPF LSM, which is not loaded on this host", mode)
+	}
+	digests := make([]ebpf.Digest, 0, len(p.config.IntegrityDigests))
+	for _, s := range p.config.IntegrityDigests {
+		d, err := ebpf.ParseDigest(s)
+		if err != nil {
+			return fmt.Errorf("integrity allowlist: %w", err)
+		}
+		digests = append(digests, d)
+	}
+	if err := p.lsmLoader.EnableIntegrity(digests, mode); err != nil {
+		return fmt.Errorf("enable integrity checking: %w", err)
+	}
+	fmt.Printf("Exec integrity: %s (%d allowlisted SHA-256 digests)\n", mode, len(digests))
 	return nil
 }
 
@@ -361,10 +398,11 @@ func (p *LinuxPlatform) monitorLSMEvents(ctx context.Context) {
 			CgroupID:  ev.CgroupID,
 			LSMEvent:  true,
 
-			KernelDenied:   ev.KernelDenied,
-			Hook:           ev.Hook,
-			MountSource:    ev.MountSource,
-			TargetCgroupID: ev.TargetCgroupID,
+			KernelDenied:       ev.KernelDenied,
+			IntegrityViolation: ev.IntegrityViolation,
+			Hook:               ev.Hook,
+			MountSource:        ev.MountSource,
+			TargetCgroupID:     ev.TargetCgroupID,
 		}
 
 		switch ev.Kind {

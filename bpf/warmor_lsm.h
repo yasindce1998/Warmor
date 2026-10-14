@@ -13,6 +13,7 @@
 #define EVENT_TYPE_LISTEN  4
 #define EVENT_TYPE_PTRACE  5
 #define EVENT_TYPE_MOUNT   6
+#define EVENT_TYPE_INTEGRITY 7 // exec refused (or would be) by lsm_integrity
 
 #define ACTION_ALLOW 0
 #define ACTION_DENY  1

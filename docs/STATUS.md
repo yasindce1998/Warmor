@@ -94,8 +94,8 @@ updates this page when it merges.
 
 | Feature | Status | What works today | Known gaps |
 |---------|--------|------------------|------------|
-| Supply-chain integrity scan (`warmor-integrity-scan`) | Partial | Offline `--rootfs` scan writes a SHA-256 JSON database; `--verify` checks a rootfs against it | **No runtime or kernel enforcement.** There is no BPF integrity map and no `--integrity-db` daemon flag. |
-| Container escape detection | Library-only | `internal/escape` (patterns, sliding-window correlator) | Not wired into the enforcer. No flag. |
+| Supply-chain integrity (`warmor-integrity-scan`, `--integrity-db/--integrity-mode`) | Experimental | Offline scan/verify (`--all` for the whole rootfs). In-kernel exec check: a sleepable LSM program hashes each exec with IMA and refuses unlisted SHA-256s (enforce) or reports them (audit) | **Not yet run on an IMA-enabled kernel in CI**: the CI kernels lack `CONFIG_IMA`, so the VM tests skip. Needs `CONFIG_IMA` and IMA hash SHA-256 (checked at startup). Does not cover mmap'd libraries or interpreted scripts passed as arguments. Global allowlist; restart to update. |
+| Container escape detection | Shipped | `--escape-detect=alert\|deny`: 7 patterns on real hook data (mount source, ptrace target cgroup, runtime socket connects), scoped to container cgroups; `warmor_escape_alerts_total` | Detection is after the fact (deny terminates the process). Relative-path `/proc/*/ns` opens and non-standard runtime socket paths are not matched. |
 | Temporal policies | Library-only | `internal/temporal` (enricher, guard) | Not wired into the enforcer. The YAML `temporal:` key is ignored. |
 | Attack graph (MITRE ATT&CK) | Library-only | `internal/attackgraph` | Not wired |
 | Blast radius | Library-only | `internal/blastradius` | Not wired |

@@ -139,18 +139,20 @@ sudo warmor-daemon --policy current.wasm --audit --event-sink file:/var/lib/warm
 warmor-simulate --policy candidate.yaml --data /var/lib/warmor/events --since 168h --format json -o report.json
 ```
 
-### Supply Chain Integrity — Partial (offline scan only)
+### Supply Chain Integrity — Experimental (in-kernel, not yet verified on an IMA kernel in CI)
 
-`warmor-integrity-scan` hashes every binary in a rootfs (SHA-256) into a JSON database and can `--verify` a rootfs against it. **There is no runtime or in-kernel enforcement on `main`.** The daemon has no `--integrity-db` flag and there is no BPF integrity map yet.
+Refuse to execute any binary whose **content** isn't in an allowlist of known-good SHA-256 digests, wherever it lives. A sleepable LSM program hashes each exec with IMA. Requires `CONFIG_IMA` (the daemon checks at startup). The CI test kernels lack IMA, so the hashing has not run in CI yet; start with `audit`.
 
 ```bash
-warmor-integrity-scan --rootfs /path -o integrity-db.json
-warmor-integrity-scan --rootfs /path --verify integrity-db.json
+warmor-integrity-scan --rootfs /path --all -o integrity-db.json
+sudo warmor-daemon --policy policy.wasm --integrity-db integrity-db.json --integrity-mode audit   # then enforce
 ```
 
-### Container Escape Detection — Experimental (library only, not yet wired into the daemon)
+See [Supply Chain Integrity](docs/supply-chain-integrity.md).
 
-Pattern-based detection of breakout techniques (`nsenter`, host filesystem mounts, cross-cgroup ptrace, Docker socket access, `/proc/*/ns/*` traversal) in `internal/escape`.
+### Container Escape Detection — Shipped (detection, after the fact)
+
+`--escape-detect=alert|deny` matches events from container cgroups against breakout techniques: `nsenter`, block-device and cgroup v1 mounts, cross-cgroup ptrace, container runtime socket connects, `/proc/*/ns/*` access, and escape tools. Matches are logged, counted and labelled; `deny` also terminates the process. See [Escape Detection](docs/escape-detection.md).
 
 ### Attack Graph — Experimental (library only, not yet wired into the daemon)
 
@@ -184,7 +186,7 @@ Time constraints (container age, time of day, day of week) in `internal/temporal
 | `warmorctl` | Interactive TUI (dashboard, agents, policies, rollouts, certs). Interactive only; there are no subcommands. |
 | `warmor-learn` | Synthesize a policy from recorded daemon events |
 | `warmor-simulate` | Replay recorded events against candidate policies |
-| `warmor-integrity-scan` | Build and verify SHA-256 binary hash databases (offline; no runtime enforcement yet) |
+| `warmor-integrity-scan` | Build and verify SHA-256 binary hash databases (the daemon's `--integrity-db` allowlist) |
 | `warmor-policy-gen` | Generate policies from audit logs |
 | `warmor-sbom-policy` | Generate policies from SBOM manifests |
 | `warmor-policy-diff` | Compare two policies and show what changes |
@@ -258,7 +260,7 @@ internal/                                      (status on main)
   lineage/        — Process tree tracking                                Partial (no PPID in events)
   learner/        — Learning recorder + policy synthesizer               Shipped (warmor-learn)
   simulator/      — Event replay engine                                  Shipped (warmor-simulate)
-  integrity/      — SHA-256 binary hash scan/verify                      Shipped offline (no runtime enforcement)
+  integrity/      — SHA-256 binary hash scan/verify                      Shipped (kernel side experimental)
   compiler/       — YAML → Rust → WASM compilation pipeline              Shipped
   platform/       — Linux eBPF, Windows ETW / eBPF-for-Windows, macOS    Linux shipped; Windows/macOS experimental
   crypto/         — mTLS (Ed25519), JWT (HMAC+EdDSA), bundle signing     Shipped
@@ -266,7 +268,7 @@ internal/                                      (status on main)
   logging/        — Structured JSON (zerolog)                            Shipped
   policygen/ sbompolicy/ policydiff/ policymerge/ policybundle/          Shipped (CLI tools)
   container/      — Runtime detection, containerd monitor                Library-only
-  escape/         — Container escape pattern correlator                  Library-only
+  escape/         — Container escape pattern correlator                  Shipped (--escape-detect)
   drift/          — Behavioral fingerprint + z-score detection           Library-only
   attackgraph/    — MITRE ATT&CK correlation + kill-chain DAG            Library-only
   blastradius/    — Container relationship graph + BFS reachability      Library-only

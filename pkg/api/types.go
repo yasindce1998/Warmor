@@ -130,9 +130,12 @@ type Event struct {
 	// LSM fields
 	LSMEvent bool `json:"lsm_event,omitempty"`
 	// KernelDenied is set when the kernel already refused the operation
-	// (policy-map deny). The enforcer
+	// (policy-map deny or integrity failure in enforce mode). The enforcer
 	// records such events but does not evaluate or act on them again.
 	KernelDenied bool `json:"kernel_denied,omitempty"`
+	// IntegrityViolation marks an exec whose content SHA-256 was not in the
+	// integrity allowlist (see --integrity-db).
+	IntegrityViolation bool `json:"integrity_violation,omitempty"`
 	// Hook is the LSM hook that produced the event (exec, file, connect,
 	// connect_unix, bind, listen, ptrace, mount); empty for tracepoints.
 	// Type folds several hooks together (mount is a file event, ptrace a

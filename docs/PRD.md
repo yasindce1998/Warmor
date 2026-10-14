@@ -38,7 +38,7 @@ Status as of current `main`. "Partial" means the phase's headline features are r
 | **Phase 6** | Partial | 7 LSM hooks attach (tested in a VM in CI). Kernel blocking happens only on a policy-map hit, and only exec and connect entries are ever written. A miss is allowed. | Linux |
 | **Phase 7** | Partial | Policy server with registration, heartbeats, versioned policies and percentage rollouts. Lineage is partial (no PPID). NetFilter, sandbox and SIEM syslog sink are library-only. | All |
 | **Phase 8** | Partial | mTLS/JWT, signed OCI bundles (`warmor-policy-bundle`), daemon signature verification (`--verify-key`) and the `warmorctl` TUI work. The OCI hook is experimental (no auth, bindings unused). containerd and per-container policy are missing. Exporter metrics are never updated. | All |
-| **Phase 9** | Mostly library-only | `warmor-learn` and `warmor-simulate` ship. Integrity is an offline scan only. Escape, drift, temporal, attack graph, blast radius and canary auto-rollback are library-only (not wired into any binary). | Linux |
+| **Phase 9** | Mostly library-only | `warmor-learn` and `warmor-simulate` ship. Escape detection ships; in-kernel integrity is experimental (unverified on an IMA kernel in CI). Drift, temporal, attack graph, blast radius and canary auto-rollback are library-only (not wired into any binary). | Linux |
 
 ### Key Metrics
 
@@ -53,7 +53,7 @@ None of the following has been measured on `main`. They are **design targets**, 
 ### Current Implementation Highlights
 
 **Code Status:**
-- 30 internal packages. 9 of them (`attackgraph`, `blastradius`, `container`, `dashboard`, `drift`, `escape`, `patterns`, `temporal`, `testing`) are imported by no binary.
+- 30 internal packages. 7 of them (`attackgraph`, `blastradius`, `dashboard`, `drift`, `patterns`, `temporal`, `testing`) are imported by no binary.
 - 15 binaries under `cmd/` (13 released tools plus `test-ebpf` and `test-wasm`)
 - 10 Rust policy crates. 8 compile; on `main` all of them deny some or all events due to ABI/field mismatches (see [STATUS.md](STATUS.md#2-policy-engine-and-toolchain)).
 - 59 YAML example policies: 53 in `policies/yaml-example/` (all validate) and 6 in `examples/policies/` (all validate; CI fails on an invalid policy)
@@ -1015,8 +1015,8 @@ Source: `internal/container/` — detector.go, containerd_monitor.go, containerd
 **Deliverables:**
 - [x] Learning mode — synthesize allowlist policies from recorded events (`warmor-learn`, `internal/learner/`). Offline only; no in-daemon learning flag.
 - [x] Policy simulator — replay recorded events against candidate policies (`warmor-simulate`, `internal/simulator/`). The daemon has no event-store sink, and the new-denials diff is empty for daemon-recorded events (decision case mismatch).
-- [ ] Supply-chain integrity — offline SHA-256 scan/verify only (`warmor-integrity-scan`). **No in-kernel or runtime enforcement.**
-- [ ] Container escape detection (`internal/escape/`) — library-only
+- [ ] Supply-chain integrity — in-kernel content-hash exec check (`--integrity-db`), **experimental**: not yet run on an IMA-enabled kernel in CI
+- [x] Container escape detection (`--escape-detect`) — after-the-fact detection, scoped to containers
 - [ ] Drift detection (`internal/drift/`) — library-only
 - [ ] Canary auto-rollback (`internal/policyserver/` canary analyzer) — library-only; manual rollouts ship
 - [ ] Temporal policies (`internal/temporal/`) — library-only; the YAML `temporal:` key is silently ignored

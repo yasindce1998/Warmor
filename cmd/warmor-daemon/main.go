@@ -30,8 +30,11 @@ var (
 	webhookHeader = flag.String("webhook-header", "", "Webhook auth header (format: Key:Value)")
 	eventLabels   = flag.String("event-labels", "", "Labels to attach to streamed events and report to the policy server (format: k=v,k2=v2)")
 	showVersion   = flag.Bool("version", false, "Show version and exit")
-	escapeDetect  = flag.String("escape-detect", "off", "Container escape detection: off, alert (log, count and stream matches) or deny (also terminate the process)")
 	evalTimeout   = flag.Duration("eval-timeout", 50*time.Millisecond, "Deadline for one WASM policy evaluation; a policy exceeding it is denied (fail closed)")
+
+	integrityDB   = flag.String("integrity-db", "", "Integrity database from warmor-integrity-scan; its SHA-256 digests become the kernel exec allowlist")
+	escapeDetect  = flag.String("escape-detect", "off", "Container escape detection: off, alert (log, count and stream matches) or deny (also terminate the process)")
+	integrityMode = flag.String("integrity-mode", "off", "Exec integrity check: off, audit (report unlisted binaries) or enforce (refuse them in-kernel)")
 
 	serverURL    = flag.String("server", "", "Policy server URL (e.g. https://warmor-server:8443); downloaded policies replace --policy")
 	serverToken  = flag.String("server-token", "", "Agent JWT (role agent) for the policy server (default: $"+serverTokenEnv+")")
@@ -183,6 +186,11 @@ func runDaemon(stop <-chan struct{}) {
 		log.Printf("Policy Server: %s", *serverURL)
 	}
 
+	digests, err := loadIntegrityDigests(*integrityMode, *integrityDB)
+	if err != nil {
+		log.Fatalf("❌ %v", err)
+	}
+
 	// Create enforcer with options
 	enf, err := enforcer.New(ctx, *policyPath, &enforcer.Options{
 		AuditMode:    *auditMode,
@@ -195,9 +203,11 @@ func runDaemon(stop <-chan struct{}) {
 		StreamSinks:  sinks,
 		Labels:       labels,
 
-		PolicyVerifyKey: pub,
-		EvalTimeout:     *evalTimeout,
-		EscapeDetect:    *escapeDetect,
+		PolicyVerifyKey:  pub,
+		EvalTimeout:      *evalTimeout,
+		IntegrityMode:    *integrityMode,
+		IntegrityDigests: digests,
+		EscapeDetect:     *escapeDetect,
 	})
 	if err != nil {
 		log.Fatalf("❌ Failed to create enforcer: %v", err)

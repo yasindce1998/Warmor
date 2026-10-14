@@ -158,6 +158,7 @@ jobs:
           go run github.com/cilium/ebpf/cmd/bpf2go lsm_listen ../../bpf/lsm_listen.bpf.c -- $BPF_CFLAGS
           go run github.com/cilium/ebpf/cmd/bpf2go lsm_ptrace ../../bpf/lsm_ptrace.bpf.c -- $BPF_CFLAGS
           go run github.com/cilium/ebpf/cmd/bpf2go lsm_mount ../../bpf/lsm_mount.bpf.c -- $BPF_CFLAGS
+          go run github.com/cilium/ebpf/cmd/bpf2go -type digest_key -type integrity_config lsm_integrity ../../bpf/lsm_integrity.bpf.c -- $BPF_CFLAGS
           go run github.com/cilium/ebpf/cmd/bpf2go -type execve_event execve_monitor ../../bpf/execve_monitor.bpf.c -- $BPF_CFLAGS
           go run github.com/cilium/ebpf/cmd/bpf2go -type file_event openat_monitor ../../bpf/openat_monitor.bpf.c -- $BPF_CFLAGS
           go run github.com/cilium/ebpf/cmd/bpf2go -type network_event connect_monitor ../../bpf/connect_monitor.bpf.c -- $BPF_CFLAGS

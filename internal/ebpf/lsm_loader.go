@@ -109,6 +109,10 @@ func (e *LSMEvent) ToEvent() Event {
 		ev.Hook = "mount"
 		ev.Kind = EventKindFile
 		ev.MountSource = nullTerminatedString(e.Aux[:])
+	case EventTypeIntegrity:
+		ev.Hook = "exec"
+		ev.Kind = EventKindProcess
+		ev.IntegrityViolation = true
 	}
 
 	return ev
@@ -167,6 +171,9 @@ type LSMLoader struct {
 	policyMap  *PolicyMapManager
 	enforceMap *ciliumebpf.Map
 	filterMap  *ciliumebpf.Map
+
+	// integrity is nil until EnableIntegrity loads lsm_integrity.
+	integrity *integrityProgram
 }
 
 // IsLSMSupported checks whether the running kernel supports BPF LSM.
@@ -495,6 +502,14 @@ func (l *LSMLoader) Close() error {
 		if err := l.lsmReader.Close(); err != nil {
 			errs = append(errs, err)
 		}
+	}
+
+	// Detach integrity before the exec objects whose maps it shares.
+	if l.integrity != nil {
+		if err := l.integrity.close(); err != nil {
+			errs = append(errs, err)
+		}
+		l.integrity = nil
 	}
 
 	for _, lnk := range []link.Link{l.execLink, l.fileLink, l.connectLink, l.bindLink, l.listenLink, l.ptraceLink, l.mountLink} {

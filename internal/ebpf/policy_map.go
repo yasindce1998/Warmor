@@ -25,6 +25,9 @@ const (
 	EventTypeListen  uint8 = 4
 	EventTypePtrace  uint8 = 5
 	EventTypeMount   uint8 = 6
+	// EventTypeIntegrity marks an exec lsm_integrity refused (or, in audit
+	// mode, would refuse) because the file's SHA-256 is not allowlisted.
+	EventTypeIntegrity uint8 = 7
 
 	ActionAllow uint8 = 0
 	ActionDeny  uint8 = 1

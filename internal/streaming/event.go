@@ -30,6 +30,8 @@ type SecurityEvent struct {
 	PtraceComm  string `json:"ptrace_target_comm,omitempty"`
 	// PtraceTargetCgroup is the cgroup id of the traced process.
 	PtraceTargetCgroup uint64 `json:"ptrace_target_cgroup,omitempty"`
+	// IntegrityViolation marks an exec whose SHA-256 was not allowlisted.
+	IntegrityViolation bool `json:"integrity_violation,omitempty"`
 	// KernelEnforced is set when the kernel refused the operation itself.
 	KernelEnforced bool `json:"kernel_enforced,omitempty"`
 

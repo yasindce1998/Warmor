@@ -14,7 +14,7 @@ gen-vmlinux:
 
 monitors: execve_monitor.bpf.o openat_monitor.bpf.o connect_monitor.bpf.o
 
-lsm: lsm_exec.bpf.o lsm_file.bpf.o lsm_connect.bpf.o lsm_bind.bpf.o lsm_listen.bpf.o lsm_ptrace.bpf.o lsm_mount.bpf.o
+lsm: lsm_exec.bpf.o lsm_file.bpf.o lsm_connect.bpf.o lsm_bind.bpf.o lsm_listen.bpf.o lsm_ptrace.bpf.o lsm_mount.bpf.o lsm_integrity.bpf.o
 
 execve_monitor.bpf.o: execve_monitor.bpf.c tracepoint_defs.h
 	$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) $(INCLUDES) \
@@ -55,6 +55,10 @@ lsm_ptrace.bpf.o: lsm_ptrace.bpf.c warmor_lsm.h vmlinux.h
 lsm_mount.bpf.o: lsm_mount.bpf.c warmor_lsm.h vmlinux.h
 	$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) $(INCLUDES) \
 		-c lsm_mount.bpf.c -o lsm_mount.bpf.o
+
+lsm_integrity.bpf.o: lsm_integrity.bpf.c warmor_lsm.h vmlinux.h
+	$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) $(INCLUDES) \
+		-c lsm_integrity.bpf.c -o lsm_integrity.bpf.o
 
 clean:
 	rm -f *.o
