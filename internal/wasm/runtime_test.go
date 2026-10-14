@@ -184,7 +184,7 @@ func TestRuntime_LoadPolicy_TooLarge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create temp file: %v", err)
 	}
-	if err := f.Truncate(maxPolicySize + 1); err != nil {
+	if err := f.Truncate(MaxPolicySize + 1); err != nil {
 		f.Close()
 		t.Fatalf("truncate: %v", err)
 	}
@@ -276,5 +276,33 @@ func TestRuntime_ReloadPolicy(t *testing.T) {
 	// The second load produces a new compiled module object.
 	if rt.module == first {
 		t.Error("module pointer unchanged after reload — expected a fresh compile")
+	}
+}
+
+// TestRuntime_LoadPolicyBytes loads a module from memory and rejects
+// oversized or invalid input.
+func TestRuntime_LoadPolicyBytes(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	data, err := os.ReadFile(testPolicyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.LoadPolicyBytes(ctx, data); err != nil {
+		t.Fatalf("LoadPolicyBytes: %v", err)
+	}
+	if rt.module == nil {
+		t.Error("Runtime.module is nil after LoadPolicyBytes")
+	}
+	if err := rt.LoadPolicyBytes(ctx, []byte("not wasm")); err == nil {
+		t.Error("expected error for invalid WASM bytes")
+	}
+	if err := rt.LoadPolicyBytes(ctx, make([]byte, MaxPolicySize+1)); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Errorf("expected too-large error, got %v", err)
 	}
 }

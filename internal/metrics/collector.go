@@ -113,3 +113,25 @@ func RecordProcessingError() {
 func RecordAuditDenied() {
 	AuditDeniedTotal.Inc()
 }
+
+// Policy signature rejection sources.
+const (
+	PolicySourceFile   = "file"
+	PolicySourceServer = "server"
+)
+
+// PolicySignatureFailures counts policies refused because their signature
+// was missing or did not verify. source is "file" (startup or reload from
+// disk) or "server" (policy server download).
+var PolicySignatureFailures = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "warmor_policy_signature_failures_total",
+		Help: "Total number of policies rejected because their signature was missing or invalid",
+	},
+	[]string{"source"},
+)
+
+// RecordPolicySignatureFailure records a rejected policy signature.
+func RecordPolicySignatureFailure(source string) {
+	PolicySignatureFailures.WithLabelValues(source).Inc()
+}
