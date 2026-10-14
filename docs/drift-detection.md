@@ -1,12 +1,14 @@
 # Drift Detection Across Fleet
 
+> **Status: Experimental, library only.** This describes the Go package `internal/drift`, which has unit tests but is **not wired into `warmor-daemon` or `warmor-server` on `main`**. No binary, flag or config value reaches it. Agents do not compute or submit fingerprints, and the server does not run the detector. See [Feature Status](STATUS.md).
+
 Warmor's drift detection identifies containers that deviate from the behavioral norm of their peers. By comparing runtime fingerprints across all instances of the same image, it surfaces compromised or misconfigured containers without requiring predefined rules.
 
 ## How It Works
 
 ### Behavioral Fingerprinting
 
-Each warmor agent continuously records security-relevant events and computes a **behavioral fingerprint** — a vector of event rates (events per minute) over a configurable observation window.
+The design has each warmor agent record security-relevant events and compute a **behavioral fingerprint** — a vector of event rates (events per minute) over a configurable observation window.
 
 Events are recorded as `type:target` patterns:
 
@@ -46,7 +48,7 @@ A minimum of 2 agents per image is required before detection activates.
 
 ### Report Fingerprint
 
-Agents submit fingerprints to the central detector:
+Callers submit fingerprints to the detector (no agent does this on `main`):
 
 ```go
 detector.Submit(&drift.BehaviorFingerprint{

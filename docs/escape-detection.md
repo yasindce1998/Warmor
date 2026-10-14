@@ -1,6 +1,8 @@
 # Container Escape Detection
 
-The escape detector correlates kernel-level security events against known container escape patterns, raising alerts (and optionally denying syscalls) when a breakout attempt is identified.
+> **Status: Experimental, library only.** This describes the Go package `internal/escape`, which has unit tests but is **not wired into `warmor-daemon` or `warmor-server` on `main`**. No binary, flag or config value reaches it. Nothing on this page runs in a deployed agent today, and no escape is blocked. See [Feature Status](STATUS.md).
+
+The escape detector correlates security events against known container escape patterns. It is designed to raise alerts, and optionally return a deny decision, when a breakout attempt is identified.
 
 ## Detected Escape Patterns
 
@@ -35,11 +37,11 @@ Events older than 30 seconds are automatically trimmed from the window.
 
 The detector inspects: `EventType`, `Comm`, `Filename`, `CgroupID`, `PID`, `PPID`, `UID`, `MountType`, `PtraceComm`, `RemoteAddr`, and `LocalPort`.
 
-## Integration with Enforcer
+## Planned Integration with Enforcer (not wired on main)
 
-The detector plugs into the enforcement pipeline in two ways:
+The detector exposes two entry points. **Neither is called by the enforcer on `main`**, and there is no `--escape-detect` flag yet.
 
-**Inline enforcement** (`CheckEvent`) — called by the enforcer on every security event. When `DenyOnDetect` is enabled, the detector returns an `ActionDeny` result that blocks the syscall at the kernel level.
+**Inline check** (`CheckEvent`) — intended to be called by the enforcer on every security event. With `DenyOnDetect` enabled, it returns an `ActionDeny` result. Once wired, that deny would be enforced like any other userspace deny (`SIGKILL` after the event). It would not block in the kernel.
 
 **Event enrichment** (`Enrich`) — tags events with `escape_technique` and `escape_name` labels for downstream consumers (logging, SIEM export, alerting dashboards).
 
@@ -71,7 +73,7 @@ Set `DenyOnDetect: false` to run in audit/alert-only mode without blocking.
 
 ## Tips
 
-- **Start in audit mode** — set `DenyOnDetect: false` first to observe alerts without impacting workloads.
+- **Start in audit mode** (once wired) — set `DenyOnDetect: false` first to observe alerts without impacting workloads.
 - **Combine with SBOM enforcement** — escape detection catches active breakout attempts while SBOM policies prevent unauthorized binaries from running in the first place.
 - **Monitor alert callbacks** — feed alerts into your SIEM to correlate escape attempts with other cluster signals.
 - **Custom patterns** — pass a filtered `Patterns` slice to scope detection to your threat model.

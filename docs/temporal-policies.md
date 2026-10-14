@@ -1,5 +1,7 @@
 # Temporal Policies
 
+> **Status: Experimental, library only. Do not use `temporal:` in policies yet.** `internal/temporal` (enricher and guard) has unit tests but is **not wired into `warmor-daemon` on `main`**. The YAML compiler does not know the `temporal:` key and **silently ignores it**. A rule with a `temporal:` block therefore compiles into an **unconditional** rule: a `deny` with `max_container_age: "5m"` denies at every container age. See [Feature Status](STATUS.md).
+
 Warmor temporal policies add time-based constraints to security rules, allowing you to restrict container behavior based on container age, time of day, and day of week.
 
 ## Constraint Types
@@ -11,7 +13,7 @@ Warmor temporal policies add time-based constraints to security rules, allowing 
 | `time_of_day` | Restrict to a UTC time window | Permit deploys only during business hours |
 | `days_of_week` | Restrict to specific weekdays | Block exec on weekends |
 
-## Policy YAML Syntax
+## Policy YAML Syntax (planned; ignored by the compiler on main)
 
 ```yaml
 name: temporal-hardening
@@ -22,7 +24,7 @@ rules:
     event: network
     conditions:
       all:
-        - comm: { equals: "curl" }
+        - comm: { eq: "curl" }
     action: deny
     temporal:
       max_container_age: "5m"
@@ -43,7 +45,7 @@ rules:
     event: process
     conditions:
       all:
-        - comm: { equals: "helm" }
+        - comm: { eq: "helm" }
     action: deny
     temporal:
       days_of_week: [Monday, Tuesday, Wednesday, Thursday, Friday]
@@ -64,7 +66,7 @@ This allows the action between 22:00 and 06:00 UTC.
 
 ## How It Works
 
-The temporal system consists of two components wired into the event pipeline:
+The temporal system consists of two components, designed to sit in the event pipeline (neither is wired on `main`):
 
 1. **Enricher** — Tracks container start times by cgroup ID and annotates every security event with temporal labels (`container_age_ms`, `wall_clock`, `day_of_week`).
 
@@ -82,7 +84,7 @@ BPF event → Enricher.Enrich(event) → Guard.CheckEvent(event) → allow/deny
 
 ### Container Lifecycle
 
-Register containers when they start and unregister on exit:
+Register containers when they start and unregister on exit. Nothing does this automatically on `main`; there is no container start-time source yet.
 
 ```go
 enricher.RegisterContainer(cgroupID, time.Now())

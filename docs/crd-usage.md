@@ -1,5 +1,7 @@
 # WarmorPolicy CRD Usage
 
+> **Status: Missing on `main`, schema only.** The chart installs the `WarmorPolicy` CRD, but **there is no controller**. Resources are stored in etcd and never applied to any node, and `status` is never populated. The chart's `ValidatingWebhookConfiguration` has **no handler behind it**, and with `failurePolicy: Fail` enabling it would reject `WarmorPolicy` writes. `policySync.source` is unused. The Helm chart itself does not start on `main` (see [Quick Start](quick-start.md#kubernetes-not-working-on-main-yet)). The rest of this page describes the intended design. See [Feature Status](STATUS.md).
+
 The `WarmorPolicy` Custom Resource Definition lets you manage security policies as native Kubernetes objects, scoped per namespace.
 
 ## Prerequisites
@@ -97,7 +99,7 @@ spec:
 kubectl apply -f policy.yaml
 ```
 
-The daemon detects the version change and reloads without restart.
+*(Planned.)* The daemon would detect the version change and reload without a restart.
 
 ## Delete a Policy
 
@@ -105,9 +107,9 @@ The daemon detects the version change and reloads without restart.
 kubectl delete wp block-miners -n production
 ```
 
-The daemon reverts to the ConfigMap-based default policy for affected pods.
+*(Planned.)* The daemon would revert to the ConfigMap-based default policy for affected pods.
 
-## Enable Admission Webhook
+## Enable Admission Webhook (do not enable on main)
 
 The webhook validates policies before they're stored in etcd:
 
@@ -119,7 +121,7 @@ helm upgrade warmor deploy/helm/warmor \
   --set webhook.certManager.issuerRef.kind=ClusterIssuer
 ```
 
-Invalid policies are rejected with a clear error message at `kubectl apply` time.
+*(Planned.)* On `main` there is no webhook server, so enabling this blocks `WarmorPolicy` writes instead of validating them.
 
 ## Multiple Policies per Namespace
 
