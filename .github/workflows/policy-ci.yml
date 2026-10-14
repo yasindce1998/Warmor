@@ -11,7 +11,11 @@ on:
       - 'cmd/warmor-policy-merge/**'
       - 'cmd/warmor-policy-diff/**'
       - 'cmd/warmor-policy-bundle/**'
+      - 'cmd/warmor-compile/**'
+      - 'internal/compiler/**'
       - 'examples/policies/**'
+      - 'policies/yaml-example/**'
+      - '.github/workflows/policy-ci.yml'
   push:
     branches: [main]
     paths:
@@ -23,6 +27,11 @@ on:
       - 'cmd/warmor-policy-merge/**'
       - 'cmd/warmor-policy-diff/**'
       - 'cmd/warmor-policy-bundle/**'
+      - 'cmd/warmor-compile/**'
+      - 'internal/compiler/**'
+      - 'examples/policies/**'
+      - 'policies/yaml-example/**'
+      - '.github/workflows/policy-ci.yml'
 
 jobs:
   policy-pipeline:
@@ -39,6 +48,7 @@ jobs:
           go build ./cmd/warmor-policy-merge
           go build ./cmd/warmor-policy-diff
           go build ./cmd/warmor-policy-bundle
+          go build -o warmor-compile ./cmd/warmor-compile
 
       - name: Run policy package tests
         run: |
@@ -47,11 +57,15 @@ jobs:
 
       - name: Validate example policies
         run: |
-          for f in examples/policies/*.yaml; do
+          status=0
+          while IFS= read -r f; do
             echo "Validating $f..."
-            # Load and validate the policy structure
-            go run ./cmd/warmor-policy-merge --validate --dir examples/policies -o /dev/null 2>&1 || true
-          done
+            if ! ./warmor-compile --validate "$f"; then
+              echo "::error file=$f::policy failed validation"
+              status=1
+            fi
+          done < <(find examples/policies policies/yaml-example -name '*.yaml' | sort)
+          exit "$status"
 
       - name: Test merge pipeline
         run: |
