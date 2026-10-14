@@ -77,6 +77,38 @@ func TestHandleEvent_KernelDeniedIsRecordedNotReenforced(t *testing.T) {
 	}
 }
 
+func TestHandleEvent_IntegrityEnforceViolation(t *testing.T) {
+	e, _ := newTestEnforcer(t, testEnforcerOpts{})
+	victim := startVictim(t)
+
+	e.handleEvent(&api.Event{
+		PID: uint32(victim.pid), Comm: "dropper", Filename: "/tmp/dropper",
+		Type: api.EventTypeProcess, LSMEvent: true, KernelDenied: true, IntegrityViolation: true,
+	})
+
+	if stats := e.GetStats(); stats.Denied != 1 {
+		t.Fatalf("stats = %+v, want 1 denied", stats)
+	}
+	requireAlive(t, victim)
+}
+
+func TestHandleEvent_IntegrityAuditViolation(t *testing.T) {
+	e, _ := newTestEnforcer(t, testEnforcerOpts{})
+	victim := startVictim(t)
+
+	// Audit mode: the exec ran; report a would-deny without acting.
+	e.handleEvent(&api.Event{
+		PID: uint32(victim.pid), Comm: "dropper", Filename: "/tmp/dropper",
+		Type: api.EventTypeProcess, LSMEvent: true, IntegrityViolation: true,
+	})
+
+	stats := e.GetStats()
+	if stats.AuditDenied != 1 || stats.Denied != 0 {
+		t.Fatalf("stats = %+v, want 1 audit-denied", stats)
+	}
+	requireAlive(t, victim)
+}
+
 func TestHandleEvent_NoKernelVerdictStillEvaluated(t *testing.T) {
 	e, _ := newTestEnforcer(t, testEnforcerOpts{})
 	e.handleEvent(&api.Event{UID: 1000, Comm: "ls", Filename: "/usr/bin/ls", LSMEvent: true})

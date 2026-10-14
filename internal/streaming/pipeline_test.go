@@ -562,9 +562,9 @@ func TestTransform_LSMHookNames(t *testing.T) {
 		t.Errorf("unix connect: %+v", unix)
 	}
 
-	denied := p.transform(&api.Event{Hook: "exec", Filename: "/tmp/x", KernelDenied: true}, nil)
-	if denied.EventType != "exec" || !denied.KernelEnforced {
-		t.Errorf("kernel denied: %+v", denied)
+	integrity := p.transform(&api.Event{Hook: "exec", Filename: "/tmp/x", IntegrityViolation: true, KernelDenied: true}, nil)
+	if integrity.EventType != "exec" || !integrity.IntegrityViolation || !integrity.KernelEnforced {
+		t.Errorf("integrity: %+v", integrity)
 	}
 
 	// Tracepoint events (no Hook) keep the Type-derived name.

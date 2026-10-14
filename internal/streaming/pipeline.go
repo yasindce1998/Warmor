@@ -249,6 +249,7 @@ func FromAPIEvent(event *api.Event, result *api.ActionResult) *SecurityEvent {
 			se.Filename = event.Filename
 		}
 	}
+	se.IntegrityViolation = event.IntegrityViolation
 	se.KernelEnforced = event.KernelDenied
 
 	// Decision

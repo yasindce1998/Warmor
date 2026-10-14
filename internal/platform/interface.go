@@ -55,6 +55,12 @@ type Config struct {
 	// SkipLSM disables LSM-BPF program loading entirely, running in
 	// tracepoint-only observe mode regardless of kernel capabilities.
 	SkipLSM bool
+	// IntegrityMode is "off", "audit" or "enforce". Anything but off loads
+	// the content-hash exec check with IntegrityDigests (hex SHA-256) as
+	// the allowlist; failing to load it is fatal, since the operator asked
+	// for it explicitly. Linux only.
+	IntegrityMode    string
+	IntegrityDigests []string
 	// UnixWatch lists unix socket paths whose connects the kernel reports
 	// (Linux LSM only); used for container runtime socket access detection.
 	UnixWatch []string

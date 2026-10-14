@@ -52,6 +52,10 @@ type Options struct {
 	// exceeds it is denied (fail closed) and its instance replaced. Zero
 	// means wasm.DefaultEvalTimeout.
 	EvalTimeout time.Duration
+	// IntegrityMode ("off", "audit", "enforce") and IntegrityDigests (hex
+	// SHA-256 allowlist) configure the kernel content-hash exec check.
+	IntegrityMode    string
+	IntegrityDigests []string
 
 	// EscapeDetect is the container escape detection mode: "off", "alert"
 	// (log, count and stream matches) or "deny" (also terminate the process).
@@ -191,7 +195,10 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		LSMEnforce:   opts.LSMEnforce,
 		RequireLSM:   opts.RequireLSM,
 		SkipLSM:      opts.SkipLSM,
-		UnixWatch:    unixWatch,
+
+		IntegrityMode:    opts.IntegrityMode,
+		IntegrityDigests: opts.IntegrityDigests,
+		UnixWatch:        unixWatch,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize platform: %w", err)
