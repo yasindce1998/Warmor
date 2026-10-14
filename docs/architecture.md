@@ -587,7 +587,7 @@ The following are design targets only. A benchmark harness is in progress.
 - Grafana dashboard ConfigMap for sidecar auto-provisioning
 - Policy ConfigMap with default YAML policy
 
-**Install:** not working on `main`. The initContainer calls a nonexistent `--validate-policy` flag, there is no LSM enforce value, the YAML policy needs `cargo` in a distroless image, and the webhook has no handler. See [Feature Status](STATUS.md#5-container-runtime-and-kubernetes).
+**Install:** not working on `main`. There is no LSM enforce value, the YAML policy needs `cargo` in a distroless image, and the webhook has no handler. See [Feature Status](STATUS.md#5-container-runtime-and-kubernetes).
 
 ### Distributed Mode with mTLS
 

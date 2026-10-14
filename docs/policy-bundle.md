@@ -71,6 +71,8 @@ failure an existing file at `--wasm` is left untouched.
 | `--policy-version` | `1.0.0` | Policy version stored in artifact metadata |
 | `--description` | — | Policy description stored in artifact metadata |
 | `--keygen` | — | Generate a key pair at `--sign-key` / `--verify-key` and exit |
+| `--sign` | — | Write the detached signature `<wasm>.sig` for `--wasm` with `--sign-key` and exit |
+| `--verify` | — | Check `--wasm` against `<wasm>.sig` with `--verify-key` and exit |
 | `--sign-key` | required for push | ed25519 private key PEM used to sign on push |
 | `--verify-key` | required for pull | ed25519 public key PEM used to verify on pull |
 | `--allow-unsigned` | `false` | Push without a signature (INSECURE) |
@@ -122,6 +124,106 @@ Before downloading any blob, Pull requires:
 The config must also decode as JSON, and every blob must match its digest and
 size.
 
+## Detached signatures (daemon and policy server)
+
+`warmor-daemon --verify-key` and `warmor-server --verify-key` do not read OCI
+bundles; they check a **detached signature** stored next to the module as
+`<policy>.sig`. It uses the same key pair as bundles (`--keygen`), but signs
+something different: the bundle signature covers the manifest descriptors,
+the detached signature is a plain ed25519 signature over the exact `.wasm`
+bytes (`crypto.SignPolicy`), written as one line of standard base64. A raw
+64-byte binary signature file is accepted too.
+
+```bash
+$ warmor-policy-bundle --sign --wasm policies/policy.wasm --sign-key signing.key
+Signed policies/policy.wasm → policies/policy.wasm.sig
+$ warmor-policy-bundle --verify --wasm policies/policy.wasm --verify-key signing.pub
+Verified policies/policy.wasm (signature policies/policy.wasm.sig)
+```
+
+Ed25519 signatures are deterministic, so OpenSSL 3 produces a byte-identical
+signature from the same PKCS#8 key, if you'd rather not use the tool:
+
+```bash
+openssl pkeyutl -sign -inkey signing.key -rawin -in policies/policy.wasm | base64 -w0 > policies/policy.wasm.sig
+```
+
+### Daemon
+
+With `--verify-key signing.pub` the daemon refuses any policy whose
+signature is missing or does not verify:
+
+- **startup**: it reads `--policy` once, verifies it against `<policy>.sig`,
+  and loads those exact bytes from memory (no re-read, so nothing can swap the
+  file between check and load). This happens before any BPF program loads; on
+  failure the daemon exits.
+- **reload** (SIGHUP on Linux/macOS, the file watcher on Windows): same check.
+  On failure the current policy stays active and the error is logged.
+- **policy server downloads**: the module and the signature served with it
+  are verified in memory *before* anything is written to disk. A rejected
+  download keeps the old policy and file, logs
+  `Rejected policy <id> v<N> from server: ...`, and increments
+  `warmor_policy_signature_failures_total{source="server"}` (startup and
+  reload failures count under `source="file"`). The agent keeps reporting the
+  version it actually runs and checks the server's version again on the next
+  poll. Accepted downloads are written with their `.sig`, so the reload
+  verifies them a second time.
+
+YAML policies are refused under `--verify-key`: they are compiled on the node
+at load time, so there are no signed bytes to check. Compile with
+`warmor-compile`, sign the `.wasm`, and point `--policy` at it.
+
+`--validate-policy <path>` loads a policy in a throwaway WASM runtime (and
+checks its signature when `--verify-key` is given), prints the result and
+exits 0 or 1. It needs no root and no BPF. The Helm chart's `validate-policy`
+initContainer runs it:
+
+```bash
+$ warmor-daemon --verify-key signing.pub --validate-policy policies/policy.wasm
+policy OK: policies/policy.wasm (wasm, signature verified, loaded in WASM runtime)
+$ warmor-daemon --verify-key signing.pub --validate-policy unsigned.wasm
+policy INVALID: unsigned.wasm: policy is not signed (no unsigned.wasm.sig)
+$ echo $?
+1
+```
+
+For a YAML policy without `--verify-key`, validation checks the YAML schema
+and loads a precompiled sibling `.wasm` if one exists. It does not compile the
+YAML, because that needs the Rust toolchain and a writable directory.
+
+### Policy server
+
+You upload a policy that is already signed, so the private key never has to
+be on the server. Put `<wasm>.sig` next to the module in `--policy-dir`
+(it is confined to that directory like the module), or pass the base64
+signature as `"signature"` in the create/update request body. The server
+stores the signature with that version and returns it in the
+`X-Warmor-Policy-Signature` header of `/api/v1/policy/wasm`, in the same
+response as the module bytes. With `warmor-server --verify-key signing.pub`
+the server also rejects uploads that are unsigned or do not verify, with
+HTTP 422. Policies show `"signed": true|false` in the admin API.
+
+```bash
+$ warmor-server --addr 127.0.0.1:18443 --insecure --policy-dir ./policies --verify-key signing.pub &
+$ curl -s -X POST http://127.0.0.1:18443/api/v1/admin/policies -d '{"id":"default","wasm_path":"policy.wasm"}'
+{"id":"default",...,"signed":true}
+$ curl -s -w ' %{http_code}\n' -X POST http://127.0.0.1:18443/api/v1/admin/policies -d '{"id":"bad","wasm_path":"unsigned.wasm"}'
+/tmp/.../policies/unsigned.wasm: policy is not signed (the server requires signed policies)
+ 422
+$ curl -s -D - -o fetched.wasm 'http://127.0.0.1:18443/api/v1/policy/wasm?policy_id=default&version=1' | grep -i x-warmor
+X-Warmor-Policy-Signature: s20fEDoYPqIE...
+```
+
+(`--insecure` is only for this local demo. Use `--jwt-secret` and/or mTLS
+in a real deployment.)
+
+### OCI bundles and `--verify-key`
+
+`--pull` writes only the `.wasm`. The bundle signature cannot be turned into
+a detached one, so if the nodes run `warmor-daemon --verify-key`, also
+run `--sign` in CI and ship the `.sig` next to the module (for example in the
+same ConfigMap or Secret).
+
 ## Authentication
 
 The tool uses the standard Docker/OCI credential chain:
@@ -159,7 +261,8 @@ warmor-policy-bundle --pull \
   --wasm /etc/warmor/policy.wasm \
   --verify-key /etc/warmor/signing.pub
 
-# 5. Enforce
+# 5. Enforce (add --verify-key /etc/warmor/signing.pub to require a detached
+#    signature; ship /etc/warmor/policy.wasm.sig made with --sign, see above)
 sudo warmor-daemon --policy /etc/warmor/policy.wasm
 ```
 

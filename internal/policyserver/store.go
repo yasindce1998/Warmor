@@ -1,12 +1,15 @@
 package policyserver
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/yasindce1998/warmor/internal/crypto"
 )
 
 // Store manages policies and agent registrations in memory.
@@ -17,6 +20,9 @@ type Store struct {
 	// versions keeps every uploaded WASM binary so that rollouts can serve
 	// both their base and target versions: policyID -> version -> binary.
 	versions map[string]map[int64]*policyVersion
+	// verifyKey, if set, makes every upload require a detached signature
+	// that verifies against it.
+	verifyKey ed25519.PublicKey
 }
 
 // policyVersion is one immutable uploaded revision of a policy's WASM.
@@ -24,6 +30,8 @@ type policyVersion struct {
 	data []byte
 	hash string
 	path string
+	// sig is the raw ed25519 signature over data, or nil if unsigned.
+	sig []byte
 }
 
 func NewStore() *Store {
@@ -34,16 +42,51 @@ func NewStore() *Store {
 	}
 }
 
-func readPolicyVersion(wasmPath string) (*policyVersion, error) {
+// SetVerifyKey makes the store refuse uploads whose detached signature is
+// missing or does not verify against pub. The private key never needs to
+// be on the server: policies are signed offline and uploaded with their
+// signature.
+func (s *Store) SetVerifyKey(pub ed25519.PublicKey) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.verifyKey = pub
+}
+
+// readPolicyVersion reads a WASM upload. sigFile is its detached signature
+// (the <policy>.sig file format, or a raw 64-byte signature), or nil for
+// an unsigned upload. A signature that is present must be well formed; with
+// a verify key it must also verify, and unsigned uploads are refused.
+func readPolicyVersion(wasmPath string, sigFile []byte, pub ed25519.PublicKey) (*policyVersion, error) {
 	data, err := os.ReadFile(wasmPath)
 	if err != nil {
 		return nil, fmt.Errorf("read wasm: %w", err)
 	}
+	var sig []byte
+	switch {
+	case len(sigFile) > 0:
+		if sig, err = crypto.DecodePolicySignature(sigFile); err != nil {
+			return nil, err
+		}
+		if pub != nil {
+			if err := crypto.VerifyPolicySignature(pub, data, sig); err != nil {
+				return nil, fmt.Errorf("%s: %w", wasmPath, err)
+			}
+		}
+	case pub != nil:
+		return nil, fmt.Errorf("%s: %w (the server requires signed policies)", wasmPath, crypto.ErrPolicyUnsigned)
+	}
 	h := sha256.Sum256(data)
-	return &policyVersion{data: data, hash: hex.EncodeToString(h[:]), path: wasmPath}, nil
+	return &policyVersion{data: data, hash: hex.EncodeToString(h[:]), path: wasmPath, sig: sig}, nil
 }
 
+// CreatePolicy creates an unsigned policy from wasmPath.
 func (s *Store) CreatePolicy(p *Policy, wasmPath string) error {
+	return s.CreateSignedPolicy(p, wasmPath, nil)
+}
+
+// CreateSignedPolicy creates a policy from wasmPath with its detached
+// signature sigFile (nil for unsigned).
+func (s *Store) CreateSignedPolicy(p *Policy, wasmPath string, sigFile []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -51,13 +94,14 @@ func (s *Store) CreatePolicy(p *Policy, wasmPath string) error {
 		return fmt.Errorf("policy %s already exists", p.ID)
 	}
 
-	v, err := readPolicyVersion(wasmPath)
+	v, err := readPolicyVersion(wasmPath, sigFile, s.verifyKey)
 	if err != nil {
 		return err
 	}
 
 	p.WASMHash = v.hash
 	p.WASMPath = v.path
+	p.Signed = v.sig != nil
 	p.Version = 1
 	p.ActiveVersion = 1
 	p.CreatedAt = time.Now()
@@ -71,16 +115,19 @@ func (s *Store) CreatePolicy(p *Policy, wasmPath string) error {
 // UpdatePolicy uploads a new version of a policy and makes it the active
 // version served to agents outside of a rollout.
 func (s *Store) UpdatePolicy(id string, wasmPath string) error {
-	return s.addVersion(id, wasmPath, true)
+	return s.AddVersion(id, wasmPath, nil, true)
 }
 
 // StagePolicy uploads a new version of a policy without activating it, so
 // it can be introduced gradually through a rollout.
 func (s *Store) StagePolicy(id string, wasmPath string) error {
-	return s.addVersion(id, wasmPath, false)
+	return s.AddVersion(id, wasmPath, nil, false)
 }
 
-func (s *Store) addVersion(id, wasmPath string, activate bool) error {
+// AddVersion uploads a new version of a policy with its detached signature
+// sigFile (nil for unsigned). With activate it becomes the active version;
+// otherwise it is staged as a rollout target.
+func (s *Store) AddVersion(id, wasmPath string, sigFile []byte, activate bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -89,13 +136,14 @@ func (s *Store) addVersion(id, wasmPath string, activate bool) error {
 		return fmt.Errorf("policy %s not found", id)
 	}
 
-	v, err := readPolicyVersion(wasmPath)
+	v, err := readPolicyVersion(wasmPath, sigFile, s.verifyKey)
 	if err != nil {
 		return err
 	}
 
 	p.WASMHash = v.hash
 	p.WASMPath = v.path
+	p.Signed = v.sig != nil
 	p.Version++
 	p.UpdatedAt = time.Now()
 	if activate {
@@ -214,13 +262,27 @@ func (s *Store) GetWASM(policyID string) ([]byte, bool) {
 
 // GetWASMVersion returns the WASM binary of a specific policy version.
 func (s *Store) GetWASMVersion(policyID string, version int64) ([]byte, bool) {
+	data, _, ok := s.GetSignedWASM(policyID, version)
+	return data, ok
+}
+
+// GetSignedWASM returns the WASM binary of a policy version (the active
+// version if version is 0) and its raw signature (nil if unsigned).
+func (s *Store) GetSignedWASM(policyID string, version int64) (data, sig []byte, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	v, ok := s.versions[policyID][version]
-	if !ok {
-		return nil, false
+	if version == 0 {
+		p, found := s.policies[policyID]
+		if !found {
+			return nil, nil, false
+		}
+		version = p.ActiveVersion
 	}
-	return v.data, true
+	v, found := s.versions[policyID][version]
+	if !found {
+		return nil, nil, false
+	}
+	return v.data, v.sig, true
 }
 
 // MatchPolicy finds the highest-priority policy whose selector matches the agent labels.

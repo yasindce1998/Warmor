@@ -96,7 +96,8 @@ func NewRuntime(ctx context.Context, cfgs ...RuntimeConfig) (*Runtime, error) {
 	}, nil
 }
 
-const maxPolicySize = 64 * 1024 * 1024 // 64 MiB
+// MaxPolicySize is the largest WASM policy module the runtime will load.
+const MaxPolicySize = 64 * 1024 * 1024 // 64 MiB
 
 // LoadPolicy loads a WASM policy module from file
 func (r *Runtime) LoadPolicy(ctx context.Context, path string) error {
@@ -104,13 +105,27 @@ func (r *Runtime) LoadPolicy(ctx context.Context, path string) error {
 	if err != nil {
 		return fmt.Errorf("stat policy file: %w", err)
 	}
-	if info.Size() > maxPolicySize {
-		return fmt.Errorf("policy file too large: %d bytes (max %d)", info.Size(), maxPolicySize)
+	if info.Size() > MaxPolicySize {
+		return fmt.Errorf("policy file too large: %d bytes (max %d)", info.Size(), MaxPolicySize)
 	}
 
 	wasmBytes, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read policy file: %w", err)
+	}
+
+	if err := r.LoadPolicyBytes(ctx, wasmBytes); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return nil
+}
+
+// LoadPolicyBytes compiles and loads a WASM policy module from memory. Use
+// it to load exactly the bytes whose signature was verified, rather than
+// re-reading a file that may have changed in between.
+func (r *Runtime) LoadPolicyBytes(ctx context.Context, wasmBytes []byte) error {
+	if len(wasmBytes) > MaxPolicySize {
+		return fmt.Errorf("policy too large: %d bytes (max %d)", len(wasmBytes), MaxPolicySize)
 	}
 
 	// Compile module
@@ -121,7 +136,7 @@ func (r *Runtime) LoadPolicy(ctx context.Context, path string) error {
 
 	if err := r.validateModule(ctx, compiled); err != nil {
 		compiled.Close(ctx)
-		return fmt.Errorf("invalid policy module %s: %w", path, err)
+		return fmt.Errorf("invalid policy module: %w", err)
 	}
 
 	r.module = compiled

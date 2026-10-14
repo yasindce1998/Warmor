@@ -14,8 +14,8 @@ func TestAbsolutizePathFlags(t *testing.T) {
 		}
 		return a
 	}
-	in := []string{"--policy", "p.wasm", "-tls-ca=ca.pem", "--audit", "--metrics-port", "9090", "--tls-key", "k.pem"}
-	want := []string{"--policy", abs("p.wasm"), "--tls-ca=" + abs("ca.pem"), "--audit", "--metrics-port", "9090", "--tls-key", abs("k.pem")}
+	in := []string{"--policy", "p.wasm", "-tls-ca=ca.pem", "--audit", "--metrics-port", "9090", "--tls-key", "k.pem", "--verify-key", "s.pub"}
+	want := []string{"--policy", abs("p.wasm"), "--tls-ca=" + abs("ca.pem"), "--audit", "--metrics-port", "9090", "--tls-key", abs("k.pem"), "--verify-key", abs("s.pub")}
 	got, err := absolutizePathFlags(in)
 	if err != nil {
 		t.Fatal(err)

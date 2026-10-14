@@ -18,6 +18,9 @@ type Policy struct {
 	CreatedAt     time.Time         `json:"created_at" yaml:"created_at"`
 	UpdatedAt     time.Time         `json:"updated_at" yaml:"updated_at"`
 	Description   string            `json:"description,omitempty" yaml:"description,omitempty"`
+	// Signed reports whether the latest uploaded version carries a detached
+	// ed25519 signature.
+	Signed bool `json:"signed" yaml:"signed"`
 }
 
 // Agent represents a registered warmor agent with its labels and status.
@@ -58,7 +61,16 @@ type PolicyAssignment struct {
 	WASMHash string `json:"wasm_hash"`
 	WASMPath string `json:"wasm_path"`
 	WASMData []byte `json:"wasm_data,omitempty"`
+	// Signature is the raw ed25519 signature over the WASM bytes, filled in
+	// by Client from the SignatureHeader of the WASM download. Empty when
+	// the policy is unsigned.
+	Signature []byte `json:"-"`
 }
+
+// SignatureHeader carries the base64 ed25519 signature of a policy version
+// on its /api/v1/policy/wasm response, so the module and its signature
+// arrive in one response.
+const SignatureHeader = "X-Warmor-Policy-Signature"
 
 // Rollout represents a gradual policy rollout configuration.
 type Rollout struct {

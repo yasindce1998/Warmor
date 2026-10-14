@@ -224,7 +224,7 @@ func TestClientNetworkErrors(t *testing.T) {
 	if err := c.SendHeartbeat(ctx); err == nil || !strings.Contains(err.Error(), "heartbeat") {
 		t.Errorf("expected heartbeat network error, got %v", err)
 	}
-	if _, err := c.fetchWASM(ctx, "p", 1); err == nil || !strings.Contains(err.Error(), "fetch wasm") {
+	if _, _, err := c.fetchWASM(ctx, "p", 1); err == nil || !strings.Contains(err.Error(), "fetch wasm") {
 		t.Errorf("expected fetch wasm network error, got %v", err)
 	}
 	c.poll(ctx) // must not panic
@@ -239,7 +239,7 @@ func TestClientInvalidURL(t *testing.T) {
 	if err := c.SendHeartbeat(ctx); err == nil {
 		t.Error("expected heartbeat request construction error")
 	}
-	if _, err := c.fetchWASM(ctx, "p", 1); err == nil {
+	if _, _, err := c.fetchWASM(ctx, "p", 1); err == nil {
 		t.Error("expected fetchWASM request construction error")
 	}
 	c.poll(ctx) // must not panic
@@ -257,7 +257,7 @@ func TestClientRegisterRejected(t *testing.T) {
 func TestClientFetchWASMNotFound(t *testing.T) {
 	_, ts, _ := setupClientEnv(t)
 	c := NewClient(ClientConfig{ServerURL: ts.URL, AgentID: "a"})
-	_, err := c.fetchWASM(context.Background(), "missing", 1)
+	_, _, err := c.fetchWASM(context.Background(), "missing", 1)
 	if err == nil || !strings.Contains(err.Error(), "status 404") {
 		t.Fatalf("expected 404 error, got %v", err)
 	}

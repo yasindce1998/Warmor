@@ -164,9 +164,16 @@ Validate a policy locally before deploying:
 warmor-compile --validate path/to/policy.yaml
 ```
 
-The daemon has no validate-only flag (`--validate-policy` does not exist).
+`warmor-daemon --validate-policy <path>` loads the policy in the WASM runtime (and checks its signature with `--verify-key`) without root or BPF, and exits 0 or 1. For YAML it only validates the schema, because compiling needs `cargo`.
 
 > **Note:** the compiler silently ignores keys it does not know, such as `temporal:`. Run `warmor-compile --rust-only path/to/policy.yaml` to see exactly which conditions were compiled.
+
+This needs no root or BPF and exits 0 if the policy is valid, 1 if not. For a
+`.yaml` file it checks the schema, and loads a precompiled `.wasm` with the
+same base name if there is one. It does not compile the YAML. For a `.wasm`
+file it compiles and instantiates the module in the WASM runtime. Add
+`--verify-key signing.pub` to also check the policy's detached signature
+(see [policy-bundle.md](policy-bundle.md#detached-signatures-daemon-and-policy-server)).
 
 ---
 

@@ -160,9 +160,50 @@ func TestServer_InsecureFlag(t *testing.T) {
 	assertContains(t, "logs", logs, "INSECURE MODE")
 }
 
+func TestServer_VerifyKey(t *testing.T) {
+	sk, err := crypto.GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubPEM, _ := sk.MarshalPublicKey()
+	dir := t.TempDir()
+	pubFile := filepath.Join(dir, "signing.pub")
+	policyDir := filepath.Join(dir, "policies")
+	if err := os.Mkdir(policyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range map[string][]byte{
+		pubFile: pubPEM,
+		filepath.Join(policyDir, "unsigned.wasm"):   []byte("u"),
+		filepath.Join(policyDir, "signed.wasm"):     []byte("s"),
+		filepath.Join(policyDir, "signed.wasm.sig"): sk.SignPolicyFile([]byte("s")),
+	} {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	post := func(addr, body string) int {
+		resp, err := http.Post("http://"+addr+"/api/v1/admin/policies", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	logs := runServer(t, func(addr string) {
+		if got := post(addr, `{"id":"u","wasm_path":"unsigned.wasm"}`); got != http.StatusUnprocessableEntity {
+			t.Errorf("unsigned upload: status %d, want 422", got)
+		}
+		if got := post(addr, `{"id":"s","wasm_path":"signed.wasm"}`); got != http.StatusCreated {
+			t.Errorf("signed upload: status %d, want 201", got)
+		}
+	}, "-insecure", "-policy-dir", policyDir, "-verify-key", pubFile)
+	assertContains(t, "logs", logs, "policy uploads must be signed")
+}
+
 type pki struct {
-	caCert, serverCert, serverKey string
-	caPEM, clientCertPEM, clientKeyPEM                   []byte
+	caCert, serverCert, serverKey      string
+	caPEM, clientCertPEM, clientKeyPEM []byte
 }
 
 func writePKI(t *testing.T) pki {
@@ -284,6 +325,8 @@ func TestServer_Failures(t *testing.T) {
 		{"ca and cert without key", []string{"-ca-cert", p.caCert, "-tls-cert", p.serverCert}, "--tls-cert and --tls-key must be given together"},
 		{"tls-only bad keypair", []string{"-tls-cert", garbage, "-tls-key", p.serverKey, "-jwt-secret", "x"}, "configure TLS"},
 		{"policy dir missing", []string{"-insecure", "-policy-dir", missing}, "is not a directory"},
+		{"verify key missing", []string{"-insecure", "-verify-key", missing}, "--verify-key"},
+		{"verify key garbage", []string{"-insecure", "-verify-key", garbage}, "--verify-key"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

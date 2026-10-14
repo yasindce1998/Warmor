@@ -2,10 +2,13 @@ package policyserver
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -14,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yasindce1998/warmor/internal/crypto"
 )
 
 // Server is the central policy management HTTP server.
@@ -54,6 +59,10 @@ type ServerConfig struct {
 	// PolicyDir is the only directory admin requests may load WASM from.
 	// If empty, policies cannot be created or updated over the API.
 	PolicyDir string
+	// VerifyKey, if set, makes the server refuse policy uploads without a
+	// detached signature that verifies against it. Signatures are always
+	// served to agents when present; agents verify them independently.
+	VerifyKey ed25519.PublicKey
 }
 
 // NewServer creates a policy management server.
@@ -66,6 +75,9 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 
 	store := NewStore()
+	if cfg.VerifyKey != nil {
+		store.SetVerifyKey(cfg.VerifyKey)
+	}
 	s := &Server{
 		store:      store,
 		rollouts:   NewRolloutManager(store),
@@ -301,23 +313,26 @@ func (s *Server) handleGetWASM(w http.ResponseWriter, r *http.Request) {
 
 	// Without a version the active one is served; agents pass the version
 	// from their assignment so rollout cohorts get the right binary.
-	var data []byte
-	var ok bool
+	var version int64
 	if vs := r.URL.Query().Get("version"); vs != "" {
 		v, err := strconv.ParseInt(vs, 10, 64)
-		if err != nil {
+		if err != nil || v <= 0 {
 			http.Error(w, "invalid version", http.StatusBadRequest)
 			return
 		}
-		data, ok = s.store.GetWASMVersion(policyID, v)
-	} else {
-		data, ok = s.store.GetWASM(policyID)
+		version = v
 	}
+	data, sig, ok := s.store.GetSignedWASM(policyID, version)
 	if !ok {
 		http.Error(w, "policy not found", http.StatusNotFound)
 		return
 	}
 
+	// The signature travels with the module it covers so an agent can never
+	// pair bytes and signature from different versions.
+	if sig != nil {
+		w.Header().Set(SignatureHeader, base64.StdEncoding.EncodeToString(sig))
+	}
 	w.Header().Set("Content-Type", "application/wasm")
 	_, _ = w.Write(data)
 }
@@ -331,11 +346,17 @@ func (s *Server) handleAdminPolicies(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, policies)
 
 	case http.MethodPost:
-		var p Policy
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		var req struct {
+			Policy
+			// Signature is an optional detached signature (base64) for
+			// the WASM; otherwise <wasm_path>.sig is used if present.
+			Signature string `json:"signature"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
+		p := req.Policy
 		if p.ID == "" || p.WASMPath == "" {
 			http.Error(w, "id and wasm_path required", http.StatusBadRequest)
 			return
@@ -345,8 +366,13 @@ func (s *Server) handleAdminPolicies(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := s.store.CreatePolicy(&p, path); err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
+		sig, err := s.uploadSignature(path, req.Signature)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.store.CreateSignedPolicy(&p, path, sig); err != nil {
+			http.Error(w, err.Error(), uploadErrorStatus(err, http.StatusConflict))
 			return
 		}
 		writeJSON(w, http.StatusCreated, &p)
@@ -378,6 +404,9 @@ func (s *Server) handleAdminPolicy(w http.ResponseWriter, r *http.Request) {
 			// Stage uploads the version without activating it, for use as
 			// a rollout target.
 			Stage bool `json:"stage"`
+			// Signature is an optional detached signature (base64); see
+			// the POST handler.
+			Signature string `json:"signature"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -392,12 +421,13 @@ func (s *Server) handleAdminPolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		update := s.store.UpdatePolicy
-		if req.Stage {
-			update = s.store.StagePolicy
+		sig, err := s.uploadSignature(path, req.Signature)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
-		if err := update(id, path); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+		if err := s.store.AddVersion(id, path, sig, !req.Stage); err != nil {
+			http.Error(w, err.Error(), uploadErrorStatus(err, http.StatusNotFound))
 			return
 		}
 		p, _ := s.store.GetPolicy(id)
@@ -493,6 +523,38 @@ func (s *Server) handleAdminRollout(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// uploadSignature returns the detached signature for an uploaded policy:
+// the request's base64 signature if given, else the contents of
+// <wasm>.sig next to the resolved WASM file (confined to the policy
+// directory like the WASM itself), else nil.
+func (s *Server) uploadSignature(wasmPath, inline string) ([]byte, error) {
+	if inline != "" {
+		return crypto.DecodePolicySignature([]byte(inline))
+	}
+	sigPath, err := s.resolveWASMPath(crypto.PolicySignaturePath(wasmPath))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("signature: %w", err)
+	}
+	data, err := crypto.ReadFileLimited(sigPath, crypto.MaxPolicySignatureFileSize)
+	if err != nil {
+		return nil, fmt.Errorf("signature: %w", err)
+	}
+	return data, nil
+}
+
+// uploadErrorStatus maps a policy upload error to an HTTP status:
+// signature problems are the client's fault (422), anything else gets
+// fallback.
+func uploadErrorStatus(err error, fallback int) int {
+	if errors.Is(err, crypto.ErrPolicyUnsigned) || errors.Is(err, crypto.ErrPolicySignatureInvalid) {
+		return http.StatusUnprocessableEntity
+	}
+	return fallback
 }
 
 func rolloutErrorStatus(err error) int {

@@ -86,10 +86,43 @@ recommended posture for production enforcement nodes, typically paired with
 | `--no-lsm` | `false` | Skip LSM-BPF loading entirely. Tracepoint-only observe mode — useful for environments where the verifier hangs or LSM is unsupported. |
 | `--audit` | `false` | Log would-be denials instead of enforcing them (userspace actions). |
 
+## Policy integrity: `--verify-key`
+
+By default the daemon loads whatever module is at `--policy`, or whatever
+the policy server sends. Anyone who can write that file, or impersonate or
+compromise the server, controls enforcement. This is a *fail-open* trust
+model.
+
+With `--verify-key <ed25519 public key PEM>`, every policy needs a detached
+signature (`<policy>.sig`) that verifies, and loading **fails closed**:
+
+| Event | Signature missing / invalid |
+|---|---|
+| Startup | Daemon refuses to start (checked before BPF loads). |
+| SIGHUP / file-watcher reload | Reload refused; current policy stays active. |
+| Policy server download | Discarded before it is written to disk; old policy and file kept; error logged; `warmor_policy_signature_failures_total{source="server"}` incremented. |
+
+The daemon verifies the exact bytes it loads: it reads the file once into
+memory, checks the signature, and compiles from that buffer. YAML policies are
+refused under `--verify-key` because they are compiled on the node. The
+private key stays offline: `warmor-server` stores and serves the signatures
+of pre-signed uploads and never signs anything itself. `warmor-server
+--verify-key` additionally rejects unsigned uploads (defense in depth; agents
+still verify on their own).
+
+The signature binds content, not version. A server or anyone else who can
+write the policy path can still roll a node back to an *older* module that was
+validly signed with the same key. Rotate keys, or use separate keys per policy
+line, when an old policy must never return.
+
+The flow and commands are in
+[policy-bundle.md](policy-bundle.md#detached-signatures-daemon-and-policy-server).
+
 ## Recommended postures
 
-- **Production enforcement node:** `--lsm-enforce --require-lsm`. Fail-closed
-  startup; deny rules blocked in-kernel; no silent downgrade.
+- **Production enforcement node:** `--lsm-enforce --require-lsm --verify-key
+  signing.pub`. Fail-closed startup; deny rules blocked in-kernel; no silent
+  downgrade; only signed policies load.
 - **Rollout / canary:** `--lsm-enforce` (no `--require-lsm`). Enforces where the
   kernel supports it, degrades gracefully elsewhere while you assess coverage.
 - **Pure monitoring:** `--audit`. Observe and evaluate, kill and block nothing.

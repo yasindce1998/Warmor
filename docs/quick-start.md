@@ -128,8 +128,6 @@ Swap `--audit` for `--lsm-enforce` once you trust the policy.
 
 The Helm chart in `deploy/helm/warmor` is being fixed. On `main`:
 
-- The initContainer runs `warmor-daemon --validate-policy`, a flag that does
-  not exist, so pods stay in `Init`.
 - The chart has no `lsmEnforce` value and never passes `--lsm-enforce`.
 - The policy is shipped as YAML in a ConfigMap. The daemon would need `cargo`
   to compile it, and the distroless image does not include it.
