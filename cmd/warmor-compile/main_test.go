@@ -131,3 +131,28 @@ func TestCompile_FullBuild(t *testing.T) {
 		t.Errorf("wasm output missing or empty: %v", err)
 	}
 }
+
+// Flags given after the input file must not be silently ignored (Go's flag
+// package stops at the first positional argument).
+func TestCompile_FlagsAfterInput(t *testing.T) {
+	path := writePolicy(t, validPolicy)
+	r := runChild(t, nil, path, "-validate")
+	if r.code != 0 {
+		t.Fatalf("exit = %d (stderr: %s)", r.code, r.stderr)
+	}
+	assertContains(t, "stdout", r.stdout, "test-policy is valid")
+
+	// -o after the input reaches the build step: with no toolchain on PATH
+	// it fails there, but must not have tried to treat -o as a file.
+	r = runChild(t, []string{"PATH=" + t.TempDir()}, path, "-o", filepath.Join(t.TempDir(), "out.wasm"))
+	assertContains(t, "stderr", r.stderr, "Rust toolchain not found")
+}
+
+func TestCompile_ExtraPositionalRejected(t *testing.T) {
+	path := writePolicy(t, validPolicy)
+	r := runChild(t, nil, "-validate", path, "stray.wasm")
+	if r.code != 1 {
+		t.Fatalf("exit = %d, want 1 (stdout: %s)", r.code, r.stdout)
+	}
+	assertContains(t, "stderr", r.stderr, "unexpected argument")
+}

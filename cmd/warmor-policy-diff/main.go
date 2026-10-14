@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/yasindce1998/warmor/internal/cliflag"
 	"github.com/yasindce1998/warmor/internal/policydiff"
 	"github.com/yasindce1998/warmor/internal/policymerge"
 )
@@ -27,7 +28,7 @@ func main() {
 		flag.PrintDefaults()
 	}
 
-	args, err := parseInterspersed(flag.CommandLine, os.Args[1:])
+	args, err := cliflag.ParseInterspersed(flag.CommandLine, os.Args[1:])
 	if err != nil {
 		os.Exit(2)
 	}
@@ -73,27 +74,5 @@ func main() {
 		}
 	} else {
 		fmt.Print(out)
-	}
-}
-
-// parseInterspersed parses flags that may appear before, between or after
-// positional arguments (Go's flag package stops at the first positional)
-// and returns the positionals in order. A "--" ends flag parsing; every
-// argument after it is positional.
-func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
-	var positional []string
-	for {
-		if err := fs.Parse(args); err != nil {
-			return nil, err
-		}
-		rest := fs.Args()
-		if n := len(args) - len(rest); n > 0 && args[n-1] == "--" {
-			return append(positional, rest...), nil
-		}
-		if len(rest) == 0 {
-			return positional, nil
-		}
-		positional = append(positional, rest[0])
-		args = rest[1:]
 	}
 }
