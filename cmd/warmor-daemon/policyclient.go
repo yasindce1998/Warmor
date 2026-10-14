@@ -27,6 +27,9 @@ type policyClientConfig struct {
 	KeyFile   string
 	AgentID   string
 	Labels    map[string]string
+	// Verify, if set, vets each download before onUpdate (see
+	// policyserver.ClientConfig.Verify).
+	Verify func(*policyserver.PolicyAssignment, []byte) error
 }
 
 // newPolicyClient builds a policy server client. The agent authenticates
@@ -94,6 +97,7 @@ func newPolicyClient(cfg policyClientConfig, onUpdate func(*policyserver.PolicyA
 		TLSConfig: tlsCfg,
 		Token:     cfg.Token,
 		OnUpdate:  onUpdate,
+		Verify:    cfg.Verify,
 	}), nil
 }
 

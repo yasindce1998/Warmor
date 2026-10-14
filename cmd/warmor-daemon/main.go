@@ -38,6 +38,9 @@ var (
 	tlsKey       = flag.String("tls-key", "", "Client private key PEM for mTLS to the policy server")
 	agentID      = flag.String("agent-id", "", "Agent ID reported to the policy server (default: hostname)")
 	pollInterval = flag.Duration("poll-interval", 30*time.Second, "Policy server poll and heartbeat interval")
+
+	verifyKey      = flag.String("verify-key", "", "ed25519 public key PEM (PKIX, from warmor-policy-bundle --keygen); refuse any policy (startup, reload, server download) without a valid detached signature (<policy>.sig)")
+	validatePolicy = flag.String("validate-policy", "", "Validate the policy at this path in the WASM runtime (and its signature with --verify-key), print the result and exit 0/1; needs no root or BPF")
 )
 
 func main() {
@@ -52,6 +55,10 @@ func main() {
 	if *showVersion {
 		log.Printf("warmor version %s", version.Version)
 		return
+	}
+
+	if *validatePolicy != "" {
+		os.Exit(runValidatePolicy(*validatePolicy, *verifyKey, os.Stdout, os.Stderr))
 	}
 
 	// Run as Windows Service if launched by SCM
@@ -74,7 +81,15 @@ func runDaemon(stop <-chan struct{}) {
 		log.Fatal("❌ This program must be run with elevated privileges (root on Linux/macOS, Administrator on Windows)")
 	}
 
+	pub, err := loadVerifyKey(*verifyKey)
+	if err != nil {
+		log.Fatalf("❌ %v", err)
+	}
+
 	log.Printf("Policy: %s", *policyPath)
+	if pub != nil {
+		log.Printf("Policy Signature Key: %s (unsigned or invalid policies are refused)", *verifyKey)
+	}
 	log.Printf("Stats Interval: %v", *statsInterval)
 	log.Printf("Log Level: %s", *logLevel)
 	log.Printf("Metrics Port: %d", *metricsPort)
@@ -158,17 +173,8 @@ func runDaemon(stop <-chan struct{}) {
 			KeyFile:   *tlsKey,
 			AgentID:   *agentID,
 			Labels:    labels,
-		}, func(a *policyserver.PolicyAssignment, data []byte) {
-			if err := writePolicyFile(*policyPath, data); err != nil {
-				log.Printf("❌ Failed to write policy %s v%d: %v", a.PolicyID, a.Version, err)
-				return
-			}
-			log.Printf("📥 Received policy %s v%d from server", a.PolicyID, a.Version)
-			select {
-			case reloadCh <- struct{}{}:
-			default:
-			}
-		})
+			Verify:    verifyDownload(pub),
+		}, policyUpdateHandler(*policyPath, reloadCh))
 		if err != nil {
 			log.Fatalf("❌ Policy server: %v", err)
 		}
@@ -186,6 +192,8 @@ func runDaemon(stop <-chan struct{}) {
 		SkipLSM:      *noLSM,
 		StreamSinks:  sinks,
 		Labels:       labels,
+
+		PolicyVerifyKey: pub,
 	})
 	if err != nil {
 		log.Fatalf("❌ Failed to create enforcer: %v", err)

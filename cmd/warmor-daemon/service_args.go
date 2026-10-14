@@ -9,7 +9,7 @@ import (
 // services start in %SystemRoot%\System32, so relative paths would resolve
 // there instead of where the operator ran install.
 func absolutizePathFlags(args []string) ([]string, error) {
-	pathFlags := map[string]bool{"policy": true, "tls-ca": true, "tls-cert": true, "tls-key": true}
+	pathFlags := map[string]bool{"policy": true, "tls-ca": true, "tls-cert": true, "tls-key": true, "verify-key": true}
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
