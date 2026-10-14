@@ -12,6 +12,8 @@ import (
 	"sync"
 
 	"github.com/cilium/ebpf"
+
+	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 const (
@@ -428,4 +430,20 @@ func (k PolicyKey) MarshalBinary() ([]byte, error) {
 	buf[14] = 0
 	buf[15] = 0
 	return buf, nil
+}
+
+// KernelKeyFields reports which event fields (compiler field names) the BPF
+// programs' policy_map key covers per event type, besides the cgroup: the
+// exec filename for process events and the remote endpoint for connects.
+// File events are never keyed (lsm_file only sees the basename). The
+// enforcer only syncs decisions that depend on nothing else.
+func (m *PolicyMapManager) KernelKeyFields(t api.EventType) []string {
+	switch t {
+	case api.EventTypeProcess:
+		return []string{"path"}
+	case api.EventTypeNetwork:
+		return []string{"remote_addr", "remote_port"}
+	default:
+		return nil
+	}
 }

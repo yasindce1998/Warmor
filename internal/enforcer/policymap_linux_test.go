@@ -9,4 +9,5 @@ import "github.com/yasindce1998/warmor/internal/ebpf"
 var (
 	_ PolicyMapSyncer         = (*ebpf.PolicyMapManager)(nil)
 	_ endpointPolicyMapSyncer = (*ebpf.PolicyMapManager)(nil)
+	_ kernelKeyFielder        = (*ebpf.PolicyMapManager)(nil)
 )

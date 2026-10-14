@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/yasindce1998/warmor/internal/cache"
+	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/lineage"
 	"github.com/yasindce1998/warmor/internal/logging"
 	"github.com/yasindce1998/warmor/internal/metrics"
@@ -462,7 +463,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 
 		// Compile decision into BPF policy map for kernel fast-path
 		if e.policyMap != nil && !event.LSMEvent {
-			e.syncToPolicyMap(event, result, gen)
+			e.syncToPolicyMap(event, result, gen, evaluator.FieldsRead(event.GetType()))
 		}
 	}
 
@@ -492,6 +493,29 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	metrics.UpdateCacheSize(cacheStats.Size)
 }
 
+// kernelKeyFielder is implemented by policy maps to report which event fields
+// (compiler field names, e.g. "path", "remote_addr") their kernel key for an
+// event type covers. A syncer that does not implement it never receives
+// decisions, since nothing can be proven about its keys.
+type kernelKeyFielder interface {
+	KernelKeyFields(t api.EventType) []string
+}
+
+// decisionDeterminedByKernelKey reports whether a decision of a policy that
+// reads fieldsRead (for events of type t) depends only on fields the kernel
+// key of pm covers.
+func decisionDeterminedByKernelKey(pm PolicyMapSyncer, t api.EventType, fieldsRead uint32) bool {
+	kf, ok := pm.(kernelKeyFielder)
+	if !ok || fieldsRead == wasm.FieldsUnknown {
+		return false
+	}
+	keyFields := kf.KernelKeyFields(t)
+	if len(keyFields) == 0 {
+		return false
+	}
+	return fieldsRead&^compiler.FieldMask(keyFields...) == 0
+}
+
 // endpointPolicyMapSyncer is implemented by policy maps whose kernel programs
 // key network rules on the binary address+port rather than a string (the
 // Linux LSM connect hook hashes the raw sockaddr). Port is in host order.
@@ -516,10 +540,21 @@ type eventPolicyMapSyncer interface {
 //
 // gen is the policy generation that produced result; the write is dropped if
 // a reload has replaced that policy since.
-func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult, gen uint64) {
+//
+// fieldsRead is the policy's declared fields-read mask for the event type
+// (wasm.PolicyEvaluator.FieldsRead). The kernel applies a synced decision to
+// every event with the same kernel key, so a decision is only synced when
+// it is fully determined by that key: every field the policy reads must be
+// part of it (see kernelKeyFielder). A decision that depends on, say, uid
+// or comm would otherwise be enforced for other users or binaries. Policies
+// that declare nothing are never synced.
+func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult, gen uint64, fieldsRead uint32) {
 	e.policyMapMu.RLock()
 	defer e.policyMapMu.RUnlock()
 	if e.policyGen.Load() != gen {
+		return
+	}
+	if !decisionDeterminedByKernelKey(e.policyMap, event.GetType(), fieldsRead) {
 		return
 	}
 

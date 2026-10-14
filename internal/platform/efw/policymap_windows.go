@@ -180,3 +180,18 @@ func clearMap(mp *ebpf.Map) error {
 	}
 	return errors.Join(errs...)
 }
+
+// KernelKeyFields reports which event fields (compiler field names) the
+// kernel keys cover. Process keys are the image path; network keys are the
+// image plus operation, protocol and remote endpoint (the image is not a
+// policy-visible field of network events, so it only narrows the key).
+func (m *PolicyMap) KernelKeyFields(t api.EventType) []string {
+	switch t {
+	case api.EventTypeProcess:
+		return []string{"path"}
+	case api.EventTypeNetwork:
+		return []string{"operation", "protocol", "remote_addr", "remote_port"}
+	default:
+		return nil
+	}
+}

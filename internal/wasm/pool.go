@@ -19,6 +19,10 @@ type Pool struct {
 	size      int
 	counter   atomic.Uint64
 
+	// fields is the module's fields-read declaration per event type,
+	// read once from the first instance.
+	fields [numEventTypes]uint32
+
 	// mu serialises Put against Close so no instance is returned to the
 	// channel after it has been drained.
 	mu        sync.Mutex
@@ -48,6 +52,9 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 		if err != nil {
 			p.Close(ctx)
 			return nil, fmt.Errorf("instantiate pool member %d: %w", i, err)
+		}
+		if i == 0 {
+			p.fields = readFieldsDeclaration(ctx, policy)
 		}
 		p.instances <- policy
 	}

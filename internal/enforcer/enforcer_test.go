@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/cache"
+	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/lineage"
 	"github.com/yasindce1998/warmor/internal/logging"
 	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/internal/platform"
 	"github.com/yasindce1998/warmor/internal/streaming"
 	"github.com/yasindce1998/warmor/internal/wasm"
+	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -96,6 +98,17 @@ func (f *fakePolicyMap) Clear() error {
 	return nil
 }
 
+// KernelKeyFields mirrors the Linux PolicyMapManager keys.
+func (f *fakePolicyMap) KernelKeyFields(t api.EventType) []string {
+	switch t {
+	case api.EventTypeProcess:
+		return []string{"path"}
+	case api.EventTypeNetwork:
+		return []string{"remote_addr", "remote_port"}
+	}
+	return nil
+}
+
 func (f *fakePolicyMap) clearCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -136,6 +149,11 @@ func (s *sinkRecorder) snapshot() []string {
 
 // ---- helpers ----
 
+// pathPolicy is a binary-ABI policy that denies exec of anything under
+// "/bin" and allows everything else, and declares (warmor_fields_read) that
+// process decisions depend only on the path, so they are kernel-syncable.
+var pathPolicy = wasmtest.PathPrefixPolicy("/bin", &[3]uint32{compiler.FieldBitPath, compiler.FieldBitPath, compiler.FieldBitRemoteAddr})
+
 type testEnforcerOpts struct {
 	audit     bool
 	learning  bool
@@ -143,6 +161,8 @@ type testEnforcerOpts struct {
 	netFilter *NetFilterConfig
 	policyMap PolicyMapSyncer
 	sink      *sinkRecorder
+	// policyWasm, if set, is loaded instead of testPolicyPath.
+	policyWasm []byte
 }
 
 // newTestEnforcer builds an Enforcer by hand (bypassing New, which requires a
@@ -155,7 +175,14 @@ func newTestEnforcer(t *testing.T, o testEnforcerOpts) (*Enforcer, *fakePlatform
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
-	if err := rt.LoadPolicy(ctx, testPolicyPath); err != nil {
+	policyPath := testPolicyPath
+	if o.policyWasm != nil {
+		policyPath = filepath.Join(t.TempDir(), "policy.wasm")
+		if err := os.WriteFile(policyPath, o.policyWasm, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := rt.LoadPolicy(ctx, policyPath); err != nil {
 		rt.Close(ctx)
 		t.Fatalf("LoadPolicy: %v", err)
 	}
@@ -257,13 +284,11 @@ func TestHandleEvent_PolicyAllow(t *testing.T) {
 		t.Errorf("expected decision to be cached")
 	}
 
-	rules := pm.snapshot()
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 policy map rule, got %d", len(rules))
-	}
-	want := policyRule{cgroupID: 7, eventType: 0, pattern: "/usr/bin/ls", action: 0, audit: false}
-	if rules[0] != want {
-		t.Errorf("rule = %+v, want %+v", rules[0], want)
+	// The fixture reads uid and comm and declares nothing, so its decision
+	// is not determined by the kernel key (cgroup+path) and must not be
+	// compiled into the kernel map.
+	if rules := pm.snapshot(); len(rules) != 0 {
+		t.Fatalf("undeclared policy decision synced to kernel: %+v", rules)
 	}
 
 	// Process exec must be recorded in lineage.
@@ -284,9 +309,10 @@ func TestHandleEvent_PolicyDeny(t *testing.T) {
 	if stats.Denied != 1 || stats.Allowed != 0 {
 		t.Fatalf("stats = %+v, want 1 denied", stats)
 	}
-	rules := pm.snapshot()
-	if len(rules) != 1 || rules[0].action != 1 || rules[0].pattern != "/bin/bash" {
-		t.Errorf("expected deny rule for /bin/bash, got %+v", rules)
+	// A uid-dependent deny must never become a cgroup+path kernel rule:
+	// the kernel would then deny /bin/bash for every user.
+	if rules := pm.snapshot(); len(rules) != 0 {
+		t.Errorf("uid-dependent deny synced to kernel: %+v", rules)
 	}
 }
 
@@ -303,7 +329,7 @@ func TestHandleEvent_PolicyLog(t *testing.T) {
 
 func TestHandleEvent_AuditModeDowngradesPolicyDeny(t *testing.T) {
 	pm := &fakePolicyMap{}
-	e, _ := newTestEnforcer(t, testEnforcerOpts{audit: true, policyMap: pm})
+	e, _ := newTestEnforcer(t, testEnforcerOpts{audit: true, policyMap: pm, policyWasm: pathPolicy})
 
 	// Non-zero PID is safe: audit mode never reaches terminateProcess.
 	e.handleEvent(&api.Event{PID: 4242, UID: 0, Comm: "bash", Filename: "/bin/bash"})
@@ -322,7 +348,7 @@ func TestHandleEvent_AuditModeDowngradesPolicyDeny(t *testing.T) {
 
 func TestHandleEvent_CacheHit(t *testing.T) {
 	pm := &fakePolicyMap{}
-	e, _ := newTestEnforcer(t, testEnforcerOpts{policyMap: pm})
+	e, _ := newTestEnforcer(t, testEnforcerOpts{policyMap: pm, policyWasm: pathPolicy})
 
 	event := &api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"}
 	e.handleEvent(event)
@@ -390,7 +416,7 @@ func TestHandleEvent_EvaluationErrorFailsClosed(t *testing.T) {
 
 func TestHandleEvent_EvaluationErrorNotPersisted(t *testing.T) {
 	pm := &fakePolicyMap{}
-	e, _ := newTestEnforcer(t, testEnforcerOpts{poolSize: 1, policyMap: pm})
+	e, _ := newTestEnforcer(t, testEnforcerOpts{poolSize: 1, policyMap: pm, policyWasm: pathPolicy})
 
 	// Make the next evaluation fail by exhausting the pool under a cancelled
 	// context, then restore a live context so evaluation succeeds again.
@@ -839,13 +865,15 @@ func TestSyncToPolicyMap(t *testing.T) {
 			name:   "file event uses File.Path",
 			event:  &api.Event{CgroupID: 3, Filename: "x", File: &api.FileEvent{BaseEvent: api.BaseEvent{Type: api.EventTypeFile}, Path: "/etc/shadow"}},
 			result: auditDeny,
-			want:   &policyRule{cgroupID: 3, eventType: 1, pattern: "/etc/shadow", action: 1, audit: true},
+			// No kernel key covers file paths, so file decisions stay in
+			// userspace.
+			want: nil,
 		},
 		{
 			name:   "file type without payload uses Filename",
 			event:  &api.Event{CgroupID: 4, Type: api.EventTypeFile, Filename: "/tmp/f"},
 			result: logRes,
-			want:   &policyRule{cgroupID: 4, eventType: 1, pattern: "/tmp/f", action: 0},
+			want:   nil,
 		},
 		{
 			name:   "network event uses RemoteAddr",
@@ -871,7 +899,7 @@ func TestSyncToPolicyMap(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pm := &fakePolicyMap{}
 			e := &Enforcer{policyMap: pm}
-			e.syncToPolicyMap(tc.event, tc.result, 0)
+			e.syncToPolicyMap(tc.event, tc.result, 0, 0)
 
 			rules := pm.snapshot()
 			if tc.want == nil {
@@ -918,7 +946,7 @@ func TestSyncToPolicyMap_AuditModeFlagsRules(t *testing.T) {
 	// used to compile a hard deny (audit=false) into the kernel map.
 	pm := &fakePolicyMap{}
 	e := &Enforcer{policyMap: pm, auditMode: true}
-	e.syncToPolicyMap(&api.Event{CgroupID: 1, Filename: "/bin/sh"}, &api.ActionResult{Action: api.ActionDeny}, 0)
+	e.syncToPolicyMap(&api.Event{CgroupID: 1, Filename: "/bin/sh"}, &api.ActionResult{Action: api.ActionDeny}, 0, 0)
 
 	rules := pm.snapshot()
 	want := policyRule{cgroupID: 1, eventType: 0, pattern: "/bin/sh", action: 1, audit: true}
@@ -935,7 +963,7 @@ func TestSyncToPolicyMap_NetworkUsesEndpointSyncer(t *testing.T) {
 		RemoteAddr: "10.0.0.1",
 		RemotePort: 443,
 	}}
-	e.syncToPolicyMap(event, &api.ActionResult{Action: api.ActionDeny}, 0)
+	e.syncToPolicyMap(event, &api.ActionResult{Action: api.ActionDeny}, 0, 0)
 
 	if rules := pm.snapshot(); len(rules) != 0 {
 		t.Errorf("network decision must not be written as a string rule: %+v", rules)
@@ -946,7 +974,7 @@ func TestSyncToPolicyMap_NetworkUsesEndpointSyncer(t *testing.T) {
 	}
 
 	// Non-network events still go through SetRule.
-	e.syncToPolicyMap(&api.Event{CgroupID: 9, Filename: "/bin/true"}, &api.ActionResult{Action: api.ActionAllow}, 0)
+	e.syncToPolicyMap(&api.Event{CgroupID: 9, Filename: "/bin/true"}, &api.ActionResult{Action: api.ActionAllow}, 0, 0)
 	if rules := pm.snapshot(); len(rules) != 1 || rules[0].pattern != "/bin/true" {
 		t.Errorf("rules = %+v, want one /bin/true rule", rules)
 	}
