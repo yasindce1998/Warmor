@@ -21,6 +21,7 @@ var (
 	jwtSecret = flag.String("jwt-secret", "", "JWT secret for bearer-token auth (env WARMOR_JWT_SECRET); required for the admin API")
 	policyDir = flag.String("policy-dir", "", "Directory admin requests may load policy WASM files from")
 	insecure  = flag.Bool("insecure", false, "Allow serving without any authentication (development only)")
+	verifyKey = flag.String("verify-key", "", "ed25519 public key PEM (PKIX); refuse policy uploads without a detached signature (<wasm>.sig or the request's \"signature\") that verifies against it")
 )
 
 func main() {
@@ -84,6 +85,15 @@ func main() {
 		log.Println("no --policy-dir set; creating or updating policies via the admin API is disabled")
 	} else if info, err := os.Stat(*policyDir); err != nil || !info.IsDir() {
 		log.Fatalf("--policy-dir %s is not a directory", *policyDir)
+	}
+
+	if *verifyKey != "" {
+		pub, err := crypto.LoadPublicKey(*verifyKey)
+		if err != nil {
+			log.Fatalf("--verify-key: %v", err)
+		}
+		cfg.VerifyKey = pub
+		log.Printf("policy uploads must be signed by %s", *verifyKey)
 	}
 
 	srv := policyserver.NewServer(cfg)

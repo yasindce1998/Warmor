@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,7 +26,11 @@ type Client struct {
 	policyVersion int64
 	mu            sync.Mutex
 	onUpdate      func(assignment *PolicyAssignment, wasmData []byte)
+	verify        func(assignment *PolicyAssignment, wasmData []byte) error
 }
+
+// MaxWASMDownloadSize bounds a policy module download.
+const MaxWASMDownloadSize = 64 * 1024 * 1024
 
 // ClientConfig configures the policy server client.
 type ClientConfig struct {
@@ -39,6 +44,12 @@ type ClientConfig struct {
 	// Token is a JWT bearer token with the agent role, sent on every request.
 	Token    string
 	OnUpdate func(assignment *PolicyAssignment, wasmData []byte)
+	// Verify, if set, is called with each downloaded policy (and its
+	// signature in assignment.Signature) before OnUpdate. If it returns an
+	// error the download is discarded, OnUpdate is not called and the
+	// client keeps reporting its previous version, so the policy is
+	// fetched and checked again on the next poll.
+	Verify func(assignment *PolicyAssignment, wasmData []byte) error
 }
 
 // NewClient creates a policy server client.
@@ -58,6 +69,7 @@ func NewClient(cfg ClientConfig) *Client {
 		},
 		token:    cfg.Token,
 		onUpdate: cfg.OnUpdate,
+		verify:   cfg.Verify,
 	}
 }
 
@@ -150,9 +162,15 @@ func (c *Client) poll(ctx context.Context) {
 	}
 
 	// Fetch WASM binary
-	wasmData, err := c.fetchWASM(ctx, assignment.PolicyID, assignment.Version)
+	wasmData, sig, err := c.fetchWASM(ctx, assignment.PolicyID, assignment.Version)
 	if err != nil {
 		return
+	}
+	assignment.Signature = sig
+	if c.verify != nil {
+		if err := c.verify(&assignment, wasmData); err != nil {
+			return
+		}
 	}
 
 	c.mu.Lock()
@@ -164,26 +182,41 @@ func (c *Client) poll(ctx context.Context) {
 	}
 }
 
-func (c *Client) fetchWASM(ctx context.Context, policyID string, version int64) ([]byte, error) {
+// fetchWASM downloads a policy version and its raw signature (nil if the
+// server sent none).
+func (c *Client) fetchWASM(ctx context.Context, policyID string, version int64) ([]byte, []byte, error) {
 	q := url.Values{}
 	q.Set("policy_id", policyID)
 	q.Set("version", strconv.FormatInt(version, 10))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/policy/wasm?"+q.Encode(), nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	resp, err := c.do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch wasm: %w", err)
+		return nil, nil, fmt.Errorf("fetch wasm: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch wasm: status %d", resp.StatusCode)
+		return nil, nil, fmt.Errorf("fetch wasm: status %d", resp.StatusCode)
 	}
 
-	return io.ReadAll(resp.Body)
+	var sig []byte
+	if enc := resp.Header.Get(SignatureHeader); enc != "" {
+		if sig, err = base64.StdEncoding.DecodeString(enc); err != nil {
+			return nil, nil, fmt.Errorf("fetch wasm: decode signature header: %w", err)
+		}
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxWASMDownloadSize+1))
+	if err != nil {
+		return nil, nil, fmt.Errorf("fetch wasm: %w", err)
+	}
+	if len(data) > MaxWASMDownloadSize {
+		return nil, nil, fmt.Errorf("fetch wasm: module exceeds %d bytes", MaxWASMDownloadSize)
+	}
+	return data, sig, nil
 }
 
 // SendHeartbeat sends a heartbeat to the server.
