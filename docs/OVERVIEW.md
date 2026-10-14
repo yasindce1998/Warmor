@@ -46,7 +46,7 @@
 
 ### Phase 5: Production Readiness — Partial
 - YAML policy DSL with the `warmor-compile` CLI (YAML → Rust → WASM). It needs `cargo` and `wasm32-unknown-unknown`.
-- The Kubernetes Helm chart exists but **does not start on `main`**: the initContainer uses a nonexistent flag, there is no LSM enforce value, and the YAML policy needs `cargo` in a distroless image.
+- The Kubernetes Helm chart exists but **does not start on `main`**: there is no LSM enforce value, and the YAML policy needs `cargo` in a distroless image.
 - Grafana dashboards. Some panels depend on metrics that are never updated.
 
 ### Phase 6: LSM-BPF Kernel Enforcement — Partial
@@ -63,7 +63,7 @@
 
 ### Phase 8: Production Infrastructure — Partial
 - mTLS (Ed25519) and JWT (HMAC-SHA256 and EdDSA) between agents, runtimes and server: **shipped**
-- Signed OCI policy bundles via `warmor-policy-bundle`: **shipped**. The daemon does not verify signatures.
+- Signed policies: **shipped**. OCI bundles via `warmor-policy-bundle`, and detached `<policy>.sig` files that `warmor-daemon --verify-key` checks at startup, on reload and on every server download.
 - `warmorctl` Bubble Tea TUI (dashboard, agents, policies, rollouts, certs): **shipped**, interactive only
 - CRI-O OCI hook: **experimental** (no auth/TLS, bindings unused). containerd integration and per-container policy: **missing**.
 - Prometheus metrics: partial (exporter metrics never updated). Grafana and alert rules: partial (one alert references a nonexistent metric).

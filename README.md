@@ -233,7 +233,6 @@ See [Rust Policy Examples](docs/rust-policy-examples.md) for full documentation 
 ## Kubernetes Deployment
 
 > **The Helm chart does not work on `main` and is being fixed.** Do not install it yet.
-> - Its initContainer runs `warmor-daemon --validate-policy`, a flag that does not exist, so pods stay in `Init`.
 > - The chart has no value that enables `--lsm-enforce`, and `--set config.*` values are ignored.
 > - The policy ConfigMap ships YAML, which the daemon can only compile with `cargo`, and the distroless image does not include it.
 > - The `ValidatingWebhookConfiguration` has no handler behind it.

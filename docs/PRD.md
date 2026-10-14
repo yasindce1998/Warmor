@@ -34,10 +34,10 @@ Status as of current `main`. "Partial" means the phase's headline features are r
 | **Phase 2** | Done, with gaps | ALLOW/DENY/LOG (DENY = `SIGKILL`); decision cache (not LRU, PID in key); Prometheus metrics. `--log-level` is ignored. | Linux |
 | **Phase 3** | Partial | Type-safe process/file/network events. **No** `sendto`/`recvfrom` hooks. Overhead not measured. | Linux |
 | **Phase 4** | Partial | Platform abstraction. Windows ETW (detect-then-terminate) works and is tested in CI. eBPF-for-Windows has never been built or run in CI. macOS ESF answers every AUTH event ALLOW and is not compiled in CI. | Linux/Windows/macOS |
-| **Phase 5** | Partial | YAML DSL and `warmor-compile` work. The Helm chart does **not** start (nonexistent `--validate-policy` initContainer flag, no LSM enforce value, YAML policy needs `cargo` in a distroless image). | Linux |
+| **Phase 5** | Partial | YAML DSL and `warmor-compile` work. The Helm chart does **not** start (no LSM enforce value, YAML policy needs `cargo` in a distroless image). | Linux |
 | **Phase 6** | Partial | 7 LSM hooks attach (tested in a VM in CI). Kernel blocking happens only on a policy-map hit, and only exec and connect entries are ever written. A miss is allowed. | Linux |
 | **Phase 7** | Partial | Policy server with registration, heartbeats, versioned policies and percentage rollouts. Lineage is partial (no PPID). NetFilter, sandbox and SIEM syslog sink are library-only. | All |
-| **Phase 8** | Partial | mTLS/JWT, signed OCI bundles (`warmor-policy-bundle`) and the `warmorctl` TUI work. The daemon does not verify signatures. The OCI hook is experimental (no auth, bindings unused). containerd and per-container policy are missing. Exporter metrics are never updated. | All |
+| **Phase 8** | Partial | mTLS/JWT, signed OCI bundles (`warmor-policy-bundle`), daemon signature verification (`--verify-key`) and the `warmorctl` TUI work. The OCI hook is experimental (no auth, bindings unused). containerd and per-container policy are missing. Exporter metrics are never updated. | All |
 | **Phase 9** | Mostly library-only | `warmor-learn` and `warmor-simulate` ship. Integrity is an offline scan only. Escape, drift, temporal, attack graph, blast radius and canary auto-rollback are library-only (not wired into any binary). | Linux |
 
 ### Key Metrics
@@ -726,7 +726,7 @@ Cold Path (Cache Miss):
 - [x] All events logged with context and timestamps
 - [x] Prometheus-compatible metrics exposed on :9090
 - [x] Documentation for all 3 platforms
-- [ ] Deploy to a Kubernetes cluster via the Helm chart: **not met**. The initContainer runs nonexistent `--validate-policy`, there is no `lsmEnforce` value, and the ConfigMap YAML policy needs `cargo`, which the distroless image lacks.
+- [ ] Deploy to a Kubernetes cluster via the Helm chart: **not met**. There is no `lsmEnforce` value, and the ConfigMap YAML policy needs `cargo`, which the distroless image lacks.
 - [ ] Full observability stack: partial
 
 ### Phase 6: LSM-BPF Kernel Enforcement (Weeks 19-22) — Partial
@@ -1007,7 +1007,7 @@ Source: `internal/container/` — detector.go, containerd_monitor.go, containerd
 
 #### Kubernetes Deployment
 
-**Not working on `main`.** The Helm chart's initContainer runs nonexistent `warmor-daemon --validate-policy`, so pods stay in `Init`. The chart also has no `lsmEnforce`, `containerRuntime`, `perContainerPolicy` or `tls.*` values. The ConfigMap YAML policy needs `cargo` in a distroless image, the ValidatingWebhook has no handler, and the `WarmorPolicy` CRD has no controller. See [STATUS.md](STATUS.md#5-container-runtime-and-kubernetes).
+**Not working on `main`.** The Helm chart has no `lsmEnforce`, `containerRuntime`, `perContainerPolicy` or `tls.*` values. The ConfigMap YAML policy needs `cargo` in a distroless image, the ValidatingWebhook has no handler, and the `WarmorPolicy` CRD has no controller. See [STATUS.md](STATUS.md#5-container-runtime-and-kubernetes).
 
 ### Phase 9: Security Intelligence (Weeks 37-44) — Mostly library-only
 **Goal:** Move from static policy enforcement to autonomous security intelligence — learn, simulate, detect, and adapt.

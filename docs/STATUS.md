@@ -52,7 +52,7 @@ updates this page when it merges.
 | `warmor-sbom-policy` | Shipped | Generates a policy from SPDX/CycloneDX SBOMs | None known |
 | `warmor-policy-diff`, `warmor-policy-merge` | Shipped | Compare and merge YAML policies (`--strategy union\|intersection\|deny-wins`) | None known |
 | `warmor-policy-bundle` | Shipped | OCI push/pull of policy bundles, Ed25519 `--keygen`, `--sign-key`, `--verify-key` | Signature verification only happens in `--pull --verify-key` |
-| Policy signature verification in the daemon | Missing | None | The daemon never verifies policy signatures, whether from disk or from `warmor-server` |
+| Policy signature verification in the daemon | Shipped | `--verify-key` checks a detached ed25519 `<policy>.sig` over the exact bytes at startup, on every reload and on every server download (verified before writing); fails closed | Rollback to an older module signed with the same key is not prevented. YAML policies are refused with a key set (they are compiled on the node). |
 | Temporal constraints in YAML (`temporal:`) | Missing | None | The compiler ignores the key (see above). `internal/temporal` is library-only. |
 
 ## 3. Event streaming and observability
@@ -72,19 +72,19 @@ updates this page when it merges.
 |---------|--------|------------------|------------|
 | `warmor-server` REST API | Shipped | `/api/v1/register`, `/api/v1/heartbeat`, `/api/v1/policy`, `/api/v1/policy/wasm` (agents). `/api/v1/admin/policies[/{id}]`, `/api/v1/admin/agents`, `/api/v1/admin/rollouts[/{id}]` (admin JWT). | None |
 | mTLS, JWT (HMAC and EdDSA) | Shipped | `warmor-server --ca-cert/--tls-cert/--tls-key/--jwt-secret`. The daemon uses `--server/--tls-ca/--tls-cert/--tls-key/--server-token`. | None |
-| Daemon policy download from server | Shipped | `--server` with `--poll-interval`; the downloaded WASM replaces `--policy` | Downloaded policies are not signature-checked |
+| Daemon policy download from server | Shipped | `--server` with `--poll-interval`; the downloaded WASM replaces `--policy` | With `--verify-key`, downloads are verified in memory before being written; a bad signature keeps the old policy |
 | Percentage rollouts (A/B, consistent hashing) | Shipped | Create, ramp, complete and abort through the admin API or `warmorctl` | Ramping is manual |
 | Canary auto-rollback (deny-rate analyzer) | Library-only | `CanaryAnalyzer` exists with tests | Nothing feeds it decisions and nothing calls it. **There is no automatic rollback.** |
 | Drift detection (z-score fleet fingerprinting) | Library-only | `internal/drift` | Not wired into server or agents |
 | `warmorctl` TUI | Shipped | Tabs for dashboard, agents, policies, rollouts and certs. The Certs tab generates a CA, certs and a signing key (keys `g` and `s`). | There is no non-interactive `warmorctl certs generate` or `warmorctl agents list` subcommand |
 | `warmor-server policy sign` | Missing | None | Use `warmor-policy-bundle --sign-key` |
-| `warmor-daemon --verify-policy-sig --signing-pub` | Missing | None | None |
+| `warmor-daemon --verify-policy-sig --signing-pub` | Missing | Use `--verify-key` | Never existed under these names |
 
 ## 5. Container runtime and Kubernetes
 
 | Feature | Status | What works today | Known gaps |
 |---------|--------|------------------|------------|
-| Helm chart `deploy/helm/warmor` | Experimental (broken on main) | Templates render | The initContainer runs `warmor-daemon --validate-policy`, a flag that does not exist, so **pods stay in `Init`**. The chart has no `lsmEnforce` value and never passes `--lsm-enforce`. `--set config.*` does nothing. The policy ConfigMap is YAML, which needs `cargo` at runtime that the distroless image lacks, and writes `.wasm` next to a read-only mount. The `ValidatingWebhookConfiguration` (`failurePolicy: Fail`) has no handler behind it. The `ebpf.pinPrograms`, `logging.siem` and `policySync` values are unused. There is no kind e2e test in CI. |
+| Helm chart `deploy/helm/warmor` | Experimental (broken on main) | Templates render | The initContainer's `--validate-policy` check passes, but it only checks the YAML schema. The chart has no `lsmEnforce` value and never passes `--lsm-enforce`. `--set config.*` does nothing. The policy ConfigMap is YAML, which needs `cargo` at runtime that the distroless image lacks, and writes `.wasm` next to a read-only mount. The `ValidatingWebhookConfiguration` (`failurePolicy: Fail`) has no handler behind it. The `ebpf.pinPrograms`, `logging.siem` and `policySync` values are unused. There is no kind e2e test in CI. |
 | `WarmorPolicy` CRD | Missing (schema only) | The CRD installs | There is no controller, so resources are stored and never applied |
 | `deploy/kubernetes/warmor-daemonset.yaml` | Experimental | None | Configures the daemon through environment variables it does not read, and relies on the default `--policy` path, which is not in the image |
 | `warmor-oci-hook` (CRI-O / OCI hook) | Experimental | Posts container start/stop to `warmor-server /api/v1/containers/bind` | No auth and no TLS (default `http://`), so it works only against `warmor-server --insecure`. The stored bindings are **never consumed**. |
