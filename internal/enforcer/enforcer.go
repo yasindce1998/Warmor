@@ -16,6 +16,8 @@ import (
 
 	"github.com/yasindce1998/warmor/internal/cache"
 	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/container"
+	"github.com/yasindce1998/warmor/internal/escape"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/lineage"
 	"github.com/yasindce1998/warmor/internal/logging"
@@ -50,6 +52,10 @@ type Options struct {
 	// exceeds it is denied (fail closed) and its instance replaced. Zero
 	// means wasm.DefaultEvalTimeout.
 	EvalTimeout time.Duration
+
+	// EscapeDetect is the container escape detection mode: "off", "alert"
+	// (log, count and stream matches) or "deny" (also terminate the process).
+	EscapeDetect string
 
 	// Streaming pipeline configuration
 	StreamSinks []streaming.Sink
@@ -97,6 +103,7 @@ type Enforcer struct {
 	lineageTracker *lineage.Tracker
 	netFilter      *NetFilter
 	sandbox        *SandboxManager
+	escape         *escape.Detector
 	policyPath     string
 	verifyKey      ed25519.PublicKey
 	evalTimeout    time.Duration
@@ -165,6 +172,18 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		logger.LogInfo("✓ Policy signature verified")
 	}
 
+	// Escape detection only applies to container cgroups. Built before the
+	// platform so a bad mode can't leak it.
+	escapeDetector, err := newEscapeDetector(opts.EscapeDetect,
+		container.NewCgroupResolver("/sys/fs/cgroup").IsContainer)
+	if err != nil {
+		return nil, err
+	}
+	var unixWatch []string
+	if escapeDetector != nil {
+		unixWatch = escape.RuntimeSockets
+	}
+
 	// Initialize the platform-specific monitor (eBPF on Linux, ETW on
 	// Windows, ESF on macOS).
 	plat, err := newPlatform(platform.Config{
@@ -172,6 +191,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		LSMEnforce:   opts.LSMEnforce,
 		RequireLSM:   opts.RequireLSM,
 		SkipLSM:      opts.SkipLSM,
+		UnixWatch:    unixWatch,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize platform: %w", err)
@@ -271,6 +291,9 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	var pipeline *streaming.Pipeline
 	if len(opts.StreamSinks) > 0 {
 		enrichers := []streaming.Enricher{lineage.NewEnricher(tracker)}
+		if escapeDetector != nil {
+			enrichers = append(enrichers, escapeDetector)
+		}
 		pipeline = streaming.NewPipeline(streaming.PipelineConfig{
 			Sinks:     opts.StreamSinks,
 			Labels:    opts.Labels,
@@ -303,6 +326,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		lineageTracker: tracker,
 		netFilter:      netFilter,
 		sandbox:        sandboxMgr,
+		escape:         escapeDetector,
 		policyPath:     policyPath,
 		verifyKey:      opts.PolicyVerifyKey,
 		policyID:       pid,
@@ -361,6 +385,9 @@ func (e *Enforcer) eventLoop() {
 // handleEvent processes a single event with caching and metrics
 func (e *Enforcer) handleEvent(event *api.Event) {
 	metrics.RecordEventProcessed(event.GetType().String())
+	if e.checkEscape(event) {
+		return
+	}
 	if e.handleKernelVerdict(event) {
 		return
 	}
