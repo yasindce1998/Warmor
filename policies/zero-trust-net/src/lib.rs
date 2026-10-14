@@ -3,7 +3,9 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::slice;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct Event {
     #[serde(rename = "type")]
     event_type: String,
@@ -12,25 +14,15 @@ struct Event {
     gid: u32,
     comm: String,
     filename: String,
-    #[serde(default)]
     path: String,
-    #[serde(default)]
     operation: String,
-    #[serde(default)]
     flags: u32,
-    #[serde(default)]
     protocol: String,
-    #[serde(default)]
     remote_addr: String,
-    #[serde(default)]
     remote_port: u16,
-    #[serde(default)]
     local_port: u16,
-    #[serde(default)]
     direction: String,
-    #[serde(default)]
     container_name: String,
-    #[serde(default)]
     namespace: String,
 }
 

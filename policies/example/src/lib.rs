@@ -1,8 +1,14 @@
 use serde::Deserialize;
 use std::slice;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct Event {
+    /// "PROCESS", "FILE" or "NETWORK". Empty for legacy hosts that only
+    /// sent process events.
+    #[serde(rename = "type")]
+    event_type: String,
     pid: u32,
     uid: u32,
     gid: u32,
@@ -39,6 +45,11 @@ pub extern "C" fn evaluate_syscall(event_ptr: *const u8, event_len: usize) -> i3
         Ok(e) => e,
         Err(_) => return ACTION_DENY, // Deny on parse error
     };
+
+    // The rules below are about executed binaries.
+    if !(event.event_type.is_empty() || event.event_type == "PROCESS") {
+        return ACTION_ALLOW;
+    }
 
     // Example policy: Block root from running bash
     if event.uid == 0 && event.filename.contains("bash") {
