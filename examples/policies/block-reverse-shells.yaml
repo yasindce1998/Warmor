@@ -34,13 +34,13 @@ variables:
     - 9001
 
 rules:
-  - name: block-shell-from-tmp
+  - name: audit-non-root-shells
     event: process
     conditions:
       all:
         - path: { any_of: $shell_interpreters }
         - uid: { not: 0 }
-    action: audit
+    action: log
     reason: "Non-root shell execution"
 
   - name: block-tmp-execution
@@ -82,7 +82,7 @@ rules:
       all:
         - uid: { not: 0 }
         - path: { any_of: $script_interpreters }
-    action: audit
+    action: log
     reason: "Non-root script interpreter execution"
 
 default_action: allow

@@ -61,9 +61,9 @@ rules:
     event: process
     conditions:
       all:
-        - uid: { equals: 0 }
+        - uid: { eq: 0 }
         - path: { any_of: $recon_tools }
-    action: audit
+    action: log
     reason: "Root using network scanning tool"
 
 default_action: allow
