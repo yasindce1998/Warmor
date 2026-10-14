@@ -27,6 +27,30 @@ spec:
       containers:
         - name: warmor-agent
           image: ghcr.io/yasindce1998/warmor:latest
+          # warmor-daemon is configured only through flags (plus the optional
+          # WARMOR_SERVER_TOKEN env var for JWT auth); see warmor-daemon -h.
+          args:
+            - "--server"
+            - "https://warmor-server.warmor-system.svc:8443"
+            # mTLS to the policy server. The warmor-agent-certs secret must
+            # hold ca.crt, agent.crt and agent.key (as written by
+            # `warmorctl certs`).
+            - "--tls-ca"
+            - "/etc/warmor/certs/ca.crt"
+            - "--tls-cert"
+            - "/etc/warmor/certs/agent.crt"
+            - "--tls-key"
+            - "/etc/warmor/certs/agent.key"
+            - "--agent-id"
+            - "$(NODE_NAME)"
+            - "--metrics-port"
+            - "9090"
+            # Policies downloaded from the server are written here and
+            # hot-reloaded; the directory persists on the node so a restart
+            # starts from the last assigned policy. The daemon loads this
+            # file at startup, so it must exist before the first start.
+            - "--policy"
+            - "/var/lib/warmor/policy.wasm"
           securityContext:
             privileged: true
             capabilities:
@@ -45,12 +69,11 @@ spec:
             - name: certs
               mountPath: /etc/warmor/certs
               readOnly: true
+            - name: policy-state
+              mountPath: /var/lib/warmor
           env:
-            - name: WARMOR_SERVER
-              value: "https://warmor-server.warmor-system.svc:8443"
-            - name: WARMOR_METRICS_ADDR
-              value: ":9090"
-            - name: WARMOR_NODE_NAME
+            # Not read by the daemon; only expanded into --agent-id above.
+            - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
@@ -72,6 +95,10 @@ spec:
         - name: certs
           secret:
             secretName: warmor-agent-certs
+        - name: policy-state
+          hostPath:
+            path: /var/lib/warmor
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: ServiceAccount
