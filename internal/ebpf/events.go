@@ -142,9 +142,11 @@ type Event struct {
 	LSMHook     uint8
 	LSMDecision uint8
 	// KernelDenied is set for LSM events the kernel already refused (a
-	// policy-map deny); userspace
+	// policy-map deny or an integrity failure in enforce mode); userspace
 	// must record them, not evaluate and act on them again.
 	KernelDenied bool
+	// IntegrityViolation marks an exec whose SHA-256 was not allowlisted.
+	IntegrityViolation bool
 
 	// Hook names the LSM hook for LSM events: exec, file, connect,
 	// connect_unix, bind, listen, ptrace, mount. Empty for tracepoint events.
