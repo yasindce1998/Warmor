@@ -1,8 +1,7 @@
 # warmor Architecture
 
-**Version:** 2.0.0-beta  
-**Last Updated:** 2026-06-27  
-**Status:** Phase 9 Complete — Windows Service, Event Viewer, SSE Dashboard, Coverage Gating
+**Last Updated:** 2026-10-14
+**Status:** Describes current `main`. Phases 1-8 are partially done, and Phase 9 is mostly library-only. See [Feature Status](STATUS.md) for the per-feature reference.
 
 ---
 
@@ -38,7 +37,7 @@ Traditional security enforcers are platform-specific:
 │  ┌──────────┐    ┌──────────┐    ┌──────────────────┐      │
 │  │   eBPF   │    │   ESF    │    │  eBPF-Windows/   │      │
 │  │ (Linux)  │    │ (macOS)  │    │      ETW         │      │
-│  │  PROD    │    │   BETA   │    │      BETA        │      │
+│  │ MATURE   │    │ EXPER.   │    │  EXPERIMENTAL    │      │
 │  └──────────┘    └──────────┘    └──────────────────┘      │
 └─────────────────────────────────────────────────────────────┘
                             │
@@ -63,9 +62,9 @@ Traditional security enforcers are platform-specific:
 │  ┌────────────────────────────────────────────────────┐     │
 │  │         Observability & Caching                    │     │
 │  │  - Prometheus metrics                              │     │
-│  │  - Structured logging (+ Event Viewer on Windows)  │     │
-│  │  - LRU decision cache                              │     │
-│  │  - Real-time SSE dashboard                         │     │
+│  │  - Structured logging (zerolog)                    │     │
+│  │  - Decision cache (10k entries, TTL)               │     │
+│  │  - Event sinks: stdout / file / webhook            │     │
 │  └────────────────────────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -74,11 +73,13 @@ Traditional security enforcers are platform-specific:
 
 ## Platform Support Matrix
 
-| Platform | Status | Technology | Enforcement | Latency (P95) | Throughput |
-|----------|--------|------------|-------------|---------|------------|
-| **Linux** | ✅ Production | eBPF | ✅ Yes | <100μs | 100k+/sec |
-| **Windows** | 🚧 Beta | ETW + eBPF-for-Windows | ✅ Yes (eBPF mode) | <100μs | 100k+/sec |
-| **macOS** | 🚧 Beta | ESF | ✅ Yes (AUTH events) | <100μs | 100k+/sec |
+| Platform | Status | Technology | Enforcement on `main` |
+|----------|--------|------------|-------------|
+| **Linux** | Most mature | eBPF tracepoints + LSM-BPF | Kernel `EPERM` for cached exec/connect denies (`--lsm-enforce`); detect-then-`SIGKILL` for everything else |
+| **Windows** | Experimental beta | ETW (+ eBPF-for-Windows, never built or run in CI) | ETW: detect, then `TerminateProcess`. eBPF kernel blocking unverified. |
+| **macOS** | Experimental, detection only | ESF | None: every AUTH event is answered ALLOW |
+
+Latency and throughput targets (P95 <100μs, 100k events/s) are **unmeasured design targets**. See [Performance](#performance-characteristics).
 
 ---
 
@@ -110,9 +111,9 @@ type Capabilities struct {
 ```
 
 **Implementations:**
-- `LinuxPlatform` - eBPF-based monitoring (production)
-- `WindowsPlatform` - ETW + eBPF-for-Windows (beta)
-- `DarwinPlatform` - ESF-based monitoring (beta)
+- `LinuxPlatform` - eBPF-based monitoring and LSM enforcement (most mature)
+- `WindowsPlatform` - ETW + eBPF-for-Windows (experimental)
+- `DarwinPlatform` - ESF-based monitoring (experimental, detection only; requires cgo)
 
 ### 2. Event Processing Pipeline
 
@@ -151,21 +152,20 @@ pub extern "C" fn evaluate_syscall(event_ptr: *const u8, event_len: usize) -> i3
 ```
 
 **Features:**
-- Sandboxed execution (cannot crash daemon)
-- Hot reload support
-- <100μs evaluation latency
-- Memory-safe (WASM sandbox)
+- Sandboxed execution in Wazero. A trap cannot crash the daemon, but there is **no memory or time limit yet**, so a looping policy hangs the event loop.
+- Hot reload via SIGHUP
+- Evaluation latency: target <100μs, unmeasured
+- Two ABIs: JSON `evaluate_syscall(ptr,len)` and binary `evaluate_event`. If a module exports `evaluate_event`, the host uses the binary ABI.
 
 ### 4. Decision Cache
 
-**Implementation:** LRU cache with TTL
+**Implementation:** map with TTL (5 min). When full, it evicts the entry with the oldest expiry with an O(n) scan. This is not a true LRU.
 
-**Key Format:** `{type}:{pid}:{uid}:{filename_hash}`
+**Key Format:** `{type}:{pid}:{uid}:{target_hash}`
 
 **Performance:**
 - 10,000 entry capacity
-- >90% hit rate in production
-- Reduces WASM evaluation overhead
+- Hit rate has not been measured. The PID in the key means a new process always misses.
 
 ### 5. YAML Policy Compiler
 
@@ -211,7 +211,9 @@ default_action: allow
 - Exports: `malloc(size)`, `evaluate_syscall(ptr, len) -> i32`
 - Return values: 0=ALLOW, 1=DENY, 2=LOG
 
-**Runtime compilation:** The daemon also accepts `.yaml`/`.yml` policy files directly, compiling at load time if the Rust toolchain is available.
+**Runtime compilation:** The daemon also accepts `.yaml`/`.yml` policy files directly and compiles them at load time. That needs `cargo` and the wasm32 target **on the enforcing host**, which the distroless image lacks. If a sibling `.wasm` with the same base name exists, it is loaded instead, even if stale.
+
+**Known gap:** keys the schema does not know, such as `temporal:`, are silently ignored.
 
 ### 6. Observability
 
@@ -223,6 +225,9 @@ default_action: allow
 - `warmor_evaluation_latency_microseconds`
 - `warmor_policy_info{path, version}`
 - `warmor_events_processing_errors_total`
+- `warmor_audit_denied_total`
+
+A second metric set in `internal/metrics/exporter.go` (LSM decisions, policy loads, heartbeats, WASM exec) is registered but **never updated** on `main`.
 
 **Grafana Dashboards** (provisioned via ConfigMap or JSON import):
 - Events/sec rate, Actions breakdown (pie chart)
@@ -246,7 +251,7 @@ default_action: allow
 
 ## Platform-Specific Implementations
 
-### Linux (eBPF) - Production ✅
+### Linux (eBPF) - Most mature
 
 **Architecture:**
 ```
@@ -259,10 +264,9 @@ Application → Syscall → eBPF Hook → Ring Buffer → warmor Daemon → WASM
 - `connect_monitor.bpf.c` - Network connection monitoring
 
 **Key Features:**
-- Kernel-space monitoring (<50μs latency)
-- Zero-copy ring buffer
-- High throughput (>50k events/sec)
-- Full enforcement capability
+- Kernel-space monitoring through ring buffers
+- Tracepoints observe only. A deny for a tracepoint event is enforced by `SIGKILL` from userspace.
+- Latency and throughput have not been measured
 
 **Implementation Files:**
 - `internal/platform/linux.go` - Platform implementation
@@ -281,12 +285,15 @@ Application → Syscall → LSM Hook → Policy Map Lookup
   └─ MISS        → emit to ringbuf → WASM evaluates → decision compiled back into policy map
 ```
 
-Unlike tracepoint-based monitoring which observes syscalls after they begin, LSM-BPF hooks are **synchronous** — they execute inline within the kernel security path and can return `-EPERM` to block an operation before it completes.
+Unlike tracepoint-based monitoring, which observes syscalls after they begin, LSM-BPF hooks are **synchronous**. They run inline in the kernel security path and can return `-EPERM` to block an operation before it completes. They do so **only on a map hit**. A miss is allowed (default-allow) and reported.
+
+**What reaches the map on `main`:** the daemon writes WASM decisions into the map only for **exec** (exact path) and **connect** (endpoint) events, and only for tracepoint-origin events. File (the hook sees only the basename), bind, listen, ptrace and mount entries are never written, so those hooks never block. The map is not preloaded from the compiled policy, not cleared on reload, and has no eviction (HASH, 65536 entries).
 
 **LSM Programs:**
-- `lsm_exec.bpf.c` — `bprm_check_security` hook (blocks exec before binary loads)
-- `lsm_file.bpf.c` — `file_open` hook (blocks file access before open completes)
-- `lsm_connect.bpf.c` — `socket_connect` hook (blocks connections before handshake)
+- `lsm_exec.bpf.c` — `bprm_check_security` (can block exec on a map hit)
+- `lsm_file.bpf.c` — `file_open` (observe only on `main`: no entries written)
+- `lsm_connect.bpf.c` — `socket_connect` (can block connect on a map hit)
+- `lsm_bind.bpf.c`, `lsm_listen.bpf.c`, `lsm_ptrace.bpf.c`, `lsm_mount.bpf.c` — observe only on `main`
 
 **Policy Map (BPF_MAP_TYPE_HASH):**
 ```c
@@ -307,9 +314,9 @@ struct policy_value {
 1. Cgroup-specific: `policy_map[{cgroup_id, hash, type}]`
 2. Global fallback: `policy_map[{0, hash, type}]`
 
-**WASM→BPF Feedback Loop:**
+**WASM→BPF Feedback Loop (exec and connect only):**
 ```
-First occurrence:  LSM miss → ringbuf → WASM evaluates → write decision to policy_map
+First occurrence:  LSM miss → allowed → event → WASM evaluates → DENY → SIGKILL + write decision to policy_map
 Second occurrence: LSM hit → kernel allows/denies immediately (no userspace trip)
 ```
 
@@ -318,14 +325,17 @@ Second occurrence: LSM hit → kernel allows/denies immediately (no userspace tr
 **Implementation Files:**
 - `bpf/warmor_lsm.h` — Shared structs, maps, FNV-1a hash helper
 - `bpf/lsm_exec.bpf.c` — Exec enforcement
-- `bpf/lsm_file.bpf.c` — File access enforcement
+- `bpf/lsm_file.bpf.c` — File access hook
 - `bpf/lsm_connect.bpf.c` — Network enforcement
+- `bpf/lsm_{bind,listen,ptrace,mount}.bpf.c` — Additional hooks
 - `internal/ebpf/lsm_loader.go` — Go LSM program loader
 - `internal/ebpf/policy_map.go` — Policy map manager (userspace↔BPF)
 
 ---
 
-### Windows (ETW + eBPF-for-Windows) - Beta 🚧
+### Windows (ETW + eBPF-for-Windows) - Experimental
+
+> The ETW path is what CI exercises. The eBPF-for-Windows programs and driver have **never been built or run in CI**, so the kernel-blocking rows below are unverified.
 
 **Per-event-type backends:** each event type is served by one backend,
 chosen at startup.
@@ -356,7 +366,9 @@ makes eBPF mandatory.
 
 **Documentation:** [PLATFORM_WINDOWS.md](PLATFORM_WINDOWS.md)
 
-### macOS (ESF) - Beta 🚧
+### macOS (ESF) - Experimental, detection only
+
+> On `main` the ESF client answers **every AUTH event with ALLOW**. The cgo code is not compiled in CI, and release binaries are built without cgo.
 
 **Architecture:**
 ```
@@ -365,7 +377,7 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
 
 **ESF Event Types:**
 
-**AUTH Events (Can Block):**
+**AUTH Events (could block; always answered ALLOW on `main`):**
 - `ES_EVENT_TYPE_AUTH_EXEC` - Process execution
 - `ES_EVENT_TYPE_AUTH_OPEN` - File open
 - `ES_EVENT_TYPE_AUTH_CREATE` - File creation
@@ -376,8 +388,8 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
 - `ES_EVENT_TYPE_NOTIFY_CONNECT` - Network connection
 
 **Key Features:**
-- Kernel-space monitoring (<100μs latency)
-- AUTH event enforcement
+- ESF event monitoring
+- AUTH event enforcement: not implemented (always ALLOW)
 - System Extension required
 - Full Disk Access required
 
@@ -440,11 +452,13 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
    ↓
 3. If ALLOW → Allow syscall to proceed
    ↓
-4. If DENY → Block syscall (platform-specific)
-   ├─ Linux (LSM): Already blocked in kernel via -EPERM (synchronous)
-   ├─ Linux (tracepoint): Return error from eBPF
-   ├─ Windows: Terminate process (eBPF mode)
-   └─ macOS: Respond with ES_AUTH_RESULT_DENY
+4. If DENY (and not --audit) → act (platform-specific)
+   ├─ Linux: SIGKILL the process (after the fact). If the kernel map already
+   │         had a deny entry (exec/connect, --lsm-enforce), the kernel
+   │         refused it with -EPERM before this point.
+   ├─ Windows (ETW): TerminateProcess (PID reuse checked)
+   ├─ Windows (eBPF): kernel map entry for next attempt (unverified)
+   └─ macOS: nothing (AUTH always answered ALLOW)
    ↓
 5. If LOG → Allow but log event
 ```
@@ -466,53 +480,26 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
    ├─ HIT + action=ALLOW → return 0
    └─ MISS → emit event to lsm_events ringbuf, return 0 (default-allow)
    ↓
-4. On MISS: userspace WASM evaluates → writes result back to policy_map
+4. On MISS: userspace WASM evaluates; DENY → SIGKILL. For exec and connect
+   only, the result is written back to policy_map.
    ↓
-5. Next identical event → kernel fast-path (no userspace trip)
+5. Next identical exec/connect in the same cgroup → kernel fast path
 ```
 
 ---
 
 ## Performance Characteristics
 
-### Latency Breakdown
+**None of the numbers in earlier versions of this document were measured.**
+The following are design targets only. A benchmark harness is in progress.
 
-**Linux (eBPF) - Production:**
-- Event capture: ~10μs
-- Event parsing: ~5μs
-- Cache lookup: ~2μs
-- WASM evaluation: ~30μs (cache miss)
-- **Total: <100μs (P95)** ✅
-
-**Windows (ETW) - Beta:**
-- Event capture: ~50μs
-- Event parsing: ~15μs
-- Cache lookup: ~2μs
-- WASM evaluation: ~30μs (cache miss)
-- **Total: <100μs (P95)** ✅
-
-**Windows (eBPF) - Beta:**
-- Event capture: ~10μs
-- Event parsing: ~5μs
-- Cache lookup: ~2μs
-- WASM evaluation: ~30μs (cache miss)
-- **Total: <100μs (P95)** ✅
-
-**macOS (ESF) - Beta:**
-- Event capture: ~50μs
-- Event parsing: ~10μs
-- Cache lookup: ~2μs
-- WASM evaluation: ~30μs (cache miss)
-- **Total: <100μs (P95)** ✅
-
-### Throughput
-
-| Platform | Events/sec | CPU Usage | Memory |
-|----------|------------|-----------|--------|
-| Linux (eBPF) | 100k+/sec | <5% | <100MB |
-| Windows (ETW) | 100k+/sec | <5% | <100MB |
-| Windows (eBPF) | 100k+/sec | <5% | <100MB |
-| macOS (ESF) | 100k+/sec | <5% | <100MB |
+| Target | Value |
+|--------|-------|
+| P95 evaluation latency (cache miss, WASM) | <100μs |
+| Kernel fast path (BPF map hit) | <1μs |
+| Throughput | 100k events/s |
+| CPU overhead | <5% |
+| Memory | <50MB |
 
 ---
 
@@ -522,7 +509,7 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
 
 **Linux:**
 - Root/CAP_BPF required for eBPF
-- Cannot be bypassed (kernel-level)
+- Kernel blocking applies only to operations with a map entry. Everything else is detect-then-kill, which a fast process can race.
 
 **Windows:**
 - Administrator required for ETW/eBPF
@@ -533,7 +520,7 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
 - Root required for ESF
 - System Extension approval required
 - Full Disk Access required
-- Cannot be bypassed (kernel-level)
+- No enforcement on `main`
 
 ### WASM Sandbox
 
@@ -544,9 +531,7 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
 - Memory-safe execution
 
 **Resource Limits:**
-- Max memory: 64MB
-- Max execution time: 100ms
-- No infinite loops
+- None on `main`. There is no memory-page limit or per-evaluation deadline, so an infinite loop in a policy hangs the event loop. Adding limits is in progress.
 
 ### Attack Surface
 
@@ -602,7 +587,7 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
 - Grafana dashboard ConfigMap for sidecar auto-provisioning
 - Policy ConfigMap with default YAML policy
 
-**Install:** `helm install warmor deploy/helm/warmor/`
+**Install:** not working on `main`. The initContainer calls a nonexistent `--validate-policy` flag, there is no LSM enforce value, the YAML policy needs `cargo` in a distroless image, and the webhook has no handler. See [Feature Status](STATUS.md#5-container-runtime-and-kubernetes).
 
 ### Distributed Mode with mTLS
 
@@ -611,7 +596,7 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
 │                    warmor-server (Policy Hub)                │
 │  ┌──────────┐  ┌──────────────┐  ┌───────────────────────┐ │
 │  │  REST    │  │ Policy Store │  │  A/B Testing Engine   │ │
-│  │  API     │  │ (YAML+WASM)  │  │  (consistent hash)    │ │
+│  │  API     │  │ (WASM, vers.)│  │  (consistent hash)    │ │
 │  └──────────┘  └──────────────┘  └───────────────────────┘ │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │          mTLS + JWT Auth (Ed25519/HMAC-SHA256)       │   │
@@ -622,12 +607,10 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
 ┌─────────────────┐ ┌──────────────┐ ┌──────────────────────┐
 │  warmor-daemon  │ │ warmor-daemon│ │  warmor-daemon       │
 │  (Agent A)      │ │ (Agent B)    │ │  (Agent C)           │
-│  + containerd   │ │ + CRI-O      │ │  + per-container     │
-│    integration  │ │   OCI hooks  │ │    policy scope      │
 └─────────────────┘ └──────────────┘ └──────────────────────┘
 ```
 
-**Use Case:** Fleet management, per-container enforcement, centralized policy distribution
+**Use Case:** Fleet management and centralized policy distribution. Per-container policy, containerd integration and consuming the OCI hook's bindings are **not implemented** on `main`. Downloaded policies are not signature-verified by the daemon.
 
 ### Monitoring Stack
 
@@ -636,10 +619,11 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
 │                                                              │
 │   warmor-daemon ──(metrics:9090)──▶ Prometheus ──▶ Grafana  │
 │                                                              │
-│   Alert Rules:                                               │
-│   - warmor_lsm_deny_rate > 100/min → PagerDuty             │
-│   - warmor_agent_last_heartbeat > 5m → Slack                │
-│   - warmor_policy_load_failures > 0 → Critical             │
+│   Alert rules ship in deploy/prometheus and the Helm chart.  │
+│   Rules on warmor_events_total work. Rules on LSM-decision,  │
+│   heartbeat and policy-load metrics never fire (the metrics  │
+│   are not updated), and warmor_ebpf_loader_status does not   │
+│   exist.                                                     │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -671,50 +655,38 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
 - **Lipgloss** - TUI styling and layout
 
 ### Container Runtime
-- **containerd** - Shim plugin for container lifecycle events
-- **CRI-O** - OCI hook integration
-- **Kubernetes** - DaemonSet with BPF capabilities
+- **CRI-O / OCI hook** - `warmor-oci-hook` (experimental: no auth/TLS, bindings unused)
+- **containerd** - library code only (`internal/container`), not wired
+- **Kubernetes** - Helm chart and DaemonSet manifests (not working on `main`)
 
 ### Observability
-- **Prometheus** - Metrics collection (LSM decisions, latency, policy loads)
+- **Prometheus** - Metrics collection (events, cache, evaluation latency)
 - **Grafana** - Pre-built dashboards with auto-provisioning
 - **Alert Rules** - Deny rate spikes, heartbeat failures, load errors
 - **zerolog** - Structured logging
-- **pprof** - Performance profiling
 
 ---
 
-## Development Phases (Complete)
+## Development Phases
 
-### Phase 6: LSM-BPF Kernel Enforcement ✅
-- Synchronous kernel-level blocking via LSM-BPF hooks (exec, file_open, socket_connect, socket_bind, socket_listen, ptrace_access_check, sb_mount)
-- BPF hash map policy cache with WASM→BPF feedback loop
-- Cgroup-aware two-tier policy lookup (per-container + global)
-- FNV-1a hashing for O(1) pattern matching in BPF context
-- Audit-only mode via `lsm_enforce` toggle
-- Graceful fallback to tracepoint-only on unsupported kernels
+See [OVERVIEW.md](OVERVIEW.md) for the phase-by-phase summary and
+[STATUS.md](STATUS.md) for the per-feature reference. In short:
 
-### Phase 7: Advanced Features ✅
-- Stateful policy engine with process lineage tracking
-- Central policy management server (`warmor-server`) for fleet management
-- A/B testing framework for safe canary policy rollouts
-- Advanced enforcement (network filtering, process sandboxing)
-- SIEM integration (CEF-formatted event streaming to syslog)
-
-### Phase 8: Production Infrastructure ✅
-- **mTLS & Policy Signing** — Ed25519 certificates, mutual TLS for agent↔server, signed WASM bundles, JWT auth (HMAC-SHA256 + EdDSA)
-- **warmorctl CLI** — Bubble Tea TUI with real-time dashboard, agent management, policy CRUD, rollout control, certificate generation
-- **Container Runtime Integration** — containerd shim plugin, CRI-O OCI hooks, per-container policy scoping, Kubernetes DaemonSet
-- **Enhanced Observability** — Prometheus metrics exporter (LSM decisions, latency histograms, policy loads), Grafana dashboards, alerting rules (deny spikes, heartbeat failures, load errors)
+- **Phases 1-2:** done. DENY is enforced by `SIGKILL`.
+- **Phases 3-8:** partial. Highlights:
+  - LSM hooks attach, but only exec/connect get kernel entries.
+  - The policy server, mTLS/JWT, signed bundles and `warmorctl` ship.
+  - The Helm chart, CRD, webhook, containerd and per-container policy do not work or are missing.
+- **Phase 9:** `warmor-learn` and `warmor-simulate` ship. Integrity is offline only. Escape, drift, temporal, attack graph, blast radius and canary auto-rollback are library-only.
 
 ## Future Enhancements
 
-### Phase 9 (Planned)
-- eBPF-for-Windows enforcement mode
+- Kernel-side default-deny and preloading static rules from the compiled policy
+- Wiring the library-only Phase 9 features into the daemon and server
+- Policy signature verification in the daemon
+- Verified eBPF-for-Windows enforcement and macOS ESF blocking
 - Network policy (L3/L4 filtering via XDP)
 - Distributed tracing (OpenTelemetry spans per event)
-- Policy marketplace with community-contributed rules
-- GUI web console for fleet management
 
 ---
 
@@ -740,6 +712,5 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
 
 ---
 
-**Last Updated:** 2026-06-12  
-**Version:** 1.2.0-beta  
+**Last Updated:** 2026-10-14  
 **Status:** Phase 6 In Progress (LSM-BPF Kernel Enforcement)

@@ -1,5 +1,7 @@
 # Attack Graph Visualization
 
+> **Status: Experimental, library only.** This describes the Go package `internal/attackgraph`, which has unit tests but is **not wired into `warmor-daemon` or `warmor-server` on `main`**. No binary, flag or config value reaches it. No event pipeline calls `Graph.Ingest` or `Correlator.Enrich` today. See [Feature Status](STATUS.md).
+
 The attack graph engine correlates runtime security events to MITRE ATT&CK techniques and builds a per-container kill-chain graph showing how far an attacker has progressed.
 
 ## MITRE ATT&CK Coverage
@@ -61,7 +63,7 @@ Each container (identified by cgroup ID) maintains an independent graph.
 correlator := attackgraph.NewCorrelator()
 graph := attackgraph.NewGraph(correlator)
 
-// Ingest events (called from the event pipeline)
+// Ingest events (intended to be called from the event pipeline; not wired on main)
 graph.Ingest(event)
 
 // Query a single container's graph

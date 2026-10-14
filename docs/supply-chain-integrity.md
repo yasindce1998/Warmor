@@ -1,8 +1,10 @@
 # Supply Chain Integrity
 
-`warmor-integrity-scan` builds a cryptographic allowlist of container binaries and enforces it at runtime via eBPF LSM hooks. Any exec of a tampered or undeclared binary is denied before it runs.
+> **Status: Partial, offline scan and verify only.** `warmor-integrity-scan` builds and verifies SHA-256 databases. **There is no runtime or in-kernel enforcement on `main`.** No BPF integrity map is loaded, `warmor-daemon` has no `--integrity-db` flag, and the `Checker`/`Enricher` in `internal/integrity` are not wired into the daemon. The architecture and runtime sections below describe the planned design. See [Feature Status](STATUS.md).
 
-## Architecture
+`warmor-integrity-scan` builds a cryptographic allowlist of container binaries and verifies a rootfs against it. Runtime enforcement via eBPF LSM hooks is planned and not yet on `main`.
+
+## Architecture (planned; kernel side not on main)
 
 ```
 +---------------------+          +----------------------------+
@@ -68,10 +70,10 @@ Exit code is non-zero if any binary fails or is missing.
 1. Build:    docker build -t myapp .
 2. Export:   docker export $(docker create myapp) | tar -C ./rootfs -xf -
 3. Scan:     warmor-integrity-scan --rootfs ./rootfs -o integrity-db.json
-4. Deploy:   warmor-daemon --integrity-db integrity-db.json
+4. Verify:   warmor-integrity-scan --rootfs ./rootfs --verify integrity-db.json   (e.g. in CI or on a node)
 ```
 
-At runtime the `Checker` intercepts exec events from the streaming pipeline:
+There is no runtime deploy step yet; `warmor-daemon --integrity-db` does not exist. Once wired, the `Checker` is designed to intercept exec events from the streaming pipeline:
 
 - **PASS** — SHA-256 matches the database entry; execution proceeds.
 - **FAIL** — hash mismatch; exec is denied with reason `integrity violation: <path> hash mismatch`.
@@ -81,7 +83,7 @@ Results are cached per-path until `ClearCache()` is called (e.g., after a legiti
 
 The `Enricher` can also annotate events with an `integrity` label for audit-mode deployments where you want visibility without enforcement.
 
-## Performance Considerations
+## Performance Considerations (planned runtime path, unmeasured)
 
 | Concern | Mitigation |
 |---------|-----------|
@@ -90,11 +92,11 @@ The `Enricher` can also annotate events with an `integrity` label for audit-mode
 | Scan time | Only walks standard executable dirs (`bin`, `sbin`, `usr/bin`, `usr/sbin`, `usr/local/bin`, `usr/local/sbin`) |
 | Memory | BPF map keyed by 32-bit FNV-1a hash; user-space cache is a simple `map[string]CheckResult` |
 
-For containers with hundreds of binaries, the initial scan completes in under a second on typical hardware. Runtime verification adds sub-millisecond latency to exec after the first invocation (cache hit path).
+Scan time and runtime overhead have not been benchmarked.
 
 ## Tips
 
 - **Scan at build time** in CI so the integrity database ships alongside the image.
-- **Start in audit mode** using the `Enricher` to label events before switching to enforcement.
+- **Start in audit mode** (once wired) using the `Enricher` to label events before switching to enforcement.
 - **Re-scan on image updates** — any base image change invalidates the database.
 - **Use `WithAllowUnknown(true)`** during rollout to permit binaries not yet catalogued, then tighten once coverage is confirmed.

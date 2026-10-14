@@ -8,38 +8,55 @@
 
 <p align="center">
   <strong>Kernel-level security enforcement that follows your containers everywhere.</strong><br>
-  Write once. Enforce on Linux, Windows, macOS. Block threats before they execute.
+  Write policy once, compile to WASM, evaluate it the same way on every platform.
 </p>
 
 <p align="center">
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go" alt="Go"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.70+-orange?style=flat&logo=rust" alt="Rust"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License"></a>
-  <a href="docs/OVERVIEW.md"><img src="https://img.shields.io/badge/Status-v0.1.0--pre--stable-yellow" alt="Status"></a>
+  <a href="docs/STATUS.md"><img src="https://img.shields.io/badge/Status-pre--stable-yellow" alt="Status"></a>
   <a href="docs/PLATFORM_LINUX.md"><img src="https://img.shields.io/badge/Linux-eBPF%20%2B%20LSM-brightgreen" alt="Linux"></a>
-  <a href="docs/PLATFORM_WINDOWS.md"><img src="https://img.shields.io/badge/Windows-ETW%20%2B%20eBPF-yellow" alt="Windows"></a>
-  <a href="docs/PLATFORM_MACOS.md"><img src="https://img.shields.io/badge/macOS-ESF-yellow" alt="macOS"></a>
+  <a href="docs/PLATFORM_WINDOWS.md"><img src="https://img.shields.io/badge/Windows-experimental-orange" alt="Windows"></a>
+  <a href="docs/PLATFORM_MACOS.md"><img src="https://img.shields.io/badge/macOS-experimental%2C%20detection%20only-orange" alt="macOS"></a>
 </p>
 
 ---
 
 ## What is Warmor?
 
-Warmor (WebAssembly + Armor) is an autonomous security intelligence platform that enforces security policies at the kernel level using eBPF/LSM hooks and evaluates them in a WebAssembly sandbox. It solves the **policy portability problem** — write security rules once in YAML or Rust, compile to WASM, and enforce identically across Linux, Windows, and macOS.
+Warmor (WebAssembly + Armor) is a runtime security enforcer. It hooks the kernel with eBPF and LSM-BPF and evaluates every event against a policy running in a WebAssembly sandbox. It targets the **policy portability problem**: write security rules once in YAML or Rust, compile them to WASM, and evaluate them with the same engine on Linux, Windows and macOS. Linux is the mature platform; Windows and macOS are experimental.
 
-Unlike traditional security agents that only monitor, Warmor **blocks threats synchronously** at the kernel security boundary. Denied operations never execute.
+**How enforcement works today (two tiers):**
+
+1. **In the kernel (Linux, `--lsm-enforce`).** LSM hooks return `-EPERM` for operations that already have a deny entry in the kernel policy map. On `main`, those entries are only written for **exec (exact binary path)** and **connect (remote address and port)**. They are written after the WASM policy has seen that operation once.
+2. **In userspace (everything else).** A map miss is allowed by the kernel and sent to the daemon. The WASM policy evaluates it, and on DENY the daemon kills the process with `SIGKILL`. The first occurrence of a denied operation, and every file, bind, listen, ptrace or mount deny, is therefore **detected and then killed, not prevented**.
+
+Pre-loading kernel rules from the compiled policy and a default-deny mode are in progress. See **[Feature Status](docs/STATUS.md)** for exactly what ships on `main`.
 
 ---
 
 ## Quick Start
 
+Requirements: Linux with BTF (`/sys/kernel/btf/vmlinux`), Go 1.26+, and Rust with the `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`) for compiling YAML policies. Kernel blocking also needs `CONFIG_BPF_LSM=y` with `bpf` in `/sys/kernel/security/lsm`.
+
 ```bash
 git clone https://github.com/yasindce1998/warmor.git && cd warmor
-make all
-sudo ./warmor-daemon --policy policy.yaml --lsm-enforce
+go build -o bin/ ./cmd/...              # prebuilt BPF objects are checked in
+
+# Compile a YAML policy to WASM (-o must come before the input file)
+./bin/warmor-compile -o crypto.wasm examples/policies/block-crypto-miners.yaml
+
+# Start in audit mode first: denies are logged, nothing is killed
+sudo ./bin/warmor-daemon --policy crypto.wasm --audit --event-sink stdout
+
+# Then enforce: LSM blocking for cached exec/connect denies, SIGKILL for the rest
+sudo ./bin/warmor-daemon --policy crypto.wasm --lsm-enforce
 ```
 
-That's it. Your system is now enforcing security policy at the kernel level.
+> **Do not run the daemon with its default `--policy` (`policies/example/policy.wasm`) without `--audit`.** On `main` that example policy denies every file and network event (known issue, being fixed), so the daemon would kill almost every process. Pass a policy compiled from YAML, as above.
+
+The daemon prints a `Security posture:` line at startup that tells you whether LSM blocking is active, audit-only, or unavailable (tracepoint observe mode).
 
 > **First time?** See the [Getting Started Guide](GETTING_STARTED.md) for detailed setup instructions, dependency installation, and your first policy walkthrough.
 
@@ -56,14 +73,15 @@ That's it. Your system is now enforcing security policy at the kernel level.
 │  │ LSM/eBPF │←───│  Policy Map  │←───│  Decision Cache  │          │
 │  │  Hooks   │    └──────────────┘    └──────────────────┘          │
 │  └──────────┘                                                       │
-│   execve, openat, connect, sendto, recvfrom, mount, ptrace          │
+│   LSM: exec, file_open, connect, bind, listen, ptrace, sb_mount     │
+│   tracepoints: execve, openat, connect                              │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-1. **Kernel hooks** intercept syscalls (LSM-BPF on Linux, eBPF-for-Windows/ETW on Windows, ESF on macOS)
-2. **BPF policy map** handles cached decisions in-kernel (<1us) — no userspace round-trip
-3. **WASM sandbox** evaluates new events safely — policy bugs can't crash the system
-4. **Decisions feed back** into the kernel map, accelerating future identical events
+1. **Kernel hooks** see operations (LSM-BPF and tracepoints on Linux; ETW, plus experimental eBPF-for-Windows, on Windows; ESF on macOS)
+2. **BPF policy map** answers operations that already have an entry, in the kernel. A miss is allowed and reported to userspace.
+3. **WASM sandbox** evaluates each new event in an isolated module. It has no memory or time limit yet, so a looping policy can stall the event loop.
+4. **Decisions feed back** into the kernel map, for exec and connect only on `main`. A userspace DENY kills the offending process.
 
 ---
 
@@ -71,87 +89,88 @@ That's it. Your system is now enforcing security policy at the kernel level.
 
 ### Cross-Platform Enforcement
 
-| Platform | Technology | Mode |
+| Platform | Technology | Status on `main` |
 |----------|-----------|------|
-| **Linux** | eBPF + LSM-BPF (7 hooks) | Most mature — kernel-level blocking |
-| **Windows** | eBPF-for-Windows + ETW (per event type) | Beta — kernel blocking for network and process (eBPF), detect-then-terminate for files and as fallback (ETW) |
-| **macOS** | Endpoint Security Framework | Beta — AUTH event blocking |
+| **Linux** | eBPF tracepoints + LSM-BPF (7 hooks) | Most mature. Kernel blocking for cached exec/connect denies, and detect-then-`SIGKILL` for everything else. LSM attach is tested in a VM in CI. |
+| **Windows** | ETW, plus eBPF-for-Windows | **Experimental beta.** The ETW path (detect, then `TerminateProcess`) is what is tested in CI. The eBPF-for-Windows programs have never been built or run in CI, so their kernel blocking is unverified. |
+| **macOS** | Endpoint Security Framework | **Experimental, detection only.** Every AUTH event is answered ALLOW. The cgo ESF code is not compiled in CI, and release binaries are built without cgo. |
 
-### Performance
+### Performance (design targets, unverified)
 
-| Metric | Value |
+These are **targets, not measurements**. None of them has been benchmarked on `main`. A benchmark harness is in progress.
+
+| Metric | Design target |
 |--------|-------|
-| P95 Latency | <100us |
-| Cache Hit Rate | >90% (10k LRU) |
+| P95 evaluation latency | <100us |
+| Decision cache hit rate | >90% (10k-entry cache; the current key includes the PID, which works against this) |
 | Memory | <50MB |
-| CPU Overhead | <5% |
-| Kernel fast-path | <1us (BPF map hit) |
+| CPU overhead | <5% |
+| Kernel fast path | <1us (BPF map hit) |
 
 ### Policy Engine
 
-- **YAML DSL** — Declarative rules with glob/regex matching, variables, conditions
-- **Rust WASM** — Full Rust policies compiled to `wasm32-wasi` for complex logic
-- **Hot-Reload** — SIGHUP to swap policies without restart or downtime
-- **Two-Tier Cache** — First WASM eval compiles into BPF map; subsequent hits handled entirely in kernel
-- **Policy Signing** — Ed25519 signed WASM bundles with verification chain
+- **YAML DSL** — Declarative rules with glob matching, variables and conditions, compiled by `warmor-compile` (needs `cargo` and the `wasm32-unknown-unknown` target). Unknown keys are silently ignored, so check rules with `--rust-only` if in doubt.
+- **Rust WASM** — Full Rust policies compiled to `wasm32-unknown-unknown` for complex logic (see the known issues under [Rust WASM Policy Library](#rust-wasm-policy-library))
+- **Hot-Reload** — SIGHUP swaps the WASM module without a restart. Kernel map entries from the old policy are not cleared yet.
+- **Two-Tier Cache** — A userspace decision cache, plus the kernel policy map for exec and connect decisions
+- **Policy Signing** — Ed25519-signed OCI policy bundles via `warmor-policy-bundle` (`--sign-key` / `--pull --verify-key`). The daemon itself does **not** verify signatures yet.
 
 ---
 
 ## Security Intelligence
 
-Warmor goes beyond static policy enforcement — it learns, adapts, and predicts.
+Warmor goes beyond static policy enforcement. On `main`, **learning and simulation ship as CLI tools**. The other features in this section are **experimental Go libraries with unit tests that are not yet wired into the daemon or server**: no flag or binary reaches them. See [Feature Status](docs/STATUS.md).
 
-### Live Policy Synthesis
+### Live Policy Synthesis — Shipped (offline)
 
-Observe containers in **learning mode**, record every allowed operation, then auto-generate a deny-everything-else policy. Zero manual rule writing.
+Record events with the daemon's file sink, then have `warmor-learn` synthesize an allowlist policy from them.
 
 ```bash
+sudo warmor-daemon --policy crypto.wasm --audit --event-sink file:/var/log/warmor/events.ndjson
 warmor-learn --events /var/log/warmor/events.ndjson --follow --duration 30m -o learned-policy.yaml
 ```
 
-### Policy Simulator
+### Policy Simulator — Shipped
 
-Replay days of historical events against a candidate policy **before deployment**. Know exactly what would break.
+Replay recorded events against a candidate policy **before deployment** to see what would newly be denied. The simulator reads `events-*.ndjson` files from a directory. The daemon has no dedicated event-store sink yet, so name the file sink accordingly.
 
 ```bash
-warmor-simulate --policy candidate.yaml --data ./events/ --since 7d -o report.json
+sudo warmor-daemon --policy current.wasm --audit --event-sink file:/var/lib/warmor/events/events-current.ndjson
+warmor-simulate --policy candidate.yaml --data /var/lib/warmor/events --since 168h --format json -o report.json
 ```
 
-### Container Escape Detection
+### Supply Chain Integrity — Partial (offline scan only)
 
-Pattern-based detection of breakout techniques: `nsenter`, host filesystem mounts, ptrace across cgroup boundaries, Docker socket access, `/proc/*/ns/*` traversal, cloud metadata SSRF.
-
-### Supply Chain Tripwires
-
-eBPF-powered binary integrity verification at exec time. SHA-256 hash every binary in your image, load the allowlist into a BPF map, and block anything that doesn't match — in kernel, before it runs.
+`warmor-integrity-scan` hashes every binary in a rootfs (SHA-256) into a JSON database and can `--verify` a rootfs against it. **There is no runtime or in-kernel enforcement on `main`.** The daemon has no `--integrity-db` flag and there is no BPF integrity map yet.
 
 ```bash
 warmor-integrity-scan --rootfs /path -o integrity-db.json
+warmor-integrity-scan --rootfs /path --verify integrity-db.json
 ```
 
-### Attack Graph Visualization
+### Container Escape Detection — Experimental (library only, not yet wired into the daemon)
 
-Maps deny events to **MITRE ATT&CK** techniques. Builds kill-chain DAGs per container showing progression from reconnaissance through lateral movement to impact.
+Pattern-based detection of breakout techniques (`nsenter`, host filesystem mounts, cross-cgroup ptrace, Docker socket access, `/proc/*/ns/*` traversal) in `internal/escape`.
 
-### Blast Radius Analysis
+### Attack Graph — Experimental (library only, not yet wired into the daemon)
 
-Real-time graph of container relationships (network connections, shared volumes, IPC namespaces). Query: "If container X is compromised, what can it reach?" — answered via BFS reachability analysis.
+Maps events to **MITRE ATT&CK** techniques and builds per-container kill-chain graphs (`internal/attackgraph`).
 
-### Drift Detection
+### Blast Radius Analysis — Experimental (library only, not yet wired into the daemon)
 
-Behavioral fingerprinting across your fleet. Same image, different behavior? Z-score based outlier detection flags the anomalous node — potential compromise indicator.
+Container relationship graph (network connections, shared volumes, shared namespaces) with BFS reachability queries (`internal/blastradius`).
 
-### Canary Rollout with Auto-Rollback
+### Drift Detection — Experimental (library only, not yet wired into the server)
 
-Deploy new policies to a canary cohort. Warmor monitors deny-rate delta in real-time. If the canary exceeds threshold — automatic rollback. No humans in the loop for safety.
+Z-score outlier detection over behavioural fingerprints of containers running the same image (`internal/drift`).
 
-### Temporal Policies
+### Canary Rollout — Partial (manual ramp; auto-rollback is library only)
 
-Time-dimension constraints that static policies can't express:
-- "Init binaries allowed only in first 60 seconds"
-- "SSH only Mon-Fri 08:00-18:00"
-- "No new binaries from /tmp after container stabilizes (5 min)"
-- "Backup file creation only during 02:00-04:00 window"
+`warmor-server` supports percentage-based rollouts with consistent hashing: create, ramp, complete and abort through the admin API or `warmorctl`. The deny-rate `CanaryAnalyzer` that would trigger automatic rollback exists but is **not connected**. Nothing feeds it decisions, so there is **no automatic rollback** on `main`.
+
+### Temporal Policies — Experimental (library only, not yet wired into the daemon)
+
+Time constraints (container age, time of day, day of week) in `internal/temporal`. The YAML compiler does **not** understand a `temporal:` block yet. It silently ignores it, which turns the rule into an unconditional one, so do not use `temporal:` in policies today.
 
 ---
 
@@ -159,26 +178,35 @@ Time-dimension constraints that static policies can't express:
 
 | Tool | Purpose |
 |------|---------|
-| `warmor-daemon` | Main enforcement daemon with LSM-BPF hooks |
-| `warmor-server` | Central fleet management, A/B rollouts, drift aggregation |
-| `warmor-compile` | YAML to WASM compilation pipeline |
-| `warmorctl` | Interactive TUI (dashboard, agents, policies, rollouts, certs) |
-| `warmor-learn` | Learning mode — observe and synthesize policies |
-| `warmor-simulate` | Replay historical events against candidate policies |
-| `warmor-integrity-scan` | Build binary hash allowlists for supply chain enforcement |
+| `warmor-daemon` | Enforcement daemon: tracepoints, LSM-BPF hooks, WASM evaluation, event sinks, policy-server client |
+| `warmor-server` | Central policy server: agent registration and heartbeats, policy versions, percentage rollouts, mTLS/JWT |
+| `warmor-compile` | YAML to WASM compiler (needs `cargo` and the `wasm32-unknown-unknown` target) |
+| `warmorctl` | Interactive TUI (dashboard, agents, policies, rollouts, certs). Interactive only; there are no subcommands. |
+| `warmor-learn` | Synthesize a policy from recorded daemon events |
+| `warmor-simulate` | Replay recorded events against candidate policies |
+| `warmor-integrity-scan` | Build and verify SHA-256 binary hash databases (offline; no runtime enforcement yet) |
 | `warmor-policy-gen` | Generate policies from audit logs |
 | `warmor-sbom-policy` | Generate policies from SBOM manifests |
 | `warmor-policy-diff` | Compare two policies and show what changes |
 | `warmor-policy-merge` | Merge multiple policies with conflict resolution |
-| `warmor-policy-bundle` | Package policies into signed OCI bundles |
-| `warmor-oci-hook` | Container runtime hook (containerd/CRI-O integration) |
-| `warmor-dashboard` | Real-time SSE dashboard (policy decisions, counters) |
+| `warmor-policy-bundle` | Package policies into signed OCI bundles; pull with signature verification |
+| `warmor-oci-hook` | **Experimental.** OCI runtime hook that reports container start/stop to `warmor-server`. It has no auth or TLS, so it only works against `warmor-server --insecure`, and the server does not use the bindings yet. |
+
+There is no `warmor-dashboard` binary on `main`. The SSE dashboard in `internal/dashboard` is library-only.
 
 ---
 
 ## Rust WASM Policy Library
 
-10 production-ready Rust policy crates covering real-world threat scenarios:
+10 example Rust policy crates covering threat scenarios.
+
+> **Known issues on `main` (being fixed):**
+> - `container-escape`, `crypto-mining`, `lateral-movement`, `multi` and `supply-chain` export a JSON `evaluate_event`, but the host treats that export name as its binary ABI, so these crates **deny every event**.
+> - `example`, `advanced` and `zero-trust-net` require a `filename` field that the host omits for file and network events, so they **deny every file and network event**.
+> - `cross-platform` and `temporal-access` do not compile.
+> - CI builds none of these crates.
+>
+> Until this is fixed, YAML policies compiled with `warmor-compile` are the reliable path.
 
 | Policy | Threat Domain | Pattern |
 |--------|--------------|---------|
@@ -195,9 +223,10 @@ Time-dimension constraints that static policies can't express:
 
 Build any policy:
 ```bash
+rustup target add wasm32-unknown-unknown
 cd policies/container-escape
-cargo build --release --target wasm32-wasi
-# Output: target/wasm32-wasi/release/container_escape.wasm
+cargo build --release --target wasm32-unknown-unknown
+# Output: target/wasm32-unknown-unknown/release/<crate_name>.wasm
 ```
 
 See [Rust Policy Examples](docs/rust-policy-examples.md) for full documentation and authoring guide.
@@ -206,43 +235,48 @@ See [Rust Policy Examples](docs/rust-policy-examples.md) for full documentation 
 
 ## Kubernetes Deployment
 
-```bash
-helm install warmor deploy/helm/warmor \
-  --set image.tag=latest \
-  --set config.lsmEnforce=true \
-  --set config.policyPath=/etc/warmor/policy.wasm
-```
+> **The Helm chart does not work on `main` and is being fixed.** Do not install it yet.
+> - Its initContainer runs `warmor-daemon --validate-policy`, a flag that does not exist, so pods stay in `Init`.
+> - The chart has no value that enables `--lsm-enforce`, and `--set config.*` values are ignored.
+> - The policy ConfigMap ships YAML, which the daemon can only compile with `cargo`, and the distroless image does not include it.
+> - The `ValidatingWebhookConfiguration` has no handler behind it.
+> - The `WarmorPolicy` CRD has no controller.
+>
+> See [Feature Status](docs/STATUS.md#5-container-runtime-and-kubernetes).
 
-Includes: DaemonSet with BPF capabilities, RBAC, ServiceMonitor, Grafana dashboards, alert rules.
+The chart (`deploy/helm/warmor`) contains a DaemonSet with BPF capabilities, RBAC, a ServiceMonitor, Grafana dashboards and alert rules. Some of the dashboards and alerts depend on metrics that the daemon does not update yet.
 
 ---
 
 ## Architecture
 
 ```
-internal/
-  enforcer/       — Core event loop, WASM evaluation, LSM integration
-  ebpf/           — LSM-BPF loader, policy map, ring buffer, CO-RE BTF
-  wasm/           — Wazero runtime, ABI v2, multi-event dispatch
-  cache/          — Decision cache with BPF map sync
-  streaming/      — Pipeline: enrichers → sinks (Prometheus, SIEM, file)
-  policyserver/   — Fleet management, A/B rollouts, canary analyzer
-  lineage/        — Process tree tracking (parent/child/cgroup ancestry)
-  container/      — Runtime detection (Docker, containerd, CRI-O, Podman)
-  learner/        — Learning mode recorder + policy synthesizer
-  simulator/      — Event replay engine for policy testing
-  integrity/      — Binary hash verification (SHA-256 + FNV-1a fast path)
-  escape/         — Container escape pattern correlator
-  drift/          — Behavioral fingerprint + z-score anomaly detection
-  attackgraph/    — MITRE ATT&CK correlation + kill-chain DAG
-  blastradius/    — Container relationship graph + BFS reachability
-  temporal/       — Time-dimension enricher + constraint evaluation
-  compiler/       — YAML → Rust → WASM compilation pipeline
-  platform/       — OS abstraction (Linux eBPF, Windows eBPF-for-Windows + ETW, macOS ESF)
-  crypto/         — mTLS (Ed25519), JWT (HMAC+EdDSA), policy signing
-  metrics/        — Prometheus counters, histograms, gauges
-  logging/        — Structured JSON (zerolog), Windows Event Viewer integration
-  dashboard/      — Real-time SSE dashboard (ring buffer, embedded HTML)
+internal/                                      (status on main)
+  enforcer/       — Core event loop, WASM evaluation, SIGKILL actions   Shipped
+                    (NetFilter, sandbox, learning mode inside)           Library-only
+  ebpf/           — Tracepoint + LSM-BPF loaders, policy map, ring buf   Shipped (see STATUS for map gaps)
+  wasm/           — Wazero runtime, JSON and binary ABIs                 Shipped
+  cache/          — Userspace decision cache                             Shipped
+  streaming/      — Pipeline: enrichers → stdout/file/webhook sinks      Shipped (syslog sink library-only)
+  policyserver/   — Policy server, percentage rollouts                   Shipped (canary analyzer library-only)
+  lineage/        — Process tree tracking                                Partial (no PPID in events)
+  learner/        — Learning recorder + policy synthesizer               Shipped (warmor-learn)
+  simulator/      — Event replay engine                                  Shipped (warmor-simulate)
+  integrity/      — SHA-256 binary hash scan/verify                      Shipped offline (no runtime enforcement)
+  compiler/       — YAML → Rust → WASM compilation pipeline              Shipped
+  platform/       — Linux eBPF, Windows ETW / eBPF-for-Windows, macOS    Linux shipped; Windows/macOS experimental
+  crypto/         — mTLS (Ed25519), JWT (HMAC+EdDSA), bundle signing     Shipped
+  metrics/        — Prometheus collector and exporter                    Partial (exporter metrics never updated)
+  logging/        — Structured JSON (zerolog)                            Shipped
+  policygen/ sbompolicy/ policydiff/ policymerge/ policybundle/          Shipped (CLI tools)
+  container/      — Runtime detection, containerd monitor                Library-only
+  escape/         — Container escape pattern correlator                  Library-only
+  drift/          — Behavioral fingerprint + z-score detection           Library-only
+  attackgraph/    — MITRE ATT&CK correlation + kill-chain DAG            Library-only
+  blastradius/    — Container relationship graph + BFS reachability      Library-only
+  temporal/       — Time-dimension enricher + constraint evaluation      Library-only
+  patterns/       — Glob/regex matcher helpers                           Library-only
+  dashboard/      — SSE dashboard (ring buffer, embedded HTML)           Library-only
 ```
 
 See [Architecture Deep Dive](docs/architecture.md) for data flow diagrams.
@@ -261,7 +295,7 @@ See [Architecture Deep Dive](docs/architecture.md) for data flow diagrams.
 | **Intelligence** | [Learning Mode](docs/learning-mode.md) &bull; [Simulator](docs/policy-simulator.md) &bull; [Escape Detection](docs/escape-detection.md) &bull; [Supply Chain](docs/supply-chain-integrity.md) |
 | **Fleet** | [Canary Rollout](docs/canary-rollout.md) &bull; [Drift Detection](docs/drift-detection.md) &bull; [Attack Graph](docs/attack-graph.md) &bull; [Blast Radius](docs/blast-radius.md) &bull; [Temporal](docs/temporal-policies.md) |
 | **Kubernetes** | [CRD Usage](docs/crd-usage.md) &bull; [Helm Chart](deploy/helm/warmor/) |
-| **Project** | [Overview](docs/OVERVIEW.md) &bull; [PRD, Phase Tracking & Roadmap](docs/PRD.md) |
+| **Project** | [Feature Status](docs/STATUS.md) &bull; [Overview](docs/OVERVIEW.md) &bull; [PRD, Phase Tracking & Roadmap](docs/PRD.md) |
 
 ---
 
@@ -270,8 +304,9 @@ See [Architecture Deep Dive](docs/architecture.md) for data flow diagrams.
 We welcome contributions! Open an [issue](https://github.com/yasindce1998/warmor/issues) or pull request.
 
 **High-impact areas:**
-- Windows eBPF kernel enforcement
-- macOS ESF blocking mode improvements
+- Wiring the library-only features into the daemon (see [Feature Status](docs/STATUS.md))
+- Windows eBPF kernel enforcement (build and verify the eBPF-for-Windows programs)
+- macOS ESF blocking (AUTH responses currently always ALLOW)
 - New Rust WASM policy crates (threat detection scenarios)
 - Performance benchmarks and optimization
 - Integration tests on additional kernel versions
@@ -292,6 +327,6 @@ MIT License. See [LICENSE](LICENSE).
 ---
 
 <p align="center">
-  <strong>Warmor v0.1.0</strong> — From policy enforcement to autonomous security intelligence.<br>
+  <strong>Warmor</strong> — pre-stable. See <a href="docs/STATUS.md">Feature Status</a> for what ships today.<br>
   <a href="https://github.com/yasindce1998/warmor/issues">Issues</a> &bull; <a href="https://github.com/yasindce1998/warmor/discussions">Discussions</a>
 </p>

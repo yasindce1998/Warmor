@@ -1,6 +1,14 @@
 # Rust WASM Policy Examples
 
-Warmor ships with advanced Rust-based WASM policy examples in the `policies/` directory. These demonstrate real-world security enforcement patterns compiled to WebAssembly for kernel-level evaluation.
+> **Status on `main`: example crates have known ABI bugs (being fixed).** Use YAML policies compiled with `warmor-compile` for anything you plan to enforce.
+> - `container-escape`, `crypto-mining`, `lateral-movement`, `multi` and `supply-chain` export a JSON `evaluate_event`. The host treats an export with that name as its binary ABI, so these crates **deny every event**.
+> - `advanced`, `example` and `zero-trust-net` require a `filename` field that the host omits for file and network events, so they **deny every file and network event**.
+> - `cross-platform` and `temporal-access` do not compile.
+> - The `abi_version` export is never checked, and CI builds none of these crates.
+>
+> See [Feature Status](STATUS.md).
+
+Warmor ships with advanced Rust-based WASM policy examples in the `policies/` directory. These demonstrate security enforcement patterns compiled to WebAssembly and evaluated by the daemon in userspace.
 
 ## Directory Layout
 
@@ -19,7 +27,7 @@ policies/
 
 ## ABI Patterns
 
-All policies compile to `wasm32-wasi` with `crate-type = ["cdylib"]` and export `malloc`/`free` for host memory management.
+All policies compile to `wasm32-unknown-unknown` with `crate-type = ["cdylib"]` and export `malloc`/`free` for host memory management.
 
 ### Pattern 1: Tagged Enum (Multi-Event)
 
@@ -167,11 +175,12 @@ Detects and blocks cryptocurrency mining:
 Each policy is an independent Rust crate. Build with:
 
 ```bash
+rustup target add wasm32-unknown-unknown
 cd policies/<name>
-cargo build --release --target wasm32-wasi
+cargo build --release --target wasm32-unknown-unknown
 ```
 
-The output WASM file will be at `target/wasm32-wasi/release/<name>.wasm`.
+The output WASM file will be at `target/wasm32-unknown-unknown/release/<crate_name>.wasm`.
 
 All crates use an optimized release profile:
 
@@ -190,7 +199,7 @@ All policies use the same action constants:
 | Constant | Value | Meaning |
 |----------|-------|---------|
 | `ACTION_ALLOW` | 0 | Allow the operation |
-| `ACTION_DENY` | 1 | Block the operation (returns EPERM in LSM mode) |
+| `ACTION_DENY` | 1 | Deny: the daemon kills the process (`SIGKILL`). Exec/connect denies are also cached in the kernel map, and with `--lsm-enforce` repeats get `EPERM`. |
 | `ACTION_LOG` | 2 | Allow but emit an audit log entry |
 
 ## Writing Your Own
@@ -200,5 +209,5 @@ All policies use the same action constants:
 3. Add `serde`, `serde_json` dependencies
 4. Export `malloc`, `free`, and one of `evaluate_syscall`/`evaluate_event`/`evaluate`
 5. Optionally export `abi_version() -> u32` (return 2 for multi-event support)
-6. Build with `cargo build --release --target wasm32-wasi`
+6. Build with `cargo build --release --target wasm32-unknown-unknown`
 7. Load with `warmor-daemon --policy path/to/policy.wasm`

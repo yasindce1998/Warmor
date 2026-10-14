@@ -1,10 +1,12 @@
 # Cross-Container Blast Radius Mapping
 
+> **Status: Experimental, library only.** This describes the Go package `internal/blastradius`, which has unit tests but is **not wired into `warmor-daemon` or `warmor-server` on `main`**. No binary, flag or config value reaches it. No running component builds or queries the graph today. See [Feature Status](STATUS.md).
+
 The blast radius subsystem builds a live relationship graph of containers and analyzes how a compromise in one container could spread to others. It answers: "If container X is breached, what else is reachable?"
 
 ## How It Works
 
-warmor continuously observes inter-container interactions (network connections, shared volumes, shared namespaces) and records them as directed edges in an in-memory graph. When queried, a BFS traversal computes which containers are reachable from a given source, with full path details.
+The collector is designed to turn inter-container interactions (network connections, shared volumes, shared namespaces) into directed edges in an in-memory graph. On `main` nothing feeds it events. When queried, a BFS traversal computes which containers are reachable from a given source, with full path details.
 
 ## Edge Types
 
@@ -71,7 +73,7 @@ graph := blastradius.NewGraph()
 collector := blastradius.NewCollector(graph)
 analyzer := blastradius.NewAnalyzer(graph)
 
-// Feed events from the streaming pipeline
+// Feed events (no pipeline does this on main)
 collector.ProcessEvent(event)
 
 // Query blast radius

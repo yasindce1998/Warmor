@@ -1,10 +1,14 @@
 # Policy Simulator
 
+> **Status: Shipped** (`warmor-simulate`). The **daemon has no event-store sink** on `main`, and the policy server does not call the simulator. Record events with the file sink, using a file name that matches `events-*.ndjson`. See [Integration](#integration-with-policy-server) below and [Feature Status](STATUS.md).
+>
+> **Known issue:** the daemon's sinks record `decision` in lowercase (`allow`, `deny`), but the simulator compares against `ALLOW`/`DENY`. For events recorded by `warmor-daemon`, the "New denials" and "New allows" sections are therefore always empty. The decision breakdown (`ALLOW`/`DENY`/`LOG` counts) is still correct.
+
 `warmor-simulate` replays recorded security events against a candidate policy and reports the impact before you deploy it. This lets you preview new denials or relaxed allows without touching production.
 
 ## How It Works
 
-1. **Record**: The warmor agent writes every security event to an append-only ndjson store (daily-rotated files in the event store directory).
+1. **Record**: Run the agent with `--event-sink file:<dir>/events-<name>.ndjson`. The simulator reads every `events-*.ndjson` file in the directory. The daily-rotated `EventStore` sink exists in `internal/simulator`, but the daemon cannot select it yet.
 2. **Load**: The simulator reads events from the store, filtered by a time window.
 3. **Replay**: Each event is evaluated against the candidate policy (YAML or compiled WASM) using the same WASM policy engine used at runtime.
 4. **Compare**: The candidate decision is compared to the original recorded decision. Events that flip from ALLOW to DENY (new denials) or DENY to ALLOW (new allows) are tracked and deduplicated.
@@ -13,7 +17,7 @@
 ## Installation
 
 ```bash
-make build-simulate
+go build -o bin/ ./cmd/warmor-simulate
 ```
 
 ## Usage
@@ -89,15 +93,16 @@ The JSON output contains the same data as a structured object suitable for progr
 
 ## Integration with Policy Server
 
-The event store is a `streaming.Sink` implementation. To enable recording, add the event store as a sink in your warmor agent configuration:
+To record events today, use the daemon's file sink with a matching file name:
 
-```yaml
-sinks:
-  - type: event-store
-    path: /var/lib/warmor/events
+```bash
+sudo warmor-daemon --policy current.wasm --audit \
+  --event-sink file:/var/lib/warmor/events/events-current.ndjson
 ```
 
-The policy server can invoke the simulator as part of a promotion workflow:
+There is no agent configuration file and no `event-store` sink type on `main`.
+
+**Planned, not implemented:** the policy server invoking the simulator as part of a promotion workflow:
 
 1. A new candidate policy is pushed to the policy server.
 2. The server calls `warmor-simulate` against the recorded event stream.
@@ -108,7 +113,7 @@ This allows safe, data-driven policy iteration without risking unexpected breaka
 
 ## Event Store Format
 
-Events are stored as newline-delimited JSON (ndjson), one file per UTC day:
+With the (not yet selectable) `EventStore` sink, events are stored as newline-delimited JSON (ndjson), one file per UTC day:
 
 ```
 events-2026-06-18.ndjson

@@ -1,12 +1,14 @@
 # Canary Rollout
 
-The policy server supports A/B canary rollouts for Wasm policies with automatic deny-rate monitoring. This lets you gradually shift agents to a new policy version while the canary analyzer compares deny rates between baseline and canary cohorts, rolling back automatically if the new policy causes excessive denials.
+> **Status: Partial.** Percentage rollouts are **shipped**: create, ramp, complete and abort through the admin API or `warmorctl`, with consistent-hash cohorts and versioned policies. The **deny-rate `CanaryAnalyzer` and automatic rollback are library-only.** `NewCanaryAnalyzer` is never called, agents don't report per-decision data to it, and the rollout API does not accept a `CanaryConfig`. On `main` you monitor and abort manually. See [Feature Status](STATUS.md).
+
+The policy server supports A/B canary rollouts for Wasm policies. You can gradually shift agents to a new policy version and abort back to the baseline. A canary analyzer that compares deny rates between cohorts and rolls back automatically exists as a library, but it is not wired in yet.
 
 ## How It Works
 
 1. A rollout is created with a target percentage. Agents are assigned to the canary (new policy) or baseline (current policy) cohort via consistent hashing on `sha256(rolloutID + ":" + agentID) % 100`.
-2. The `CanaryAnalyzer` records every policy decision (allow/deny) for both cohorts.
-3. Once the observation window elapses and both cohorts have enough samples, it compares deny rates. If the canary deny rate exceeds baseline by more than `MaxDenyRateDelta`, the rollout is flagged as degraded or automatically rolled back.
+2. *(Library only, not wired.)* The `CanaryAnalyzer` is designed to record every policy decision (allow/deny) for both cohorts.
+3. *(Library only, not wired.)* Once the observation window elapses and both cohorts have enough samples, it compares deny rates. If the canary deny rate exceeds baseline by more than `MaxDenyRateDelta`, the rollout is flagged as degraded or automatically rolled back.
 
 ### Verdict States
 
@@ -17,9 +19,9 @@ The policy server supports A/B canary rollouts for Wasm policies with automatic 
 | `degraded` | Deny rate exceeded threshold (auto-rollback disabled) |
 | `rolled-back` | Rollout was aborted automatically |
 
-## Configuration
+## Configuration (library only)
 
-Canary analysis is configured per rollout via `CanaryConfig`:
+The `CanaryConfig` struct below is used by the analyzer library. **The rollout API does not accept these fields on `main`.**
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -85,9 +87,9 @@ DELETE /api/v1/admin/rollouts/{id}
 
 Reverts all agents to the baseline policy version.
 
-## Auto-Rollback Behavior
+## Auto-Rollback Behavior (library only, not wired)
 
-When `auto_rollback` is enabled, the `CanaryAnalyzer.Evaluate()` cycle performs:
+In the library, when `auto_rollback` is enabled, the `CanaryAnalyzer.Evaluate()` cycle performs:
 
 1. Wait until both cohorts reach `min_sample_size` decisions.
 2. Wait until `observation_window` has elapsed since rollout start.
@@ -110,7 +112,7 @@ curl -X PUT http://localhost:8443/api/v1/admin/policies/myapp -H "$AUTH" \
 curl -X POST http://localhost:8443/api/v1/admin/rollouts -H "$AUTH" \
   -d '{"id":"v2-canary","policy_id":"myapp","target_version":2,"percentage":10}'
 
-# 3. Monitor canary metrics; if healthy, ramp up
+# 3. Monitor the canary cohort yourself (logs/metrics); if healthy, ramp up
 curl -X PUT http://localhost:8443/api/v1/admin/rollouts/v2-canary -H "$AUTH" \
   -d '{"percentage":50}'
 

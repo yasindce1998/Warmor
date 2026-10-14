@@ -1,144 +1,136 @@
 # warmor Project Status
 
-**Version:** 0.1.0  
-**Last Updated:** 2026-06-19  
-**Status:** Phase 9 Complete — Autonomous Security Intelligence
+**Version:** pre-stable (latest release v0.3.0)
+**Last Updated:** 2026-10-14
+**Status:** Linux enforcement core works with known gaps. Several later-phase features exist only as libraries. Windows and macOS are experimental.
+
+> The canonical, row-by-row reference is **[Feature Status](STATUS.md)**. This
+> page summarizes it by development phase.
 
 ---
 
 ## Platform Support
 
-| Platform | Status | Technology | Enforcement |
+| Platform | Status | Technology | Enforcement on `main` |
 |----------|--------|------------|-------------|
-| **Linux** | Production | eBPF + LSM-BPF | Yes (kernel-level) |
-| **Windows** | Beta | ETW + eBPF-for-Windows | Planned (eBPF mode) |
-| **macOS** | Beta | ESF | Yes (AUTH events) |
+| **Linux** | Most mature | eBPF tracepoints + LSM-BPF | Kernel `EPERM` for exec/connect decisions already cached in the policy map (`--lsm-enforce`). Everything else is detect-then-`SIGKILL`. |
+| **Windows** | Experimental beta | ETW (+ eBPF-for-Windows, unverified) | ETW: detect, then `TerminateProcess`. The eBPF-for-Windows programs have never been built or run in CI. |
+| **macOS** | Experimental, detection only | ESF | None. Every AUTH event is answered ALLOW, and the cgo ESF code is not compiled in CI. |
 
 ---
 
 ## Development Phases
 
-### Phase 1: Linux PoC with WASM Integration — COMPLETE
+### Phase 1: Linux PoC with WASM Integration — Done
 - Go daemon with cilium/ebpf integration
-- Wazero WASM runtime, basic policy ABI
-- Multiple syscall hooks (execve, openat, connect)
-- Sample Rust policies, hot-reload via SIGHUP
+- Wazero WASM runtime, JSON policy ABI
+- Tracepoint hooks: execve, openat, connect
+- Sample Rust policies, hot reload via SIGHUP
 
-### Phase 2: Enforcement & Decision Making — COMPLETE
-- ALLOW/DENY/LOG actions
-- Decision caching (LRU, 10k entries, 5min TTL, >90% hit rate)
-- Pattern matching (glob/regex)
-- Structured logging (zerolog), Prometheus metrics
+### Phase 2: Enforcement & Decision Making — Done, with gaps
+- ALLOW/DENY/LOG actions. DENY is `SIGKILL` of the process.
+- Decision cache: 10k entries, 5-minute TTL. It is not a true LRU, and the PID in the key limits hit rate. Hit rate has not been measured.
+- Glob pattern matching in the YAML DSL
+- Structured logging (zerolog) and Prometheus metrics. `--log-level` is ignored.
 
-### Phase 3: Multi-Syscall Support — COMPLETE
-- Hook openat, connect, sendto, recvfrom
+### Phase 3: Multi-Syscall Support — Partial
 - Type-safe events (ProcessEvent, FileEvent, NetworkEvent)
-- Policy testing framework
-- CPU overhead <5% on typical workloads
+- Policy testing framework (`internal/testing`)
+- There are **no** `sendto`/`recvfrom` hooks
+- CPU overhead has not been measured
 
-### Phase 4: Cross-Platform Support — COMPLETE
+### Phase 4: Cross-Platform Support — Partial
 - Platform abstraction layer (Linux/Windows/macOS)
-- Windows: ETW monitoring with eBPF auto-fallback
-- macOS: ESF with AUTH event enforcement
-- Unified policy format across all platforms
+- Windows: ETW monitoring, tested in CI. The eBPF-for-Windows backend is unverified.
+- macOS: ESF client written. AUTH events are always allowed, and the code is not compiled in CI.
 
-### Phase 5: Production Readiness — COMPLETE
-- YAML Policy DSL with warmor-compile CLI
-- YAML -> Rust -> WASM compilation pipeline
-- Kubernetes Helm chart (DaemonSet, RBAC, ServiceMonitor)
-- Grafana dashboards (events, latency, cache, errors)
-- Codebase hardening and security audit
+### Phase 5: Production Readiness — Partial
+- YAML policy DSL with the `warmor-compile` CLI (YAML → Rust → WASM). It needs `cargo` and `wasm32-unknown-unknown`.
+- The Kubernetes Helm chart exists but **does not start on `main`**: the initContainer uses a nonexistent flag, there is no LSM enforce value, and the YAML policy needs `cargo` in a distroless image.
+- Grafana dashboards. Some panels depend on metrics that are never updated.
 
-### Phase 6: LSM-BPF Kernel Enforcement — COMPLETE
-- LSM-BPF synchronous hooks (bprm_check_security, file_open, socket_connect, socket_bind, socket_listen, ptrace_access_check, sb_mount)
-- BPF_MAP_TYPE_HASH policy map with FNV-1a hashed keys
-- Cgroup-aware two-tier lookup (per-container + global fallback)
-- WASM→BPF feedback loop: first hit evaluated by WASM, compiled to map, subsequent hits handled in kernel
-- Ring buffer for kernel→userspace event delivery on policy miss
-- `--lsm-enforce` flag for audit-only vs enforce mode
-- Graceful fallback to tracepoint-only when CONFIG_BPF_LSM absent
+### Phase 6: LSM-BPF Kernel Enforcement — Partial
+- 7 LSM hooks attach: bprm_check_security, file_open, socket_connect, socket_bind, socket_listen, ptrace_access_check, sb_mount. Attach is tested in a VM in CI.
+- `BPF_MAP_TYPE_HASH` policy map with FNV-1a keys and cgroup-aware two-tier lookup
+- The WASM→BPF feedback loop writes kernel entries **only for exec and connect**. File, bind, listen, ptrace and mount never block in the kernel.
+- A map miss is allowed. There is no default-deny mode and no preloading from the compiled policy.
+- `--lsm-enforce`, `--require-lsm`, `--no-lsm`, with graceful fallback to tracepoints
 
-### Phase 7: Advanced Features — COMPLETE
-- Stateful policy engine with process lineage tracking
-- Central policy management server (`warmor-server`) for fleet management
-- A/B testing framework for safe canary policy rollouts
-- Advanced enforcement (network filtering, process sandboxing)
-- SIEM integration (CEF syslog streaming)
+### Phase 7: Advanced Features — Partial
+- Central policy server (`warmor-server`) with agent registration, heartbeats, versioned policies and percentage rollouts: **shipped**
+- Process lineage tracking: partial (events carry no PPID)
+- Network filtering, process sandboxing, SIEM (CEF syslog) sink: **library-only**
 
-### Phase 8: Production Infrastructure — COMPLETE
-- mTLS certificates (Ed25519) for agent↔server authentication
-- Policy signing and verification (signed WASM bundles)
-- JWT auth with dual algorithms (HMAC-SHA256 + EdDSA)
-- `warmorctl` CLI with Bubble Tea TUI (dashboard, agents, policies, rollouts, certs)
-- Container runtime integration (containerd shim, CRI-O OCI hooks, per-container policy)
-- Kubernetes DaemonSet with privileged BPF capabilities
-- Enhanced Prometheus metrics (LSM decisions, latency histograms, policy loads)
-- Grafana dashboards with auto-provisioning
-- Alert rules (deny rate spikes, heartbeat timeouts, policy load failures)
+### Phase 8: Production Infrastructure — Partial
+- mTLS (Ed25519) and JWT (HMAC-SHA256 and EdDSA) between agents, runtimes and server: **shipped**
+- Signed OCI policy bundles via `warmor-policy-bundle`: **shipped**. The daemon does not verify signatures.
+- `warmorctl` Bubble Tea TUI (dashboard, agents, policies, rollouts, certs): **shipped**, interactive only
+- CRI-O OCI hook: **experimental** (no auth/TLS, bindings unused). containerd integration and per-container policy: **missing**.
+- Prometheus metrics: partial (exporter metrics never updated). Grafana and alert rules: partial (one alert references a nonexistent metric).
 
-### Phase 9: Autonomous Security Intelligence — COMPLETE
-- **Live Policy Synthesis** — Observe containers in learning mode, auto-generate least-privilege policies
-- **Policy Simulator** — Replay historical events against candidate policies, predict impact before deployment
-- **Supply Chain Tripwires** — eBPF-powered binary integrity verification at exec time (SHA-256 allowlists)
-- **Container Escape Detection** — Pattern-based detection of nsenter, host mounts, ptrace, docker.sock access
-- **Canary Rollout** — Deny-rate anomaly detection with automatic rollback during policy deployments
-- **Drift Detection** — Z-score based behavioral fingerprinting across fleet; flag statistical outliers
-- **Temporal Policies** — Time-dimension constraints (container age limits, time-of-day windows, day-of-week)
-- **Attack Graph Visualization** — MITRE ATT&CK technique correlation with kill-chain DAG per container
-- **Cross-Container Blast Radius** — BFS-based reachability analysis across network, volume, and namespace edges
+### Phase 9: Security Intelligence — Mostly library-only
+- **Live Policy Synthesis** (`warmor-learn`) — shipped, offline from recorded events
+- **Policy Simulator** (`warmor-simulate`) — shipped. The daemon has no event-store sink, and the diff is broken for daemon-recorded events (decision case mismatch).
+- **Supply Chain Integrity** (`warmor-integrity-scan`) — offline scan and verify only. No runtime or kernel enforcement.
+- **Container Escape Detection** — library only
+- **Canary auto-rollback** — library only (manual rollouts are shipped)
+- **Drift Detection** — library only
+- **Temporal Policies** — library only. The YAML `temporal:` key is silently ignored.
+- **Attack Graph** — library only
+- **Blast Radius** — library only
 
 ---
 
-## Infrastructure Improvements
+## Infrastructure
 
-### Windows Service & Event Viewer
-- Native Windows Service support via `warmor-daemon service install/uninstall`
-- Runs as "Warmor Security Enforcer" with automatic start
-- Logs to Windows Event Viewer (Application log, source "warmor")
+### Windows Service
+- `warmor-daemon service install/uninstall` registers the "Warmor Security Enforcer" service
+- Service lifecycle messages go to the Windows Event Viewer. Policy events do not.
 
 ### Real-Time Dashboard
-- Server-Sent Events (SSE) dashboard at `/dashboard`
-- Live policy decision counters (allow/deny/log)
-- Ring buffer for event history replay to new clients
-- Embedded HTML via `embed.FS` — no external dependencies
+- `internal/dashboard` (SSE, ring buffer, embedded HTML) is **library-only**. No `/dashboard` route and no `warmor-dashboard` binary exist.
 
 ### CI & Coverage
-- macOS CI workflow (`.github/workflows/macos-ci.yml`) with `CGO_ENABLED=0` (ESF SDK headers unavailable on runner)
-- Coverage gating at 40% threshold across all platform CI workflows (Linux, Windows, macOS)
-- Builds fail if coverage drops below threshold
+- Linux unit tests with a 40% coverage gate. The LSM attach integration test runs in a VM (longterm and stable kernels).
+- Windows CI runs on a real runner and exercises ETW
+- macOS CI builds and tests with `CGO_ENABLED=0`, so ESF is not compiled
+- No Rust policy crate is built in CI. The example-policy validation step ignores failures.
 
 ---
 
 ## Key Metrics
 
-| Metric | Target | Achieved |
+These are **design targets, not measurements**. None has been benchmarked on `main`. A benchmark harness is in progress.
+
+| Metric | Target | Measured |
 |--------|--------|----------|
-| P95 Latency | <100us | <100us |
-| Cache Hit Rate | >90% | >90% |
-| Memory Usage | <100MB | <50MB |
-| CPU Overhead | <5% | <5% |
-| Platforms | 3 | 3 |
+| P95 Latency | <100us | Not measured |
+| Cache Hit Rate | >90% | Not measured |
+| Memory Usage | <50MB | Not measured |
+| CPU Overhead | <5% | Not measured |
+| Platforms | 3 | 1 enforcing (Linux); 2 experimental |
 
 ---
 
 ## Documentation
 
-- **[Quick Start](quick-start.md)** — Get warmor running in 5 minutes
+- **[Feature Status](STATUS.md)** — What ships on `main`, feature by feature
+- **[Quick Start](quick-start.md)** — Get warmor running on a Linux host
 - **[Architecture](architecture.md)** — System design and components
-- **[PRD](PRD.md)** — Product requirements, phase tracking, future roadmap, and detailed feature reference
-- **[Linux Guide](PLATFORM_LINUX.md)** — Production eBPF platform
-- **[Windows Guide](PLATFORM_WINDOWS.md)** — Beta ETW/eBPF platform
-- **[macOS Guide](PLATFORM_MACOS.md)** — Beta ESF platform
+- **[PRD](PRD.md)** — Product requirements, phase tracking, future roadmap
+- **[Linux Guide](PLATFORM_LINUX.md)** — eBPF platform
+- **[Windows Guide](PLATFORM_WINDOWS.md)** — Experimental ETW/eBPF platform
+- **[macOS Guide](PLATFORM_MACOS.md)** — Experimental ESF platform (detection only)
 - **[Security Posture](SECURITY_POSTURE.md)** — Fail-open vs fail-closed behavior
 - **[BPF Compatibility](BPF_COMPATIBILITY.md)** — Kernel version matrix
 
 ### Phase 9: Security Intelligence
-- **[Learning Mode](learning-mode.md)** — Live policy synthesis from container behavior
-- **[Policy Simulator](policy-simulator.md)** — Replay events against candidate policies
-- **[Supply Chain Integrity](supply-chain-integrity.md)** — Binary hash verification at exec time
-- **[Escape Detection](escape-detection.md)** — Container escape pattern detection
-- **[Canary Rollout](canary-rollout.md)** — Anomaly-based automatic rollback
-- **[Drift Detection](drift-detection.md)** — Fleet behavioral fingerprint comparison
-- **[Temporal Policies](temporal-policies.md)** — Time-dimension policy constraints
-- **[Attack Graph](attack-graph.md)** — MITRE ATT&CK kill-chain visualization
-- **[Blast Radius](blast-radius.md)** — Cross-container reachability analysis
+- **[Learning Mode](learning-mode.md)** — Shipped: policy synthesis from recorded events
+- **[Policy Simulator](policy-simulator.md)** — Shipped: replay events against candidate policies
+- **[Supply Chain Integrity](supply-chain-integrity.md)** — Partial: offline binary hash scan/verify
+- **[Escape Detection](escape-detection.md)** — Library only
+- **[Canary Rollout](canary-rollout.md)** — Manual rollouts shipped; auto-rollback library only
+- **[Drift Detection](drift-detection.md)** — Library only
+- **[Temporal Policies](temporal-policies.md)** — Library only
+- **[Attack Graph](attack-graph.md)** — Library only
+- **[Blast Radius](blast-radius.md)** — Library only
