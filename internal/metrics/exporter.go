@@ -7,116 +7,213 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// Metrics below are all updated by real code paths; a metric that nothing
+// can produce must not be exported (dashboards and alerts would silently
+// show nothing). See the Record*/Set* helpers for where each is fed.
 var (
+	// HookDecisions counts LSM hook outcomes the kernel reports to
+	// userspace (internal/platform): action="deny" for a policy_map deny
+	// hit (blocked, or logged in audit mode), action="pass" for an event
+	// sent up for userspace evaluation (map miss or audit-flagged allow).
+	// Map allow hits are decided in the kernel without an event.
 	HookDecisions = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "warmor",
 			Subsystem: "lsm",
 			Name:      "decisions_total",
-			Help:      "Total LSM hook decisions by hook type and action.",
+			Help:      "LSM hook outcomes reported by the kernel, by hook and action (deny = policy_map deny hit, pass = sent to userspace).",
 		},
 		[]string{"hook", "action"},
 	)
 
-	HookLatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: "warmor",
-			Subsystem: "lsm",
-			Name:      "decision_duration_seconds",
-			Help:      "Time taken for LSM hook decision in seconds.",
-			Buckets:   []float64{.000001, .000005, .00001, .00005, .0001, .0005, .001, .005, .01},
-		},
-		[]string{"hook"},
-	)
-
+	// PolicyLoads counts policy loads at startup and on reload.
 	PolicyLoads = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "warmor",
 			Subsystem: "policy",
 			Name:      "loads_total",
-			Help:      "Policy load attempts by status.",
+			Help:      "Policy load attempts by policy and status (success, error).",
 		},
 		[]string{"policy_id", "status"},
 	)
 
-	PolicyVersion = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: "warmor",
-			Subsystem: "policy",
-			Name:      "version",
-			Help:      "Currently active policy version.",
-		},
-		[]string{"policy_id"},
-	)
-
-	AgentHeartbeats = prometheus.NewCounter(
+	// AgentHeartbeats counts heartbeats sent to the policy server.
+	AgentHeartbeats = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "warmor",
 			Subsystem: "agent",
 			Name:      "heartbeats_total",
-			Help:      "Total heartbeats sent to policy server.",
+			Help:      "Heartbeats sent to the policy server, by status (success, error).",
 		},
+		[]string{"status"},
 	)
 
-	AgentRegistrations = prometheus.NewCounter(
+	// AgentLastHeartbeat is the Unix time of the last successful heartbeat.
+	// Only present on agents connected to a policy server.
+	AgentLastHeartbeat = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "warmor",
+			Subsystem: "agent",
+			Name:      "last_heartbeat_timestamp",
+			Help:      "Unix time of the last successful heartbeat to the policy server.",
+		},
+		[]string{"agent_id"},
+	)
+
+	// AgentRegistrations counts registration attempts with the policy server.
+	AgentRegistrations = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "warmor",
 			Subsystem: "agent",
 			Name:      "registrations_total",
-			Help:      "Total registration attempts.",
+			Help:      "Registration attempts with the policy server, by status (success, error).",
 		},
+		[]string{"status"},
 	)
 
+	// WASMExecDuration observes each WASM policy evaluation (cache misses).
 	WASMExecDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "warmor",
 			Subsystem: "wasm",
 			Name:      "exec_duration_seconds",
-			Help:      "WASM policy execution duration.",
-			Buckets:   prometheus.DefBuckets,
+			Help:      "WASM policy evaluation duration.",
+			Buckets:   []float64{.00001, .000025, .00005, .0001, .00025, .0005, .001, .0025, .005, .01, .025, .05, .1},
 		},
 		[]string{"policy_id"},
 	)
 
+	// WASMExecErrors counts failed evaluations (each denied, fail closed).
 	WASMExecErrors = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "warmor",
 			Subsystem: "wasm",
 			Name:      "exec_errors_total",
-			Help:      "WASM execution errors.",
+			Help:      "Failed WASM policy evaluations (denied, fail closed), by policy and kind (timeout, error).",
 		},
-		[]string{"policy_id"},
+		[]string{"policy_id", "kind"},
 	)
 
+	// EventsProcessed counts events handled by the enforcer by event type.
 	EventsProcessed = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "warmor",
 			Subsystem: "events",
 			Name:      "processed_total",
-			Help:      "Events processed from ring buffer by type.",
+			Help:      "Events processed by the enforcer, by event type.",
 		},
 		[]string{"event_type"},
 	)
 
+	// EventsDropped counts events a platform monitor discarded because the
+	// enforcer's event channel was full (Windows eBPF and ETW consumers;
+	// the Linux readers block instead of dropping).
 	EventsDropped = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: "warmor",
 			Subsystem: "events",
 			Name:      "dropped_total",
-			Help:      "Events dropped due to processing backpressure.",
+			Help:      "Events discarded by the platform monitor because the enforcer could not keep up.",
 		},
 	)
 
+	// MapEntries is the number of entries in a kernel map, refreshed
+	// periodically by the enforcer.
 	MapEntries = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "warmor",
 			Subsystem: "ebpf",
 			Name:      "map_entries",
-			Help:      "Number of entries in BPF maps.",
+			Help:      "Number of entries in kernel BPF maps.",
 		},
 		[]string{"map_name"},
 	)
+
+	// EBPFLoaderStatus is 1 when the platform's kernel monitor loaded with
+	// the requested enforcement, 0 when it runs degraded (kernel LSM
+	// enforcement was requested but is not active).
+	EBPFLoaderStatus = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "warmor",
+			Subsystem: "ebpf",
+			Name:      "loader_status",
+			Help:      "1 if the kernel monitor loaded with the requested enforcement, 0 if degraded (e.g. LSM enforcement requested but unavailable).",
+		},
+	)
 )
+
+// Status label values.
+const (
+	StatusSuccess = "success"
+	StatusError   = "error"
+)
+
+func status(err error) string {
+	if err != nil {
+		return StatusError
+	}
+	return StatusSuccess
+}
+
+// RecordLSMDecision counts one kernel-reported LSM hook outcome.
+func RecordLSMDecision(hook, action string) {
+	HookDecisions.WithLabelValues(hook, action).Inc()
+}
+
+// RecordPolicyLoad counts one policy load attempt.
+func RecordPolicyLoad(policyID string, err error) {
+	PolicyLoads.WithLabelValues(policyID, status(err)).Inc()
+}
+
+// RecordHeartbeat counts one heartbeat and, on success, records its time.
+func RecordHeartbeat(agentID string, err error) {
+	AgentHeartbeats.WithLabelValues(status(err)).Inc()
+	if err == nil {
+		AgentLastHeartbeat.WithLabelValues(agentID).SetToCurrentTime()
+	}
+}
+
+// RecordRegistration counts one registration attempt.
+func RecordRegistration(err error) {
+	AgentRegistrations.WithLabelValues(status(err)).Inc()
+}
+
+// RecordWASMExec records one policy evaluation. timedOut distinguishes
+// deadline failures from other errors.
+func RecordWASMExec(policyID string, seconds float64, err error, timedOut bool) {
+	WASMExecDuration.WithLabelValues(policyID).Observe(seconds)
+	if err != nil {
+		kind := "error"
+		if timedOut {
+			kind = "timeout"
+		}
+		WASMExecErrors.WithLabelValues(policyID, kind).Inc()
+	}
+}
+
+// RecordEventProcessed counts one event handled by the enforcer.
+func RecordEventProcessed(eventType string) {
+	EventsProcessed.WithLabelValues(eventType).Inc()
+}
+
+// RecordEventDropped counts one event discarded under backpressure.
+func RecordEventDropped() {
+	EventsDropped.Inc()
+}
+
+// SetMapEntries sets the entry count of a kernel map.
+func SetMapEntries(mapName string, n int) {
+	MapEntries.WithLabelValues(mapName).Set(float64(n))
+}
+
+// SetEBPFLoaderStatus records whether the kernel monitor is fully loaded.
+func SetEBPFLoaderStatus(ok bool) {
+	if ok {
+		EBPFLoaderStatus.Set(1)
+	} else {
+		EBPFLoaderStatus.Set(0)
+	}
+}
 
 // Outcomes of syncing a userspace decision into the kernel policy map.
 const (
@@ -153,16 +250,16 @@ func RecordPolicyMapSync(result string) {
 func init() {
 	prometheus.MustRegister(
 		HookDecisions,
-		HookLatency,
 		PolicyLoads,
-		PolicyVersion,
 		AgentHeartbeats,
+		AgentLastHeartbeat,
 		AgentRegistrations,
 		WASMExecDuration,
 		WASMExecErrors,
 		EventsProcessed,
 		EventsDropped,
 		MapEntries,
+		EBPFLoaderStatus,
 		PolicyMapSyncs,
 	)
 }

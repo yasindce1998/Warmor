@@ -135,6 +135,12 @@ type Event struct {
 	Family     uint16
 	Timestamp  time.Time
 	CgroupID   uint64
+
+	// LSM ring buffer events only: the raw hook event type
+	// (EventTypeExec, ...) and the kernel's decision (1 = policy_map deny
+	// hit, 0 = sent up for userspace evaluation).
+	LSMHook     uint8
+	LSMDecision uint8
 }
 
 func nullTerminatedString(b []byte) string {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -99,6 +100,7 @@ type Enforcer struct {
 	policyPath     string
 	verifyKey      ed25519.PublicKey
 	evalTimeout    time.Duration
+	policyID       string // metrics label (see policyID()); guarded by evaluatorMu
 	syncFailLog    logLimiter
 	auditMode      bool
 	learningMode   bool
@@ -182,6 +184,9 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	logger.LogInfo(fmt.Sprintf("✓ %s platform loaded", plat.Name()))
 
 	caps := plat.Capabilities()
+	// Degraded if kernel LSM enforcement was asked for but is not active
+	// (RequireLSM already failed Load in that case).
+	metrics.SetEBPFLoaderStatus(caps.LSMEnforcement || !opts.LSMEnforce)
 	var policyMapSyncer PolicyMapSyncer
 	if caps.LSMEnforcement {
 		logger.LogInfo("✓ LSM-BPF kernel enforcement active")
@@ -203,6 +208,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	logger.LogInfo("✓ WASM runtime created (compilation cache enabled)")
 
 	// Load policy (supports both .wasm and .yaml/.yml)
+	pid := policyID(policyPath)
 	logger.LogInfo(fmt.Sprintf("Loading policy from: %s", policyPath))
 	if verifiedPolicy != nil {
 		if err := wasmRuntime.LoadPolicyBytes(ctx, verifiedPolicy); err != nil {
@@ -213,12 +219,14 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	} else if wasm.IsYAMLPolicy(policyPath) {
 		logger.LogInfo("Detected YAML policy, compiling...")
 		if err := wasmRuntime.LoadPolicyFromYAML(ctx, policyPath); err != nil {
+			metrics.RecordPolicyLoad(pid, err)
 			wasmRuntime.Close(ctx)
 			plat.Close()
 			return nil, fmt.Errorf("load YAML policy: %w", err)
 		}
 	} else {
 		if err := wasmRuntime.LoadPolicy(ctx, policyPath); err != nil {
+			metrics.RecordPolicyLoad(pid, err)
 			wasmRuntime.Close(ctx)
 			plat.Close()
 			return nil, fmt.Errorf("load policy: %w", err)
@@ -230,6 +238,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	poolSize := runtime.NumCPU()
 	logger.LogInfo(fmt.Sprintf("Creating policy instance pool (size=%d)...", poolSize))
 	pool, err := wasm.NewPool(ctx, wasmRuntime, poolSize)
+	metrics.RecordPolicyLoad(pid, err)
 	if err != nil {
 		wasmRuntime.Close(ctx)
 		plat.Close()
@@ -296,6 +305,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		sandbox:        sandboxMgr,
 		policyPath:     policyPath,
 		verifyKey:      opts.PolicyVerifyKey,
+		policyID:       pid,
 		evalTimeout:    opts.EvalTimeout,
 		auditMode:      opts.AuditMode,
 		learningMode:   opts.LearningMode,
@@ -321,6 +331,11 @@ func (e *Enforcer) Start() error {
 	e.wg.Add(1)
 	go e.eventLoop()
 
+	if _, ok := e.policyMap.(policyMapCounter); ok {
+		e.wg.Add(1)
+		go e.mapEntriesLoop(mapEntriesInterval)
+	}
+
 	e.logger.LogInfo("Enforcer started, processing events...")
 	return nil
 }
@@ -345,6 +360,8 @@ func (e *Enforcer) eventLoop() {
 
 // handleEvent processes a single event with caching and metrics
 func (e *Enforcer) handleEvent(event *api.Event) {
+	metrics.RecordEventProcessed(event.GetType().String())
+
 	// Record process exec in lineage tracker
 	if event.GetType() == api.EventTypeProcess {
 		filename := event.Filename
@@ -453,9 +470,12 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	e.evaluatorMu.RLock()
 	evaluator := e.evaluator
 	gen := e.policyGen.Load()
+	pid := e.policyID
 	e.evaluatorMu.RUnlock()
 
+	evalStart := time.Now()
 	result, err := evaluator.Evaluate(e.ctx, event)
+	metrics.RecordWASMExec(pid, time.Since(evalStart).Seconds(), err, errors.Is(err, wasm.ErrEvaluationTimeout))
 	if err != nil {
 		e.logger.LogError(err, "policy evaluation failed")
 		metrics.RecordProcessingError()
@@ -522,6 +542,50 @@ func decisionDeterminedByKernelKey(pm PolicyMapSyncer, t api.EventType, fieldsRe
 		return false
 	}
 	return fieldsRead&^compiler.FieldMask(keyFields...) == 0
+}
+
+// policyID is the policy_id metrics label for a policy file: its base name.
+func policyID(path string) string {
+	if path == "" {
+		return "unknown"
+	}
+	return filepath.Base(path)
+}
+
+// policyMapCounter is implemented by policy maps that can report their size
+// (Linux PolicyMapManager.Stats).
+type policyMapCounter interface {
+	Stats() (int, error)
+}
+
+// mapEntriesInterval is how often warmor_ebpf_map_entries is refreshed;
+// counting iterates the whole map, so it is not done per event.
+const mapEntriesInterval = 15 * time.Second
+
+// updateMapEntries refreshes warmor_ebpf_map_entries{map_name="policy_map"}.
+func (e *Enforcer) updateMapEntries() {
+	pc, ok := e.policyMap.(policyMapCounter)
+	if !ok {
+		return
+	}
+	if n, err := pc.Stats(); err == nil {
+		metrics.SetMapEntries("policy_map", n)
+	}
+}
+
+func (e *Enforcer) mapEntriesLoop(interval time.Duration) {
+	defer e.wg.Done()
+	e.updateMapEntries()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-t.C:
+			e.updateMapEntries()
+		}
+	}
 }
 
 // persistDecision stores a policy decision in the decision cache and, when
@@ -770,48 +834,11 @@ func (e *Enforcer) PrintStats() {
 func (e *Enforcer) ReloadPolicy() error {
 	e.logger.LogInfo(fmt.Sprintf("Reloading policy from: %s", e.policyPath))
 
-	var verifiedPolicy []byte
-	if e.verifyKey != nil {
-		data, err := ReadVerifiedPolicy(e.policyPath, e.verifyKey)
-		if err != nil {
-			return fmt.Errorf("verify new policy: %w", err)
-		}
-		verifiedPolicy = data
-	}
-
-	// Create new runtime with compilation cache
-	newRuntime, err := wasm.NewRuntime(e.ctx, wasm.RuntimeConfig{
-		CacheDir: wasm.DefaultCacheDir(),
-		PoolSize: runtime.NumCPU(),
-	})
+	pid := policyID(e.policyPath)
+	newRuntime, newPool, err := e.loadPolicy()
+	metrics.RecordPolicyLoad(pid, err)
 	if err != nil {
-		return fmt.Errorf("create new runtime: %w", err)
-	}
-
-	// Load new policy (supports both .wasm and .yaml/.yml)
-	if verifiedPolicy != nil {
-		if err := newRuntime.LoadPolicyBytes(e.ctx, verifiedPolicy); err != nil {
-			newRuntime.Close(e.ctx)
-			return fmt.Errorf("load new policy: %w", err)
-		}
-	} else if wasm.IsYAMLPolicy(e.policyPath) {
-		if err := newRuntime.LoadPolicyFromYAML(e.ctx, e.policyPath); err != nil {
-			newRuntime.Close(e.ctx)
-			return fmt.Errorf("load new YAML policy: %w", err)
-		}
-	} else {
-		if err := newRuntime.LoadPolicy(e.ctx, e.policyPath); err != nil {
-			newRuntime.Close(e.ctx)
-			return fmt.Errorf("load new policy: %w", err)
-		}
-	}
-
-	// Create new pool
-	poolSize := runtime.NumCPU()
-	newPool, err := wasm.NewPool(e.ctx, newRuntime, poolSize)
-	if err != nil {
-		newRuntime.Close(e.ctx)
-		return fmt.Errorf("create new policy pool: %w", err)
+		return err
 	}
 
 	// Create new evaluator
@@ -827,6 +854,7 @@ func (e *Enforcer) ReloadPolicy() error {
 	e.evaluator = newEvaluator
 	e.pool = newPool
 	e.wasmRuntime = newRuntime
+	e.policyID = pid
 	e.policyGen.Add(1)
 	e.evaluatorMu.Unlock()
 
@@ -843,6 +871,7 @@ func (e *Enforcer) ReloadPolicy() error {
 		clearErr = e.policyMap.Clear()
 	}
 	e.decisionMu.Unlock()
+	e.updateMapEntries()
 
 	// Clean up old resources
 	if oldEvaluator != nil {
@@ -864,6 +893,56 @@ func (e *Enforcer) ReloadPolicy() error {
 	}
 	e.logger.LogInfo("✓ Policy reloaded successfully")
 	return nil
+}
+
+// loadPolicy compiles e.policyPath into a fresh runtime and instance pool.
+func (e *Enforcer) loadPolicy() (*wasm.Runtime, *wasm.Pool, error) {
+	// With a verify key, read the file once, verify it and load exactly
+	// those bytes, before creating anything.
+	var verifiedPolicy []byte
+	if e.verifyKey != nil {
+		data, err := ReadVerifiedPolicy(e.policyPath, e.verifyKey)
+		if err != nil {
+			return nil, nil, fmt.Errorf("verify new policy: %w", err)
+		}
+		verifiedPolicy = data
+	}
+
+	// Create new runtime with compilation cache
+	newRuntime, err := wasm.NewRuntime(e.ctx, wasm.RuntimeConfig{
+		CacheDir: wasm.DefaultCacheDir(),
+		PoolSize: runtime.NumCPU(),
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("create new runtime: %w", err)
+	}
+
+	// Load new policy (supports both .wasm and .yaml/.yml)
+	if verifiedPolicy != nil {
+		if err := newRuntime.LoadPolicyBytes(e.ctx, verifiedPolicy); err != nil {
+			newRuntime.Close(e.ctx)
+			return nil, nil, fmt.Errorf("load new policy: %w", err)
+		}
+	} else if wasm.IsYAMLPolicy(e.policyPath) {
+		if err := newRuntime.LoadPolicyFromYAML(e.ctx, e.policyPath); err != nil {
+			newRuntime.Close(e.ctx)
+			return nil, nil, fmt.Errorf("load new YAML policy: %w", err)
+		}
+	} else {
+		if err := newRuntime.LoadPolicy(e.ctx, e.policyPath); err != nil {
+			newRuntime.Close(e.ctx)
+			return nil, nil, fmt.Errorf("load new policy: %w", err)
+		}
+	}
+
+	// Create new pool
+	poolSize := runtime.NumCPU()
+	newPool, err := wasm.NewPool(e.ctx, newRuntime, poolSize)
+	if err != nil {
+		newRuntime.Close(e.ctx)
+		return nil, nil, fmt.Errorf("create new policy pool: %w", err)
+	}
+	return newRuntime, newPool, nil
 }
 
 // NetFilter returns the enforcer's network filter (nil if not configured).

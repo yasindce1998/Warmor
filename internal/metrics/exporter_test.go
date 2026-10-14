@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -36,18 +37,18 @@ func getGaugeVecValue(gv *prometheus.GaugeVec, labels ...string) float64 {
 }
 
 func TestExporterMetricsRegistered(t *testing.T) {
-	// Touch every vector so it emits at least one series.
-	HookDecisions.WithLabelValues("bprm_check", "deny").Inc()
-	HookLatency.WithLabelValues("bprm_check").Observe(0.00001)
-	PolicyLoads.WithLabelValues("p1", "ok").Inc()
-	PolicyVersion.WithLabelValues("p1").Set(3)
-	AgentHeartbeats.Inc()
-	AgentRegistrations.Inc()
-	WASMExecDuration.WithLabelValues("p1").Observe(0.001)
-	WASMExecErrors.WithLabelValues("p1").Inc()
-	EventsProcessed.WithLabelValues("exec").Inc()
-	EventsDropped.Inc()
-	MapEntries.WithLabelValues("policy_map").Set(7)
+	// Touch every vector through its Record*/Set* helper so it emits at
+	// least one series.
+	RecordLSMDecision("exec", "deny")
+	RecordPolicyLoad("p1", nil)
+	RecordHeartbeat("agent-1", nil)
+	RecordRegistration(nil)
+	RecordWASMExec("p1", 0.001, errors.New("trap"), false)
+	RecordEventProcessed("PROCESS")
+	RecordEventDropped()
+	SetMapEntries("policy_map", 7)
+	SetEBPFLoaderStatus(true)
+	RecordPolicyMapSync(SyncSynced)
 
 	families, err := prometheus.DefaultGatherer.Gather()
 	if err != nil {
@@ -60,56 +61,88 @@ func TestExporterMetricsRegistered(t *testing.T) {
 
 	want := []string{
 		"warmor_lsm_decisions_total",
-		"warmor_lsm_decision_duration_seconds",
 		"warmor_policy_loads_total",
-		"warmor_policy_version",
 		"warmor_agent_heartbeats_total",
+		"warmor_agent_last_heartbeat_timestamp",
 		"warmor_agent_registrations_total",
 		"warmor_wasm_exec_duration_seconds",
 		"warmor_wasm_exec_errors_total",
 		"warmor_events_processed_total",
 		"warmor_events_dropped_total",
 		"warmor_ebpf_map_entries",
+		"warmor_ebpf_loader_status",
+		"warmor_policy_map_syncs_total",
 	}
 	for _, n := range want {
 		if !names[n] {
 			t.Errorf("metric %q not registered with default gatherer", n)
 		}
 	}
+	// Metrics nothing can produce were removed rather than left empty.
+	for _, n := range []string{
+		"warmor_lsm_decision_duration_seconds",
+		"warmor_policy_version",
+	} {
+		if names[n] {
+			t.Errorf("metric %q is exported but nothing updates it", n)
+		}
+	}
 }
 
 func TestExporterMetricValues(t *testing.T) {
-	before := getCounterVecValue(HookDecisions, "file_open", "allow")
-	HookDecisions.WithLabelValues("file_open", "allow").Add(2)
-	if got := getCounterVecValue(HookDecisions, "file_open", "allow"); got != before+2 {
+	before := getCounterVecValue(HookDecisions, "file", "pass")
+	RecordLSMDecision("file", "pass")
+	RecordLSMDecision("file", "pass")
+	if got := getCounterVecValue(HookDecisions, "file", "pass"); got != before+2 {
 		t.Errorf("HookDecisions = %v, want %v", got, before+2)
 	}
 
-	hb := getHistogramVecCount(HookLatency, "file_open")
-	HookLatency.WithLabelValues("file_open").Observe(0.0001)
-	if got := getHistogramVecCount(HookLatency, "file_open"); got != hb+1 {
-		t.Errorf("HookLatency count = %d, want %d", got, hb+1)
+	loadErr := getCounterVecValue(PolicyLoads, "p2", StatusError)
+	RecordPolicyLoad("p2", errors.New("bad"))
+	if got := getCounterVecValue(PolicyLoads, "p2", StatusError); got != loadErr+1 {
+		t.Errorf("PolicyLoads{error} = %v, want %v", got, loadErr+1)
 	}
 
-	PolicyVersion.WithLabelValues("p2").Set(42)
-	if got := getGaugeVecValue(PolicyVersion, "p2"); got != 42 {
-		t.Errorf("PolicyVersion = %v, want 42", got)
+	hbErr := getCounterVecValue(AgentHeartbeats, StatusError)
+	RecordHeartbeat("a2", errors.New("down"))
+	if got := getCounterVecValue(AgentHeartbeats, StatusError); got != hbErr+1 {
+		t.Errorf("AgentHeartbeats{error} = %v, want %v", got, hbErr+1)
+	}
+	if got := getGaugeVecValue(AgentLastHeartbeat, "a2"); got != 0 {
+		t.Errorf("failed heartbeat set the timestamp to %v", got)
+	}
+	RecordHeartbeat("a2", nil)
+	if got := getGaugeVecValue(AgentLastHeartbeat, "a2"); got < 1e9 {
+		t.Errorf("last heartbeat timestamp = %v, want current Unix time", got)
 	}
 
-	MapEntries.WithLabelValues("m").Set(5)
+	execs := getHistogramVecCount(WASMExecDuration, "p3")
+	timeouts := getCounterVecValue(WASMExecErrors, "p3", "timeout")
+	RecordWASMExec("p3", 0.05, errors.New("deadline"), true)
+	if got := getHistogramVecCount(WASMExecDuration, "p3"); got != execs+1 {
+		t.Errorf("WASMExecDuration count = %d, want %d", got, execs+1)
+	}
+	if got := getCounterVecValue(WASMExecErrors, "p3", "timeout"); got != timeouts+1 {
+		t.Errorf("WASMExecErrors{timeout} = %v, want %v", got, timeouts+1)
+	}
+
+	SetMapEntries("m", 5)
 	if got := getGaugeVecValue(MapEntries, "m"); got != 5 {
 		t.Errorf("MapEntries = %v, want 5", got)
 	}
 
-	dropped := getCounterValue(EventsDropped)
-	EventsDropped.Inc()
-	if got := getCounterValue(EventsDropped); got != dropped+1 {
-		t.Errorf("EventsDropped = %v, want %v", got, dropped+1)
+	SetEBPFLoaderStatus(false)
+	if got := getGaugeValue(EBPFLoaderStatus); got != 0 {
+		t.Errorf("EBPFLoaderStatus = %v, want 0", got)
+	}
+	SetEBPFLoaderStatus(true)
+	if got := getGaugeValue(EBPFLoaderStatus); got != 1 {
+		t.Errorf("EBPFLoaderStatus = %v, want 1", got)
 	}
 }
 
 func TestHandler_ServesMetrics(t *testing.T) {
-	AgentHeartbeats.Inc()
+	RecordHeartbeat("agent-h", nil)
 	srv := httptest.NewServer(Handler())
 	defer srv.Close()
 

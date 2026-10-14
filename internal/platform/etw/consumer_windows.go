@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/internal/platform/winutil"
 	"github.com/yasindce1998/warmor/pkg/api"
 	"golang.org/x/sys/windows"
@@ -235,6 +236,7 @@ func eventRecordCallback(rec *eventRecord) uintptr {
 		c.emitted.Add(1)
 	default:
 		c.dropped.Add(1)
+		metrics.RecordEventDropped()
 	}
 	return 0
 }

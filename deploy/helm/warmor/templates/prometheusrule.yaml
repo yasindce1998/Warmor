@@ -49,7 +49,27 @@ spec:
           labels:
             severity: {{ .Values.alerting.rules.ebpfLoaderFailure.severity }}
           annotations:
-            summary: "eBPF programs failed to load on {{ "{{" }} $labels.instance {{ "}}" }}"
-            description: "Warmor eBPF loader has been in a failed state for more than {{ .Values.alerting.rules.ebpfLoaderFailure.for }}."
+            summary: "Kernel enforcement not active on {{ "{{" }} $labels.instance {{ "}}" }}"
+            description: "Warmor was started with kernel LSM enforcement (--lsm-enforce) but it is not active; only userspace enforcement has been running for more than {{ .Values.alerting.rules.ebpfLoaderFailure.for }}."
+        {{- end }}
+        {{- if .Values.alerting.rules.wasmEvaluationErrors.enabled }}
+        - alert: WarmorWASMEvaluationErrors
+          expr: sum(rate(warmor_wasm_exec_errors_total[5m])) by (instance, policy_id, kind) > {{ .Values.alerting.rules.wasmEvaluationErrors.threshold }}
+          for: {{ .Values.alerting.rules.wasmEvaluationErrors.for }}
+          labels:
+            severity: {{ .Values.alerting.rules.wasmEvaluationErrors.severity }}
+          annotations:
+            summary: "WASM policy evaluations failing on {{ "{{" }} $labels.instance {{ "}}" }}"
+            description: "Policy {{ "{{" }} $labels.policy_id {{ "}}" }} evaluations fail ({{ "{{" }} $labels.kind {{ "}}" }}); each failure is denied (fail closed)."
+        {{- end }}
+        {{- if .Values.alerting.rules.policyMapSyncFailures.enabled }}
+        - alert: WarmorPolicyMapSyncFailures
+          expr: sum(rate(warmor_policy_map_syncs_total{result="failed"}[5m])) by (instance) > 0
+          for: {{ .Values.alerting.rules.policyMapSyncFailures.for }}
+          labels:
+            severity: {{ .Values.alerting.rules.policyMapSyncFailures.severity }}
+          annotations:
+            summary: "Kernel policy map writes failing on {{ "{{" }} $labels.instance {{ "}}" }}"
+            description: "Decisions cannot be written to the kernel policy map; they are still enforced in userspace, without the kernel fast path."
         {{- end }}
 {{- end }}

@@ -468,14 +468,14 @@
         "defaults": {
           "color": { "mode": "palette-classic" },
           "custom": {
-            "axisLabel": "latency",
+            "axisLabel": "syncs/sec",
             "drawStyle": "line",
             "fillOpacity": 10,
             "lineWidth": 2,
             "showPoints": "never",
             "spanNulls": true
           },
-          "unit": "s"
+          "unit": "ops"
         }
       },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 },
@@ -486,17 +486,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(warmor_lsm_decision_duration_seconds_bucket[5m])) by (hook, le))",
-          "legendFormat": "{{hook}} p99",
+          "expr": "sum(rate(warmor_policy_map_syncs_total[5m])) by (result)",
+          "legendFormat": "{{result}}",
           "refId": "A"
-        },
-        {
-          "expr": "histogram_quantile(0.50, sum(rate(warmor_lsm_decision_duration_seconds_bucket[5m])) by (hook, le))",
-          "legendFormat": "{{hook}} p50",
-          "refId": "B"
         }
       ],
-      "title": "LSM Hook Latency (p50/p99)",
+      "title": "Kernel Policy Map Syncs",
       "type": "timeseries"
     },
     {
@@ -562,8 +557,8 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(warmor_wasm_exec_errors_total[5m])) by (policy_id)",
-          "legendFormat": "{{policy_id}}",
+          "expr": "sum(rate(warmor_wasm_exec_errors_total[5m])) by (policy_id, kind)",
+          "legendFormat": "{{policy_id}} {{kind}}",
           "refId": "A"
         }
       ],
@@ -592,8 +587,8 @@
       },
       "targets": [
         {
-          "expr": "rate(warmor_agent_heartbeats_total[5m])",
-          "legendFormat": "Heartbeats/s",
+          "expr": "sum(rate(warmor_agent_heartbeats_total[5m])) by (status)",
+          "legendFormat": "{{status}}/s",
           "refId": "A"
         }
       ],
@@ -622,8 +617,8 @@
       },
       "targets": [
         {
-          "expr": "warmor_agent_registrations_total",
-          "legendFormat": "Registrations",
+          "expr": "sum(warmor_agent_registrations_total) by (status)",
+          "legendFormat": "{{status}}",
           "refId": "A"
         }
       ],
@@ -704,7 +699,25 @@
             ]
           },
           "unit": "ops"
-        }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "C" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "green", "value": 1 }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 50 },
       "id": 30,
@@ -714,9 +727,14 @@
       },
       "targets": [
         {
-          "expr": "rate(warmor_events_dropped_total[5m])",
+          "expr": "sum(rate(warmor_events_dropped_total[5m]))",
           "legendFormat": "Dropped/sec",
           "refId": "A"
+        },
+        {
+          "expr": "min(warmor_ebpf_loader_status)",
+          "legendFormat": "Kernel enforcement OK (1) / degraded (0)",
+          "refId": "C"
         },
         {
           "expr": "sum(rate(warmor_policy_loads_total{status=\"error\"}[5m]))",
@@ -724,7 +742,7 @@
           "refId": "B"
         }
       ],
-      "title": "Drops & Policy Errors",
+      "title": "Drops, Policy Errors & Loader Status",
       "type": "stat"
     }
   ],

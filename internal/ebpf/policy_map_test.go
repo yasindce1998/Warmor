@@ -130,3 +130,23 @@ func TestPolicyMapIsLRU(t *testing.T) {
 		}
 	}
 }
+
+func TestLSMEventCarriesHookAndDecision(t *testing.T) {
+	raw := LSMEvent{EventType: EventTypeBind, Decision: ActionDeny}
+	ev := raw.ToEvent()
+	if ev.LSMHook != EventTypeBind || ev.LSMDecision != ActionDeny {
+		t.Fatalf("hook/decision = %d/%d", ev.LSMHook, ev.LSMDecision)
+	}
+	if LSMHookName(ev.LSMHook) != "bind" || LSMDecisionAction(ev.LSMDecision) != "deny" {
+		t.Fatalf("labels = %s/%s", LSMHookName(ev.LSMHook), LSMDecisionAction(ev.LSMDecision))
+	}
+	if LSMDecisionAction(0) != "pass" || LSMHookName(99) != "unknown" {
+		t.Fatal("pass/unknown labels")
+	}
+	for et, want := range map[uint8]string{EventTypeExec: "exec", EventTypeFile: "file", EventTypeNetwork: "connect",
+		EventTypeListen: "listen", EventTypePtrace: "ptrace", EventTypeMount: "mount"} {
+		if got := LSMHookName(et); got != want {
+			t.Errorf("LSMHookName(%d) = %q, want %q", et, got, want)
+		}
+	}
+}

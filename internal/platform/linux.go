@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/yasindce1998/warmor/internal/ebpf"
+	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -340,6 +341,7 @@ func (p *LinuxPlatform) monitorLSMEvents(ctx context.Context) {
 		if err != nil {
 			continue
 		}
+		metrics.RecordLSMDecision(ebpf.LSMHookName(ev.LSMHook), ebpf.LSMDecisionAction(ev.LSMDecision))
 
 		event := &api.Event{
 			Type:     api.EventType(ev.Kind),

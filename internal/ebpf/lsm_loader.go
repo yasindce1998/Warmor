@@ -57,6 +57,9 @@ func (e *LSMEvent) ToEvent() Event {
 		Filename:  nullTerminatedString(e.Filename[:]),
 		Timestamp: bootTimeToWallClock(e.Timestamp),
 		CgroupID:  e.CgroupID,
+
+		LSMHook:     e.EventType,
+		LSMDecision: e.Decision,
 	}
 
 	switch e.EventType {
@@ -87,6 +90,37 @@ func (e *LSMEvent) ToEvent() Event {
 	}
 
 	return ev
+}
+
+// LSMHookName names an LSM event type for metrics labels.
+func LSMHookName(eventType uint8) string {
+	switch eventType {
+	case EventTypeExec:
+		return "exec"
+	case EventTypeFile:
+		return "file"
+	case EventTypeNetwork:
+		return "connect"
+	case EventTypeBind:
+		return "bind"
+	case EventTypeListen:
+		return "listen"
+	case EventTypePtrace:
+		return "ptrace"
+	case EventTypeMount:
+		return "mount"
+	default:
+		return "unknown"
+	}
+}
+
+// LSMDecisionAction maps the kernel's decision byte to the
+// warmor_lsm_decisions_total action label.
+func LSMDecisionAction(decision uint8) string {
+	if decision == ActionDeny {
+		return "deny"
+	}
+	return "pass"
 }
 
 // LSMLoader manages the lifecycle of LSM-BPF programs.

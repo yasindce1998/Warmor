@@ -18,6 +18,7 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 	"golang.org/x/sys/windows"
 
+	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/internal/platform/winutil"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -302,8 +303,19 @@ func (l *Loader) readLoop(ctx context.Context, rd *ringbuf.Reader, eventChan cha
 		case eventChan <- ev:
 		default:
 			l.dropped.Add(1)
+			metrics.RecordEventDropped()
 		}
 	}
+}
+
+// verdictAction maps a kernel verdict to the warmor_lsm_decisions_total
+// action label used on every platform: "deny" for a policy deny (blocked,
+// or only logged in audit mode), "pass" otherwise.
+func verdictAction(v Verdict) string {
+	if v == VerdictBlocked || v == VerdictAudit {
+		return "deny"
+	}
+	return "pass"
 }
 
 func (l *Loader) handle(decoded any) *api.Event {
@@ -314,6 +326,7 @@ func (l *Loader) handle(decoded any) *api.Event {
 			l.policy.ForgetProcess(r.PID)
 			return nil
 		}
+		metrics.RecordLSMDecision("exec", verdictAction(r.Verdict))
 		ts := time.Now()
 		if r.CreationTime > 0 {
 			ts = time.Unix(0, (r.CreationTime-116444736000000000)*100)
@@ -339,6 +352,7 @@ func (l *Loader) handle(decoded any) *api.Event {
 		return ev
 
 	case *NetworkRecord:
+		metrics.RecordLSMDecision(r.Operation(), verdictAction(r.Verdict))
 		ts := time.Now()
 		proc, _ := l.opts.Procs.Get(r.PID)
 		netEv := &api.NetworkEvent{
