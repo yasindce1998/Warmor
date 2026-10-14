@@ -41,7 +41,7 @@ func runValidatePolicy(path, verifyKeyPath string, stdout, stderr io.Writer) int
 	}
 	res, err := enforcer.ValidatePolicy(context.Background(), path, pub)
 	if err != nil {
-		fmt.Fprintf(stderr, "policy INVALID: %s: %v\n", path, err)
+		fmt.Fprintf(stderr, "policy INVALID: %v\n", err)
 		return 1
 	}
 	detail := "loaded in WASM runtime"
