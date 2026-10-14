@@ -18,7 +18,11 @@ import (
 func histCount(t *testing.T, h *prometheus.HistogramVec, labels ...string) uint64 {
 	t.Helper()
 	m := &dto.Metric{}
-	if err := h.WithLabelValues(labels...).(prometheus.Metric).Write(m); err != nil {
+	metric, ok := h.WithLabelValues(labels...).(prometheus.Metric)
+	if !ok {
+		t.Fatal("histogram observer is not a prometheus.Metric")
+	}
+	if err := metric.Write(m); err != nil {
 		t.Fatal(err)
 	}
 	return m.GetHistogram().GetSampleCount()

@@ -64,7 +64,7 @@ func TestLoadPolicyFromYAML_RecompilesWhenYAMLChanges(t *testing.T) {
 	if err := os.Chmod(policyDir, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(policyDir, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(policyDir, 0o755) })
 
 	loadYAML(t, cacheDir, yamlPath)
 	if *builds != 1 {
@@ -76,7 +76,9 @@ func TestLoadPolicyFromYAML_RecompilesWhenYAMLChanges(t *testing.T) {
 	}
 
 	// Edit the YAML: the new content must be compiled, not the old module.
-	os.Chmod(policyDir, 0o755)
+	if err := os.Chmod(policyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(yamlPath, []byte(
 		`name: cache-test
 version: 1
@@ -91,7 +93,9 @@ default_action: deny
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	os.Chmod(policyDir, 0o555)
+	if err := os.Chmod(policyDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
 	loadYAML(t, cacheDir, yamlPath)
 	if *builds != 2 {
 		t.Fatalf("edited YAML was not recompiled (builds = %d), want 2", *builds)

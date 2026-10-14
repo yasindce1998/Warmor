@@ -70,11 +70,11 @@ func TestSyncToPolicyMap_DropsDecisionFromReplacedPolicy(t *testing.T) {
 	gen := e.policyGen.Load()
 	e.policyGen.Add(1) // a reload happened while the evaluation was in flight
 
-	e.syncToPolicyMap(&api.Event{Filename: "/bin/sh"}, &api.ActionResult{Action: api.ActionAllow}, gen, 0)
+	_ = e.syncToPolicyMap(&api.Event{Filename: "/bin/sh"}, &api.ActionResult{Action: api.ActionAllow}, gen, 0)
 	if rules := pm.snapshot(); len(rules) != 0 {
 		t.Fatalf("stale-generation decision written to kernel map: %+v", rules)
 	}
-	e.syncToPolicyMap(&api.Event{Filename: "/bin/sh"}, &api.ActionResult{Action: api.ActionAllow}, e.policyGen.Load(), 0)
+	_ = e.syncToPolicyMap(&api.Event{Filename: "/bin/sh"}, &api.ActionResult{Action: api.ActionAllow}, e.policyGen.Load(), 0)
 	if len(pm.snapshot()) != 1 {
 		t.Fatal("current-generation decision not written")
 	}

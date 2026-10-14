@@ -903,7 +903,7 @@ func TestSyncToPolicyMap(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pm := &fakePolicyMap{}
 			e := &Enforcer{policyMap: pm}
-			e.syncToPolicyMap(tc.event, tc.result, 0, 0)
+			_ = e.syncToPolicyMap(tc.event, tc.result, 0, 0)
 
 			rules := pm.snapshot()
 			if tc.want == nil {
@@ -950,7 +950,9 @@ func TestSyncToPolicyMap_AuditModeFlagsRules(t *testing.T) {
 	// used to compile a hard deny (audit=false) into the kernel map.
 	pm := &fakePolicyMap{}
 	e := &Enforcer{policyMap: pm, auditMode: true}
-	e.syncToPolicyMap(&api.Event{CgroupID: 1, Filename: "/bin/sh"}, &api.ActionResult{Action: api.ActionDeny}, 0, 0)
+	if err := e.syncToPolicyMap(&api.Event{CgroupID: 1, Filename: "/bin/sh"}, &api.ActionResult{Action: api.ActionDeny}, 0, 0); err != nil {
+		t.Fatalf("syncToPolicyMap: %v", err)
+	}
 
 	rules := pm.snapshot()
 	want := policyRule{cgroupID: 1, eventType: 0, pattern: "/bin/sh", action: 1, audit: true}
@@ -967,7 +969,7 @@ func TestSyncToPolicyMap_NetworkUsesEndpointSyncer(t *testing.T) {
 		RemoteAddr: "10.0.0.1",
 		RemotePort: 443,
 	}}
-	e.syncToPolicyMap(event, &api.ActionResult{Action: api.ActionDeny}, 0, 0)
+	_ = e.syncToPolicyMap(event, &api.ActionResult{Action: api.ActionDeny}, 0, 0)
 
 	if rules := pm.snapshot(); len(rules) != 0 {
 		t.Errorf("network decision must not be written as a string rule: %+v", rules)
@@ -978,7 +980,7 @@ func TestSyncToPolicyMap_NetworkUsesEndpointSyncer(t *testing.T) {
 	}
 
 	// Non-network events still go through SetRule.
-	e.syncToPolicyMap(&api.Event{CgroupID: 9, Filename: "/bin/true"}, &api.ActionResult{Action: api.ActionAllow}, 0, 0)
+	_ = e.syncToPolicyMap(&api.Event{CgroupID: 9, Filename: "/bin/true"}, &api.ActionResult{Action: api.ActionAllow}, 0, 0)
 	if rules := pm.snapshot(); len(rules) != 1 || rules[0].pattern != "/bin/true" {
 		t.Errorf("rules = %+v, want one /bin/true rule", rules)
 	}

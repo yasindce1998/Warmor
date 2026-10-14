@@ -116,7 +116,7 @@ func (c *DecisionCache) Get(event *api.Event) (*api.ActionResult, bool) {
 		c.misses++
 		return nil, false
 	}
-	e := el.Value.(*entry)
+	e := entryOf(el)
 	if !c.now().Before(e.expiresAt) {
 		c.removeLocked(el)
 		c.misses++
@@ -143,7 +143,7 @@ func (c *DecisionCache) Put(event *api.Event, result *api.ActionResult) {
 	key := c.makeKey(event)
 	expires := c.now().Add(c.ttl)
 	if el, ok := c.items[key]; ok {
-		e := el.Value.(*entry)
+		e := entryOf(el)
 		e.result = *result
 		e.expiresAt = expires
 		c.lru.MoveToFront(el)
@@ -168,8 +168,15 @@ func (c *DecisionCache) clearLocked() {
 	c.lru.Init()
 }
 
+// entryOf returns the cache entry held by an LRU list element. The list only
+// ever holds *entry values.
+func entryOf(el *list.Element) *entry {
+	e, _ := el.Value.(*entry)
+	return e
+}
+
 func (c *DecisionCache) removeLocked(el *list.Element) {
-	delete(c.items, el.Value.(*entry).key)
+	delete(c.items, entryOf(el).key)
 	c.lru.Remove(el)
 }
 

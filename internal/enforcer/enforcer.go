@@ -602,7 +602,9 @@ func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, g
 
 	// Compile decision into BPF policy map for kernel fast-path
 	if e.policyMap != nil && !event.LSMEvent {
-		e.syncToPolicyMap(event, result, gen, evaluator.FieldsRead(event.GetType()))
+		// Failures are counted and rate-limit logged inside; the event
+		// itself is already enforced in userspace.
+		_ = e.syncToPolicyMap(event, result, gen, evaluator.FieldsRead(event.GetType()))
 	}
 }
 
