@@ -78,8 +78,28 @@ type policyRule struct {
 
 // fakePolicyMap records rules compiled into the (would-be) BPF policy map.
 type fakePolicyMap struct {
-	mu    sync.Mutex
-	rules []policyRule
+	mu       sync.Mutex
+	rules    []policyRule
+	clears   int
+	clearErr error
+}
+
+// Clear drops every recorded rule, like PolicyMapManager.Clear.
+func (f *fakePolicyMap) Clear() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clears++
+	if f.clearErr != nil {
+		return f.clearErr
+	}
+	f.rules = nil
+	return nil
+}
+
+func (f *fakePolicyMap) clearCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.clears
 }
 
 func (f *fakePolicyMap) SetRule(cgroupID uint64, eventType uint8, pattern string, action uint8, audit bool) error {
@@ -851,7 +871,7 @@ func TestSyncToPolicyMap(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pm := &fakePolicyMap{}
 			e := &Enforcer{policyMap: pm}
-			e.syncToPolicyMap(tc.event, tc.result)
+			e.syncToPolicyMap(tc.event, tc.result, 0)
 
 			rules := pm.snapshot()
 			if tc.want == nil {
@@ -898,7 +918,7 @@ func TestSyncToPolicyMap_AuditModeFlagsRules(t *testing.T) {
 	// used to compile a hard deny (audit=false) into the kernel map.
 	pm := &fakePolicyMap{}
 	e := &Enforcer{policyMap: pm, auditMode: true}
-	e.syncToPolicyMap(&api.Event{CgroupID: 1, Filename: "/bin/sh"}, &api.ActionResult{Action: api.ActionDeny})
+	e.syncToPolicyMap(&api.Event{CgroupID: 1, Filename: "/bin/sh"}, &api.ActionResult{Action: api.ActionDeny}, 0)
 
 	rules := pm.snapshot()
 	want := policyRule{cgroupID: 1, eventType: 0, pattern: "/bin/sh", action: 1, audit: true}
@@ -915,7 +935,7 @@ func TestSyncToPolicyMap_NetworkUsesEndpointSyncer(t *testing.T) {
 		RemoteAddr: "10.0.0.1",
 		RemotePort: 443,
 	}}
-	e.syncToPolicyMap(event, &api.ActionResult{Action: api.ActionDeny})
+	e.syncToPolicyMap(event, &api.ActionResult{Action: api.ActionDeny}, 0)
 
 	if rules := pm.snapshot(); len(rules) != 0 {
 		t.Errorf("network decision must not be written as a string rule: %+v", rules)
@@ -926,7 +946,7 @@ func TestSyncToPolicyMap_NetworkUsesEndpointSyncer(t *testing.T) {
 	}
 
 	// Non-network events still go through SetRule.
-	e.syncToPolicyMap(&api.Event{CgroupID: 9, Filename: "/bin/true"}, &api.ActionResult{Action: api.ActionAllow})
+	e.syncToPolicyMap(&api.Event{CgroupID: 9, Filename: "/bin/true"}, &api.ActionResult{Action: api.ActionAllow}, 0)
 	if rules := pm.snapshot(); len(rules) != 1 || rules[0].pattern != "/bin/true" {
 		t.Errorf("rules = %+v, want one /bin/true rule", rules)
 	}

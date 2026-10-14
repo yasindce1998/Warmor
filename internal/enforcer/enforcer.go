@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/cache"
@@ -52,6 +53,10 @@ type Options struct {
 // PolicyMapSyncer compiles WASM policy decisions into a kernel BPF map for fast-path enforcement.
 type PolicyMapSyncer interface {
 	SetRule(cgroupID uint64, eventType uint8, pattern string, action uint8, audit bool) error
+	// Clear removes every decision from the kernel map. It is called after a
+	// successful policy reload so the kernel never keeps enforcing decisions
+	// made by the previous policy.
+	Clear() error
 }
 
 // Enforcer integrates platform-specific event capture (eBPF/ETW/ESF) with
@@ -68,6 +73,15 @@ type Enforcer struct {
 	logger        *logging.Logger
 	metricsServer *metrics.Server
 	policyMap     PolicyMapSyncer
+	// policyMapMu orders kernel map writes against the clear on reload:
+	// syncs hold it shared, ReloadPolicy holds it exclusively while clearing.
+	policyMapMu sync.RWMutex
+	// policyGen is bumped (under evaluatorMu) every time a new policy is
+	// swapped in. A decision is only written to the kernel map if the policy
+	// that made it is still current, so an evaluation that was in flight
+	// during a reload cannot repopulate the map with a stale decision after
+	// it was cleared.
+	policyGen atomic.Uint64
 	pipeline      *streaming.Pipeline
 	lineageTracker *lineage.Tracker
 	netFilter     *NetFilter
@@ -413,6 +427,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	// Evaluate with policy
 	e.evaluatorMu.RLock()
 	evaluator := e.evaluator
+	gen := e.policyGen.Load()
 	e.evaluatorMu.RUnlock()
 
 	result, err := evaluator.Evaluate(e.ctx, event)
@@ -436,7 +451,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 
 		// Compile decision into BPF policy map for kernel fast-path
 		if e.policyMap != nil && !event.LSMEvent {
-			e.syncToPolicyMap(event, result)
+			e.syncToPolicyMap(event, result, gen)
 		}
 	}
 
@@ -487,7 +502,16 @@ type eventPolicyMapSyncer interface {
 // exactly (on Linux, file rules, since lsm/file_open only sees the dentry
 // basename and a basename rule would hit every same-named file), so a cached
 // decision never applies to events userspace did not evaluate.
-func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult) {
+//
+// gen is the policy generation that produced result; the write is dropped if
+// a reload has replaced that policy since.
+func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult, gen uint64) {
+	e.policyMapMu.RLock()
+	defer e.policyMapMu.RUnlock()
+	if e.policyGen.Load() != gen {
+		return
+	}
+
 	if es, ok := e.policyMap.(eventPolicyMapSyncer); ok {
 		action := uint8(0)
 		if result.Action == api.ActionDeny {
@@ -662,10 +686,23 @@ func (e *Enforcer) ReloadPolicy() error {
 	e.evaluator = newEvaluator
 	e.pool = newPool
 	e.wasmRuntime = newRuntime
+	e.policyGen.Add(1)
 	e.evaluatorMu.Unlock()
 
 	// Clear cache on policy reload
 	e.cache.Clear()
+
+	// Drop every decision the old policy compiled into the kernel map,
+	// otherwise the kernel keeps enforcing it until the entries are evicted.
+	// Holding policyMapMu exclusively waits out any sync already past its
+	// generation check; later syncs from the old policy see the bumped
+	// generation and are dropped.
+	var clearErr error
+	if e.policyMap != nil {
+		e.policyMapMu.Lock()
+		clearErr = e.policyMap.Clear()
+		e.policyMapMu.Unlock()
+	}
 
 	// Clean up old resources
 	if oldEvaluator != nil {
@@ -678,8 +715,14 @@ func (e *Enforcer) ReloadPolicy() error {
 		oldRuntime.Close(e.ctx)
 	}
 
-	e.logger.LogInfo("✓ Policy reloaded successfully")
 	metrics.SetPolicyInfo(e.policyPath, version.Version)
+	if clearErr != nil {
+		// The new policy is active in userspace, but stale kernel decisions
+		// may remain; surface it rather than report a clean reload.
+		e.logger.LogError(clearErr, "clear kernel policy map after reload")
+		return fmt.Errorf("policy reloaded, but clearing the kernel policy map failed (stale kernel decisions may remain): %w", clearErr)
+	}
+	e.logger.LogInfo("✓ Policy reloaded successfully")
 	return nil
 }
 
