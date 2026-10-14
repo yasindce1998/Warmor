@@ -71,8 +71,8 @@
 ### Phase 9: Security Intelligence — Mostly library-only
 - **Live Policy Synthesis** (`warmor-learn`) — shipped, offline from recorded events
 - **Policy Simulator** (`warmor-simulate`) — shipped. The daemon has no event-store sink, and the diff is broken for daemon-recorded events (decision case mismatch).
-- **Supply Chain Integrity** (`warmor-integrity-scan`) — offline scan and verify only. No runtime or kernel enforcement.
-- **Container Escape Detection** — library only
+- **Supply Chain Integrity** — in-kernel content-hash exec check (`--integrity-db`): **experimental**, not yet run on an IMA kernel in CI
+- **Container Escape Detection** — shipped (`--escape-detect`), detection after the fact
 - **Canary auto-rollback** — library only (manual rollouts are shipped)
 - **Drift Detection** — library only
 - **Temporal Policies** — library only. The YAML `temporal:` key is silently ignored.
@@ -127,8 +127,8 @@ These are **design targets, not measurements**. None has been benchmarked on `ma
 ### Phase 9: Security Intelligence
 - **[Learning Mode](learning-mode.md)** — Shipped: policy synthesis from recorded events
 - **[Policy Simulator](policy-simulator.md)** — Shipped: replay events against candidate policies
-- **[Supply Chain Integrity](supply-chain-integrity.md)** — Partial: offline binary hash scan/verify
-- **[Escape Detection](escape-detection.md)** — Library only
+- **[Supply Chain Integrity](supply-chain-integrity.md)** — Experimental: in-kernel exec integrity
+- **[Escape Detection](escape-detection.md)** — Shipped (`--escape-detect`)
 - **[Canary Rollout](canary-rollout.md)** — Manual rollouts shipped; auto-rollback library only
 - **[Drift Detection](drift-detection.md)** — Library only
 - **[Temporal Policies](temporal-policies.md)** — Library only
