@@ -2,6 +2,7 @@ package enforcer
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"os"
 	"runtime"
@@ -32,6 +33,12 @@ type Options struct {
 	// degrades to tracepoint-only observation.
 	RequireLSM bool
 	SkipLSM    bool
+
+	// PolicyVerifyKey, when set, makes every policy load (startup and
+	// ReloadPolicy) require a valid detached ed25519 signature at
+	// <policy>.sig. The policy file is read once, verified, and loaded from
+	// memory; YAML policies are refused.
+	PolicyVerifyKey ed25519.PublicKey
 
 	// Streaming pipeline configuration
 	StreamSinks []streaming.Sink
@@ -66,6 +73,7 @@ type Enforcer struct {
 	netFilter     *NetFilter
 	sandbox       *SandboxManager
 	policyPath    string
+	verifyKey     ed25519.PublicKey
 	auditMode     bool
 	learningMode  bool
 	ctx           context.Context
@@ -106,6 +114,18 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		netFilter = nf
 		logger.LogInfo(fmt.Sprintf("✓ Network filter active (%d CIDRs blocked, rate limit=%d/window)",
 			nf.BlocklistSize(), opts.NetFilterConfig.RateLimit))
+	}
+
+	// Verify the policy signature before acquiring any platform resource, so
+	// an unsigned or tampered policy never gets as far as loading BPF.
+	var verifiedPolicy []byte
+	if opts.PolicyVerifyKey != nil {
+		data, err := ReadVerifiedPolicy(policyPath, opts.PolicyVerifyKey)
+		if err != nil {
+			return nil, fmt.Errorf("verify policy: %w", err)
+		}
+		verifiedPolicy = data
+		logger.LogInfo("✓ Policy signature verified")
 	}
 
 	// Initialize the platform-specific monitor (eBPF on Linux, ETW on
@@ -149,7 +169,13 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 
 	// Load policy (supports both .wasm and .yaml/.yml)
 	logger.LogInfo(fmt.Sprintf("Loading policy from: %s", policyPath))
-	if wasm.IsYAMLPolicy(policyPath) {
+	if verifiedPolicy != nil {
+		if err := wasmRuntime.LoadPolicyBytes(ctx, verifiedPolicy); err != nil {
+			wasmRuntime.Close(ctx)
+			plat.Close()
+			return nil, fmt.Errorf("load policy: %w", err)
+		}
+	} else if wasm.IsYAMLPolicy(policyPath) {
 		logger.LogInfo("Detected YAML policy, compiling...")
 		if err := wasmRuntime.LoadPolicyFromYAML(ctx, policyPath); err != nil {
 			wasmRuntime.Close(ctx)
@@ -231,6 +257,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		netFilter:      netFilter,
 		sandbox:        sandboxMgr,
 		policyPath:     policyPath,
+		verifyKey:      opts.PolicyVerifyKey,
 		auditMode:      opts.AuditMode,
 		learningMode:   opts.LearningMode,
 		ctx:            ctx,
@@ -573,9 +600,20 @@ func (e *Enforcer) PrintStats() {
 	fmt.Println("========================")
 }
 
-// ReloadPolicy reloads the policy without stopping the enforcer
+// ReloadPolicy reloads the policy without stopping the enforcer. With a
+// verification key, a policy whose signature is missing or invalid is
+// refused and the current policy stays active.
 func (e *Enforcer) ReloadPolicy() error {
 	e.logger.LogInfo(fmt.Sprintf("Reloading policy from: %s", e.policyPath))
+
+	var verifiedPolicy []byte
+	if e.verifyKey != nil {
+		data, err := ReadVerifiedPolicy(e.policyPath, e.verifyKey)
+		if err != nil {
+			return fmt.Errorf("verify new policy: %w", err)
+		}
+		verifiedPolicy = data
+	}
 
 	// Create new runtime with compilation cache
 	newRuntime, err := wasm.NewRuntime(e.ctx, wasm.RuntimeConfig{
@@ -587,7 +625,12 @@ func (e *Enforcer) ReloadPolicy() error {
 	}
 
 	// Load new policy (supports both .wasm and .yaml/.yml)
-	if wasm.IsYAMLPolicy(e.policyPath) {
+	if verifiedPolicy != nil {
+		if err := newRuntime.LoadPolicyBytes(e.ctx, verifiedPolicy); err != nil {
+			newRuntime.Close(e.ctx)
+			return fmt.Errorf("load new policy: %w", err)
+		}
+	} else if wasm.IsYAMLPolicy(e.policyPath) {
 		if err := newRuntime.LoadPolicyFromYAML(e.ctx, e.policyPath); err != nil {
 			newRuntime.Close(e.ctx)
 			return fmt.Errorf("load new YAML policy: %w", err)
