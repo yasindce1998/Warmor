@@ -99,7 +99,7 @@ updates this page when it merges.
 | Temporal policies | Library-only | `internal/temporal` (enricher, guard) | Not wired into the enforcer. The YAML `temporal:` key is ignored. |
 | Attack graph (MITRE ATT&CK) | Library-only | `internal/attackgraph` | Not wired |
 | Blast radius | Library-only | `internal/blastradius` | Not wired |
-| Behavioural patterns | Library-only | `internal/patterns` | Not wired |
+| Pattern matcher helpers (glob/regex) | Library-only | `internal/patterns` | Not wired |
 | Network filter (`NetFilter`) | Library-only | `internal/enforcer/netfilter.go` | There are no flags to configure it |
 | Process sandbox (`ApplySandbox`) | Library-only | `internal/enforcer/sandbox*.go` | Nothing calls it |
 
