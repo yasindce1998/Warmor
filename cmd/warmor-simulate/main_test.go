@@ -148,3 +148,14 @@ func TestSimulate_Version(t *testing.T) {
 	}
 	assertContains(t, "stdout", r.stdout, "warmor-simulate dev")
 }
+
+// --since accepts a day suffix as documented ("--since 7d").
+func TestSimulate_SinceDays(t *testing.T) {
+	data := writeEvents(t, sampleEvents())
+	policy := copyWasm(t, t.TempDir(), "policy.wasm")
+
+	_, stderr := runMain(t, "", "-policy", policy, "-data", data, "-since", "7d")
+	assertContains(t, "stderr", stderr, "Loaded 4 events")
+	_, stderr = runMain(t, "", "-policy", policy, "-data", data, "-since", "1d")
+	assertContains(t, "stderr", stderr, "Loaded 3 events")
+}

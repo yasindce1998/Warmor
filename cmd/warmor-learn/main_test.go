@@ -97,6 +97,13 @@ func TestLearn_Follow(t *testing.T) {
 	assertContains(t, "stdout", stdout, "/usr/sbin/nginx", "/etc/nginx/nginx.conf")
 }
 
+// --duration accepts a day suffix like warmor-simulate --since.
+func TestLearn_DurationDays(t *testing.T) {
+	events := writeFile(t, filepath.Join(t.TempDir(), "events.ndjson"), evExec123+"\n")
+	_, stderr := runMain(t, "", "-events", events, "-duration", "2d")
+	assertContains(t, "stderr", stderr, "learned 1 containers")
+}
+
 func TestLearn_Errors(t *testing.T) {
 	dir := t.TempDir()
 	events := writeFile(t, filepath.Join(dir, "events.ndjson"), evExec123+"\n")

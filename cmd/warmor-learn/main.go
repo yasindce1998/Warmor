@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/cliflag"
 	"github.com/yasindce1998/warmor/internal/learner"
 	"github.com/yasindce1998/warmor/internal/streaming"
 )
@@ -29,7 +30,7 @@ var version = "dev"
 var followPollInterval = 250 * time.Millisecond
 
 func main() {
-	duration := flag.Duration("duration", 30*time.Minute, "Learning duration (e.g. 5m, 1h)")
+	duration := cliflag.Duration(flag.CommandLine, "duration", 30*time.Minute, "Learning duration (e.g. 5m, 1h, 2d)")
 	cgroups := flag.String("cgroup", "", "Comma-separated cgroup IDs to observe (empty = all)")
 	output := flag.String("o", "", "Output file (default: stdout)")
 	name := flag.String("name", "", "Name for the generated policy")
