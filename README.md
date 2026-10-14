@@ -113,7 +113,7 @@ These are **targets, not measurements**. None of them has been benchmarked on `m
 - **Rust WASM** — Full Rust policies compiled to `wasm32-unknown-unknown` for complex logic
 - **Hot-Reload** — SIGHUP swaps the WASM module without a restart. Kernel map entries from the old policy are not cleared yet.
 - **Two-Tier Cache** — A userspace decision cache, plus the kernel policy map for exec and connect decisions
-- **Policy Signing** — Ed25519-signed OCI policy bundles via `warmor-policy-bundle` (`--sign-key` / `--pull --verify-key`). The daemon itself does **not** verify signatures yet.
+- **Policy Signing** — Ed25519 signatures on WASM policies: signed OCI bundles (`warmor-policy-bundle --push/--pull`), and detached `<policy>.sig` files that `warmor-daemon --verify-key` checks at startup, on reload and on every policy server download, failing closed (see [Policy Bundle](docs/policy-bundle.md#detached-signatures-daemon-and-policy-server))
 
 ---
 
@@ -189,7 +189,7 @@ Time constraints (container age, time of day, day of week) in `internal/temporal
 | `warmor-sbom-policy` | Generate policies from SBOM manifests |
 | `warmor-policy-diff` | Compare two policies and show what changes |
 | `warmor-policy-merge` | Merge multiple policies with conflict resolution |
-| `warmor-policy-bundle` | Package policies into signed OCI bundles; pull with signature verification |
+| `warmor-policy-bundle` | Package policies into signed OCI bundles; sign/verify detached `<policy>.sig` |
 | `warmor-oci-hook` | **Experimental.** OCI runtime hook that reports container start/stop to `warmor-server`. It has no auth or TLS, so it only works against `warmor-server --insecure`, and the server does not use the bindings yet. |
 
 There is no `warmor-dashboard` binary on `main`. The SSE dashboard in `internal/dashboard` is library-only.

@@ -856,8 +856,7 @@ opts := &enforcer.Options{StreamSinks: []streaming.Sink{sink}}
 
 **Track A: mTLS & Policy Signing** — mostly done
 - [x] Mutual TLS between agent ↔ policy server (ed25519 certificates)
-- [x] Policy bundle signing (ed25519 signatures, `warmor-policy-bundle --sign-key`, verified on `--pull --verify-key`)
-- [ ] Daemon-side signature verification of loaded or downloaded policies: **missing**
+- [x] Policy signing (ed25519 signatures on WASM binaries): OCI bundles via `warmor-policy-bundle`, detached `<policy>.sig` enforced by `warmor-daemon --verify-key`
 - [x] Admin API authentication (JWT bearer tokens — HMAC-SHA256 & Ed25519)
 - [x] Certificate generation (CA, server, agent) with configurable CN/SANs
 - [x] TLS configuration in agent + server config structs
@@ -887,7 +886,7 @@ opts := &enforcer.Options{StreamSinks: []streaming.Sink{sink}}
 - [ ] Kubernetes DaemonSet manifest: present, but it configures the daemon through env vars that the daemon does not read
 
 **Success Criteria:**
-- [ ] Agent ↔ server traffic encrypted with mTLS: met. Unsigned policies rejected: **not met**.
+- [x] Agent ↔ server traffic encrypted with mTLS; unsigned policies rejected when the daemon runs with `--verify-key` (and uploads, when the server does)
 - [x] `warmorctl` TUI covers fleet overview, policies, rollouts, cert generation
 - [ ] Prometheus metrics visualized in Grafana: partial
 - [ ] New containers automatically get policies based on labels: **not met**
@@ -917,12 +916,21 @@ warmor-daemon --server https://warmor-server:8443 --tls-cert ./certs/agent-01.cr
 
 #### Policy Signing
 
-Signing is done with `warmor-policy-bundle`. The `warmor-server policy sign` command and the daemon flags `--verify-policy-sig` / `--signing-pub` do **not** exist. The daemon does not verify signatures on `main`.
+Policies are signed offline; the private key never needs to be on the policy
+server or the nodes. The signature is a detached ed25519 signature over the
+exact `.wasm` bytes, stored base64 in `<policy>.sig` (see
+[policy-bundle.md](policy-bundle.md#detached-signatures-daemon-and-policy-server)).
 
 ```bash
 warmor-policy-bundle --keygen --sign-key signing.key --verify-key signing.pub
-warmor-policy-bundle --push --ref ghcr.io/myorg/warmor-policies/app:v1 --wasm policy.wasm --sign-key signing.key
-warmor-policy-bundle --pull --ref ghcr.io/myorg/warmor-policies/app:v1 --wasm out.wasm --verify-key signing.pub  # only place verification happens
+warmor-policy-bundle --sign --wasm policies/policy.wasm --sign-key signing.key   # writes policies/policy.wasm.sig
+
+# Server: serve the signature with the module; optionally refuse unsigned uploads
+warmor-server --policy-dir ./policies --verify-key signing.pub ...
+
+# Daemon: refuse any policy (startup, reload, server download) that does not verify
+warmor-daemon --policy /etc/warmor/policy.wasm --verify-key signing.pub ...
+warmor-daemon --verify-key signing.pub --validate-policy /etc/warmor/policy.wasm
 ```
 
 See [policy-bundle.md](policy-bundle.md) for exact usage.
