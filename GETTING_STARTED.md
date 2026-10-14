@@ -109,7 +109,7 @@ go build -o bin/ ./cmd/...
 
 This builds every tool into `bin/`. The compiled BPF objects and their Go bindings are checked in, so you don't need clang for this step. If you change `bpf/*.c`, run `make build-bpf generate` to rebuild them.
 
-> `make all` builds the BPF programs, the Go bindings, the example Rust policy and **only** `warmor-daemon`. It does not build `warmor-compile` or the other tools, so use `go build` as shown above.
+`make all` does the same and also rebuilds the BPF programs, the Go bindings and the example Rust policy, so it needs clang and the Rust toolchain.
 
 > **Build failing?** Jump to [Troubleshooting](#troubleshooting) below.
 
