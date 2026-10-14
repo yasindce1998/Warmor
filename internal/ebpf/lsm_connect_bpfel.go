@@ -37,6 +37,7 @@ const (
 	lsm_connectMapLsmEnforce        = "lsm_enforce"
 	lsm_connectMapLsmEvents         = "lsm_events"
 	lsm_connectMapPolicyMap         = "policy_map"
+	lsm_connectMapUnixWatch         = "unix_watch"
 	lsm_connectProgLsmConnectCheck  = "lsm_connect_check"
 	lsm_connectVarUnusedPolicyKey   = "unused_policy_key"
 	lsm_connectVarUnusedPolicyValue = "unused_policy_value"
@@ -96,6 +97,7 @@ type lsm_connectMapSpecs struct {
 	LsmEnforce      *ebpf.MapSpec `ebpf:"lsm_enforce"`
 	LsmEvents       *ebpf.MapSpec `ebpf:"lsm_events"`
 	PolicyMap       *ebpf.MapSpec `ebpf:"policy_map"`
+	UnixWatch       *ebpf.MapSpec `ebpf:"unix_watch"`
 }
 
 // lsm_connectVariableSpecs contains global variables before they are loaded into the kernel.
@@ -131,6 +133,7 @@ type lsm_connectMaps struct {
 	LsmEnforce      *ebpf.Map `ebpf:"lsm_enforce"`
 	LsmEvents       *ebpf.Map `ebpf:"lsm_events"`
 	PolicyMap       *ebpf.Map `ebpf:"policy_map"`
+	UnixWatch       *ebpf.Map `ebpf:"unix_watch"`
 }
 
 func (m *lsm_connectMaps) Close() error {
@@ -139,6 +142,7 @@ func (m *lsm_connectMaps) Close() error {
 		m.LsmEnforce,
 		m.LsmEvents,
 		m.PolicyMap,
+		m.UnixWatch,
 	)
 }
 

@@ -30,6 +30,7 @@ var (
 	webhookHeader = flag.String("webhook-header", "", "Webhook auth header (format: Key:Value)")
 	eventLabels   = flag.String("event-labels", "", "Labels to attach to streamed events and report to the policy server (format: k=v,k2=v2)")
 	showVersion   = flag.Bool("version", false, "Show version and exit")
+	escapeDetect  = flag.String("escape-detect", "off", "Container escape detection: off, alert (log, count and stream matches) or deny (also terminate the process)")
 	evalTimeout   = flag.Duration("eval-timeout", 50*time.Millisecond, "Deadline for one WASM policy evaluation; a policy exceeding it is denied (fail closed)")
 
 	serverURL    = flag.String("server", "", "Policy server URL (e.g. https://warmor-server:8443); downloaded policies replace --policy")
@@ -196,6 +197,7 @@ func runDaemon(stop <-chan struct{}) {
 
 		PolicyVerifyKey: pub,
 		EvalTimeout:     *evalTimeout,
+		EscapeDetect:    *escapeDetect,
 	})
 	if err != nil {
 		log.Fatalf("❌ Failed to create enforcer: %v", err)

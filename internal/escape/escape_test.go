@@ -49,7 +49,10 @@ func TestDetectNsenter(t *testing.T) {
 func TestDetectHostMount(t *testing.T) {
 	d := NewDetector(DetectorConfig{DenyOnDetect: true})
 
-	ev := makeEvent("mount", "mount", "/", 200)
+	// What lsm/sb_mount reports for `mount /dev/sda1 /mnt`: the filesystem
+	// type and the source device.
+	ev := makeEvent("mount", "mount", "ext4", 200)
+	ev.MountType, ev.MountSource = "ext4", "/dev/sda1"
 	result := d.CheckEvent(context.Background(), ev)
 
 	if result == nil {
@@ -70,6 +73,8 @@ func TestDetectPtraceCross(t *testing.T) {
 		PtraceComm: "target",
 		CgroupID:   300,
 		PID:        1001,
+		// The target lives in another cgroup (e.g. the host's init).
+		PtraceTargetCgroup: 1,
 	}
 	result := d.CheckEvent(context.Background(), ev)
 
@@ -100,7 +105,8 @@ func TestDetectProcNSAccess(t *testing.T) {
 func TestDetectDockerSocket(t *testing.T) {
 	d := NewDetector(DetectorConfig{DenyOnDetect: true})
 
-	ev := makeEvent("file", "curl", "/var/run/docker.sock", 500)
+	// lsm/socket_connect reports watched AF_UNIX connects as connect_unix.
+	ev := makeEvent("connect_unix", "curl", "/var/run/docker.sock", 500)
 	result := d.CheckEvent(context.Background(), ev)
 
 	if result == nil {
@@ -115,10 +121,12 @@ func TestDetectDockerSocket(t *testing.T) {
 func TestDetectSensitiveExec(t *testing.T) {
 	d := NewDetector(DetectorConfig{DenyOnDetect: true})
 
-	tools := []string{"runc", "ctr", "crictl", "kubectl", "mount", "chroot", "capsh"}
+	tools := []string{"runc", "ctr", "crictl", "kubectl", "docker", "chroot", "capsh"}
 	for _, tool := range tools {
 		d.ClearAlerts()
-		ev := makeEvent("exec", tool, "/usr/bin/"+tool, 600)
+		// At exec time Comm is still the parent (the shell), so matching
+		// must use the binary being executed.
+		ev := makeEvent("exec", "sh", "/usr/bin/"+tool, 600)
 		result := d.CheckEvent(context.Background(), ev)
 
 		if result == nil {
@@ -381,6 +389,14 @@ func TestContainsNS(t *testing.T) {
 		{"/proc/1/n", false},
 		{"/etc/passwd", false},
 		{"short", false},
+		{"/proc/self/ns/net", true},
+		{"/proc/thread-self/ns/mnt", true},
+		{"/abcde1/ns/mnt", false},        // not under /proc
+		{"/proc/1a/ns/mnt", false},       // not a pid
+		{"/proc/1/ns/", false},           // no namespace type
+		{"/proc/1/ns/mnt/extra", false},  // deeper than a handle
+		{"/proc/1/task/2/ns/mnt", false}, // per-thread handles not matched
+		{"/sys/proc/1/ns/mnt", false},
 	}
 
 	for _, tt := range tests {
@@ -388,5 +404,101 @@ func TestContainsNS(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("containsNS(%q) = %v, want %v", tt.path, got, tt.want)
 		}
+	}
+}
+
+func TestHostProcessesIgnored(t *testing.T) {
+	const ctr, host = 100, 200
+	d := NewDetector(DetectorConfig{
+		DenyOnDetect: true,
+		IsContainer:  func(id uint64) bool { return id == ctr },
+	})
+	if r := d.CheckEvent(context.Background(), makeEvent("exec", "bash", "/usr/bin/nsenter", host)); r != nil {
+		t.Errorf("host nsenter flagged as an escape: %+v", r)
+	}
+	if r := d.CheckEvent(context.Background(), makeEvent("exec", "bash", "/usr/bin/nsenter", ctr)); r == nil {
+		t.Error("container nsenter not flagged")
+	}
+	if n := len(d.Alerts()); n != 1 {
+		t.Errorf("got %d alerts, want 1", n)
+	}
+}
+
+func TestParentCommDoesNotMatch(t *testing.T) {
+	d := NewDetector(DetectorConfig{DenyOnDetect: true})
+	// A process named nsenter (the parent) executing something benign.
+	if r := d.CheckEvent(context.Background(), makeEvent("exec", "nsenter", "/bin/ls", 100)); r != nil {
+		t.Errorf("matched on the caller's comm: %+v", r)
+	}
+}
+
+func TestMountFalsePositives(t *testing.T) {
+	d := NewDetector(DetectorConfig{DenyOnDetect: true})
+	benign := []struct{ comm, typ, src string }{
+		{"mount", "tmpfs", "tmpfs"},
+		{"mount", "proc", "proc"},
+		{"mount", "overlay", "overlay"},
+		{"runc:[2:INIT]", "cgroup", "cgroup"}, // runtime setup on a v1 host
+		{"crun", "ext4", "/dev/sda1"},
+	}
+	for _, b := range benign {
+		ev := makeEvent("mount", b.comm, b.typ, 100)
+		ev.MountType, ev.MountSource = b.typ, b.src
+		if r := d.CheckEvent(context.Background(), ev); r != nil {
+			t.Errorf("%s mounting %s from %s flagged: %+v", b.comm, b.typ, b.src, r)
+		}
+	}
+	ev := makeEvent("mount", "mount", "cgroup", 100)
+	ev.MountType, ev.MountSource = "cgroup", "cgroup"
+	if d.CheckEvent(context.Background(), ev) == nil {
+		t.Error("cgroup v1 mount from a workload not flagged (release_agent escape)")
+	}
+}
+
+func TestPtraceSameCgroupIgnored(t *testing.T) {
+	d := NewDetector(DetectorConfig{DenyOnDetect: true})
+	for _, target := range []uint64{0, 300} {
+		ev := &streaming.SecurityEvent{EventType: "ptrace", Comm: "strace", PtraceComm: "app", CgroupID: 300, PtraceTargetCgroup: target}
+		if r := d.CheckEvent(context.Background(), ev); r != nil {
+			t.Errorf("ptrace with target cgroup %d flagged: %+v", target, r)
+		}
+	}
+}
+
+func TestDockerSocketOpenNotConnect(t *testing.T) {
+	d := NewDetector(DetectorConfig{DenyOnDetect: true})
+	// open() on a socket node fails with ENXIO and grants nothing; only a
+	// connect reaches the runtime API.
+	if r := d.CheckEvent(context.Background(), makeEvent("file", "ls", "/var/run/docker.sock", 100)); r != nil {
+		t.Errorf("open of the socket node flagged: %+v", r)
+	}
+}
+
+func TestAlertHistoryBounded(t *testing.T) {
+	var delivered int
+	d := NewDetector(DetectorConfig{AlertCallback: func(*Alert) { delivered++ }})
+	for i := 0; i < maxAlerts+10; i++ {
+		d.CheckEvent(context.Background(), makeEvent("exec", "sh", "/usr/bin/nsenter", 100))
+	}
+	if n := len(d.Alerts()); n != maxAlerts {
+		t.Errorf("kept %d alerts, want %d", n, maxAlerts)
+	}
+	if delivered != maxAlerts+10 {
+		t.Errorf("callback got %d alerts, want all %d", delivered, maxAlerts+10)
+	}
+}
+
+func TestIdleWindowsSwept(t *testing.T) {
+	d := NewDetector(DetectorConfig{})
+	old := time.Now().Add(-2 * windowTTL)
+	for id := uint64(1); id <= 200; id++ {
+		d.recordEvent(id, EventView{EventType: "exec"}, old)
+	}
+	d.recordEvent(9999, EventView{EventType: "exec"}, time.Now())
+	d.windowsMu.Lock()
+	n := len(d.windows)
+	d.windowsMu.Unlock()
+	if n > 70 {
+		t.Errorf("%d windows kept after sweep; idle ones should be dropped", n)
 	}
 }

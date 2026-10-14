@@ -45,6 +45,8 @@ type LSMEvent struct {
 	RemoteAddrV6 [16]byte
 	Family       uint16
 	_            [6]byte
+	Aux          [64]byte
+	AuxID        uint64
 }
 
 // ToEvent converts an LSMEvent to a unified Event.
@@ -60,15 +62,28 @@ func (e *LSMEvent) ToEvent() Event {
 
 		LSMHook:     e.EventType,
 		LSMDecision: e.Decision,
+		// decision 1 = the kernel refused the operation (see warmor_event).
+		KernelDenied: e.Decision == 1,
 	}
 
 	switch e.EventType {
 	case EventTypeExec:
+		ev.Hook = "exec"
 		ev.Kind = EventKindProcess
 	case EventTypeFile:
+		ev.Hook = "file"
 		ev.Kind = EventKindFile
 	case EventTypeNetwork, EventTypeBind:
+		ev.Hook = "connect"
+		if e.EventType == EventTypeBind {
+			ev.Hook = "bind"
+		}
 		ev.Kind = EventKindNetwork
+		if e.Family == 1 { // AF_UNIX: Filename is the socket path
+			ev.Hook = "connect_unix"
+			ev.Family = e.Family
+			break
+		}
 		// connect/bind report the raw sockaddr sin_port, in network order.
 		ev.RemotePort = ntohs(e.RemotePort)
 		ev.Family = e.Family
@@ -79,14 +94,21 @@ func (e *LSMEvent) ToEvent() Event {
 			ev.RemoteAddr = net.IP(e.RemoteAddrV6[:]).String()
 		}
 	case EventTypeListen:
+		ev.Hook = "listen"
 		ev.Kind = EventKindNetwork
 		// listen reports skc_num, which is already in host order.
 		ev.RemotePort = e.RemotePort
 		ev.Family = e.Family
 	case EventTypePtrace:
+		// Filename is the target's comm.
+		ev.Hook = "ptrace"
 		ev.Kind = EventKindProcess
+		ev.TargetCgroupID = e.AuxID
 	case EventTypeMount:
+		// Filename is the filesystem type, Aux the mount source.
+		ev.Hook = "mount"
 		ev.Kind = EventKindFile
+		ev.MountSource = nullTerminatedString(e.Aux[:])
 	}
 
 	return ev
@@ -233,9 +255,9 @@ func LoadLSM() (*LSMLoader, error) {
 	}
 	fileOpts.MapReplacements = map[string]*ciliumebpf.Map{
 		"policy_map":        l.execObjs.PolicyMap,
-		"lsm_events":       l.execObjs.LsmEvents,
+		"lsm_events":        l.execObjs.LsmEvents,
 		"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
-		"lsm_enforce":      l.execObjs.LsmEnforce,
+		"lsm_enforce":       l.execObjs.LsmEnforce,
 	}
 	if err := loadLsm_fileObjects(l.fileObjs, fileOpts); err != nil {
 		l.Close()
@@ -258,10 +280,11 @@ func LoadLSM() (*LSMLoader, error) {
 		Cache: btfCache,
 	}
 	connectOpts.MapReplacements = map[string]*ciliumebpf.Map{
+		"unix_watch":        l.execObjs.UnixWatch,
 		"policy_map":        l.execObjs.PolicyMap,
-		"lsm_events":       l.execObjs.LsmEvents,
+		"lsm_events":        l.execObjs.LsmEvents,
 		"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
-		"lsm_enforce":      l.execObjs.LsmEnforce,
+		"lsm_enforce":       l.execObjs.LsmEnforce,
 	}
 	if err := loadLsm_connectObjects(l.connectObjs, connectOpts); err != nil {
 		l.Close()
@@ -285,9 +308,9 @@ func LoadLSM() (*LSMLoader, error) {
 	}
 	bindOpts.MapReplacements = map[string]*ciliumebpf.Map{
 		"policy_map":        l.execObjs.PolicyMap,
-		"lsm_events":       l.execObjs.LsmEvents,
+		"lsm_events":        l.execObjs.LsmEvents,
 		"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
-		"lsm_enforce":      l.execObjs.LsmEnforce,
+		"lsm_enforce":       l.execObjs.LsmEnforce,
 	}
 	if err := loadLsm_bindObjects(l.bindObjs, bindOpts); err != nil {
 		l.Close()
@@ -311,9 +334,9 @@ func LoadLSM() (*LSMLoader, error) {
 	}
 	listenOpts.MapReplacements = map[string]*ciliumebpf.Map{
 		"policy_map":        l.execObjs.PolicyMap,
-		"lsm_events":       l.execObjs.LsmEvents,
+		"lsm_events":        l.execObjs.LsmEvents,
 		"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
-		"lsm_enforce":      l.execObjs.LsmEnforce,
+		"lsm_enforce":       l.execObjs.LsmEnforce,
 	}
 	if err := loadLsm_listenObjects(l.listenObjs, listenOpts); err != nil {
 		l.Close()
@@ -337,9 +360,9 @@ func LoadLSM() (*LSMLoader, error) {
 	}
 	ptraceOpts.MapReplacements = map[string]*ciliumebpf.Map{
 		"policy_map":        l.execObjs.PolicyMap,
-		"lsm_events":       l.execObjs.LsmEvents,
+		"lsm_events":        l.execObjs.LsmEvents,
 		"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
-		"lsm_enforce":      l.execObjs.LsmEnforce,
+		"lsm_enforce":       l.execObjs.LsmEnforce,
 	}
 	if err := loadLsm_ptraceObjects(l.ptraceObjs, ptraceOpts); err != nil {
 		l.Close()
@@ -363,9 +386,9 @@ func LoadLSM() (*LSMLoader, error) {
 	}
 	mountOpts.MapReplacements = map[string]*ciliumebpf.Map{
 		"policy_map":        l.execObjs.PolicyMap,
-		"lsm_events":       l.execObjs.LsmEvents,
+		"lsm_events":        l.execObjs.LsmEvents,
 		"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
-		"lsm_enforce":      l.execObjs.LsmEnforce,
+		"lsm_enforce":       l.execObjs.LsmEnforce,
 	}
 	if err := loadLsm_mountObjects(l.mountObjs, mountOpts); err != nil {
 		l.Close()
@@ -416,6 +439,37 @@ func (l *LSMLoader) ReadLSMEvent() (*Event, error) {
 
 	ev := raw.ToEvent()
 	return &ev, nil
+}
+
+// SetUnixWatch replaces the set of unix socket paths whose connects
+// lsm_connect reports. Paths must fit sun_path (at most 106 bytes plus NUL
+// so the kernel can tell they weren't truncated).
+func (l *LSMLoader) SetUnixWatch(paths []string) error {
+	m := l.execObjs.UnixWatch
+	var key uint32
+	var stale []uint32
+	iter := m.Iterate()
+	for iter.Next(&key, new(uint8)) {
+		stale = append(stale, key)
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("iterate unix_watch: %w", err)
+	}
+	for _, k := range stale {
+		if err := m.Delete(k); err != nil && !errors.Is(err, ciliumebpf.ErrKeyNotExist) {
+			return fmt.Errorf("clear unix_watch: %w", err)
+		}
+	}
+	one := uint8(1)
+	for _, p := range paths {
+		if p == "" || len(p) > 106 || strings.IndexByte(p, 0) >= 0 {
+			return fmt.Errorf("unix watch path %q: must be 1-106 bytes without NUL", p)
+		}
+		if err := m.Put(HashPattern(p), one); err != nil {
+			return fmt.Errorf("watch unix socket %s: %w", p, err)
+		}
+	}
+	return nil
 }
 
 // PolicyMap returns the policy map manager for this LSM instance.

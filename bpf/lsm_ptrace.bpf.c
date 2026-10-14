@@ -2,6 +2,24 @@
 
 #include "warmor_lsm.h"
 
+// Minimal CO-RE views of the cgroup chain (task->cgroups->dfl_cgrp->kn->id);
+// the ___warmor suffix is dropped when relocating against kernel BTF.
+struct kernfs_node___warmor {
+	__u64 id;
+} __attribute__((preserve_access_index));
+
+struct cgroup___warmor {
+	struct kernfs_node___warmor *kn;
+} __attribute__((preserve_access_index));
+
+struct css_set___warmor {
+	struct cgroup___warmor *dfl_cgrp;
+} __attribute__((preserve_access_index));
+
+struct task_struct___warmor {
+	struct css_set___warmor *cgroups;
+} __attribute__((preserve_access_index));
+
 SEC("lsm/ptrace_access_check")
 int BPF_PROG(lsm_ptrace_check, struct task_struct *child, unsigned int mode)
 {
@@ -19,6 +37,11 @@ int BPF_PROG(lsm_ptrace_check, struct task_struct *child, unsigned int mode)
 
 	__u32 hash = fnv1a_hash(comm_buf, 16);
 
+	// The target's cgroup (its kernfs node id, the same id
+	// bpf_get_current_cgroup_id returns), so userspace can tell a ptrace
+	// inside one container from one that reaches across a boundary.
+	__u64 target_cgid = BPF_CORE_READ((struct task_struct___warmor *)child, cgroups, dfl_cgrp, kn, id);
+
 	struct policy_key key = {
 		.cgroup_id = cgid,
 		.rule_hash = hash,
@@ -35,8 +58,8 @@ int BPF_PROG(lsm_ptrace_check, struct task_struct *child, unsigned int mode)
 		__sync_fetch_and_add(&val->hit_count, 1);
 
 		if (val->action == ACTION_DENY) {
-			emit_lsm_event(EVENT_TYPE_PTRACE, 1, comm_buf, 16,
-				cgid, 0, 0, 0, 0);
+			emit_lsm_event_aux(EVENT_TYPE_PTRACE, 1, comm_buf, 16,
+				cgid, 0, 0, 0, 0, 0, target_cgid);
 
 			// An audit-flagged deny is a would-be denial: log it, never block.
 			if (is_enforce_enabled() && !val->audit)
@@ -45,13 +68,13 @@ int BPF_PROG(lsm_ptrace_check, struct task_struct *child, unsigned int mode)
 		}
 
 		if (val->audit) {
-			emit_lsm_event(EVENT_TYPE_PTRACE, 0, comm_buf, 16,
-				cgid, 0, 0, 0, 0);
+			emit_lsm_event_aux(EVENT_TYPE_PTRACE, 0, comm_buf, 16,
+				cgid, 0, 0, 0, 0, 0, target_cgid);
 		}
 		return 0;
 	}
 
-	emit_lsm_event(EVENT_TYPE_PTRACE, 0, comm_buf, 16, cgid, 0, 0, 0, 0);
+	emit_lsm_event_aux(EVENT_TYPE_PTRACE, 0, comm_buf, 16, cgid, 0, 0, 0, 0, 0, target_cgid);
 	return 0;
 }
 

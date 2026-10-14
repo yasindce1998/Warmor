@@ -43,8 +43,8 @@ int BPF_PROG(lsm_mount_check, const char *dev_name, const struct path *path,
 		__sync_fetch_and_add(&val->hit_count, 1);
 
 		if (val->action == ACTION_DENY) {
-			emit_lsm_event(EVENT_TYPE_MOUNT, 1, type_buf, len,
-				cgid, 0, 0, 0, 0);
+			emit_lsm_event_aux(EVENT_TYPE_MOUNT, 1, type_buf, len,
+				cgid, 0, 0, 0, 0, dev_name, 0);
 
 			// An audit-flagged deny is a would-be denial: log it, never block.
 			if (is_enforce_enabled() && !val->audit)
@@ -53,13 +53,13 @@ int BPF_PROG(lsm_mount_check, const char *dev_name, const struct path *path,
 		}
 
 		if (val->audit) {
-			emit_lsm_event(EVENT_TYPE_MOUNT, 0, type_buf, len,
-				cgid, 0, 0, 0, 0);
+			emit_lsm_event_aux(EVENT_TYPE_MOUNT, 0, type_buf, len,
+				cgid, 0, 0, 0, 0, dev_name, 0);
 		}
 		return 0;
 	}
 
-	emit_lsm_event(EVENT_TYPE_MOUNT, 0, type_buf, len, cgid, 0, 0, 0, 0);
+	emit_lsm_event_aux(EVENT_TYPE_MOUNT, 0, type_buf, len, cgid, 0, 0, 0, 0, dev_name, 0);
 	return 0;
 }
 

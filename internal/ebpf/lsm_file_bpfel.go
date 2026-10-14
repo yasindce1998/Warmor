@@ -46,6 +46,8 @@ type lsm_fileWarmorEvent struct {
 	RemoteAddrV6 [16]uint8
 	Family       uint16
 	Pad          [3]uint16
+	Aux          [64]int8
+	AuxId        uint64
 }
 
 // Names of all BPF objects in the ELF.
@@ -56,6 +58,7 @@ const (
 	lsm_fileMapLsmEnforce        = "lsm_enforce"
 	lsm_fileMapLsmEvents         = "lsm_events"
 	lsm_fileMapPolicyMap         = "policy_map"
+	lsm_fileMapUnixWatch         = "unix_watch"
 	lsm_fileProgLsmFileCheck     = "lsm_file_check"
 	lsm_fileVarUnusedPolicyKey   = "unused_policy_key"
 	lsm_fileVarUnusedPolicyValue = "unused_policy_value"
@@ -115,6 +118,7 @@ type lsm_fileMapSpecs struct {
 	LsmEnforce      *ebpf.MapSpec `ebpf:"lsm_enforce"`
 	LsmEvents       *ebpf.MapSpec `ebpf:"lsm_events"`
 	PolicyMap       *ebpf.MapSpec `ebpf:"policy_map"`
+	UnixWatch       *ebpf.MapSpec `ebpf:"unix_watch"`
 }
 
 // lsm_fileVariableSpecs contains global variables before they are loaded into the kernel.
@@ -150,6 +154,7 @@ type lsm_fileMaps struct {
 	LsmEnforce      *ebpf.Map `ebpf:"lsm_enforce"`
 	LsmEvents       *ebpf.Map `ebpf:"lsm_events"`
 	PolicyMap       *ebpf.Map `ebpf:"policy_map"`
+	UnixWatch       *ebpf.Map `ebpf:"unix_watch"`
 }
 
 func (m *lsm_fileMaps) Close() error {
@@ -158,6 +163,7 @@ func (m *lsm_fileMaps) Close() error {
 		m.LsmEnforce,
 		m.LsmEvents,
 		m.PolicyMap,
+		m.UnixWatch,
 	)
 }
 

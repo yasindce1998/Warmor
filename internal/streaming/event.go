@@ -20,22 +20,27 @@ type SecurityEvent struct {
 	Comm      string `json:"comm"`
 
 	// Event-specific payload
-	Filename   string `json:"filename,omitempty"`
-	RemoteAddr string `json:"remote_addr,omitempty"`
-	RemotePort uint16 `json:"remote_port,omitempty"`
-	LocalPort  uint16 `json:"local_port,omitempty"`
-	Protocol   string `json:"protocol,omitempty"`
-	MountType  string `json:"mount_type,omitempty"`
-	PtraceComm string `json:"ptrace_target_comm,omitempty"`
+	Filename    string `json:"filename,omitempty"`
+	RemoteAddr  string `json:"remote_addr,omitempty"`
+	RemotePort  uint16 `json:"remote_port,omitempty"`
+	LocalPort   uint16 `json:"local_port,omitempty"`
+	Protocol    string `json:"protocol,omitempty"`
+	MountType   string `json:"mount_type,omitempty"`
+	MountSource string `json:"mount_source,omitempty"`
+	PtraceComm  string `json:"ptrace_target_comm,omitempty"`
+	// PtraceTargetCgroup is the cgroup id of the traced process.
+	PtraceTargetCgroup uint64 `json:"ptrace_target_cgroup,omitempty"`
+	// KernelEnforced is set when the kernel refused the operation itself.
+	KernelEnforced bool `json:"kernel_enforced,omitempty"`
 
 	// Policy decision
-	Decision    string `json:"decision"`              // allow, deny, log
-	Reason      string `json:"reason,omitempty"`
-	PolicyRule  string `json:"policy_rule,omitempty"`
-	Cached      bool   `json:"cached"`
-	Enforced    bool   `json:"enforced"`
-	AuditOnly   bool   `json:"audit_only,omitempty"`
-	LatencyUS   int64  `json:"latency_us"`
+	Decision   string `json:"decision"` // allow, deny, log
+	Reason     string `json:"reason,omitempty"`
+	PolicyRule string `json:"policy_rule,omitempty"`
+	Cached     bool   `json:"cached"`
+	Enforced   bool   `json:"enforced"`
+	AuditOnly  bool   `json:"audit_only,omitempty"`
+	LatencyUS  int64  `json:"latency_us"`
 
 	// Lineage (populated when process tracker is active)
 	Lineage []LineageEntry `json:"lineage,omitempty"`

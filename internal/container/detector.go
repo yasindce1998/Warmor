@@ -14,6 +14,7 @@ const (
 	RuntimeContainerd Runtime = "containerd"
 	RuntimeCRIO       Runtime = "cri-o"
 	RuntimeDocker     Runtime = "docker"
+	RuntimePodman     Runtime = "podman"
 	RuntimeUnknown    Runtime = "unknown"
 )
 
@@ -61,9 +62,23 @@ func ContainerFromCgroup(cgroupPath string) (*ContainerInfo, error) {
 			info.Runtime = RuntimeContainerd
 			break
 		}
+		// crio-conmon-<id> is CRI-O's per-container monitor, which runs on
+		// the host side of the boundary; it is not the container.
+		if strings.HasPrefix(part, "crio-conmon-") {
+			continue
+		}
 		if id, ok := strings.CutPrefix(part, "crio-"); ok {
 			info.ID = strings.TrimSuffix(id, ".scope")
 			info.Runtime = RuntimeCRIO
+			break
+		}
+		if id, ok := strings.CutPrefix(part, "libpod-"); ok {
+			// Podman also creates libpod-conmon-<id> for its monitor.
+			if strings.HasPrefix(id, "conmon-") {
+				continue
+			}
+			info.ID = strings.TrimSuffix(id, ".scope")
+			info.Runtime = RuntimePodman
 			break
 		}
 		if id, ok := strings.CutPrefix(part, "docker-"); ok {

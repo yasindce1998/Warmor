@@ -141,6 +141,18 @@ type Event struct {
 	// hit, 0 = sent up for userspace evaluation).
 	LSMHook     uint8
 	LSMDecision uint8
+	// KernelDenied is set for LSM events the kernel already refused (a
+	// policy-map deny); userspace
+	// must record them, not evaluate and act on them again.
+	KernelDenied bool
+
+	// Hook names the LSM hook for LSM events: exec, file, connect,
+	// connect_unix, bind, listen, ptrace, mount. Empty for tracepoint events.
+	Hook string
+	// MountSource is the mount source (dev_name) for mount events.
+	MountSource string
+	// TargetCgroupID is the ptrace target's cgroup id for ptrace events.
+	TargetCgroupID uint64
 }
 
 func nullTerminatedString(b []byte) string {

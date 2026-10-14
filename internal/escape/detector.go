@@ -27,6 +27,11 @@ type DetectorConfig struct {
 	Patterns      []*Pattern
 	DenyOnDetect  bool
 	AlertCallback func(*Alert)
+	// IsContainer limits detection to container cgroups. Escape techniques
+	// are only escapes from inside a container: a host administrator running
+	// nsenter or mounting a disk is not one. Nil treats every non-zero
+	// cgroup as a container (tests, or a daemon scoped by --cgroup-filter).
+	IsContainer func(cgroupID uint64) bool
 }
 
 // Detector correlates security events against known container escape patterns.
@@ -35,9 +40,12 @@ type Detector struct {
 	patterns      []*Pattern
 	denyOnDetect  bool
 	alertCallback func(*Alert)
+	isContainer   func(uint64) bool
 
 	windows   map[uint64]*cgroupWindow
 	windowsMu sync.Mutex
+	sweptSize int
+	lastSweep time.Time
 
 	alerts   []*Alert
 	alertsMu sync.Mutex
@@ -62,60 +70,82 @@ func NewDetector(cfg DetectorConfig) *Detector {
 		patterns:      patterns,
 		denyOnDetect:  cfg.DenyOnDetect,
 		alertCallback: cfg.AlertCallback,
+		isContainer:   cfg.IsContainer,
 		windows:       make(map[uint64]*cgroupWindow),
 	}
 }
 
-// CheckEvent evaluates a security event against all escape patterns.
-// Returns an ActionResult with ActionDeny if an escape is detected and deny mode is on.
-// Returns nil if no escape detected.
+// maxAlerts bounds the in-memory alert history (Alerts); older alerts are
+// dropped. Every alert is still delivered to AlertCallback.
+const maxAlerts = 1024
+
+// windowTTL is how long a cgroup's event window is kept without new events.
+// It must cover the longest multi-step pattern window.
+const windowTTL = 30 * time.Second
+
+func (d *Detector) inScope(cgroupID uint64) bool {
+	if cgroupID == 0 {
+		return false
+	}
+	return d.isContainer == nil || d.isContainer(cgroupID)
+}
+
+func viewOf(event *streaming.SecurityEvent) EventView {
+	return EventView{
+		EventType:          event.EventType,
+		Comm:               event.Comm,
+		Filename:           event.Filename,
+		CgroupID:           event.CgroupID,
+		PID:                event.PID,
+		PPID:               event.PPID,
+		UID:                event.UID,
+		MountType:          event.MountType,
+		MountSource:        event.MountSource,
+		PtraceComm:         event.PtraceComm,
+		PtraceTargetCgroup: event.PtraceTargetCgroup,
+		RemoteAddr:         event.RemoteAddr,
+		LocalPort:          event.LocalPort,
+	}
+}
+
+// CheckEvent evaluates a security event against all escape patterns and
+// records an alert for each match. It returns a deny result when a pattern
+// matched and deny mode is on, nil otherwise. Events outside a container
+// are ignored.
 func (d *Detector) CheckEvent(_ context.Context, event *streaming.SecurityEvent) *api.ActionResult {
-	if event.CgroupID == 0 {
+	if !d.inScope(event.CgroupID) {
 		return nil
 	}
 
-	view := EventView{
-		EventType:  event.EventType,
-		Comm:       event.Comm,
-		Filename:   event.Filename,
-		CgroupID:   event.CgroupID,
-		PID:        event.PID,
-		PPID:       event.PPID,
-		UID:        event.UID,
-		MountType:  event.MountType,
-		PtraceComm: event.PtraceComm,
-		RemoteAddr: event.RemoteAddr,
-		LocalPort:  event.LocalPort,
-	}
-
+	view := viewOf(event)
 	now := time.Now()
 
+	var deny *api.ActionResult
 	for _, pattern := range d.patterns {
-		if d.matchPattern(pattern, event.CgroupID, view, now) {
-			alert := &Alert{
-				Timestamp:   now,
-				TechniqueID: pattern.ID,
-				Name:        pattern.Name,
-				Severity:    pattern.Severity,
-				CgroupID:    event.CgroupID,
-				PID:         event.PID,
-				Comm:        event.Comm,
-				Details:     fmt.Sprintf("%s: %s (file=%s)", pattern.ID, pattern.Description, event.Filename),
-			}
-
-			d.recordAlert(alert)
-
-			if d.denyOnDetect {
-				return &api.ActionResult{
-					Action: api.ActionDeny,
-					Reason: fmt.Sprintf("escape detected: %s (%s)", pattern.Name, pattern.ID),
-				}
+		if !d.matchPattern(pattern, event.CgroupID, view, now) {
+			continue
+		}
+		d.recordAlert(&Alert{
+			Timestamp:   now,
+			TechniqueID: pattern.ID,
+			Name:        pattern.Name,
+			Severity:    pattern.Severity,
+			CgroupID:    event.CgroupID,
+			PID:         event.PID,
+			Comm:        event.Comm,
+			Details:     fmt.Sprintf("%s: %s (file=%s)", pattern.ID, pattern.Description, event.Filename),
+		})
+		if d.denyOnDetect && deny == nil {
+			deny = &api.ActionResult{
+				Action:    api.ActionDeny,
+				Reason:    fmt.Sprintf("escape detected: %s (%s)", pattern.Name, pattern.ID),
+				Timestamp: now,
 			}
 		}
 	}
 
 	d.recordEvent(event.CgroupID, view, now)
-	return nil
+	return deny
 }
 
 func (d *Detector) matchPattern(pattern *Pattern, cgroupID uint64, current EventView, now time.Time) bool {
@@ -182,8 +212,7 @@ func (d *Detector) recordEvent(cgroupID uint64, view EventView, now time.Time) {
 
 	w.events = append(w.events, windowEvent{view: view, timestamp: now})
 
-	// Trim old events (keep last 30 seconds)
-	cutoff := now.Add(-30 * time.Second)
+	cutoff := now.Add(-windowTTL)
 	trimIdx := 0
 	for trimIdx < len(w.events) && w.events[trimIdx].timestamp.Before(cutoff) {
 		trimIdx++
@@ -191,11 +220,27 @@ func (d *Detector) recordEvent(cgroupID uint64, view EventView, now time.Time) {
 	if trimIdx > 0 {
 		w.events = w.events[trimIdx:]
 	}
+
+	// Containers come and go; drop windows that have gone quiet so the map
+	// doesn't grow with every container ever seen. Amortized: when the map
+	// has doubled since the last sweep, or a window TTL has passed.
+	if len(d.windows) > 2*d.sweptSize+64 || now.Sub(d.lastSweep) >= windowTTL {
+		d.lastSweep = now
+		for id, cw := range d.windows {
+			if n := len(cw.events); n == 0 || cw.events[n-1].timestamp.Before(cutoff) {
+				delete(d.windows, id)
+			}
+		}
+		d.sweptSize = len(d.windows)
+	}
 }
 
 func (d *Detector) recordAlert(alert *Alert) {
 	d.alertsMu.Lock()
 	d.alerts = append(d.alerts, alert)
+	if len(d.alerts) > maxAlerts {
+		d.alerts = append(d.alerts[:0:0], d.alerts[len(d.alerts)-maxAlerts:]...)
+	}
 	d.alertsMu.Unlock()
 
 	if d.alertCallback != nil {
@@ -226,26 +271,14 @@ func (d *Detector) ClearWindow(cgroupID uint64) {
 	d.windowsMu.Unlock()
 }
 
-// Enrich implements an enricher that tags events with escape detection results.
+// Enrich implements streaming.Enricher: it labels events that match an
+// escape pattern. It does not record alerts or update windows (CheckEvent
+// does), so it can run alongside CheckEvent without double counting.
 func (d *Detector) Enrich(event *streaming.SecurityEvent) {
-	if event.CgroupID == 0 {
+	if !d.inScope(event.CgroupID) {
 		return
 	}
-
-	view := EventView{
-		EventType:  event.EventType,
-		Comm:       event.Comm,
-		Filename:   event.Filename,
-		CgroupID:   event.CgroupID,
-		PID:        event.PID,
-		PPID:       event.PPID,
-		UID:        event.UID,
-		MountType:  event.MountType,
-		PtraceComm: event.PtraceComm,
-		RemoteAddr: event.RemoteAddr,
-		LocalPort:  event.LocalPort,
-	}
-
+	view := viewOf(event)
 	for _, pattern := range d.patterns {
 		if d.matchPattern(pattern, event.CgroupID, view, time.Now()) {
 			if event.Labels == nil {

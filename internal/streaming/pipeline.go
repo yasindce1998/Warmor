@@ -183,19 +183,27 @@ func (p *Pipeline) process(pair eventPair) {
 }
 
 func (p *Pipeline) transform(event *api.Event, result *api.ActionResult) *SecurityEvent {
+	se := FromAPIEvent(event, result)
+	se.ID = generateID()
+	se.Hostname = p.hostname
+	// Each event gets its own copy so enrichers or sinks mutating one
+	// event's labels cannot affect other events or the pipeline config.
+	se.Labels = maps.Clone(p.labels)
+	return se
+}
+
+// FromAPIEvent converts an enforcer event and its decision to the streaming
+// form (without pipeline-assigned ID, hostname or labels). Detectors that
+// run outside the pipeline use it to see events exactly as sinks do.
+func FromAPIEvent(event *api.Event, result *api.ActionResult) *SecurityEvent {
 	se := &SecurityEvent{
-		ID:        generateID(),
 		Timestamp: event.Timestamp,
-		Hostname:  p.hostname,
 		PID:       event.PID,
 		UID:       event.UID,
 		GID:       event.GID,
 		Comm:      event.Comm,
 		CgroupID:  event.CgroupID,
 		Filename:  event.Filename,
-		// Each event gets its own copy so enrichers or sinks mutating one
-		// event's labels cannot affect other events or the pipeline config.
-		Labels: maps.Clone(p.labels),
 	}
 
 	if se.Timestamp.IsZero() {
@@ -223,6 +231,25 @@ func (p *Pipeline) transform(event *api.Event, result *api.ActionResult) *Securi
 			se.Protocol = event.Network.Protocol
 		}
 	}
+
+	// LSM hooks that Type folds into exec/file/network keep their own name,
+	// so consumers (escape detection, SIEM) can tell a mount from an open.
+	switch event.Hook {
+	case "mount":
+		se.EventType = "mount"
+		se.MountType = event.Filename
+		se.MountSource = event.MountSource
+	case "ptrace":
+		se.EventType = "ptrace"
+		se.PtraceComm = event.Filename
+		se.PtraceTargetCgroup = event.TargetCgroupID
+	case "bind", "listen", "connect_unix":
+		se.EventType = event.Hook
+		if event.Hook == "connect_unix" {
+			se.Filename = event.Filename
+		}
+	}
+	se.KernelEnforced = event.KernelDenied
 
 	// Decision
 	if result != nil {

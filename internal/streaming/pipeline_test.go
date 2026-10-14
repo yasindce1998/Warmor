@@ -533,3 +533,42 @@ func TestPipelineTransformNilLabels(t *testing.T) {
 		t.Errorf("expected nil labels when none configured, got %v", se.Labels)
 	}
 }
+
+func TestTransform_LSMHookNames(t *testing.T) {
+	p := NewPipeline(PipelineConfig{})
+	defer p.Close()
+
+	mount := p.transform(&api.Event{
+		Type: api.EventTypeFile, Hook: "mount", Filename: "ext4", MountSource: "/dev/sda1",
+		File: &api.FileEvent{Path: "ext4"},
+	}, nil)
+	if mount.EventType != "mount" || mount.MountType != "ext4" || mount.MountSource != "/dev/sda1" {
+		t.Errorf("mount: %+v", mount)
+	}
+
+	ptrace := p.transform(&api.Event{
+		Hook: "ptrace", Filename: "sshd", TargetCgroupID: 42,
+		Process: &api.ProcessEvent{Filename: "sshd"},
+	}, nil)
+	if ptrace.EventType != "ptrace" || ptrace.PtraceComm != "sshd" || ptrace.PtraceTargetCgroup != 42 {
+		t.Errorf("ptrace: %+v", ptrace)
+	}
+
+	unix := p.transform(&api.Event{
+		Type: api.EventTypeNetwork, Hook: "connect_unix", Filename: "/run/docker.sock",
+		Network: &api.NetworkEvent{},
+	}, nil)
+	if unix.EventType != "connect_unix" || unix.Filename != "/run/docker.sock" {
+		t.Errorf("unix connect: %+v", unix)
+	}
+
+	denied := p.transform(&api.Event{Hook: "exec", Filename: "/tmp/x", KernelDenied: true}, nil)
+	if denied.EventType != "exec" || !denied.KernelEnforced {
+		t.Errorf("kernel denied: %+v", denied)
+	}
+
+	// Tracepoint events (no Hook) keep the Type-derived name.
+	if se := p.transform(&api.Event{Type: api.EventTypeFile, File: &api.FileEvent{Path: "/etc/x"}}, nil); se.EventType != "file" {
+		t.Errorf("tracepoint file event type = %q", se.EventType)
+	}
+}

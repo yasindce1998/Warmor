@@ -37,6 +37,7 @@ const (
 	lsm_mountMapLsmEnforce        = "lsm_enforce"
 	lsm_mountMapLsmEvents         = "lsm_events"
 	lsm_mountMapPolicyMap         = "policy_map"
+	lsm_mountMapUnixWatch         = "unix_watch"
 	lsm_mountProgLsmMountCheck    = "lsm_mount_check"
 	lsm_mountVarUnusedPolicyKey   = "unused_policy_key"
 	lsm_mountVarUnusedPolicyValue = "unused_policy_value"
@@ -96,6 +97,7 @@ type lsm_mountMapSpecs struct {
 	LsmEnforce      *ebpf.MapSpec `ebpf:"lsm_enforce"`
 	LsmEvents       *ebpf.MapSpec `ebpf:"lsm_events"`
 	PolicyMap       *ebpf.MapSpec `ebpf:"policy_map"`
+	UnixWatch       *ebpf.MapSpec `ebpf:"unix_watch"`
 }
 
 // lsm_mountVariableSpecs contains global variables before they are loaded into the kernel.
@@ -131,6 +133,7 @@ type lsm_mountMaps struct {
 	LsmEnforce      *ebpf.Map `ebpf:"lsm_enforce"`
 	LsmEvents       *ebpf.Map `ebpf:"lsm_events"`
 	PolicyMap       *ebpf.Map `ebpf:"policy_map"`
+	UnixWatch       *ebpf.Map `ebpf:"unix_watch"`
 }
 
 func (m *lsm_mountMaps) Close() error {
@@ -139,6 +142,7 @@ func (m *lsm_mountMaps) Close() error {
 		m.LsmEnforce,
 		m.LsmEvents,
 		m.PolicyMap,
+		m.UnixWatch,
 	)
 }
 

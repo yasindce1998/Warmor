@@ -69,6 +69,20 @@ int BPF_PROG(lsm_connect_check, struct socket *sock, struct sockaddr *address, i
 		port = sin6.sin6_port;
 		__builtin_memcpy(addr_v6, sin6.sin6_addr, 16);
 		hash = hash_ipv6_endpoint(addr_v6, port);
+	} else if (family == 1) { // AF_UNIX
+		// Report connects to watched paths only (see unix_watch). Never
+		// blocked here: unix sockets have no policy-map rules.
+		char path[108] = {};
+		int len = bpf_probe_read_kernel_str(path, sizeof(path),
+						    ((struct sockaddr_un *)address)->sun_path);
+		// len == sizeof(path) means a possibly truncated path; abstract
+		// sockets (leading NUL) read as empty. Neither can be watched.
+		if (len <= 1 || len >= (int)sizeof(path))
+			return 0;
+		__u32 path_hash = fnv1a_hash(path, len);
+		if (bpf_map_lookup_elem(&unix_watch, &path_hash))
+			emit_lsm_event(EVENT_TYPE_NETWORK, 0, path, len, cgid, family, 0, 0, 0);
+		return 0;
 	} else {
 		// Unsupported address family — allow
 		return 0;

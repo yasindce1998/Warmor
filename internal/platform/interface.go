@@ -55,6 +55,9 @@ type Config struct {
 	// SkipLSM disables LSM-BPF program loading entirely, running in
 	// tracepoint-only observe mode regardless of kernel capabilities.
 	SkipLSM bool
+	// UnixWatch lists unix socket paths whose connects the kernel reports
+	// (Linux LSM only); used for container runtime socket access detection.
+	UnixWatch []string
 }
 
 // Current returns the platform for the current OS with default config.
