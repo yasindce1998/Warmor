@@ -84,6 +84,7 @@ type fakePolicyMap struct {
 	rules    []policyRule
 	clears   int
 	clearErr error
+	setErr   error // returned by SetRule, which then records nothing
 }
 
 // Clear drops every recorded rule, like PolicyMapManager.Clear.
@@ -118,6 +119,9 @@ func (f *fakePolicyMap) clearCount() int {
 func (f *fakePolicyMap) SetRule(cgroupID uint64, eventType uint8, pattern string, action uint8, audit bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.setErr != nil {
+		return f.setErr
+	}
 	f.rules = append(f.rules, policyRule{cgroupID, eventType, pattern, action, audit})
 	return nil
 }

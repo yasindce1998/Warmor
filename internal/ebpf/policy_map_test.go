@@ -103,3 +103,30 @@ func TestClear_NilMap(t *testing.T) {
 		t.Fatal("Clear on an unloaded map must fail, not pretend success")
 	}
 }
+
+// TestPolicyMapIsLRU checks every compiled LSM object declares policy_map as
+// an LRU hash, so a full map evicts instead of refusing new decisions. It
+// only parses the embedded ELF; no kernel is needed.
+func TestPolicyMapIsLRU(t *testing.T) {
+	loaders := map[string]func() (*ebpf.CollectionSpec, error){
+		"exec": loadLsm_exec, "file": loadLsm_file, "connect": loadLsm_connect,
+		"bind": loadLsm_bind, "listen": loadLsm_listen, "ptrace": loadLsm_ptrace,
+		"mount": loadLsm_mount,
+	}
+	for name, load := range loaders {
+		spec, err := load()
+		if err != nil {
+			t.Fatalf("%s: load spec: %v", name, err)
+		}
+		m, ok := spec.Maps["policy_map"]
+		if !ok {
+			t.Fatalf("%s: no policy_map", name)
+		}
+		if m.Type != ebpf.LRUHash {
+			t.Errorf("%s: policy_map type = %v, want LRUHash", name, m.Type)
+		}
+		if m.MaxEntries != 65536 {
+			t.Errorf("%s: policy_map max_entries = %d", name, m.MaxEntries)
+		}
+	}
+}

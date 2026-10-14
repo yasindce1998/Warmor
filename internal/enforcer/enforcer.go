@@ -3,6 +3,7 @@ package enforcer
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/yasindce1998/warmor/internal/cache"
 	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/lineage"
 	"github.com/yasindce1998/warmor/internal/logging"
 	"github.com/yasindce1998/warmor/internal/metrics"
@@ -97,6 +99,7 @@ type Enforcer struct {
 	policyPath     string
 	verifyKey      ed25519.PublicKey
 	evalTimeout    time.Duration
+	syncFailLog    logLimiter
 	auditMode      bool
 	learningMode   bool
 	ctx            context.Context
@@ -582,21 +585,63 @@ type eventPolicyMapSyncer interface {
 // that declare nothing are never synced.
 //
 // Callers hold decisionMu (shared); see persistDecision.
-func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult, gen uint64, fieldsRead uint32) {
+func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult, gen uint64, fieldsRead uint32) error {
+	err := e.syncDecision(event, result, gen, fieldsRead)
+	e.recordSync(event, err)
+	return err
+}
+
+var (
+	// errStaleDecision: the policy that made the decision was replaced.
+	errStaleDecision = errors.New("decision made by a replaced policy")
+	// errNotKeyDetermined: the decision depends on fields the kernel key
+	// does not cover (or the policy did not declare what it reads).
+	errNotKeyDetermined = errors.New("decision not determined by the kernel key")
+)
+
+// recordSync counts the outcome of one kernel sync and logs failures, at
+// most once per syncFailureLogInterval.
+func (e *Enforcer) recordSync(event *api.Event, err error) {
+	switch {
+	case err == nil:
+		metrics.RecordPolicyMapSync(metrics.SyncSynced)
+	case errors.Is(err, errStaleDecision):
+		metrics.RecordPolicyMapSync(metrics.SyncSkippedStale)
+	case errors.Is(err, errNotKeyDetermined):
+		metrics.RecordPolicyMapSync(metrics.SyncSkippedUnsound)
+	case errors.Is(err, kernelmap.ErrNotKernelMatchable):
+		metrics.RecordPolicyMapSync(metrics.SyncSkippedUnmatchable)
+	default:
+		metrics.RecordPolicyMapSync(metrics.SyncFailed)
+		if ok, suppressed := e.syncFailLog.allow(time.Now()); ok && e.logger != nil {
+			msg := fmt.Sprintf("sync %s decision to kernel policy map (userspace still enforces it)", event.GetType())
+			if suppressed > 0 {
+				msg += fmt.Sprintf("; %d similar failures suppressed", suppressed)
+			}
+			e.logger.LogError(err, msg)
+		}
+	}
+}
+
+func (e *Enforcer) syncDecision(event *api.Event, result *api.ActionResult, gen uint64, fieldsRead uint32) error {
 	if e.policyGen.Load() != gen {
-		return
+		return errStaleDecision
 	}
 	if !decisionDeterminedByKernelKey(e.policyMap, event.GetType(), fieldsRead) {
-		return
+		return errNotKeyDetermined
 	}
 
+	action := uint8(0)
+	if result.Action == api.ActionDeny {
+		action = 1
+	}
+	// Sync runs before ActionHandler.Enforce applies the audit downgrade, so
+	// fold global audit mode in here: the kernel must never be stricter than
+	// userspace, and an audit-flagged deny is only logged by the BPF side.
+	audit := result.Audit || e.auditMode
+
 	if es, ok := e.policyMap.(eventPolicyMapSyncer); ok {
-		action := uint8(0)
-		if result.Action == api.ActionDeny {
-			action = 1
-		}
-		_ = es.SyncEvent(event, action, result.Audit || e.auditMode)
-		return
+		return es.SyncEvent(event, action, audit)
 	}
 
 	var eventType uint8
@@ -623,27 +668,44 @@ func (e *Enforcer) syncToPolicyMap(event *api.Event, result *api.ActionResult, g
 	}
 
 	if pattern == "" {
-		return
+		return fmt.Errorf("empty pattern: %w", kernelmap.ErrNotKernelMatchable)
 	}
-
-	action := uint8(0)
-	if result.Action == api.ActionDeny {
-		action = 1
-	}
-
-	// Sync runs before ActionHandler.Enforce applies the audit downgrade, so
-	// fold global audit mode in here: the kernel must never be stricter than
-	// userspace, and an audit-flagged deny is only logged by the BPF side.
-	audit := result.Audit || e.auditMode
 
 	if eventType == 2 {
 		if ep, ok := e.policyMap.(endpointPolicyMapSyncer); ok {
-			_ = ep.SetEndpointRule(event.CgroupID, eventType, pattern, event.Network.RemotePort, action, audit)
-			return
+			return ep.SetEndpointRule(event.CgroupID, eventType, pattern, event.Network.RemotePort, action, audit)
 		}
 	}
 
-	_ = e.policyMap.SetRule(event.CgroupID, eventType, pattern, action, audit)
+	return e.policyMap.SetRule(event.CgroupID, eventType, pattern, action, audit)
+}
+
+// syncFailureLogInterval rate-limits kernel sync failure logs: a full or
+// broken map fails every sync, and the event loop must not drown in logs.
+const syncFailureLogInterval = 10 * time.Second
+
+// logLimiter allows one log per interval and counts what it suppressed.
+type logLimiter struct {
+	mu         sync.Mutex
+	interval   time.Duration
+	last       time.Time
+	suppressed int
+}
+
+func (l *logLimiter) allow(now time.Time) (bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	interval := l.interval
+	if interval == 0 {
+		interval = syncFailureLogInterval
+	}
+	if !l.last.IsZero() && now.Sub(l.last) < interval {
+		l.suppressed++
+		return false, 0
+	}
+	n := l.suppressed
+	l.last, l.suppressed = now, 0
+	return true, n
 }
 
 // GetStats returns current statistics

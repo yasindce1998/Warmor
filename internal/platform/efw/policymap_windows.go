@@ -10,13 +10,14 @@ import (
 
 	"github.com/cilium/ebpf"
 
+	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/platform/winutil"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 // ErrNotKernelMatchable is returned for decisions the kernel programs could
 // not apply exactly, so they are left to userspace.
-var ErrNotKernelMatchable = errors.New("efw: decision not expressible in the kernel map")
+var ErrNotKernelMatchable = kernelmap.ErrNotKernelMatchable
 
 // PolicyMap writes WASM decisions into the kernel maps so the next identical
 // operation is decided in the kernel, synchronously.

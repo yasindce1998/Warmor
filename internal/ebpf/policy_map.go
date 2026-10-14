@@ -13,6 +13,7 @@ import (
 
 	"github.com/cilium/ebpf"
 
+	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -113,7 +114,7 @@ const (
 // match exactly. Such rules are refused rather than written: a key that only
 // covers part of what userspace decided on would apply the decision to other
 // events, which is worse than no kernel fast-path at all.
-var ErrNotKernelMatchable = errors.New("rule cannot be matched exactly by the BPF programs")
+var ErrNotKernelMatchable = kernelmap.ErrNotKernelMatchable
 
 // ruleHash returns the policy_map rule_hash the BPF program for eventType
 // computes for pattern, or ErrNotKernelMatchable if the program never sees

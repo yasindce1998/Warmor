@@ -54,9 +54,12 @@ struct warmor_event {
 	__u16 pad[3];
 };
 
-// Shared policy map — all LSM programs reference the same map via BTF
+// Shared policy map — all LSM programs reference the same map via BTF.
+// LRU so that, once full, userspace syncs evict the least recently used
+// decision instead of failing: an evicted rule only costs a userspace
+// evaluation on the next miss.
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
 	__type(key, struct policy_key);
 	__type(value, struct policy_value);

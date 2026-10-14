@@ -118,6 +118,38 @@ var (
 	)
 )
 
+// Outcomes of syncing a userspace decision into the kernel policy map.
+const (
+	SyncSynced = "synced"
+	// SyncFailed: the map write failed (e.g. map full, EPERM).
+	SyncFailed = "failed"
+	// SyncSkippedUnmatchable: the kernel programs cannot match the decision
+	// exactly (ErrNotKernelMatchable), so it stays in userspace by design.
+	SyncSkippedUnmatchable = "skipped_unmatchable"
+	// SyncSkippedUnsound: the decision depends on fields outside the kernel
+	// key (or the policy declared nothing), so syncing it would apply it to
+	// other events.
+	SyncSkippedUnsound = "skipped_unsound"
+	// SyncSkippedStale: the deciding policy was replaced by a reload.
+	SyncSkippedStale = "skipped_stale"
+)
+
+// PolicyMapSyncs counts kernel policy map sync attempts by outcome.
+var PolicyMapSyncs = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "warmor",
+		Subsystem: "policy_map",
+		Name:      "syncs_total",
+		Help:      "Userspace decisions synced to the kernel policy map, by result (synced, failed, skipped_unmatchable, skipped_unsound, skipped_stale).",
+	},
+	[]string{"result"},
+)
+
+// RecordPolicyMapSync counts one kernel policy map sync outcome.
+func RecordPolicyMapSync(result string) {
+	PolicyMapSyncs.WithLabelValues(result).Inc()
+}
+
 func init() {
 	prometheus.MustRegister(
 		HookDecisions,
@@ -131,6 +163,7 @@ func init() {
 		EventsProcessed,
 		EventsDropped,
 		MapEntries,
+		PolicyMapSyncs,
 	)
 }
 
