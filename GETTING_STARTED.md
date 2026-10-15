@@ -248,8 +248,8 @@ Leaving out `--lsm-enforce` alone is **not** observe-only. The kernel then only 
 ### "I want to test a policy before deploying"
 
 ```bash
-./bin/warmor-simulate --policy candidate.yaml --data /var/lib/warmor/events --since 168h --format json -o report.json
-# Shows what WOULD have been denied over the last 7 days (--since takes Go durations: 168h, not 7d)
+./bin/warmor-simulate --policy candidate.yaml --data /var/lib/warmor/events --since 7d --format json -o report.json
+# Shows what WOULD have been denied over the last 7 days
 ```
 
 ### "I want to validate my YAML without running anything"

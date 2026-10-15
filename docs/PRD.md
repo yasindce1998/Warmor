@@ -878,12 +878,12 @@ opts := &enforcer.Options{StreamSinks: []streaming.Sink{sink}}
 
 **Track D: Container Runtime Integration** — Mostly missing
 - [ ] containerd shim plugin: library code in `internal/container`, not wired
-- [x] CRI-O OCI hook configuration (createRuntime + poststop; both stages pass `--action start`)
+- [x] CRI-O OCI hook configuration (`warmor-hook.json` for createRuntime, `warmor-hook-stop.json` for poststop)
 - [ ] OCI hook binary (`warmor-oci-hook`): experimental. No auth/TLS, so it only works with `warmor-server --insecure`.
 - [ ] Per-container policy scoping via container labels (`io.warmor/policy`): bindings are stored, **never consumed**
 - [x] Container binding API endpoints on policy server
 - [ ] Runtime auto-detection: library-only
-- [ ] Kubernetes DaemonSet manifest: present, but it configures the daemon through env vars that the daemon does not read
+- [ ] Kubernetes DaemonSet manifest: configured with real daemon flags, but it can't start a fresh node (the daemon needs a local policy before it contacts the server)
 
 **Success Criteria:**
 - [x] Agent ↔ server traffic encrypted with mTLS; unsigned policies rejected when the daemon runs with `--verify-key` (and uploads, when the server does)
@@ -998,7 +998,7 @@ cd deploy/ && docker compose -f docker-compose.monitoring.yml up -d
 
 ```bash
 # CRI-O (install OCI hook; experimental, works only against warmor-server --insecure)
-sudo cp deploy/crio/warmor-hook.json /etc/containers/oci/hooks.d/
+sudo cp deploy/crio/warmor-hook.json deploy/crio/warmor-hook-stop.json /etc/containers/oci/hooks.d/
 ```
 
 The `--containerd-socket` and `--per-container-policy` flags do **not** exist. Per-container policy scoping via `io.warmor/policy` labels is **not implemented**: the hook records bindings on the server, but nothing resolves `cgroup_id → container_id → policy`.
@@ -1014,7 +1014,7 @@ Source: `internal/container/` — detector.go, containerd_monitor.go, containerd
 
 **Deliverables:**
 - [x] Learning mode — synthesize allowlist policies from recorded events (`warmor-learn`, `internal/learner/`). Offline only; no in-daemon learning flag.
-- [x] Policy simulator — replay recorded events against candidate policies (`warmor-simulate`, `internal/simulator/`). The daemon has no event-store sink, and the new-denials diff is empty for daemon-recorded events (decision case mismatch).
+- [x] Policy simulator — replay recorded events against candidate policies (`warmor-simulate`, `internal/simulator/`). The daemon has no event-store sink; record with `--event-sink file:`.
 - [ ] Supply-chain integrity — in-kernel content-hash exec check (`--integrity-db`), **experimental**: not yet run on an IMA-enabled kernel in CI
 - [x] Container escape detection (`--escape-detect`) — after-the-fact detection, scoped to containers
 - [ ] Drift detection (`internal/drift/`) — library-only

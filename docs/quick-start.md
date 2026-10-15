@@ -239,7 +239,7 @@ The daemon exports `warmor_events_total`, `warmor_cache_hits_total`,
 ### CRI-O / OCI hook (experimental)
 
 ```bash
-sudo cp deploy/crio/warmor-hook.json /etc/containers/oci/hooks.d/
+sudo cp deploy/crio/warmor-hook.json deploy/crio/warmor-hook-stop.json /etc/containers/oci/hooks.d/
 ```
 
 `warmor-oci-hook` reports container start/stop to `warmor-server`
@@ -248,7 +248,6 @@ sudo cp deploy/crio/warmor-hook.json /etc/containers/oci/hooks.d/
 - It has no auth or TLS, so it only works against `warmor-server --insecure`.
 - The server stores the bindings but nothing consumes them, so there is no
   per-container policy yet.
-- The shipped hook config passes `--action start` for both stages.
 
 ### containerd / per-container policy
 

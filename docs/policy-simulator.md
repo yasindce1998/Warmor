@@ -1,8 +1,6 @@
 # Policy Simulator
 
 > **Status: Shipped** (`warmor-simulate`). The **daemon has no event-store sink** on `main`, and the policy server does not call the simulator. Record events with the file sink, using a file name that matches `events-*.ndjson`. See [Integration](#integration-with-policy-server) below and [Feature Status](STATUS.md).
->
-> **Known issue:** the daemon's sinks record `decision` in lowercase (`allow`, `deny`), but the simulator compares against `ALLOW`/`DENY`. For events recorded by `warmor-daemon`, the "New denials" and "New allows" sections are therefore always empty. The decision breakdown (`ALLOW`/`DENY`/`LOG` counts) is still correct.
 
 `warmor-simulate` replays recorded security events against a candidate policy and reports the impact before you deploy it. This lets you preview new denials or relaxed allows without touching production.
 
@@ -32,7 +30,7 @@ warmor-simulate --policy <path> --data <event-dir> [flags]
 |------|---------|-------------|
 | `--policy` | required | Path to candidate policy file (.yaml or .wasm) |
 | `--data` | required | Path to the event store directory |
-| `--since` | `168h` (7 days) | Only replay events from this duration ago |
+| `--since` | `7d` | Only replay events from this duration ago |
 | `-o` | stdout | Output file path |
 | `--format` | `text` | Output format: `text` or `json` |
 | `--version` | -- | Print version and exit |
