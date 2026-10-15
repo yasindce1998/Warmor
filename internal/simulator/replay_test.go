@@ -35,6 +35,10 @@ func newTestEvaluator(t *testing.T) *wasm.PolicyEvaluator {
 		t.Fatalf("NewPool: %v", err)
 	}
 	ev := wasm.NewPolicyEvaluator(pool, "test-host")
+	// The default 50ms deadline is a production latency bound; under -race
+	// on a loaded machine an evaluation can exceed it, and Replay counts a
+	// failed evaluation as a deny without a denial detail.
+	ev.SetTimeout(10 * time.Second)
 	t.Cleanup(func() {
 		_ = ev.Close(ctx)
 		_ = rt.Close(ctx)
@@ -370,5 +374,29 @@ func TestNormalizeDecision(t *testing.T) {
 		if got := normalizeDecision(in); got != want {
 			t.Errorf("normalizeDecision(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestContainerStartRoundTrip: the container start the enforcer determined
+// is recorded by sinks and replayed, so age-based temporal rules see the
+// same container age in warmor-simulate as they did live.
+func TestContainerStartRoundTrip(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0).UTC()
+	ev := &api.Event{Comm: "curl", Timestamp: start.Add(time.Hour), CgroupID: 4, ContainerStart: start}
+	data, err := json.Marshal(streaming.FromAPIEvent(ev, &api.ActionResult{Action: api.ActionAllow}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var se streaming.SecurityEvent
+	if err := json.Unmarshal(data, &se); err != nil {
+		t.Fatal(err)
+	}
+	if got := securityEventToAPIEvent(&se); !got.ContainerStart.Equal(start) {
+		t.Errorf("replayed ContainerStart = %v, want %v (json %s)", got.ContainerStart, start, data)
+	}
+	// Unknown stays unknown and is not written at all.
+	data, _ = json.Marshal(streaming.FromAPIEvent(&api.Event{Comm: "x"}, nil))
+	if bytes.Contains(data, []byte("container_start")) {
+		t.Errorf("zero ContainerStart serialized: %s", data)
 	}
 }

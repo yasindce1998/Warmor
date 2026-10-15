@@ -204,6 +204,8 @@ func FromAPIEvent(event *api.Event, result *api.ActionResult) *SecurityEvent {
 		Comm:      event.Comm,
 		CgroupID:  event.CgroupID,
 		Filename:  event.Filename,
+
+		ContainerStart: event.ContainerStart,
 	}
 
 	if se.Timestamp.IsZero() {

@@ -19,11 +19,13 @@ func GenerateRust(policy *Policy) (string, error) {
 	// Binary struct field offsets
 	writeBinaryOffsets(&b)
 	writeHelperFunctions(&b)
+	writeTemporalHelpers(&b)
 	writeMallocFree(&b)
 	writeReasonTable(&b, policy)
 	writeEvaluateEventFunction(&b, policy)
 	writeGetLastMatchedRule(&b)
 	writeFieldsRead(&b, policy)
+	writeABIVersion(&b)
 
 	// Host callback extern declarations
 	writeHostExterns(&b)
@@ -46,6 +48,8 @@ const OFF_REMOTE_PORT: usize = 209;
 const OFF_LOCAL_PORT: usize = 211;
 const OFF_SECONDARY_STR: usize = 213;
 const OFF_SECONDARY_STR_LEN: usize = 32;
+const OFF_WALL_CLOCK: usize = 245; // u32 UTC Unix seconds, 0 = unknown (ABI 3)
+const OFF_CONTAINER_AGE: usize = 249; // u48 milliseconds, 0 = unknown (ABI 3)
 
 `)
 }
@@ -285,7 +289,8 @@ func writeProcessEvaluatorBinary(b *strings.Builder, policy *Policy) {
 	b.WriteString("    let gid = read_u32(base, OFF_GID);\n")
 	b.WriteString("    let comm = read_str(base, OFF_COMM, OFF_COMM_LEN);\n")
 	b.WriteString("    let path = read_str(base, OFF_PRIMARY_STR, OFF_PRIMARY_STR_LEN);\n")
-	b.WriteString("    let _ = (pid, gid, comm);\n")
+	writeTemporalReads(b)
+	b.WriteString("    let _ = (pid, gid, comm, wall, age_ms);\n")
 
 	for _, rule := range rules {
 		writeRuleCheckBinary(b, rule, "process", globalRuleIndex(policy, rule))
@@ -306,7 +311,8 @@ func writeFileEvaluatorBinary(b *strings.Builder, policy *Policy) {
 	b.WriteString("    let path = read_str(base, OFF_PRIMARY_STR, OFF_PRIMARY_STR_LEN);\n")
 	b.WriteString("    let flags = read_u32(base, OFF_FLAGS);\n")
 	b.WriteString("    let operation = read_str(base, OFF_SECONDARY_STR, OFF_SECONDARY_STR_LEN);\n")
-	b.WriteString("    let _ = (pid, gid, comm, flags);\n")
+	writeTemporalReads(b)
+	b.WriteString("    let _ = (pid, gid, comm, flags, wall, age_ms);\n")
 
 	for _, rule := range rules {
 		writeRuleCheckBinary(b, rule, "file", globalRuleIndex(policy, rule))
@@ -328,7 +334,8 @@ func writeNetworkEvaluatorBinary(b *strings.Builder, policy *Policy) {
 	b.WriteString("    let remote_port = read_u16(base, OFF_REMOTE_PORT);\n")
 	b.WriteString("    let local_port = read_u16(base, OFF_LOCAL_PORT);\n")
 	b.WriteString("    let protocol = read_str(base, OFF_SECONDARY_STR, OFF_SECONDARY_STR_LEN);\n")
-	b.WriteString("    let _ = (pid, gid, comm);\n")
+	writeTemporalReads(b)
+	b.WriteString("    let _ = (pid, gid, comm, wall, age_ms);\n")
 
 	for _, rule := range rules {
 		writeRuleCheckBinary(b, rule, "network", globalRuleIndex(policy, rule))
@@ -347,12 +354,28 @@ func writeRuleCheckBinary(b *strings.Builder, rule Rule, eventType string, ruleI
 	if condExpr == "" {
 		condExpr = "true"
 	}
+	if window := temporalWindowExpr(rule.Temporal); window != "" {
+		// The action applies only outside the permitted window.
+		condExpr = fmt.Sprintf("(%s) && !(%s)", condExpr, window)
+	}
 
 	b.WriteString(fmt.Sprintf("    // Rule: %s\n", rule.Name))
 	b.WriteString(fmt.Sprintf("    if %s {\n", condExpr))
 	b.WriteString(fmt.Sprintf("        LAST_MATCHED = %d;\n", ruleIndex))
 	b.WriteString(fmt.Sprintf("        return %s;\n", action))
 	b.WriteString("    }\n\n")
+}
+
+// writeTemporalReads decodes the temporal context into wall and age_ms.
+func writeTemporalReads(b *strings.Builder) {
+	b.WriteString("    let wall = read_u32(base, OFF_WALL_CLOCK);\n")
+	b.WriteString("    let age_ms = read_u48(base, OFF_CONTAINER_AGE);\n")
+}
+
+// writeABIVersion declares ABI version 3, under which the host sends the
+// temporal context (wasm.TemporalABIVersion).
+func writeABIVersion(b *strings.Builder) {
+	b.WriteString("#[no_mangle]\npub extern \"C\" fn abi_version() -> u32 {\n    3\n}\n\n")
 }
 
 func writeGetLastMatchedRule(b *strings.Builder) {

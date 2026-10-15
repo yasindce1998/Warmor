@@ -14,7 +14,8 @@ type DiffResult struct {
 	OnlyA []policymerge.RuleYAML
 	OnlyB []policymerge.RuleYAML
 	// Changed holds rules that match on (event, conditions) but whose
-	// decision (action, mode or reason) differs between the policies.
+	// decision (action, mode, reason or temporal window) differs between
+	// the policies.
 	Changed []RuleChange
 	Both    []policymerge.RuleYAML
 }
@@ -27,7 +28,8 @@ type RuleChange struct {
 }
 
 // Diff compares the rules of a and b. Rules are matched on (event,
-// conditions); a matched pair is in Both if action, mode and reason are also
+// conditions); a matched pair is in Both if action, mode, reason and temporal
+// window are also
 // equal, otherwise in Changed. Duplicate rules within one policy are kept
 // and matched one-for-one, so their counts are reported faithfully.
 func Diff(a, b *policymerge.PolicyYAML) *DiffResult {
@@ -109,7 +111,22 @@ func entries(rules []policymerge.RuleYAML) []entry {
 }
 
 func decisionKey(r policymerge.RuleYAML) string {
-	return r.Action + "\x00" + r.Mode + "\x00" + r.Reason
+	return r.Action + "\x00" + r.Mode + "\x00" + r.Reason + "\x00" + temporalKey(r.Temporal)
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+
+// temporalKey renders a rule's temporal block canonically ("" for none).
+func temporalKey(t map[string]any) string {
+	if len(t) == 0 {
+		return ""
+	}
+	return string(canonical(t))
 }
 
 // sortRules orders rules by name with a full tiebreak on every other field
@@ -126,6 +143,7 @@ func compareRules(a, b policymerge.RuleYAML) int {
 		{a.Mode, b.Mode},
 		{a.Reason, b.Reason},
 		{conditionsKey(a.Conditions), conditionsKey(b.Conditions)},
+		{temporalKey(a.Temporal), temporalKey(b.Temporal)},
 	} {
 		if c := strings.Compare(p[0], p[1]); c != 0 {
 			return c
@@ -219,6 +237,9 @@ func describeChange(a, b policymerge.RuleYAML) string {
 	}
 	if a.Reason != b.Reason {
 		parts = append(parts, fmt.Sprintf("reason %q -> %q", a.Reason, b.Reason))
+	}
+	if ta, tb := temporalKey(a.Temporal), temporalKey(b.Temporal); ta != tb {
+		parts = append(parts, fmt.Sprintf("temporal %s -> %s", orNone(ta), orNone(tb)))
 	}
 	return strings.Join(parts, ", ")
 }

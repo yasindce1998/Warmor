@@ -75,7 +75,7 @@
 - **Container Escape Detection** — shipped (`--escape-detect`), detection after the fact
 - **Canary auto-rollback** — library only (manual rollouts are shipped)
 - **Drift Detection** — library only
-- **Temporal Policies** — library only. The YAML `temporal:` key is silently ignored.
+- **Temporal Policies** — shipped for YAML policies: `temporal:` blocks (container age, UTC time of day, weekday) are compiled into the WASM policy. Container age is Linux-only; unknown age fails closed.
 - **Attack Graph** — library only
 - **Blast Radius** — library only
 
@@ -131,6 +131,6 @@ These are **design targets, not measurements**. None has been benchmarked on `ma
 - **[Escape Detection](escape-detection.md)** — Shipped (`--escape-detect`)
 - **[Canary Rollout](canary-rollout.md)** — Manual rollouts shipped; auto-rollback library only
 - **[Drift Detection](drift-detection.md)** — Library only
-- **[Temporal Policies](temporal-policies.md)** — Library only
+- **[Temporal Policies](temporal-policies.md)** — Shipped (YAML `temporal:` blocks)
 - **[Attack Graph](attack-graph.md)** — Library only
 - **[Blast Radius](blast-radius.md)** — Library only

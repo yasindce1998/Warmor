@@ -11,14 +11,16 @@ import (
 // PolicyInputs returns everything a policy module can observe about event,
 // through every channel the host offers: the binary ABI event struct, the
 // JSON ABI document, and the values the get_field_* host callbacks return.
-// Two events with equal PolicyInputs are indistinguishable to any policy
-// (pure policies decide them identically). It exists so the decision
-// cache's key can be checked against the real serialization in tests.
-func PolicyInputs(event *api.Event) [][]byte {
+// temporal selects what a module declaring ABI >= TemporalABIVersion sees
+// (which adds the wall clock and container age). Two events with equal
+// PolicyInputs are indistinguishable to any such policy (pure policies
+// decide them identically). It exists so the decision cache's key can be
+// checked against the real serialization in tests.
+func PolicyInputs(event *api.Event, temporal bool) [][]byte {
 	bin := make([]byte, eventStructSize)
-	writeEventBinary(bin, event)
+	writeEventBinary(bin, event, temporal)
 
-	js, err := marshalEventForWASM(event)
+	js, err := marshalEventForWASM(event, temporal)
 	if err != nil {
 		js = []byte("marshal error: " + err.Error())
 	}

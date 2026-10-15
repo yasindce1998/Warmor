@@ -194,6 +194,7 @@ func fullEvent(typ api.EventType) *api.Event {
 	ev := &api.Event{
 		PID: 10, UID: 11, GID: 12, Comm: "comm", Filename: "/file/name",
 		Timestamp: time.Unix(1, 0), CgroupID: 13, LSMEvent: true,
+		ContainerStart: time.Unix(0, 500*int64(time.Millisecond)),
 		Process: &api.ProcessEvent{
 			BaseEvent: api.BaseEvent{Type: api.EventTypeProcess, PID: 20, UID: 21, GID: 22, Comm: "pcomm", CgroupID: 23},
 			Filename:  "/proc/file", Args: []string{"a", "b"},
@@ -237,7 +238,16 @@ func forEachMutation(t *testing.T, mk func() *api.Event, visit func(desc string,
 			return walk(v.Elem(), path, target, n, ev)
 		case reflect.Struct:
 			if v.Type() == timeType {
-				return false
+				// A leaf: shift it by a day and a minute, which changes
+				// the Unix seconds, minute of day and weekday alike.
+				if *n != target {
+					*n++
+					return false
+				}
+				tv, _ := v.Interface().(time.Time)
+				v.Set(reflect.ValueOf(tv.Add(25*time.Hour + time.Minute)))
+				visit(path, ev)
+				return true
 			}
 			for i := 0; i < v.NumField(); i++ {
 				f := v.Field(i)
@@ -283,8 +293,8 @@ func forEachMutation(t *testing.T, mk func() *api.Event, visit func(desc string,
 	}
 }
 
-func inputsEqual(a, b *api.Event) bool {
-	ia, ib := wasm.PolicyInputs(a), wasm.PolicyInputs(b)
+func inputsEqual(a, b *api.Event, temporal bool) bool {
+	ia, ib := wasm.PolicyInputs(a, temporal), wasm.PolicyInputs(b, temporal)
 	for i := range ia {
 		if !bytes.Equal(ia[i], ib[i]) {
 			return false
@@ -297,29 +307,83 @@ func inputsEqual(a, b *api.Event) bool {
 // to a policy module (through the binary ABI, the JSON ABI or the host
 // callbacks), the cache key must change too, or the cached decision of one
 // event would be reused for an event the policy may decide differently.
+//
+// The one exception is the temporal context of ABI >= 3 modules (wall
+// clock, container age), which is not in the key: decisions that may
+// depend on it are never cached (TestDecisionCache_TimeDependentNeverCached).
+// The test pins down exactly which event fields feed it, so a new input
+// cannot slip into that exception unnoticed.
 func TestKey_CoversEveryPolicyInput(t *testing.T) {
-	for _, typ := range []api.EventType{-1, api.EventTypeProcess, api.EventTypeFile, api.EventTypeNetwork} {
-		mk := func() *api.Event { return fullEvent(typ) }
-		for _, pidRelevant := range []bool{true, false} {
-			c := NewDecisionCache(1, time.Minute)
-			if !pidRelevant {
-				c.SetPIDRelevant(func(api.EventType) bool { return false })
+	for _, temporal := range []bool{false, true} {
+		temporalOnly := map[string]bool{}
+		for _, typ := range []api.EventType{-1, api.EventTypeProcess, api.EventTypeFile, api.EventTypeNetwork} {
+			mk := func() *api.Event { return fullEvent(typ) }
+			for _, pidRelevant := range []bool{true, false} {
+				c := NewDecisionCache(1, time.Minute)
+				if !pidRelevant {
+					c.SetPIDRelevant(func(api.EventType) bool { return false })
+				}
+				base := mk()
+				baseKey := c.makeKey(base)
+				forEachMutation(t, mk, func(desc string, ev *api.Event) {
+					if inputsEqual(base, ev, temporal) {
+						return
+					}
+					if !pidRelevant && desc == "Event.PID" {
+						// Allowed to collide: the policy declared it ignores the PID.
+						return
+					}
+					if c.makeKey(ev) != baseKey {
+						return
+					}
+					if temporal && inputsEqual(base, ev, false) {
+						// Only the temporal context differs.
+						temporalOnly[desc] = true
+						return
+					}
+					t.Errorf("type %v, pidRelevant=%v, temporal=%v: mutating %s changes what the policy sees but not the cache key",
+						typ, pidRelevant, temporal, desc)
+				})
 			}
-			base := mk()
-			baseKey := c.makeKey(base)
-			forEachMutation(t, mk, func(desc string, ev *api.Event) {
-				if inputsEqual(base, ev) {
-					return
-				}
-				if !pidRelevant && desc == "Event.PID" {
-					// Allowed to collide: the policy declared it ignores the PID.
-					return
-				}
-				if c.makeKey(ev) == baseKey {
-					t.Errorf("type %v, pidRelevant=%v: mutating %s changes what the policy sees but not the cache key", typ, pidRelevant, desc)
-				}
-			})
 		}
+		want := map[string]bool{}
+		if temporal {
+			want = map[string]bool{"Event.Timestamp": true, "Event.ContainerStart": true}
+		}
+		if !reflect.DeepEqual(temporalOnly, want) {
+			t.Errorf("temporal=%v: fields feeding only the temporal context = %v, want %v", temporal, temporalOnly, want)
+		}
+	}
+}
+
+func TestDecisionCache_TimeDependentNeverCached(t *testing.T) {
+	c, _ := newTestCache(10, time.Minute)
+	c.Put(exec("/bin/x", 0), allow) // cleared below
+	c.SetTimeDependent(func(t api.EventType) bool { return t == api.EventTypeProcess })
+	if c.Stats().Size != 0 {
+		t.Fatal("SetTimeDependent must clear the cache")
+	}
+
+	ev := exec("/bin/x", 0)
+	c.Put(ev, allow)
+	if _, ok := c.Get(ev); ok {
+		t.Fatal("time-dependent decision served from the cache")
+	}
+	if s := c.Stats(); s.Size != 0 || s.Misses != 1 {
+		t.Fatalf("stats = %+v, want nothing stored and one miss", s)
+	}
+
+	// Other event types are still cached.
+	file := &api.Event{File: &api.FileEvent{BaseEvent: api.BaseEvent{Type: api.EventTypeFile}, Path: "/etc/x"}}
+	c.Put(file, allow)
+	if _, ok := c.Get(file); !ok {
+		t.Error("time-independent event type not cached")
+	}
+
+	c.SetTimeDependent(nil)
+	c.Put(ev, allow)
+	if _, ok := c.Get(ev); !ok {
+		t.Error("nil SetTimeDependent must cache every type")
 	}
 }
 

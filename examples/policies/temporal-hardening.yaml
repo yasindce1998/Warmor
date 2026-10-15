@@ -1,0 +1,77 @@
+# Temporal hardening: rules that act only outside a permitted window of
+# container age, UTC time of day or weekday. See docs/temporal-policies.md.
+#
+# Age rules treat an unknown container age (host processes, undatable
+# containers, non-Linux) as outside the window, so they also act on matching
+# host processes. Scope them, or run the daemon with --cgroup-filter.
+name: temporal-hardening
+version: 1
+description: "Startup, warmup, maintenance-window and business-hours restrictions"
+
+rules:
+  # Startup window: dependency fetches are permitted in the first minute only.
+  - name: no-network-tools-after-startup
+    event: network
+    conditions:
+      all:
+        - comm: { any_of: ["curl", "wget"] }
+    action: deny
+    reason: "curl/wget after the container's first minute"
+    temporal:
+      max_container_age: "60s"
+
+  # Warmup: no database writes during the first 30 seconds.
+  - name: no-db-writes-during-warmup
+    event: file
+    conditions:
+      all:
+        - path: { glob: "/var/lib/postgresql/**" }
+        - operation: { eq: "write" }
+    action: deny
+    reason: "database write during the 30s warmup"
+    temporal:
+      min_container_age: "30s"
+
+  # Maintenance window: package installs only Tue/Thu 22:00-04:30 UTC. The
+  # after-midnight part of the window is on the next UTC day, so it is
+  # permitted only on Wednesday and Friday mornings if those days are listed.
+  - name: apt-maintenance-window
+    event: process
+    conditions:
+      all:
+        - path: { glob: "/usr/bin/apt*" }
+    action: deny
+    reason: "package manager outside the maintenance window"
+    temporal:
+      time_of_day:
+        start: { hour: 22, minute: 0 }
+        end: { hour: 4, minute: 30 }
+      days_of_week: [Tuesday, Wednesday, Thursday, Friday]
+
+  # No weekend deploys.
+  - name: no-weekend-deploys
+    event: process
+    conditions:
+      all:
+        - comm: { eq: "helm" }
+    action: deny
+    reason: "helm on a weekend"
+    temporal:
+      days_of_week: [Monday, Tuesday, Wednesday, Thursday, Friday]
+
+  # Log shells outside weekday business hours or after the first hour.
+  - name: log-late-shells
+    event: process
+    conditions:
+      all:
+        - path: { any_of: ["/bin/sh", "/bin/bash"] }
+    action: log
+    reason: "shell outside business hours or in a long-running container"
+    temporal:
+      max_container_age: "1h"
+      time_of_day:
+        start: { hour: 9, minute: 0 }
+        end: { hour: 17, minute: 0 }
+      days_of_week: [Monday, Tuesday, Wednesday, Thursday, Friday]
+
+default_action: allow

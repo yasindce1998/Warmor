@@ -23,6 +23,9 @@ type PolicyEvaluator struct {
 	pool     *Pool
 	hostname string
 	timeout  time.Duration
+	// now stamps events that carry no Timestamp, so a temporal policy
+	// never sees an unknown wall clock for them.
+	now func() time.Time
 }
 
 // NewPolicyEvaluator creates a new pool-backed policy evaluator with the
@@ -32,6 +35,7 @@ func NewPolicyEvaluator(pool *Pool, hostname string) *PolicyEvaluator {
 		pool:     pool,
 		hostname: hostname,
 		timeout:  DefaultEvalTimeout,
+		now:      time.Now,
 	}
 }
 
@@ -54,6 +58,14 @@ const ActionAuditDeny api.Action = 3
 // Evaluate runs policy evaluation using an instance from the pool.
 func (e *PolicyEvaluator) Evaluate(ctx context.Context, event *api.Event) (*api.ActionResult, error) {
 	start := time.Now()
+
+	if event.Timestamp.IsZero() {
+		// The policy's wall clock is the event's time (see
+		// temporalInputs); stamp a copy rather than the caller's event.
+		stamped := *event
+		stamped.Timestamp = e.now()
+		event = &stamped
+	}
 
 	timeout := e.timeout
 	if timeout <= 0 {

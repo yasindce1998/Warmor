@@ -17,7 +17,7 @@ func TestMarshalEventForWASM_ProcessEvent(t *testing.T) {
 		Type:     api.EventTypeProcess,
 	}
 
-	data, err := marshalEventForWASM(event)
+	data, err := marshalEventForWASM(event, false)
 	if err != nil {
 		t.Fatalf("marshalEventForWASM failed: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestMarshalEventForWASM_ProcessEventWithSubStruct(t *testing.T) {
 		},
 	}
 
-	data, err := marshalEventForWASM(event)
+	data, err := marshalEventForWASM(event, false)
 	if err != nil {
 		t.Fatalf("marshalEventForWASM failed: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestMarshalEventForWASM_FileEvent(t *testing.T) {
 		},
 	}
 
-	data, err := marshalEventForWASM(event)
+	data, err := marshalEventForWASM(event, false)
 	if err != nil {
 		t.Fatalf("marshalEventForWASM failed: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestMarshalEventForWASM_FileEvent_Fallback(t *testing.T) {
 		Type:     api.EventTypeFile,
 	}
 
-	data, err := marshalEventForWASM(event)
+	data, err := marshalEventForWASM(event, false)
 	if err != nil {
 		t.Fatalf("marshalEventForWASM failed: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestMarshalEventForWASM_NetworkEvent(t *testing.T) {
 		},
 	}
 
-	data, err := marshalEventForWASM(event)
+	data, err := marshalEventForWASM(event, false)
 	if err != nil {
 		t.Fatalf("marshalEventForWASM failed: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestMarshalEventForWASM_NetworkEvent_Fallback(t *testing.T) {
 		Type: api.EventTypeNetwork,
 	}
 
-	data, err := marshalEventForWASM(event)
+	data, err := marshalEventForWASM(event, false)
 	if err != nil {
 		t.Fatalf("marshalEventForWASM failed: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestMarshalEventForWASM_UnknownType(t *testing.T) {
 		Type:     api.EventType(99),
 	}
 
-	data, err := marshalEventForWASM(event)
+	data, err := marshalEventForWASM(event, false)
 	if err != nil {
 		t.Fatalf("marshalEventForWASM failed: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestMarshalEventForWASM_FilenameAlwaysPresent(t *testing.T) {
 		"NETWORK fallback": {Type: api.EventTypeNetwork},
 	}
 	for name, ev := range events {
-		data, err := marshalEventForWASM(ev)
+		data, err := marshalEventForWASM(ev, false)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}

@@ -23,6 +23,8 @@ type Pool struct {
 	// fields is the module's fields-read declaration per event type,
 	// read once from the first instance.
 	fields [numEventTypes]uint32
+	// temporal: the module is sent temporal context (ABI >= 3).
+	temporal bool
 
 	// mu serialises Put against Close so no instance is returned to the
 	// channel after it has been drained.
@@ -56,6 +58,7 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 		}
 		if i == 0 {
 			p.fields = readFieldsDeclaration(ctx, policy)
+			p.temporal = policy.temporal
 		}
 		p.instances <- policy
 	}

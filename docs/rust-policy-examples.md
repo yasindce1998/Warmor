@@ -37,7 +37,7 @@ module's export *signatures* and rejects a module it cannot call at load time:
 | `evaluate_event` | `(ptr: i32) -> i32` | Binary ABI: `ptr` is a fixed 256-byte struct (used by YAML-compiled policies) |
 | `malloc` | `(size: i32) -> i32` | Required for both ABIs |
 | `free` | `(ptr: i32, size: i32)` | Optional |
-| `abi_version` | `() -> i32` | Optional; the host accepts 1 and 2 and refuses anything else |
+| `abi_version` | `() -> i32` | Optional; the host accepts 1, 2 and 3 and refuses anything else. 3 opts in to temporal context (below) |
 
 A JSON policy must name its entry point `evaluate_syscall`. Exporting
 `evaluate_event(ptr, len)` is an error: `evaluate_event` is reserved for the
@@ -52,10 +52,23 @@ listed type):
 | `PROCESS` | `filename` is the executed binary |
 | `FILE` | `operation`, `path`, `flags` (`filename` is empty) |
 | `NETWORK` | `operation`, `protocol`, `remote_addr`, `remote_port`, `local_port` (`filename` is empty) |
+| all, only if `abi_version() >= 3` | `wall_clock_unix` (the event's time, UTC Unix seconds), `container_age_ms` (age of the event's container at that time, in ms). Each is `0` when unknown |
 
-Anything else (`args`, `parent_comm`, `cgroup_id`, temporal context, ...) is
-not sent today. Mark every struct `#[serde(default)]`: a missing key is
-otherwise a parse error, and the crates deny on parse errors.
+The binary ABI carries the same two values at offsets 245 (`u32` seconds) and
+249 (`u48` little-endian milliseconds) of the 256-byte struct; they are zero
+for modules that do not declare version 3.
+
+A version 3 module that reads either value must say so, or its decisions may
+be reused when they should not be: export
+`warmor_fields_read(event_type: u32) -> u32` (see
+`internal/compiler/fields.go`) and set `FieldBitTime` / `FieldBitContainerAge`
+for those event types. A version 3 module without that export is treated as
+reading everything, so none of its decisions are cached or synced to the
+kernel. Modules without version 3 never see time and are cached as before.
+
+Anything else (`args`, `parent_comm`, `cgroup_id`, ...) is not sent today.
+Mark every struct `#[serde(default)]`: a missing key is otherwise a parse
+error, and the crates deny on parse errors.
 
 ### Pattern 1: Tagged Enum (Multi-Event)
 
@@ -110,7 +123,7 @@ Internally the rules build a `Decision` (action + reason) that `evaluate_syscall
 
 ### ABI Version
 
-All advanced policies export `abi_version() -> u32` returning `2`, signaling support for the multi-event format and extended fields.
+All advanced policies export `abi_version() -> u32` returning `2`, signaling support for the multi-event format and extended fields. Version `3` additionally opts in to the temporal context (`wall_clock_unix`, `container_age_ms`; see the host contract above); YAML-compiled policies declare it.
 
 ## Policy Descriptions
 
@@ -145,10 +158,14 @@ Enforces runtime supply chain security:
 
 ### Temporal Access Control (`temporal-access/`)
 
-Time-based policy enforcement:
+Time-based policy enforcement in Rust. It declares ABI version 3, so the host
+sends `wall_clock_unix` and `container_age_ms` (0 = unknown), and derives the
+UTC hour and weekday itself. Unknown time keeps maintenance tools denied; other
+rules fall back to allow or log. All times are UTC. For declarative temporal
+rules, use a YAML `temporal:` block ([Temporal Policies](temporal-policies.md)).
 
 - **Startup-only binaries**: init processes (`tini`, `dumb-init`) allowed only in first 60s
-- **Maintenance windows**: package managers and dump tools require maintenance flag
+- **Maintenance window**: package managers and dump tools only Sunday 02:00-06:00 UTC (allowed and logged), denied otherwise
 - **Business hours**: SSH/SCP restricted to Mon-Fri 08:00-18:00
 - **Cron windows**: cron execution only during 02:00-04:00 and 06:00-07:00
 - **Post-stabilization blocking**: no new binaries from `/tmp` after 5 minutes

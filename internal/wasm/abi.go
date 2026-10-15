@@ -15,13 +15,18 @@ import (
 //
 //	1  original single-event contract
 //	2  adds the "type"-tagged multi-event JSON format (PROCESS/FILE/NETWORK)
+//	3  adds temporal context: the event's wall clock and container age
+//	   (binary offsets 245/249, JSON wall_clock_unix/container_age_ms);
+//	   see TemporalABIVersion
 //
-// Both versions use the same wire format; the host rejects anything outside
-// this range so a policy built for a future, incompatible contract fails
-// loudly at load time instead of silently mis-evaluating every event.
+// All versions use the same wire format; version 3 only fills bytes that
+// were padding and adds JSON keys, and only for modules declaring it. The
+// host rejects anything outside this range so a policy built for a future,
+// incompatible contract fails loudly at load time instead of silently
+// mis-evaluating every event.
 const (
 	MinABIVersion uint32 = 1
-	MaxABIVersion uint32 = 2
+	MaxABIVersion uint32 = 3
 )
 
 // Export names that make up the host <-> policy contract.
@@ -106,22 +111,23 @@ func validateCompiledModule(compiled wazero.CompiledModule) error {
 }
 
 // checkABIVersion calls the optional abi_version export and rejects versions
-// this host does not implement.
-func checkABIVersion(ctx context.Context, instance wazeroapi.Module) error {
+// this host does not implement. It returns the declared version, or 0 when
+// the module declares none.
+func checkABIVersion(ctx context.Context, instance wazeroapi.Module) (uint32, error) {
 	fn := instance.ExportedFunction(exportABIVersion)
 	if fn == nil {
-		return nil
+		return 0, nil
 	}
 	results, err := fn.Call(ctx)
 	if err != nil {
-		return fmt.Errorf("call %s: %w", exportABIVersion, err)
+		return 0, fmt.Errorf("call %s: %w", exportABIVersion, err)
 	}
 	v := uint32(results[0])
 	if v < MinABIVersion || v > MaxABIVersion {
-		return fmt.Errorf("unsupported policy ABI version %d (this host supports %d-%d)",
+		return 0, fmt.Errorf("unsupported policy ABI version %d (this host supports %d-%d)",
 			v, MinABIVersion, MaxABIVersion)
 	}
-	return nil
+	return v, nil
 }
 
 // initPolicy wraps a freshly instantiated module in a Policy, selecting its
@@ -134,7 +140,13 @@ func initPolicy(ctx context.Context, runtime *Runtime, instance wazeroapi.Module
 		return nil, err
 	}
 
-	p := &Policy{runtime: runtime, instance: instance}
+	version, err := checkABIVersion(ctx, instance)
+	if err != nil {
+		instance.Close(ctx)
+		return nil, err
+	}
+
+	p := &Policy{runtime: runtime, instance: instance, temporal: version >= TemporalABIVersion}
 	if abi == abiBinary {
 		p.useBinaryABI = true
 		results, err := instance.ExportedFunction(exportMalloc).Call(ctx, uint64(eventStructSize))

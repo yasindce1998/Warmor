@@ -61,6 +61,7 @@ type rawRule struct {
 	Action     string        `yaml:"action"`
 	Mode       string        `yaml:"mode,omitempty"`
 	Reason     string        `yaml:"reason,omitempty"`
+	Temporal   yaml.Node     `yaml:"temporal,omitempty"`
 }
 
 type rawConditions struct {
@@ -90,6 +91,17 @@ func parseRule(rr rawRule, variables map[string]interface{}) (*Rule, error) {
 	rule.Conditions.Not, err = parseConditionList(rr.Conditions.Not, variables)
 	if err != nil {
 		return nil, fmt.Errorf("conditions.not: %w", err)
+	}
+
+	if rr.Temporal.Kind != 0 { // the key is present
+		var raw map[string]interface{}
+		if rr.Temporal.Kind != yaml.MappingNode || rr.Temporal.Decode(&raw) != nil {
+			return nil, fmt.Errorf("temporal: must be a map of constraints (line %d)", rr.Temporal.Line)
+		}
+		rule.Temporal, err = parseTemporal(raw)
+		if err != nil {
+			return nil, fmt.Errorf("temporal: %w", err)
+		}
 	}
 
 	return rule, nil

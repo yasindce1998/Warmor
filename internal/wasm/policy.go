@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
 
 	wazeroapi "github.com/tetratelabs/wazero/api"
 	"github.com/yasindce1998/warmor/pkg/api"
@@ -25,7 +26,13 @@ const eventStructSize = 256
 //	209     2      remote_port (u16)
 //	211     2      local_port (u16)
 //	213     32     secondary_str (operation/protocol, null-padded)
-//	245     11     padding
+//	245     4      wall_clock_unix (u32, UTC seconds; 0 = unknown)  ABI >= 3
+//	249     6      container_age_ms (u48 LE; 0 = unknown)          ABI >= 3
+//	255     1      reserved (0)
+//
+// The temporal fields (offset 245 on) are only filled for modules that
+// export abi_version() >= 3 (see temporalInputs). For older modules they
+// stay zero, like the padding they replace.
 
 // Policy represents a loaded WASM policy instance.
 type Policy struct {
@@ -36,6 +43,9 @@ type Policy struct {
 	eventBufPtr uint32
 	// Which ABI does this module support?
 	useBinaryABI bool
+	// temporal: the module declared ABI version >= 3, so it is sent the
+	// event's wall clock and container age.
+	temporal bool
 }
 
 // NewPolicy creates a new policy instance from a compiled module.
@@ -60,7 +70,7 @@ func (p *Policy) Evaluate(ctx context.Context, event *api.Event) (api.Action, er
 
 func (p *Policy) evaluateBinary(ctx context.Context, event *api.Event) (api.Action, error) {
 	buf := make([]byte, eventStructSize)
-	writeEventBinary(buf, event)
+	writeEventBinary(buf, event, p.temporal)
 
 	if !p.instance.Memory().Write(p.eventBufPtr, buf) {
 		return api.ActionDeny, fmt.Errorf("failed to write event to WASM memory")
@@ -76,7 +86,7 @@ func (p *Policy) evaluateBinary(ctx context.Context, event *api.Event) (api.Acti
 }
 
 func (p *Policy) evaluateJSON(ctx context.Context, event *api.Event) (api.Action, error) {
-	eventJSON, err := marshalEventForWASM(event)
+	eventJSON, err := marshalEventForWASM(event, p.temporal)
 	if err != nil {
 		return api.ActionDeny, fmt.Errorf("marshal event: %w", err)
 	}
@@ -156,9 +166,27 @@ func (p *Policy) GetMatchedRule(ctx context.Context) string {
 	return string(data)
 }
 
-func writeEventBinary(buf []byte, event *api.Event) {
+// Binary ABI offsets of the temporal fields (ABI version 3).
+const (
+	offWallClock    = 245
+	offContainerAge = 249
+	maxU48          = 1<<48 - 1
+)
+
+func writeEventBinary(buf []byte, event *api.Event, temporal bool) {
 	for i := range buf {
 		buf[i] = 0
+	}
+
+	if temporal {
+		wall, age := temporalInputs(event)
+		if wall > math.MaxUint32 {
+			wall = 0 // after 2106: not representable, so unknown
+		}
+		binary.LittleEndian.PutUint32(buf[offWallClock:offWallClock+4], uint32(wall))
+		var a [8]byte
+		binary.LittleEndian.PutUint64(a[:], min(age, maxU48))
+		copy(buf[offContainerAge:offContainerAge+6], a[:6])
 	}
 
 	binary.LittleEndian.PutUint32(buf[0:4], event.PID)
@@ -215,7 +243,11 @@ func copyStringToBuffer(dst []byte, s string) {
 //	PROCESS: filename = executed binary
 //	FILE:    operation, path, flags
 //	NETWORK: operation, protocol, remote_addr, remote_port, local_port
-func marshalEventForWASM(event *api.Event) ([]byte, error) {
+//
+// With temporal (modules declaring ABI version >= 3) every document also
+// carries wall_clock_unix (UTC seconds) and container_age_ms, each 0 when
+// unknown (see temporalInputs).
+func marshalEventForWASM(event *api.Event, temporal bool) ([]byte, error) {
 	// Every key below is always present so policies that deserialize into a
 	// fixed struct do not fail to parse (and deny) on event types that lack a
 	// field. "filename" is the executed binary and is only non-empty for
@@ -226,6 +258,11 @@ func marshalEventForWASM(event *api.Event) ([]byte, error) {
 		"gid":      event.GID,
 		"comm":     event.Comm,
 		"filename": "",
+	}
+	if temporal {
+		wall, age := temporalInputs(event)
+		m["wall_clock_unix"] = wall
+		m["container_age_ms"] = age
 	}
 
 	switch event.GetType() {
