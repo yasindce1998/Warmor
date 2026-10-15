@@ -98,12 +98,13 @@ the only BPF-LSM-capable images available off the shelf:
 `mainline` is a heads-up to investigate before it reaches `stable`, not a merge
 blocker.
 
-> **Limitation: the version spread is narrow.** Because only the channel images
-> carry BPF LSM, today's matrix spans roughly 6.18–7.0 — it does **not** exercise
-> older LTS kernels (5.10/5.15/6.1) where struct layouts most differ. To cover
-> those, build a selftests-enabled image for a specific version (ci-kernels'
-> `buildx.sh <version>` plus the `selftests-bpf` target) and add it to the
-> matrix. This is the highest-value next step for CO-RE confidence.
+Two more kernels are built in CI from the ci-kernels configuration plus IMA
+(`ci/kernel/`, `scripts/build-ci-kernel.sh`): **6.18** (current longterm) and
+**6.1** (the oldest LTS the BPF programs target). The whole LSM suite runs on
+them with the exec integrity tests required. 6.1 is where struct layouts
+differ most from the committed `vmlinux.h`, so it is the main CO-RE check.
+5.10 and 5.15 are not tested yet; adding a version is one matrix entry in
+`.github/workflows/lsm-test.yml`.
 
 To reproduce a single kernel locally:
 
@@ -111,6 +112,12 @@ To reproduce a single kernel locally:
 go install lmb.io/vimto@latest
 # generate real bpf2go bindings first (see the CI "Generate BPF bindings" step)
 vimto -kernel ghcr.io/cilium/ci-kernels:stable-selftests -- \
+  go test -v -count 1 -tags integration ./internal/ebpf/
+
+# Or on an IMA-enabled LTS kernel, with the integrity tests required
+# (vimto needs an absolute kernel path):
+scripts/build-ci-kernel.sh 6.1.188 /tmp/kernel-6.1
+WARMOR_REQUIRE_IMA=1 vimto -kernel /tmp/kernel-6.1/vmlinuz -- \
   go test -v -count 1 -tags integration ./internal/ebpf/
 ```
 
@@ -120,10 +127,9 @@ vimto -kernel ghcr.io/cilium/ci-kernels:stable-selftests -- \
   removed in older kernels will fail CO-RE relocation at load time. Mitigation:
   only access fields via `BPF_CORE_READ` (which gracefully fails relocation) +
   the kernel matrix above.
-- **Old LTS kernels are not yet tested.** Upstream only ships `-selftests`
-  (BPF-LSM-enabled) images for release channels, so the matrix currently spans
-  ~6.18–7.0. Building selftests images for 5.15/6.1 and adding them is the
-  biggest open coverage gap (see the matrix section above).
+- **5.10 and 5.15 are not tested yet.** The matrix covers 6.1, 6.18 and the
+  ci-kernels channels (~6.18–7.3). Adding an older version to the IMA kernel
+  matrix is the remaining coverage gap.
 - **Policy matching is exact-hash (FNV-1a).** No prefix/glob matching, and hash
   collisions are theoretically possible. This is an architectural property of
   the current policy map, not a kernel-compat issue — noted here for awareness.

@@ -71,7 +71,7 @@
 ### Phase 9: Security Intelligence — Mostly library-only
 - **Live Policy Synthesis** (`warmor-learn`) — shipped, offline from recorded events
 - **Policy Simulator** (`warmor-simulate`) — shipped. The daemon has no event-store sink; record with `--event-sink file:`.
-- **Supply Chain Integrity** — in-kernel content-hash exec check (`--integrity-db`): **experimental**, not yet run on an IMA kernel in CI
+- **Supply Chain Integrity** — in-kernel content-hash exec check (`--integrity-db`): shipped, requires `CONFIG_IMA`
 - **Container Escape Detection** — shipped (`--escape-detect`), detection after the fact
 - **Canary auto-rollback** — library only (manual rollouts are shipped)
 - **Drift Detection** — library only

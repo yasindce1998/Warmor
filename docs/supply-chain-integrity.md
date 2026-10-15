@@ -1,6 +1,6 @@
 # Supply Chain Integrity
 
-> **Status: Experimental.** In-kernel exec integrity is on `main`, but **it has not yet run on an IMA-enabled kernel in CI**. The CI test kernels are built without `CONFIG_IMA`, so the integrity VM tests skip. The program loads and attaches on longterm, stable and mainline kernels; the hashing itself is unverified. Try it in `audit` mode before `enforce`. See [Feature Status](STATUS.md).
+> **Status: Shipped (requires `CONFIG_IMA`).** CI builds IMA-enabled 6.1 and 6.18 kernels (`ci/kernel/`) and runs the integrity VM tests on them with skipping disabled: allow/deny by content, cache invalidation on modify, allowlist revocation, audit events, and overlayfs. Start in `audit` mode before `enforce`. See [Feature Status](STATUS.md).
 
 Warmor can refuse to execute any binary whose **content** is not in an allowlist of known-good SHA-256 digests. Matching is on content, not path, so it catches:
 - a binary that was modified after the image was built;
@@ -60,6 +60,6 @@ sudo warmor-daemon --policy policy.wasm --cgroup-filter auto \
 
 ## Known limitations
 
-- **Not yet verified on an IMA kernel in CI** (see the status note above).
+- Tested in VMs, not yet in a live Kubernetes cluster.
 - The allowlist is global (the union of all digests loaded), not per container.
 - Updating the allowlist requires restarting the daemon with a new database.

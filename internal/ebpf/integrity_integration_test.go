@@ -64,10 +64,13 @@ func newIntegrityHarness(t *testing.T) *integrityHarness {
 
 	h := &integrityHarness{t: t, loader: loader, cgroupFD: fd, dir: dir}
 	if err := loader.EnableIntegrity(nil, IntegrityOff); err != nil {
-		if errors.Is(err, ErrIMAUnavailable) {
+		// CI sets WARMOR_REQUIRE_IMA on the IMA-enabled kernels it builds, where
+		// a skip would hide exactly what that job exists to test.
+		required := os.Getenv("WARMOR_REQUIRE_IMA") == "1"
+		if errors.Is(err, ErrIMAUnavailable) && !required {
 			t.Skipf("kernel has no IMA: %v", err)
 		}
-		if strings.Contains(err.Error(), "lsm_integrity") {
+		if strings.Contains(err.Error(), "lsm_integrity") && !required {
 			t.Skipf("kernel cannot load lsm_integrity: %v", err)
 		}
 		t.Fatalf("EnableIntegrity: %v", err)
@@ -298,6 +301,9 @@ func TestIntegrity_Overlayfs(t *testing.T) {
 
 	opts := "lowerdir=" + lower + ",upperdir=" + upper + ",workdir=" + work
 	if err := syscall.Mount("overlay", merged, "overlay", 0, opts); err != nil {
+		if os.Getenv("WARMOR_REQUIRE_IMA") == "1" {
+			t.Fatalf("mount overlayfs: %v", err)
+		}
 		t.Skipf("overlayfs unavailable: %v", err)
 	}
 	t.Cleanup(func() { _ = syscall.Unmount(merged, syscall.MNT_DETACH) })
