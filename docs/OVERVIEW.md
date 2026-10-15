@@ -100,14 +100,17 @@
 
 ## Key Metrics
 
-These are **design targets, not measurements**. None has been benchmarked on `main`. A benchmark harness is in progress.
+Measured on one laptop (WSL2); see [PERFORMANCE.md](PERFORMANCE.md) for the
+method and caveats. "Declared" = the policy exports its fields-read
+declaration (every compiled YAML policy does).
 
 | Metric | Target | Measured |
 |--------|--------|----------|
-| P95 Latency | <100us | Not measured |
-| Cache Hit Rate | >90% | Not measured |
-| Memory Usage | <50MB | Not measured |
-| CPU Overhead | <5% | Not measured |
+| P95 Latency | <100us | Hit 1.5–2.4 µs; miss 79 µs (YAML) to 148 µs (Rust crate) |
+| Cache Hit Rate | >90% | 95.4% declared, 0% undeclared (synthetic workload) |
+| Memory Usage | <50MB | 57–127 MB RSS (not met) |
+| CPU Overhead | <5% | 11% of one core at 10k events/s (declared) |
+| Kernel fast path | <1us | 0.35–0.78 µs BPF program time on a map hit (VM) |
 | Platforms | 3 | 1 enforcing (Linux); 2 experimental |
 
 ---

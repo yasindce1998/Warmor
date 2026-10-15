@@ -1,0 +1,8 @@
+make bench-kernel (kernel.txt), run 2026-10-15 ~14:10 UTC from commit 74c6355's tree
+vimto:        lmb.io/vimto v0.4.0, qemu 8.2.2, KVM (nested: the host is itself a WSL2 Hyper-V VM)
+image:        ghcr.io/cilium/ci-kernels:stable-selftests
+guest kernel: 7.2.2
+guest vCPUs:  2 (vimto default)
+clocksource:  kvm-clock
+active LSMs:  capability,selinux,bpf
+root fs:      9p (host share); the benchmark binaries live on a tmpfs the benchmark mounts

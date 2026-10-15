@@ -95,17 +95,25 @@ The daemon prints a `Security posture:` line at startup that tells you whether L
 | **Windows** | ETW, plus eBPF-for-Windows | **Experimental beta.** The ETW path (detect, then `TerminateProcess`) is what is tested in CI. The eBPF-for-Windows programs have never been built or run in CI, so their kernel blocking is unverified. |
 | **macOS** | Endpoint Security Framework | **Experimental, detection only.** Every AUTH event is answered ALLOW. The cgo ESF code is not compiled in CI, and release binaries are built without cgo. |
 
-### Performance (design targets, unverified)
+### Performance (measured)
 
-These are **targets, not measurements**. None of them has been benchmarked on `main`. A benchmark harness is in progress.
+Measured on one laptop (WSL2, Core Ultra 5 135U, not idle) with the harness
+in [docs/PERFORMANCE.md](docs/PERFORMANCE.md), which has the methodology,
+the caveats and the commands (`make bench`, `make bench-kernel`). The kernel
+numbers come from a nested KVM VM, not bare metal. "Declared" means the policy
+exports its fields-read declaration, which every compiled YAML policy does and
+no Rust crate under `policies/` does yet.
 
-| Metric | Design target |
-|--------|-------|
-| P95 evaluation latency | <100us |
-| Decision cache hit rate | >90% (10k-entry cache; the current key includes the PID, which works against this) |
-| Memory | <50MB |
-| CPU overhead | <5% |
-| Kernel fast path | <1us (BPF map hit) |
+| Metric | Measured | Design target |
+|--------|----------|---------------|
+| Decision latency, cache hit | P95 1.5–2.4 µs | <100 µs P95 |
+| Decision latency, cache miss (WASM) | P95 79 µs (YAML policy), 148 µs (Rust `advanced` crate) | <100 µs P95 |
+| Decision cache hit rate, synthetic host workload | 95.4% declared; 0% undeclared (PID in every key) | >90% |
+| Throughput, daemon event loop | 170k events/s declared; 13k–26k undeclared | 100k events/s |
+| Memory (RSS, in-process harness) | 57–103 MB declared; 107–127 MB undeclared | <50 MB (not met) |
+| CPU at 10k events/s | 11% of one core declared; ~120% undeclared | <5% |
+| Kernel fast path (BPF program, policy_map hit) | 0.35 µs connect, 0.78 µs exec | <1 µs |
+| Kernel, event sent to userspace (every miss, every `open()`) | about +24 µs per event, mostly reader wake-up | none set |
 
 ### Policy Engine
 

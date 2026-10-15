@@ -1,0 +1,86 @@
+goos: linux
+goarch: amd64
+pkg: github.com/yasindce1998/warmor/internal/enforcer
+cpu: Intel(R) Core(TM) Ultra 5 135U
+BenchmarkWorkloadStream
+    perf_bench_test.go:489: go go1.26.6 linux/amd64 GOMAXPROCS=14 NumCPU=14
+BenchmarkWorkloadStream/fixture
+    perf_bench_test.go:435: fixture: PROCESS fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: fixture: FILE fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: fixture: NETWORK fields read [*], pid-free cache key: false
+    perf_bench_test.go:476: fixture: 200000 events (36684 process, 155964 file, 7352 network); hits 0/0/0
+BenchmarkWorkloadStream/fixture-14         	  200000	     25234 ns/op	         0 file-hit-%	         0 hit-%	     25065 mean-ns	         0 net-hit-%	     18852 p50-ns	     46802 p95-ns	    101643 p99-ns	    391423 p99.9-ns	         0 proc-hit-%
+    perf_bench_test.go:435: fixture: PROCESS fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: fixture: FILE fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: fixture: NETWORK fields read [*], pid-free cache key: false
+    perf_bench_test.go:476: fixture: 200000 events (36684 process, 155964 file, 7352 network); hits 0/0/0
+BenchmarkWorkloadStream/fixture-14         	  200000	     26114 ns/op	         0 file-hit-%	         0 hit-%	     25955 mean-ns	         0 net-hit-%	     19520 p50-ns	     43871 p95-ns	     95327 p99-ns	    381222 p99.9-ns	         0 proc-hit-%
+    perf_bench_test.go:435: fixture: PROCESS fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: fixture: FILE fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: fixture: NETWORK fields read [*], pid-free cache key: false
+    perf_bench_test.go:476: fixture: 200000 events (36684 process, 155964 file, 7352 network); hits 0/0/0
+BenchmarkWorkloadStream/fixture-14         	  200000	     31101 ns/op	         0 file-hit-%	         0 hit-%	     30932 mean-ns	         0 net-hit-%	     21350 p50-ns	     54029 p95-ns	    118140 p99-ns	    714187 p99.9-ns	         0 proc-hit-%
+    perf_bench_test.go:435: fixture: PROCESS fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: fixture: FILE fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: fixture: NETWORK fields read [*], pid-free cache key: false
+    perf_bench_test.go:476: fixture: 200000 events (36684 process, 155964 file, 7352 network); hits 0/0/0
+BenchmarkWorkloadStream/fixture-14         	  200000	     62481 ns/op	         0 file-hit-%	         0 hit-%	     62116 mean-ns	         0 net-hit-%	     43351 p50-ns	     95760 p95-ns	    225580 p99-ns	   3895275 p99.9-ns	         0 proc-hit-%
+    perf_bench_test.go:435: fixture: PROCESS fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: fixture: FILE fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: fixture: NETWORK fields read [*], pid-free cache key: false
+    perf_bench_test.go:476: fixture: 200000 events (36684 process, 155964 file, 7352 network); hits 0/0/0
+BenchmarkWorkloadStream/fixture-14         	  200000	     64132 ns/op	         0 file-hit-%	         0 hit-%	     63687 mean-ns	         0 net-hit-%	     43621 p50-ns	    100717 p95-ns	    254565 p99-ns	   4098640 p99.9-ns	         0 proc-hit-%
+BenchmarkWorkloadStream/yaml
+    perf_bench_test.go:435: yaml: PROCESS fields read [path uid], pid-free cache key: true
+    perf_bench_test.go:435: yaml: FILE fields read [operation path uid], pid-free cache key: true
+    perf_bench_test.go:435: yaml: NETWORK fields read [remote_port uid], pid-free cache key: true
+    perf_bench_test.go:476: yaml: 200000 events (36684 process, 155964 file, 7352 network); hits 36683/146734/7305
+BenchmarkWorkloadStream/yaml-14            	  200000	      6228 ns/op	        94.08 file-hit-%	        95.36 hit-%	      5986 mean-ns	        99.36 net-hit-%	      2116 p50-ns	     18440 p95-ns	     68155 p99-ns	    222411 p99.9-ns	       100.0 proc-hit-%
+    perf_bench_test.go:435: yaml: PROCESS fields read [path uid], pid-free cache key: true
+    perf_bench_test.go:435: yaml: FILE fields read [operation path uid], pid-free cache key: true
+    perf_bench_test.go:435: yaml: NETWORK fields read [remote_port uid], pid-free cache key: true
+    perf_bench_test.go:476: yaml: 200000 events (36684 process, 155964 file, 7352 network); hits 36683/146734/7305
+BenchmarkWorkloadStream/yaml-14            	  200000	      7225 ns/op	        94.08 file-hit-%	        95.36 hit-%	      6948 mean-ns	        99.36 net-hit-%	      2239 p50-ns	     19096 p95-ns	     82993 p99-ns	    340725 p99.9-ns	       100.0 proc-hit-%
+    perf_bench_test.go:435: yaml: PROCESS fields read [path uid], pid-free cache key: true
+    perf_bench_test.go:435: yaml: FILE fields read [operation path uid], pid-free cache key: true
+    perf_bench_test.go:435: yaml: NETWORK fields read [remote_port uid], pid-free cache key: true
+    perf_bench_test.go:476: yaml: 200000 events (36684 process, 155964 file, 7352 network); hits 36683/146734/7305
+BenchmarkWorkloadStream/yaml-14            	  200000	      6193 ns/op	        94.08 file-hit-%	        95.36 hit-%	      5943 mean-ns	        99.36 net-hit-%	      2122 p50-ns	     17968 p95-ns	     74871 p99-ns	    214093 p99.9-ns	       100.0 proc-hit-%
+    perf_bench_test.go:435: yaml: PROCESS fields read [path uid], pid-free cache key: true
+    perf_bench_test.go:435: yaml: FILE fields read [operation path uid], pid-free cache key: true
+    perf_bench_test.go:435: yaml: NETWORK fields read [remote_port uid], pid-free cache key: true
+    perf_bench_test.go:476: yaml: 200000 events (36684 process, 155964 file, 7352 network); hits 36683/146734/7305
+BenchmarkWorkloadStream/yaml-14            	  200000	      4696 ns/op	        94.08 file-hit-%	        95.36 hit-%	      4482 mean-ns	        99.36 net-hit-%	      1930 p50-ns	     13383 p95-ns	     45389 p99-ns	    169839 p99.9-ns	       100.0 proc-hit-%
+    perf_bench_test.go:435: yaml: PROCESS fields read [path uid], pid-free cache key: true
+    perf_bench_test.go:435: yaml: FILE fields read [operation path uid], pid-free cache key: true
+    perf_bench_test.go:435: yaml: NETWORK fields read [remote_port uid], pid-free cache key: true
+    perf_bench_test.go:476: yaml: 200000 events (36684 process, 155964 file, 7352 network); hits 36683/146734/7305
+BenchmarkWorkloadStream/yaml-14            	  200000	      6266 ns/op	        94.08 file-hit-%	        95.36 hit-%	      5997 mean-ns	        99.36 net-hit-%	      2186 p50-ns	     18383 p95-ns	     67472 p99-ns	    213462 p99.9-ns	       100.0 proc-hit-%
+BenchmarkWorkloadStream/rust-advanced
+    perf_bench_test.go:435: rust-advanced: PROCESS fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: rust-advanced: FILE fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: rust-advanced: NETWORK fields read [*], pid-free cache key: false
+    perf_bench_test.go:476: rust-advanced: 200000 events (36684 process, 155964 file, 7352 network); hits 0/0/0
+BenchmarkWorkloadStream/rust-advanced-14   	  200000	     75552 ns/op	         0 file-hit-%	         0 hit-%	     75215 mean-ns	         0 net-hit-%	     53871 p50-ns	    112717 p95-ns	    290720 p99-ns	   4218190 p99.9-ns	         0 proc-hit-%
+    perf_bench_test.go:435: rust-advanced: PROCESS fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: rust-advanced: FILE fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: rust-advanced: NETWORK fields read [*], pid-free cache key: false
+    perf_bench_test.go:476: rust-advanced: 200000 events (36684 process, 155964 file, 7352 network); hits 0/0/0
+BenchmarkWorkloadStream/rust-advanced-14   	  200000	     70003 ns/op	         0 file-hit-%	         0 hit-%	     69703 mean-ns	         0 net-hit-%	     54412 p50-ns	    105252 p95-ns	    235689 p99-ns	   3049269 p99.9-ns	         0 proc-hit-%
+    perf_bench_test.go:435: rust-advanced: PROCESS fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: rust-advanced: FILE fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: rust-advanced: NETWORK fields read [*], pid-free cache key: false
+    perf_bench_test.go:476: rust-advanced: 200000 events (36684 process, 155964 file, 7352 network); hits 0/0/0
+BenchmarkWorkloadStream/rust-advanced-14   	  200000	     68649 ns/op	         0 file-hit-%	         0 hit-%	     68371 mean-ns	         0 net-hit-%	     53642 p50-ns	    109346 p95-ns	    247279 p99-ns	   2677239 p99.9-ns	         0 proc-hit-%
+    perf_bench_test.go:435: rust-advanced: PROCESS fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: rust-advanced: FILE fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: rust-advanced: NETWORK fields read [*], pid-free cache key: false
+    perf_bench_test.go:476: rust-advanced: 200000 events (36684 process, 155964 file, 7352 network); hits 0/0/0
+BenchmarkWorkloadStream/rust-advanced-14   	  200000	     67510 ns/op	         0 file-hit-%	         0 hit-%	     67220 mean-ns	         0 net-hit-%	     53327 p50-ns	    106224 p95-ns	    233091 p99-ns	   2559400 p99.9-ns	         0 proc-hit-%
+    perf_bench_test.go:435: rust-advanced: PROCESS fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: rust-advanced: FILE fields read [*], pid-free cache key: false
+    perf_bench_test.go:435: rust-advanced: NETWORK fields read [*], pid-free cache key: false
+    perf_bench_test.go:476: rust-advanced: 200000 events (36684 process, 155964 file, 7352 network); hits 0/0/0
+BenchmarkWorkloadStream/rust-advanced-14   	  200000	     69634 ns/op	         0 file-hit-%	         0 hit-%	     69342 mean-ns	         0 net-hit-%	     54815 p50-ns	    108114 p95-ns	    234395 p99-ns	   2582415 p99.9-ns	         0 proc-hit-%
+PASS
+ok  	github.com/yasindce1998/warmor/internal/enforcer	134.803s

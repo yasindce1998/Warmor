@@ -1,0 +1,11 @@
+goos: linux
+goarch: amd64
+pkg: github.com/yasindce1998/warmor/internal/lineage
+cpu: Intel(R) Core(TM) Ultra 5 135U
+BenchmarkRecordExec-14    	  200000	      1304 ns/op	     179 B/op	       3 allocs/op
+BenchmarkRecordExec-14    	  200000	      1527 ns/op	     179 B/op	       3 allocs/op
+BenchmarkRecordExec-14    	  200000	      1534 ns/op	     179 B/op	       3 allocs/op
+BenchmarkRecordExec-14    	  200000	      1391 ns/op	     179 B/op	       3 allocs/op
+BenchmarkRecordExec-14    	  200000	      1359 ns/op	     179 B/op	       3 allocs/op
+PASS
+ok  	github.com/yasindce1998/warmor/internal/lineage	2.446s
