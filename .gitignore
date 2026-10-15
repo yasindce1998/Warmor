@@ -40,3 +40,6 @@ temp/
 
 # make tools output
 bin/
+
+# Benchmark output (scripts/bench.sh)
+bench-results/

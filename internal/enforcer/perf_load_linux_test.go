@@ -44,6 +44,9 @@ func BenchmarkSustainedLoad(b *testing.B) {
 	}
 }
 
+// lineageCapacity is lineage.TrackerConfig's default MaxSize.
+const lineageCapacity = 100000
+
 func loadSeconds() time.Duration {
 	if v, err := strconv.Atoi(os.Getenv("WARMOR_BENCH_LOAD_SECONDS")); err == nil && v > 0 {
 		return time.Duration(v) * time.Second
@@ -67,6 +70,14 @@ func runSustainedLoad(b *testing.B, p benchPolicy, rate int) {
 		stop = func() { close(ch); <-done }
 	} else {
 		e := newBenchEnforcer(b, p, runtime.NumCPU())
+		// A long-running daemon's lineage tracker is full: nothing calls
+		// RecordExit, so it holds the last 100000 execs. Start from that
+		// state instead of an empty tracker, or a 10 s run would understate
+		// steady-state memory.
+		for i := range lineageCapacity {
+			e.lineageTracker.RecordExec(uint32(5_000_000+i), 1, 1000, 1000,
+				strings.Clone("prefill"), strings.Clone("/usr/bin/prefill"))
+		}
 		e.eventChan = ch
 		e.wg.Add(1)
 		go e.eventLoop()
@@ -91,7 +102,7 @@ func runSustainedLoad(b *testing.B, p benchPolicy, rate int) {
 				sent++
 			}
 			if rate != 0 {
-				time.Sleep(time.Millisecond)
+				time.Sleep(5 * time.Millisecond) // batches of rate/200 events
 			}
 		}
 	}
