@@ -65,16 +65,25 @@ func name(s string) []byte { return append(uleb(uint32(len(s))), s...) }
 type fn struct {
 	export string
 	body   []byte // instructions, without the trailing end
+	// noArg makes the function () -> i32 instead of (i32) -> i32.
+	noArg bool
 }
 
 // assemble builds a module with one page of memory (exported as "memory")
-// and the given (i32) -> i32 functions, all exported.
+// and the given (i32) -> i32 (or, with noArg, () -> i32) functions, all
+// exported.
 func assemble(fns ...fn) []byte {
 	mod := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
-	mod = append(mod, section(1, vec([]byte{0x60, 0x01, typeI32, 0x01, typeI32}))...)
+	mod = append(mod, section(1, vec(
+		[]byte{0x60, 0x01, typeI32, 0x01, typeI32}, // type 0: (i32) -> i32
+		[]byte{0x60, 0x00, 0x01, typeI32},          // type 1: () -> i32
+	))...)
 	typeIdx := make([][]byte, len(fns))
-	for i := range fns {
+	for i, f := range fns {
 		typeIdx[i] = uleb(0)
+		if f.noArg {
+			typeIdx[i] = uleb(1)
+		}
 	}
 	mod = append(mod, section(3, vec(typeIdx...))...)
 	mod = append(mod, section(5, vec([]byte{0x00, 0x01}))...) // memory: min 1 page
@@ -94,7 +103,7 @@ func assemble(fns ...fn) []byte {
 
 // mallocFn always hands out the same buffer; enough for the binary ABI,
 // which allocates its event buffer once per instance.
-var mallocFn = fn{"malloc", i32Const(1024)}
+var mallocFn = fn{export: "malloc", body: i32Const(1024)}
 
 // fieldsReadFn returns masks[event_type], or all-ones for other types.
 func fieldsReadFn(masks [3]uint32) fn {
@@ -110,7 +119,7 @@ func fieldsReadFn(masks [3]uint32) fn {
 	b = append(b, i32Const(1)...)
 	b = append(b, opI32Eq, opSelect)
 	b = append(b, opLocalGet, 0x00, opI32Eqz, opSelect)
-	return fn{"warmor_fields_read", b}
+	return fn{export: "warmor_fields_read", body: b}
 }
 
 func withFields(evaluate fn, masks *[3]uint32) []byte {
@@ -125,7 +134,7 @@ func withFields(evaluate fn, masks *[3]uint32) []byte {
 // returns action. If masks is non-nil the module also declares
 // warmor_fields_read, returning masks[event_type].
 func ConstPolicy(action int32, masks *[3]uint32) []byte {
-	return withFields(fn{"evaluate_event", i32Const(action)}, masks)
+	return withFields(fn{export: "evaluate_event", body: i32Const(action)}, masks)
 }
 
 // UIDPolicy denies (1) events with uid 0 and allows (0) everything else.
@@ -135,14 +144,32 @@ func UIDPolicy(masks *[3]uint32) []byte {
 	b = append(b, i32Const(0)...)
 	b = append(b, opLocalGet, 0x00, opI32Load, 0x02, 0x04) // uid at offset 4
 	b = append(b, opI32Eqz, opSelect)
-	return withFields(fn{"evaluate_event", b}, masks)
+	return withFields(fn{export: "evaluate_event", body: b}, masks)
+}
+
+// AgeKnownPolicy is a temporal (ABI version 3) module that allows (0) events
+// whose container age is known (the low 32 bits of container_age_ms at
+// offset 249 are non-zero) and denies (1) the rest. masks is its fields-read
+// declaration, if non-nil.
+func AgeKnownPolicy(masks *[3]uint32) []byte {
+	var b []byte
+	b = append(b, i32Const(1)...)
+	b = append(b, i32Const(0)...)
+	b = append(b, opLocalGet, 0x00, opI32Load, 0x00)
+	b = append(b, uleb(249)...) // container_age_ms, unaligned
+	b = append(b, opI32Eqz, opSelect)
+	fns := []fn{mallocFn, {export: "evaluate_event", body: b}, {export: "abi_version", body: i32Const(3), noArg: true}}
+	if masks != nil {
+		fns = append(fns, fieldsReadFn(*masks))
+	}
+	return assemble(fns...)
 }
 
 // LoopPolicy never returns from evaluate_event.
 func LoopPolicy() []byte {
 	b := []byte{opLoop, opBlockVoid, opBr, 0x00, opEnd}
 	b = append(b, i32Const(0)...)
-	return withFields(fn{"evaluate_event", b}, nil)
+	return withFields(fn{export: "evaluate_event", body: b}, nil)
 }
 
 // GrowPolicy tries to grow memory by pages and denies (1) if the growth was
@@ -155,7 +182,7 @@ func GrowPolicy(pages int32) []byte {
 	b = append(b, opMemGrow, 0x00)
 	b = append(b, i32Const(-1)...)
 	b = append(b, opI32Eq, opSelect)
-	return withFields(fn{"evaluate_event", b}, nil)
+	return withFields(fn{export: "evaluate_event", body: b}, nil)
 }
 
 // LoopOnUIDPolicy loops forever for uid 0 and allows everything else, so a
@@ -167,7 +194,7 @@ func LoopOnUIDPolicy() []byte {
 	b = append(b, opLoop, opBlockVoid, opBr, 0x00, opEnd)
 	b = append(b, opEnd) // end if
 	b = append(b, i32Const(0)...)
-	return withFields(fn{"evaluate_event", b}, nil)
+	return withFields(fn{export: "evaluate_event", body: b}, nil)
 }
 
 // PathPrefixPolicy denies (1) events whose primary string (exec filename,
@@ -184,5 +211,5 @@ func PathPrefixPolicy(prefix string, masks *[3]uint32) []byte {
 	b = append(b, opLocalGet, 0x00, opI32Load, 0x00, 77) // primary_str at offset 77
 	b = append(b, i32Const(want)...)
 	b = append(b, opI32Eq, opSelect)
-	return withFields(fn{"evaluate_event", b}, masks)
+	return withFields(fn{export: "evaluate_event", body: b}, masks)
 }

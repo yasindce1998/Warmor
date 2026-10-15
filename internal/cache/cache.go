@@ -19,6 +19,14 @@ import (
 // can omit is the PID, and only for event types whose policy has declared it
 // does not read the PID (SetPIDRelevant); otherwise every new process would
 // be a guaranteed miss.
+//
+// Decisions that may depend on the wall clock or container age (temporal
+// policies, SetTimeDependent) are never cached at all. The key could carry a
+// time bucket instead, but no bucket is sound in general: a time_of_day
+// window can close at any minute and an age limit at any millisecond, so a
+// reused decision would outlive the window it was made in. Bypassing costs
+// one policy evaluation per event, only for the event types of policies
+// that read time.
 type DecisionCache struct {
 	mu      sync.Mutex
 	items   map[Key]*list.Element
@@ -30,6 +38,11 @@ type DecisionCache struct {
 	// pidRelevant reports whether decisions for an event type may depend on
 	// the PID. nil means always (the safe default).
 	pidRelevant func(api.EventType) bool
+	// timeDependent reports whether decisions for an event type may depend
+	// on time (wall clock, container age); those are never cached. nil
+	// means never, which is only right for policies that are not sent
+	// temporal context (see wasm.TemporalABIVersion).
+	timeDependent func(api.EventType) bool
 
 	hits      uint64
 	misses    uint64
@@ -58,6 +71,10 @@ type CacheStats struct {
 // the serializers fall back to different values when one is nil. If a field
 // is added to any of those, it must be added here too;
 // TestKey_CoversEveryPolicyInput enforces this.
+//
+// The temporal context of ABI >= 3 modules (wall clock and container age,
+// from Timestamp and ContainerStart) is deliberately not in the key:
+// decisions that may depend on it are not cached (SetTimeDependent).
 type Key struct {
 	typ      api.EventType
 	pid      uint32 // zero when the policy does not read it
@@ -104,12 +121,33 @@ func (c *DecisionCache) SetPIDRelevant(f func(api.EventType) bool) {
 	c.clearLocked()
 }
 
+// SetTimeDependent installs the policy's time dependence (typically
+// wasm.PolicyEvaluator.TimeDependent) and clears the cache. Decisions for
+// event types where f reports true are neither stored nor served. A nil f
+// means no event type depends on time.
+func (c *DecisionCache) SetTimeDependent(f func(api.EventType) bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.timeDependent = f
+	c.clearLocked()
+}
+
+// cacheableLocked reports whether decisions for events of type t may be
+// cached at all.
+func (c *DecisionCache) cacheableLocked(t api.EventType) bool {
+	return c.timeDependent == nil || !c.timeDependent(t)
+}
+
 // Get retrieves a cached decision. The returned result is a copy with
 // Cached set.
 func (c *DecisionCache) Get(event *api.Event) (*api.ActionResult, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if !c.cacheableLocked(event.GetType()) {
+		c.misses++
+		return nil, false
+	}
 	key := c.makeKey(event)
 	el, ok := c.items[key]
 	if !ok {
@@ -136,7 +174,7 @@ func (c *DecisionCache) Put(event *api.Event, result *api.ActionResult) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.maxSize <= 0 {
+	if c.maxSize <= 0 || !c.cacheableLocked(event.GetType()) {
 		return
 	}
 

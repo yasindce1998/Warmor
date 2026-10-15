@@ -183,7 +183,8 @@ func (r *Runtime) validateModule(ctx context.Context, compiled wazero.CompiledMo
 		return fmt.Errorf("instantiate module: %w", err)
 	}
 	defer probe.Close(ctx)
-	return checkABIVersion(ctx, probe)
+	_, err = checkABIVersion(ctx, probe)
+	return err
 }
 
 // LoadPolicyFromYAML compiles a YAML policy to WASM and loads it.

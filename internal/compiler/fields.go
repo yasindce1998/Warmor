@@ -34,6 +34,14 @@ const (
 	FieldBitRemotePort
 	FieldBitLocalPort
 
+	// FieldBitTime and FieldBitContainerAge are not event fields but the
+	// temporal context the host sends to ABI >= 3 modules (the event's wall
+	// clock and its container's age). A decision depending on either can
+	// change for the same event over time, so the host never caches it
+	// and no kernel key covers it.
+	FieldBitTime
+	FieldBitContainerAge
+
 	// FieldsUnknown means the decision may depend on any part of the event.
 	FieldsUnknown uint32 = 0xFFFFFFFF
 )
@@ -54,6 +62,10 @@ var fieldBits = map[string]uint32{
 	"remote_addr": FieldBitRemoteAddr,
 	"remote_port": FieldBitRemotePort,
 	"local_port":  FieldBitLocalPort,
+
+	// Temporal context, read by rules with a temporal: block.
+	"wall_clock":    FieldBitTime,
+	"container_age": FieldBitContainerAge,
 }
 
 // FieldBit returns the bit for a YAML condition field name. Unknown names

@@ -121,11 +121,16 @@ type Event struct {
 	Timestamp time.Time `json:"timestamp"`
 
 	// Phase 3 fields
-	Type     EventType     `json:"type,omitempty"`
-	CgroupID uint64        `json:"cgroup_id,omitempty"`
-	Process  *ProcessEvent `json:"process,omitempty"`
-	File     *FileEvent    `json:"file,omitempty"`
-	Network  *NetworkEvent `json:"network,omitempty"`
+	Type     EventType `json:"type,omitempty"`
+	CgroupID uint64    `json:"cgroup_id,omitempty"`
+	// ContainerStart is when the container the event came from started
+	// (zero: unknown, or not a container). The enforcer fills it from the
+	// cgroup for policies that read container age; the policy host sends
+	// Timestamp - ContainerStart to them as container_age_ms.
+	ContainerStart time.Time     `json:"container_start,omitzero"`
+	Process        *ProcessEvent `json:"process,omitempty"`
+	File           *FileEvent    `json:"file,omitempty"`
+	Network        *NetworkEvent `json:"network,omitempty"`
 
 	// LSM fields
 	LSMEvent bool `json:"lsm_event,omitempty"`

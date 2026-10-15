@@ -220,8 +220,8 @@ func TestPolicy_Evaluate_MultipleCallsOnSameInstance(t *testing.T) {
 	defer pol.Close(ctx)
 
 	calls := []struct {
-		event  *api.Event
-		want   api.Action
+		event *api.Event
+		want  api.Action
 	}{
 		{&api.Event{UID: 0, Comm: "bash", Filename: "/bin/bash", Type: api.EventTypeProcess}, api.ActionDeny},
 		{&api.Event{UID: 1000, Comm: "ls", Filename: "/bin/ls", Type: api.EventTypeProcess}, api.ActionAllow},
@@ -268,7 +268,7 @@ func TestWriteEventBinary_ProcessEvent(t *testing.T) {
 	}
 
 	buf := make([]byte, eventStructSize)
-	writeEventBinary(buf, event)
+	writeEventBinary(buf, event, false)
 
 	// PID at offset 0
 	pid := uint32(buf[0]) | uint32(buf[1])<<8 | uint32(buf[2])<<16 | uint32(buf[3])<<24
@@ -321,7 +321,7 @@ func TestWriteEventBinary_FileEvent(t *testing.T) {
 	}
 
 	buf := make([]byte, eventStructSize)
-	writeEventBinary(buf, event)
+	writeEventBinary(buf, event, false)
 
 	if buf[12] != byte(api.EventTypeFile) {
 		t.Errorf("EventType = %d, want EventTypeFile(%d)", buf[12], api.EventTypeFile)
@@ -359,7 +359,7 @@ func TestWriteEventBinary_NetworkEvent(t *testing.T) {
 	}
 
 	buf := make([]byte, eventStructSize)
-	writeEventBinary(buf, event)
+	writeEventBinary(buf, event, false)
 
 	if buf[12] != byte(api.EventTypeNetwork) {
 		t.Errorf("EventType = %d, want EventTypeNetwork(%d)", buf[12], api.EventTypeNetwork)
@@ -390,7 +390,7 @@ func TestWriteEventBinary_ZeroBuffer(t *testing.T) {
 	// A default zero-value event should produce an all-zero buffer with no panics.
 	event := &api.Event{}
 	buf := make([]byte, eventStructSize)
-	writeEventBinary(buf, event) // must not panic
+	writeEventBinary(buf, event, false) // must not panic
 
 	// EventType byte defaults to EventTypeProcess (0).
 	if buf[12] != 0 {
@@ -406,7 +406,7 @@ func TestWriteEventBinary_BufferIsAlwaysCleared(t *testing.T) {
 	}
 
 	event := &api.Event{PID: 1, UID: 1, Comm: "a", Type: api.EventTypeProcess}
-	writeEventBinary(buf, event)
+	writeEventBinary(buf, event, false)
 
 	// Padding bytes (offset 245–255) must be zero, not 0xFF.
 	for i := 245; i < eventStructSize; i++ {
@@ -425,7 +425,7 @@ func TestWriteEventBinary_CommTruncation(t *testing.T) {
 
 	event := &api.Event{Comm: longComm, Type: api.EventTypeProcess}
 	buf := make([]byte, eventStructSize)
-	writeEventBinary(buf, event) // must not panic
+	writeEventBinary(buf, event, false) // must not panic
 }
 
 func TestWriteEventBinary_FileEventFallback(t *testing.T) {
@@ -439,7 +439,7 @@ func TestWriteEventBinary_FileEventFallback(t *testing.T) {
 	}
 
 	buf := make([]byte, eventStructSize)
-	writeEventBinary(buf, event)
+	writeEventBinary(buf, event, false)
 
 	path := nullTerminated(buf[77:205])
 	if path != "/tmp/data.txt" {
