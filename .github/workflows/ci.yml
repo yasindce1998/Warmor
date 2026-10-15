@@ -112,6 +112,15 @@ jobs:
           WARMOR_REQUIRE_POLICY_CRATES: "1"
         run: go test ./internal/wasm/ -run TestPolicyCrates -v
 
+      # Smoke run of the performance harness (docs/PERFORMANCE.md): catches
+      # benchmarks that crash or stop building. The numbers from a shared CI
+      # runner are not meaningful and are not checked.
+      - name: Benchmark smoke run
+        env:
+          QUICK: "1"
+          OUT: ${{ runner.temp }}/bench-results
+        run: ./scripts/bench.sh
+
   docker:
     runs-on: ubuntu-latest
     steps:
