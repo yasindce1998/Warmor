@@ -1,11 +1,9 @@
 package temporal
 
 import (
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/yasindce1998/warmor/internal/streaming"
-	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 func TestEvaluateNilConstraint(t *testing.T) {
@@ -134,343 +132,131 @@ func TestEvaluateCombinedConstraints(t *testing.T) {
 	}
 }
 
-func TestEnricherRegisterAndAge(t *testing.T) {
-	e := NewEnricher()
-	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	e.clock = func() time.Time { return now }
-
-	start := now.Add(-5 * time.Minute)
-	e.RegisterContainer(100, start)
-
-	age := e.ContainerAge(100)
-	if age != 5*time.Minute {
-		t.Errorf("expected 5m age, got %v", age)
+func TestEvaluateUnknownAgeIsOutsideWindow(t *testing.T) {
+	for _, c := range []*Constraint{
+		{MaxContainerAge: time.Hour},
+		{MinContainerAge: time.Second},
+		{MaxContainerAge: time.Hour, MinContainerAge: time.Second},
+	} {
+		if Evaluate(c, 0, time.Now()) {
+			t.Errorf("%+v: unknown (zero) age must be outside the window", c)
+		}
+		if Evaluate(c, -time.Second, time.Now()) {
+			t.Errorf("%+v: negative age must be outside the window", c)
+		}
+	}
+	// A time-only constraint does not care about age.
+	c := &Constraint{DaysOfWeek: []time.Weekday{time.Monday}}
+	if !Evaluate(c, 0, time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)) {
+		t.Error("unknown age must not affect a days_of_week-only constraint")
 	}
 }
 
-func TestEnricherUnknownCgroup(t *testing.T) {
-	e := NewEnricher()
-
-	age := e.ContainerAge(999)
-	if age != 0 {
-		t.Errorf("expected 0 for unknown cgroup, got %v", age)
+func TestEvaluateUnknownClockIsOutsideWindow(t *testing.T) {
+	c := &Constraint{TimeOfDay: &TimeRange{Start: TimeOfDay{0, 0}, End: TimeOfDay{23, 59}}}
+	if Evaluate(c, time.Minute, time.Time{}) {
+		t.Error("zero wall clock must be outside a time_of_day window")
+	}
+	if Evaluate(c, time.Minute, time.Unix(0, 0)) {
+		t.Error("epoch wall clock must be outside a time_of_day window")
+	}
+	// An age-only constraint does not care about the clock.
+	if !Evaluate(&Constraint{MaxContainerAge: time.Hour}, time.Minute, time.Time{}) {
+		t.Error("unknown clock must not affect a max_container_age-only constraint")
 	}
 }
 
-func TestEnricherUnregister(t *testing.T) {
-	e := NewEnricher()
-	e.RegisterContainer(100, time.Now().Add(-time.Minute))
-	e.UnregisterContainer(100)
-
-	if e.ContainerAge(100) != 0 {
-		t.Error("expected 0 after unregister")
+func TestEvaluateUsesUTC(t *testing.T) {
+	c := &Constraint{
+		TimeOfDay:  &TimeRange{Start: TimeOfDay{9, 0}, End: TimeOfDay{10, 0}},
+		DaysOfWeek: []time.Weekday{time.Monday},
+	}
+	// 09:30 UTC Monday expressed in UTC+10, where it is 19:30.
+	east := time.FixedZone("UTC+10", 10*3600)
+	at := time.Date(2024, 1, 1, 19, 30, 0, 0, east)
+	if !Evaluate(c, 0, at) {
+		t.Error("window must be evaluated in UTC, not the time's location")
 	}
 }
 
-func TestEnricherEnrich(t *testing.T) {
-	e := NewEnricher()
-	now := time.Date(2024, 6, 15, 14, 30, 0, 0, time.UTC) // Saturday
-	e.clock = func() time.Time { return now }
-
-	start := now.Add(-2 * time.Minute)
-	e.RegisterContainer(100, start)
-
-	ev := &streaming.SecurityEvent{
-		EventType: "exec",
-		CgroupID:  100,
-		Comm:      "nginx",
+func TestEvaluateBoundaries(t *testing.T) {
+	c := &Constraint{TimeOfDay: &TimeRange{Start: TimeOfDay{2, 0}, End: TimeOfDay{4, 0}}}
+	day := func(h, m, s int) time.Time { return time.Date(2024, 1, 1, h, m, s, 0, time.UTC) }
+	for _, tc := range []struct {
+		at   time.Time
+		want bool
+	}{
+		{day(1, 59, 59), false},
+		{day(2, 0, 0), true},
+		{day(4, 0, 59), true}, // the end minute is inclusive
+		{day(4, 1, 0), false},
+	} {
+		if got := Evaluate(c, 0, tc.at); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.at.Format("15:04:05"), got, tc.want)
+		}
 	}
 
-	e.Enrich(ev)
-
-	if ev.Labels == nil {
-		t.Fatal("expected labels to be set")
-	}
-	if ev.Labels["wall_clock"] != "2024-06-15T14:30:00Z" {
-		t.Errorf("unexpected wall_clock: %s", ev.Labels["wall_clock"])
-	}
-	if ev.Labels["day_of_week"] != "Saturday" {
-		t.Errorf("unexpected day_of_week: %s", ev.Labels["day_of_week"])
-	}
-	if ev.Labels["container_age_ms"] != "120000" {
-		t.Errorf("unexpected container_age_ms: %s", ev.Labels["container_age_ms"])
-	}
-}
-
-func TestEnricherEnrichZeroCgroup(t *testing.T) {
-	e := NewEnricher()
-
-	ev := &streaming.SecurityEvent{
-		EventType: "exec",
-		CgroupID:  0,
-		Comm:      "nginx",
-	}
-
-	e.Enrich(ev)
-
-	if ev.Labels != nil {
-		t.Error("cgroup 0 should not be enriched")
+	age := &Constraint{MaxContainerAge: 5 * time.Second, MinContainerAge: time.Second}
+	for _, tc := range []struct {
+		age  time.Duration
+		want bool
+	}{
+		{999 * time.Millisecond, false},
+		{time.Second, true},
+		{5 * time.Second, true},
+		{5*time.Second + 999*time.Microsecond, true}, // millisecond resolution
+		{5*time.Second + time.Millisecond, false},
+	} {
+		if got := Evaluate(age, tc.age, time.Now()); got != tc.want {
+			t.Errorf("age %v: got %v, want %v", tc.age, got, tc.want)
+		}
 	}
 }
 
-func TestEnricherEnrichUnknownContainer(t *testing.T) {
-	e := NewEnricher()
-	now := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
-	e.clock = func() time.Time { return now }
-
-	ev := &streaming.SecurityEvent{
-		EventType: "exec",
-		CgroupID:  999,
-		Comm:      "nginx",
+func TestValidate(t *testing.T) {
+	tr := func(sh, sm, eh, em int) *TimeRange {
+		return &TimeRange{Start: TimeOfDay{sh, sm}, End: TimeOfDay{eh, em}}
 	}
-
-	e.Enrich(ev)
-
-	if ev.Labels == nil {
-		t.Fatal("expected labels even without container registration")
-	}
-	if ev.Labels["wall_clock"] == "" {
-		t.Error("wall_clock should be set")
-	}
-	if _, ok := ev.Labels["container_age_ms"]; ok {
-		t.Error("container_age_ms should not be set for unknown container")
-	}
-}
-
-func TestGuardDenyAfterMaxAge(t *testing.T) {
-	e := NewEnricher()
-	now := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-	e.clock = func() time.Time { return now }
-	e.RegisterContainer(100, now.Add(-60*time.Second))
-
-	g := NewGuard(e)
-	g.clock = func() time.Time { return now }
-	g.AddRule(&Rule{
-		Name:      "nginx-fork-window",
-		EventType: "exec",
-		Comm:      "nginx",
-		Constraint: &Constraint{
-			MaxContainerAge: 30 * time.Second,
-		},
-	})
-
-	ev := &streaming.SecurityEvent{
-		EventType: "exec",
-		CgroupID:  100,
-		Comm:      "nginx",
-	}
-
-	result := g.CheckEvent(ev)
-	if result == nil {
-		t.Fatal("expected deny for nginx exec after 30s")
-	}
-	if result.Action != api.ActionDeny {
-		t.Errorf("expected ActionDeny, got %d", result.Action)
+	for _, tc := range []struct {
+		name string
+		c    *Constraint
+		err  string
+	}{
+		{"nil", nil, ""},
+		{"max", &Constraint{MaxContainerAge: time.Minute}, ""},
+		{"wrap", &Constraint{TimeOfDay: tr(22, 0, 6, 0)}, ""},
+		{"empty", &Constraint{}, "sets no constraint"},
+		{"negative max", &Constraint{MaxContainerAge: -time.Second}, "must not be negative"},
+		{"negative min", &Constraint{MinContainerAge: -time.Second}, "must not be negative"},
+		{"sub-ms", &Constraint{MaxContainerAge: 1500 * time.Microsecond}, "whole number of milliseconds"},
+		{"min > max", &Constraint{MaxContainerAge: time.Second, MinContainerAge: time.Minute}, "greater than max_container_age"},
+		{"min == max", &Constraint{MaxContainerAge: time.Minute, MinContainerAge: time.Minute}, ""},
+		{"hour 24", &Constraint{TimeOfDay: tr(24, 0, 1, 0)}, "start.hour must be 0-23"},
+		{"end hour -1", &Constraint{TimeOfDay: tr(1, 0, -1, 0)}, "end.hour must be 0-23"},
+		{"minute 60", &Constraint{TimeOfDay: tr(1, 60, 2, 0)}, "start.minute must be 0-59"},
+		{"equal ends", &Constraint{TimeOfDay: tr(3, 0, 3, 0)}, "single minute"},
+		{"bad weekday", &Constraint{DaysOfWeek: []time.Weekday{7}}, "invalid weekday"},
+		{"dup weekday", &Constraint{DaysOfWeek: []time.Weekday{time.Monday, time.Monday}}, "twice"},
+	} {
+		err := tc.c.Validate()
+		switch {
+		case tc.err == "" && err != nil:
+			t.Errorf("%s: unexpected error %v", tc.name, err)
+		case tc.err != "" && (err == nil || !strings.Contains(err.Error(), tc.err)):
+			t.Errorf("%s: error %v, want it to contain %q", tc.name, err, tc.err)
+		}
 	}
 }
 
-func TestGuardAllowWithinAge(t *testing.T) {
-	e := NewEnricher()
-	now := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-	e.clock = func() time.Time { return now }
-	e.RegisterContainer(100, now.Add(-10*time.Second))
-
-	g := NewGuard(e)
-	g.clock = func() time.Time { return now }
-	g.AddRule(&Rule{
-		Name:      "nginx-fork-window",
-		EventType: "exec",
-		Comm:      "nginx",
-		Constraint: &Constraint{
-			MaxContainerAge: 30 * time.Second,
-		},
-	})
-
-	ev := &streaming.SecurityEvent{
-		EventType: "exec",
-		CgroupID:  100,
-		Comm:      "nginx",
+func TestParseWeekday(t *testing.T) {
+	for in, want := range map[string]time.Weekday{"Monday": time.Monday, "sunday": time.Sunday, "SATURDAY": time.Saturday} {
+		if got, err := ParseWeekday(in); err != nil || got != want {
+			t.Errorf("ParseWeekday(%q) = %v, %v", in, got, err)
+		}
 	}
-
-	result := g.CheckEvent(ev)
-	if result != nil {
-		t.Error("expected allow for nginx exec within 30s")
-	}
-}
-
-func TestGuardDenyOutsideTimeWindow(t *testing.T) {
-	e := NewEnricher()
-	now := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
-	e.clock = func() time.Time { return now }
-	e.RegisterContainer(100, now)
-
-	g := NewGuard(e)
-	g.clock = func() time.Time { return now }
-	g.AddRule(&Rule{
-		Name: "cron-window",
-		Comm: "cron",
-		Constraint: &Constraint{
-			TimeOfDay: &TimeRange{
-				Start: TimeOfDay{Hour: 2, Minute: 0},
-				End:   TimeOfDay{Hour: 3, Minute: 0},
-			},
-		},
-	})
-
-	ev := &streaming.SecurityEvent{
-		EventType: "exec",
-		CgroupID:  100,
-		Comm:      "cron",
-	}
-
-	result := g.CheckEvent(ev)
-	if result == nil {
-		t.Fatal("expected deny for cron at 10:00 outside 02:00-03:00")
-	}
-	if result.Action != api.ActionDeny {
-		t.Errorf("expected ActionDeny, got %d", result.Action)
-	}
-}
-
-func TestGuardAllowWithinTimeWindow(t *testing.T) {
-	e := NewEnricher()
-	now := time.Date(2024, 1, 1, 2, 30, 0, 0, time.UTC)
-	e.clock = func() time.Time { return now }
-	e.RegisterContainer(100, now)
-
-	g := NewGuard(e)
-	g.clock = func() time.Time { return now }
-	g.AddRule(&Rule{
-		Name: "cron-window",
-		Comm: "cron",
-		Constraint: &Constraint{
-			TimeOfDay: &TimeRange{
-				Start: TimeOfDay{Hour: 2, Minute: 0},
-				End:   TimeOfDay{Hour: 3, Minute: 0},
-			},
-		},
-	})
-
-	ev := &streaming.SecurityEvent{
-		EventType: "exec",
-		CgroupID:  100,
-		Comm:      "cron",
-	}
-
-	result := g.CheckEvent(ev)
-	if result != nil {
-		t.Error("expected allow for cron at 02:30 within 02:00-03:00")
-	}
-}
-
-func TestGuardNoMatchDifferentComm(t *testing.T) {
-	e := NewEnricher()
-	now := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-	e.clock = func() time.Time { return now }
-	e.RegisterContainer(100, now.Add(-60*time.Second))
-
-	g := NewGuard(e)
-	g.clock = func() time.Time { return now }
-	g.AddRule(&Rule{
-		Name:      "nginx-only",
-		EventType: "exec",
-		Comm:      "nginx",
-		Constraint: &Constraint{
-			MaxContainerAge: 30 * time.Second,
-		},
-	})
-
-	ev := &streaming.SecurityEvent{
-		EventType: "exec",
-		CgroupID:  100,
-		Comm:      "curl",
-	}
-
-	result := g.CheckEvent(ev)
-	if result != nil {
-		t.Error("rule for nginx should not affect curl")
-	}
-}
-
-func TestGuardZeroCgroupIgnored(t *testing.T) {
-	e := NewEnricher()
-	g := NewGuard(e)
-	g.AddRule(&Rule{
-		Name: "any",
-		Constraint: &Constraint{
-			MaxContainerAge: 1 * time.Second,
-		},
-	})
-
-	ev := &streaming.SecurityEvent{
-		EventType: "exec",
-		CgroupID:  0,
-		Comm:      "nginx",
-	}
-
-	result := g.CheckEvent(ev)
-	if result != nil {
-		t.Error("cgroup 0 should be ignored")
-	}
-}
-
-func TestGuardClearRules(t *testing.T) {
-	e := NewEnricher()
-	now := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-	e.clock = func() time.Time { return now }
-	e.RegisterContainer(100, now.Add(-60*time.Second))
-
-	g := NewGuard(e)
-	g.clock = func() time.Time { return now }
-	g.AddRule(&Rule{
-		Name: "test",
-		Constraint: &Constraint{
-			MaxContainerAge: 30 * time.Second,
-		},
-	})
-
-	g.ClearRules()
-
-	ev := &streaming.SecurityEvent{
-		EventType: "exec",
-		CgroupID:  100,
-		Comm:      "nginx",
-	}
-
-	result := g.CheckEvent(ev)
-	if result != nil {
-		t.Error("no rules should mean no denials")
-	}
-}
-
-func TestGuardDaysOfWeekDeny(t *testing.T) {
-	e := NewEnricher()
-	// Tuesday
-	now := time.Date(2024, 1, 2, 12, 0, 0, 0, time.UTC)
-	e.clock = func() time.Time { return now }
-	e.RegisterContainer(100, now)
-
-	g := NewGuard(e)
-	g.clock = func() time.Time { return now }
-	g.AddRule(&Rule{
-		Name: "weekday-only",
-		Comm: "backup",
-		Constraint: &Constraint{
-			DaysOfWeek: []time.Weekday{time.Saturday, time.Sunday},
-		},
-	})
-
-	ev := &streaming.SecurityEvent{
-		EventType: "exec",
-		CgroupID:  100,
-		Comm:      "backup",
-	}
-
-	result := g.CheckEvent(ev)
-	if result == nil {
-		t.Fatal("expected deny for backup on Tuesday (only allowed Sat/Sun)")
-	}
-	if result.Action != api.ActionDeny {
-		t.Errorf("expected ActionDeny, got %d", result.Action)
+	for _, in := range []string{"Mon", "", "Funday"} {
+		if _, err := ParseWeekday(in); err == nil {
+			t.Errorf("ParseWeekday(%q) accepted", in)
+		}
 	}
 }
