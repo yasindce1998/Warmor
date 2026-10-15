@@ -25,8 +25,9 @@ package ebpf
 //	                 loads (sys_enter_execve/openat/connect), all drained
 //
 // The difference between a configuration's op-p50-ns and none's is the
-// syscall-level overhead. Programs are loaded once per top-level invocation,
-// so with -count N the configurations are interleaved N times.
+// syscall-level overhead. Programs are loaded once per top-level benchmark;
+// with -count N, the testing package runs each configuration N times in a
+// row (it does not interleave them).
 
 import (
 	"bytes"

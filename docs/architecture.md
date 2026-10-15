@@ -154,7 +154,7 @@ pub extern "C" fn evaluate_syscall(event_ptr: *const u8, event_len: usize) -> i3
 **Features:**
 - Sandboxed execution in Wazero. A trap cannot crash the daemon, but there is **no memory or time limit yet**, so a looping policy hangs the event loop.
 - Hot reload via SIGHUP
-- Evaluation latency (target <100μs P95): measured P95 79μs for a compiled YAML policy and 148μs for the Rust `advanced` crate on a cache miss ([PERFORMANCE.md](PERFORMANCE.md))
+- Evaluation latency (target <100μs P95): measured P95 32μs for a compiled YAML policy and 55μs for the Rust `advanced` crate on a cache miss ([PERFORMANCE.md](PERFORMANCE.md))
 - Two ABIs: JSON `evaluate_syscall(ptr,len)` and binary `evaluate_event`. If a module exports `evaluate_event`, the host uses the binary ABI.
 
 ### 4. Decision Cache
@@ -504,13 +504,13 @@ YAML policy); "undeclared" ones do not.
 
 | Metric | Design target | Measured |
 |--------|---------------|----------|
-| P95 evaluation latency (cache miss, WASM) | <100μs | 79μs YAML, 90μs fixture, 148μs Rust `advanced` crate |
-| P95 latency, cache hit | | 1.5–2.4μs |
-| Kernel fast path (BPF map hit) | <1μs | 0.35μs connect, 0.78μs exec (BPF program run time) |
-| Kernel, event sent to userspace | | about +24μs per event (reader wake-up) |
-| Throughput (daemon event loop) | 100k events/s | 170k/s declared, 13k–26k/s undeclared |
+| P95 evaluation latency (cache miss, WASM) | <100μs | 32μs YAML, 38μs fixture, 55μs Rust `advanced` crate |
+| P95 latency, cache hit | | 1.2–1.3μs |
+| Kernel fast path (BPF map hit) | <1μs | 0.11μs connect, 0.34μs exec (BPF program run time) |
+| Kernel, event sent to userspace | | about +13–20μs per event (reader wake-up) |
+| Throughput (daemon event loop) | 100k events/s | 175k/s declared, 24k–41k/s undeclared |
 | CPU overhead | <5% | 11% of one core at 10k events/s declared |
-| Memory | <50MB | 57–127MB RSS (not met) |
+| Memory | <50MB | 60–128MB RSS (not met) |
 
 ---
 

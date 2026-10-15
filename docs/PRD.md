@@ -44,9 +44,9 @@ Status as of current `main`. "Partial" means the phase's headline features are r
 
 Measured 2026-10-15 on one laptop; see [PERFORMANCE.md](PERFORMANCE.md) for the method and caveats. Targets are in parentheses.
 
-- **Performance:** P95 1.5–2.4μs on a cache hit; 79μs (YAML policy) to 148μs (Rust crate) on a miss (target <100μs P95)
+- **Performance:** P95 1.2–1.3μs on a cache hit; 32μs (YAML policy) to 55μs (Rust crate) on a miss (target <100μs P95)
 - **Cache Hit Rate:** 95.4% for policies that declare the fields they read (every YAML policy), 0% for those that do not (target >90%)
-- **Memory Usage:** 57–127MB RSS, not met (target <50MB per instance)
+- **Memory Usage:** 60–128MB RSS, not met (target <50MB per instance)
 - **Platform Support:** Linux enforcing; Windows and macOS experimental
 - **Event types:** process, file and network on all platforms; bind, listen, ptrace and mount via LSM on Linux
 
@@ -234,7 +234,7 @@ There is no existing solution that provides:
 **Linux Implementation:**
 - Use eBPF (kprobes/tracepoints) to intercept syscalls
 - Support for: `execve`, `openat`, `connect`, `sendto`, `recvfrom` (*on `main`: execve, openat and connect tracepoints, plus 7 LSM hooks; no `sendto`/`recvfrom`*)
-- Minimal performance overhead (<5% CPU impact) (*target; measured in [PERFORMANCE.md](PERFORMANCE.md): BPF program 0.35–0.78μs on a policy map hit, about +24μs per event sent to userspace in a nested VM*)
+- Minimal performance overhead (<5% CPU impact) (*target; measured in [PERFORMANCE.md](PERFORMANCE.md): BPF program 0.11–0.34μs on a policy map hit, about +13–20μs per event sent to userspace in a nested VM*)
 - Graceful degradation if eBPF is unavailable
 
 **Windows Implementation:**
@@ -316,9 +316,9 @@ const ACTION_MODIFY: i32 = 3;
 - **MODIFY:** Syscall arguments modified before execution (advanced)
 
 **Performance Requirements** (targets; measured values from [PERFORMANCE.md](PERFORMANCE.md) in italics):
-- Policy evaluation: <100μs per syscall (P95) (*hit 1.5–2.4μs; miss 79μs YAML, 148μs Rust crate*)
+- Policy evaluation: <100μs per syscall (P95) (*hit 1.2–1.3μs; miss 32μs YAML, 55μs Rust crate*)
 - Decision caching: 90%+ cache hit rate for repeated patterns (*95.4% declared policies, 0% undeclared*)
-- Memory usage: <50MB per enforcer instance (*57–127MB, not met*)
+- Memory usage: <50MB per enforcer instance (*60–128MB, not met*)
 - CPU overhead: <5% on average workload (*11% of one core at 10k events/s, declared policy*)
 
 #### FR4: Hot-Reloading & Policy Management
@@ -423,18 +423,18 @@ These are targets. Measured values (2026-10-15, one laptop, see
 [PERFORMANCE.md](PERFORMANCE.md)) are in italics; "declared" policies export
 their fields-read declaration (every YAML policy), "undeclared" ones do not.
 
-**Latency** (cache miss, i.e. a WASM evaluation; a hit is P95 1.5–2.4μs):
-- P50: <50μs per syscall evaluation (*29μs YAML, 40μs fixture, 76μs Rust crate*)
-- P95: <100μs per syscall evaluation (*79μs, 90μs, 148μs*)
-- P99: <500μs per syscall evaluation (*234μs, 232μs, 453μs*)
+**Latency** (cache miss, i.e. a WASM evaluation; a hit is P95 1.2–1.3μs):
+- P50: <50μs per syscall evaluation (*12μs YAML, 15μs fixture, 25μs Rust crate*)
+- P95: <100μs per syscall evaluation (*32μs, 38μs, 55μs*)
+- P99: <500μs per syscall evaluation (*81μs, 89μs, 115μs*)
 
 **Throughput:**
-- Support 100,000+ syscalls/second per enforcer (*170k events/s declared, 13k–26k undeclared, through the single-goroutine event loop*)
+- Support 100,000+ syscalls/second per enforcer (*175k events/s declared, 24k–41k undeclared, through the single-goroutine event loop*)
 - Horizontal scaling via multiple enforcer instances (*not implemented*)
 - Efficient batching for bulk operations (*not implemented*)
 
 **Resource Usage:**
-- Memory: <100MB per enforcer instance (*57–103MB declared, 107–127MB undeclared*)
+- Memory: <100MB per enforcer instance (*60–104MB declared, 105–128MB undeclared*)
 - CPU: <5% overhead on typical workload (*not measured on a real workload; synthetic: 11% of one core at 10k events/s declared*)
 - Disk: <10MB for enforcer binary + policies (*not measured*)
 
@@ -663,7 +663,7 @@ Cold Path (Cache Miss):
 **Success Criteria:**
 - Policy intercepts and logs process, file, and network events: met
 - WASM policy reloadable via signal without daemon restart: met
-- Latency <100μs per evaluation: met for YAML policies (P95 79μs on a miss), not for the Rust `advanced` crate (148μs); see PERFORMANCE.md
+- Latency <100μs per evaluation: met (P95 on a miss 32μs YAML, 55μs Rust `advanced` crate); see PERFORMANCE.md
 
 ### Phase 2: Enforcement & Decision Making (Weeks 4-6) — Done, with gaps
 **Goal:** Move from logging to actual enforcement
@@ -754,7 +754,7 @@ Cold Path (Cache Miss):
 - [x] Policy map feedback: WASM decision appears in BPF map after first evaluation
 - [x] Graceful fallback on kernels without CONFIG_BPF_LSM
 - [x] No regression in tracepoint-based monitoring
-- [x] Kernel fast-path latency <10μs (map lookup only): BPF program run time 0.35μs (connect) and 0.78μs (exec) on a policy map hit, measured in a VM (PERFORMANCE.md). A miss, which sends an event to userspace, costs about 24μs per event there
+- [x] Kernel fast-path latency <10μs (map lookup only): BPF program run time 0.11μs (connect) and 0.34μs (exec) on a policy map hit, measured in a VM (PERFORMANCE.md). A miss, which sends an event to userspace, costs about 13–20μs per event there
 
 ### Phase 7: Advanced Features (Weeks 23-28) — Partial
 **Goal:** Add enterprise features
@@ -1080,9 +1080,9 @@ Planned enhancements beyond the current release. Tracked here as the single sour
 ### 8.1 Technical Metrics
 
 **Performance** (targets; measured in [PERFORMANCE.md](PERFORMANCE.md)):
-- Policy evaluation latency P95 <100μs (*miss: 79μs YAML, 148μs Rust crate; hit: 2.4μs*)
+- Policy evaluation latency P95 <100μs (*miss: 32μs YAML, 55μs Rust crate; hit: 1.3μs*)
 - CPU overhead <5% on typical workload (*not measured on a real workload*)
-- Memory usage <100MB per instance (*57–127MB RSS*)
+- Memory usage <100MB per instance (*60–128MB RSS*)
 - Cache hit rate >90% (*95.4% declared policies, 0% undeclared*)
 
 **Reliability:**
@@ -1167,7 +1167,7 @@ Planned enhancements beyond the current release. Tracked here as the single sour
 
 4. **Performance Target:** **<100μs P95**
    - Decision: target kept
-   - Result: measured (PERFORMANCE.md). Cache hits P95 2.4μs; WASM evaluations P95 79μs for a YAML policy, 148μs for the Rust `advanced` crate
+   - Result: measured (PERFORMANCE.md). Cache hits P95 1.3μs; WASM evaluations P95 32μs for a YAML policy, 55μs for the Rust `advanced` crate
 
 ### Remaining Open Questions
 

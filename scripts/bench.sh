@@ -2,7 +2,7 @@
 # Run the userspace performance harness (docs/PERFORMANCE.md) and keep the
 # raw output in $OUT (default: bench-results/).
 #
-#   scripts/bench.sh            # everything (about 20 minutes)
+#   scripts/bench.sh            # everything (about 15 minutes)
 #   QUICK=1 scripts/bench.sh    # short smoke run (CI): small iteration counts
 #
 # Summarise the repeated runs with scripts/bench-summary.py bench-results/*.txt

@@ -2,70 +2,70 @@ goos: linux
 goarch: amd64
 pkg: github.com/yasindce1998/warmor/internal/enforcer
 cpu: Intel(R) Core(TM) Ultra 5 135U
-BenchmarkTimerOverhead-14                 	  200000	       211.4 ns/op	        94.19 mean-ns	        53.00 p50-ns	        55.00 p95-ns	        56.00 p99-ns	       314.0 p99.9-ns
-BenchmarkTimerOverhead-14                 	  200000	       205.1 ns/op	        76.88 mean-ns	        54.00 p50-ns	        61.00 p95-ns	        66.00 p99-ns	        90.00 p99.9-ns
-BenchmarkTimerOverhead-14                 	  200000	       247.3 ns/op	        93.51 mean-ns	        53.00 p50-ns	        55.00 p95-ns	        55.00 p99-ns	        56.00 p99.9-ns
-BenchmarkTimerOverhead-14                 	  200000	       115.1 ns/op	        41.20 mean-ns	        39.00 p50-ns	        54.00 p95-ns	        58.00 p99-ns	        83.00 p99.9-ns
-BenchmarkTimerOverhead-14                 	  200000	       126.5 ns/op	        45.14 mean-ns	        38.00 p50-ns	        65.00 p95-ns	        82.00 p99-ns	       272.0 p99.9-ns
-BenchmarkDecisionLatency/fixture/hit-14   	  200000	      3006 ns/op	    332695 events/s	       100.0 hit-%	      2888 mean-ns	      2137 p50-ns	      2429 p95-ns	      7368 p99-ns	     45361 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/fixture/hit-14   	  200000	      2707 ns/op	    369471 events/s	       100.0 hit-%	      2596 mean-ns	      2129 p50-ns	      2415 p95-ns	      6945 p99-ns	     42460 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/fixture/hit-14   	  200000	      2637 ns/op	    379282 events/s	       100.0 hit-%	      2514 mean-ns	      2127 p50-ns	      2396 p95-ns	      6725 p99-ns	     41616 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/fixture/hit-14   	  200000	      2518 ns/op	    397185 events/s	       100.0 hit-%	      2427 mean-ns	      2113 p50-ns	      2358 p95-ns	      4904 p99-ns	     39932 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/fixture/hit-14   	  200000	      2587 ns/op	    386492 events/s	       100.0 hit-%	      2495 mean-ns	      2104 p50-ns	      2453 p95-ns	      7424 p99-ns	     42415 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/fixture/miss-14  	  200000	     62193 ns/op	     16079 events/s	         0 hit-%	     61972 mean-ns	     39692 p50-ns	     95451 p95-ns	    283207 p99-ns	   4320267 p99.9-ns	   37775 B/op	      58 allocs/op
-BenchmarkDecisionLatency/fixture/miss-14  	  200000	     59464 ns/op	     16817 events/s	         0 hit-%	     59270 mean-ns	     40615 p50-ns	     91113 p95-ns	    232261 p99-ns	   4200730 p99.9-ns	   37770 B/op	      58 allocs/op
-BenchmarkDecisionLatency/fixture/miss-14  	  200000	     54417 ns/op	     18377 events/s	         0 hit-%	     54194 mean-ns	     39512 p50-ns	     87319 p95-ns	    205909 p99-ns	   3196077 p99.9-ns	   37769 B/op	      58 allocs/op
-BenchmarkDecisionLatency/fixture/miss-14  	  200000	     55560 ns/op	     17999 events/s	         0 hit-%	     55406 mean-ns	     40014 p50-ns	     89927 p95-ns	    214969 p99-ns	   3170250 p99.9-ns	   37770 B/op	      58 allocs/op
-BenchmarkDecisionLatency/fixture/miss-14  	  200000	     56548 ns/op	     17684 events/s	         0 hit-%	     56281 mean-ns	     40182 p50-ns	     90371 p95-ns	    240153 p99-ns	   3178378 p99.9-ns	   37770 B/op	      58 allocs/op
-BenchmarkDecisionLatency/yaml/hit-14      	  200000	      2650 ns/op	    377369 events/s	       100.0 hit-%	      2552 mean-ns	      2103 p50-ns	      2406 p95-ns	      7178 p99-ns	     41340 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/yaml/hit-14      	  200000	      2535 ns/op	    394462 events/s	       100.0 hit-%	      2427 mean-ns	      2013 p50-ns	      2402 p95-ns	      6601 p99-ns	     41078 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/yaml/hit-14      	  200000	      2464 ns/op	    405796 events/s	       100.0 hit-%	      2350 mean-ns	      2090 p50-ns	      2390 p95-ns	      6529 p99-ns	     44069 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/yaml/hit-14      	  200000	      2301 ns/op	    434603 events/s	       100.0 hit-%	      2203 mean-ns	      1890 p50-ns	      2261 p95-ns	      4826 p99-ns	     43545 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/yaml/hit-14      	  200000	      2008 ns/op	    498039 events/s	       100.0 hit-%	      1915 mean-ns	      1673 p50-ns	      2484 p95-ns	      4700 p99-ns	     40360 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/yaml/miss-14     	  200000	     46901 ns/op	     21322 events/s	         0 hit-%	     46660 mean-ns	     29095 p50-ns	     79096 p95-ns	    233722 p99-ns	   3666326 p99.9-ns	   48808 B/op	      40 allocs/op
-BenchmarkDecisionLatency/yaml/miss-14     	  200000	     45650 ns/op	     21906 events/s	         0 hit-%	     45451 mean-ns	     29411 p50-ns	     76014 p95-ns	    201857 p99-ns	   3416992 p99.9-ns	   48806 B/op	      40 allocs/op
-BenchmarkDecisionLatency/yaml/miss-14     	  200000	     46876 ns/op	     21333 events/s	         0 hit-%	     46676 mean-ns	     29691 p50-ns	     80137 p95-ns	    220065 p99-ns	   3302676 p99.9-ns	   48806 B/op	      40 allocs/op
-BenchmarkDecisionLatency/yaml/miss-14     	  200000	     54445 ns/op	     18367 events/s	         0 hit-%	     54130 mean-ns	     31495 p50-ns	     89767 p95-ns	    319203 p99-ns	   4197746 p99.9-ns	   48806 B/op	      40 allocs/op
-BenchmarkDecisionLatency/yaml/miss-14     	  200000	     42904 ns/op	     23308 events/s	         0 hit-%	     42719 mean-ns	     20989 p50-ns	     75277 p95-ns	    263383 p99-ns	   4095691 p99.9-ns	   48806 B/op	      40 allocs/op
-BenchmarkDecisionLatency/rust-advanced/hit-14         	  200000	      1770 ns/op	    564965 events/s	       100.0 hit-%	      1700 mean-ns	      1332 p50-ns	      1583 p95-ns	      3971 p99-ns	     53712 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/rust-advanced/hit-14         	  200000	      1691 ns/op	    591383 events/s	       100.0 hit-%	      1629 mean-ns	      1076 p50-ns	      1497 p95-ns	      4453 p99-ns	     42618 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/rust-advanced/hit-14         	  200000	      1489 ns/op	    671752 events/s	       100.0 hit-%	      1425 mean-ns	      1198 p50-ns	      1542 p95-ns	      4397 p99-ns	     31141 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/rust-advanced/hit-14         	  200000	      1635 ns/op	    611639 events/s	       100.0 hit-%	      1563 mean-ns	      1222 p50-ns	      1473 p95-ns	      3772 p99-ns	     37595 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/rust-advanced/hit-14         	  200000	      1438 ns/op	    695629 events/s	       100.0 hit-%	      1373 mean-ns	      1099 p50-ns	      1461 p95-ns	      4389 p99-ns	     28868 p99.9-ns	     160 B/op	       2 allocs/op
-BenchmarkDecisionLatency/rust-advanced/miss-14        	  200000	     82963 ns/op	     12054 events/s	         0 hit-%	     82740 mean-ns	     57725 p50-ns	    135394 p95-ns	    413305 p99-ns	   4271037 p99.9-ns	   37774 B/op	      58 allocs/op
-BenchmarkDecisionLatency/rust-advanced/miss-14        	  200000	    116621 ns/op	      8575 events/s	         0 hit-%	    116328 mean-ns	     77731 p50-ns	    164560 p95-ns	    716686 p99-ns	   6288402 p99.9-ns	   37770 B/op	      58 allocs/op
-BenchmarkDecisionLatency/rust-advanced/miss-14        	  200000	    101243 ns/op	      9877 events/s	         0 hit-%	    101001 mean-ns	     75653 p50-ns	    150228 p95-ns	    466445 p99-ns	   4306575 p99.9-ns	   37770 B/op	      58 allocs/op
-BenchmarkDecisionLatency/rust-advanced/miss-14        	  200000	     99092 ns/op	     10092 events/s	         0 hit-%	     98833 mean-ns	     75495 p50-ns	    148301 p95-ns	    453353 p99-ns	   4233300 p99.9-ns	   37770 B/op	      58 allocs/op
-BenchmarkDecisionLatency/rust-advanced/miss-14        	  200000	     98072 ns/op	     10197 events/s	         0 hit-%	     97842 mean-ns	     75934 p50-ns	    145638 p95-ns	    416987 p99-ns	   4050274 p99.9-ns	   37770 B/op	      58 allocs/op
-BenchmarkDecisionThroughputParallel/fixture/hit-14    	  200000	      1850 ns/op	    540549 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/fixture/hit-14    	  200000	      1849 ns/op	    540870 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/fixture/hit-14    	  200000	      1864 ns/op	    536493 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/fixture/hit-14    	  200000	      1816 ns/op	    550697 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/fixture/hit-14    	  200000	      1726 ns/op	    579405 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/fixture/miss-14   	  200000	     26716 ns/op	     37430 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/fixture/miss-14   	  200000	     27811 ns/op	     35958 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/fixture/miss-14   	  200000	     26591 ns/op	     37607 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/fixture/miss-14   	  200000	     26745 ns/op	     37390 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/fixture/miss-14   	  200000	     18382 ns/op	     54401 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/yaml/hit-14       	  200000	      1397 ns/op	    715582 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/yaml/hit-14       	  200000	      1201 ns/op	    832819 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/yaml/hit-14       	  200000	      1210 ns/op	    826703 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/yaml/hit-14       	  200000	      1069 ns/op	    935068 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/yaml/hit-14       	  200000	      1044 ns/op	    958022 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/yaml/miss-14      	  200000	     13817 ns/op	     72374 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/yaml/miss-14      	  200000	     15662 ns/op	     63850 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/yaml/miss-14      	  200000	     15658 ns/op	     63865 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/yaml/miss-14      	  200000	     16154 ns/op	     61905 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/yaml/miss-14      	  200000	     15932 ns/op	     62767 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/rust-advanced/hit-14         	  200000	      1344 ns/op	    744004 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/rust-advanced/hit-14         	  200000	      1187 ns/op	    842727 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/rust-advanced/hit-14         	  200000	      1059 ns/op	    943912 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/rust-advanced/hit-14         	  200000	      1088 ns/op	    919104 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/rust-advanced/hit-14         	  200000	      1094 ns/op	    914273 events/s	       100.0 hit-%
-BenchmarkDecisionThroughputParallel/rust-advanced/miss-14        	  200000	     17655 ns/op	     56641 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/rust-advanced/miss-14        	  200000	     19824 ns/op	     50444 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/rust-advanced/miss-14        	  200000	     19867 ns/op	     50334 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/rust-advanced/miss-14        	  200000	     20284 ns/op	     49299 events/s	         0 hit-%
-BenchmarkDecisionThroughputParallel/rust-advanced/miss-14        	  200000	     19285 ns/op	     51855 events/s	         0 hit-%
+BenchmarkTimerOverhead-14                 	  200000	        68.29 ns/op	        22.87 mean-ns	        19.00 p50-ns	        32.00 p95-ns	        32.00 p99-ns	       195.0 p99.9-ns
+BenchmarkTimerOverhead-14                 	  200000	        69.50 ns/op	        25.65 mean-ns	        19.00 p50-ns	        31.00 p95-ns	        32.00 p99-ns	        56.00 p99.9-ns
+BenchmarkTimerOverhead-14                 	  200000	        58.60 ns/op	        21.34 mean-ns	        19.00 p50-ns	        27.00 p95-ns	        32.00 p99-ns	        54.00 p99.9-ns
+BenchmarkTimerOverhead-14                 	  200000	        56.88 ns/op	        20.60 mean-ns	        19.00 p50-ns	        24.00 p95-ns	        31.00 p99-ns	        41.00 p99.9-ns
+BenchmarkTimerOverhead-14                 	  200000	        64.78 ns/op	        23.68 mean-ns	        19.00 p50-ns	        32.00 p95-ns	        32.00 p99-ns	        43.00 p99.9-ns
+BenchmarkDecisionLatency/fixture/hit-14   	  200000	       919.0 ns/op	   1088100 events/s	       100.0 hit-%	       874.7 mean-ns	       699.0 p50-ns	      1270 p95-ns	      1847 p99-ns	     30746 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/fixture/hit-14   	  200000	       953.3 ns/op	   1049033 events/s	       100.0 hit-%	       908.0 mean-ns	       707.0 p50-ns	      1314 p95-ns	      1862 p99-ns	     23119 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/fixture/hit-14   	  200000	       892.8 ns/op	   1120074 events/s	       100.0 hit-%	       849.5 mean-ns	       698.0 p50-ns	      1245 p95-ns	      1861 p99-ns	     19326 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/fixture/hit-14   	  200000	       870.0 ns/op	   1149365 events/s	       100.0 hit-%	       827.7 mean-ns	       695.0 p50-ns	      1232 p95-ns	      1543 p99-ns	     16317 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/fixture/hit-14   	  200000	       960.7 ns/op	   1040925 events/s	       100.0 hit-%	       915.3 mean-ns	       702.0 p50-ns	      1324 p95-ns	      1748 p99-ns	     19087 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/fixture/miss-14  	  200000	     20541 ns/op	     48683 events/s	         0 hit-%	     20448 mean-ns	     14573 p50-ns	     39582 p95-ns	    106526 p99-ns	    410431 p99.9-ns	   37966 B/op	      59 allocs/op
+BenchmarkDecisionLatency/fixture/miss-14  	  200000	     21652 ns/op	     46186 events/s	         0 hit-%	     21554 mean-ns	     15287 p50-ns	     40770 p95-ns	    104011 p99-ns	    423018 p99.9-ns	   37962 B/op	      59 allocs/op
+BenchmarkDecisionLatency/fixture/miss-14  	  200000	     19600 ns/op	     51021 events/s	         0 hit-%	     19509 mean-ns	     14454 p50-ns	     37251 p95-ns	     86554 p99-ns	    315864 p99.9-ns	   37962 B/op	      59 allocs/op
+BenchmarkDecisionLatency/fixture/miss-14  	  200000	     20121 ns/op	     49699 events/s	         0 hit-%	     20031 mean-ns	     14644 p50-ns	     38479 p95-ns	     89127 p99-ns	    332673 p99.9-ns	   37962 B/op	      59 allocs/op
+BenchmarkDecisionLatency/fixture/miss-14  	  200000	     19804 ns/op	     50495 events/s	         0 hit-%	     19718 mean-ns	     14584 p50-ns	     37943 p95-ns	     87861 p99-ns	    332906 p99.9-ns	   37961 B/op	      59 allocs/op
+BenchmarkDecisionLatency/yaml/hit-14      	  200000	       968.0 ns/op	   1033052 events/s	       100.0 hit-%	       926.5 mean-ns	       718.0 p50-ns	      1556 p95-ns	      2307 p99-ns	     17336 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/yaml/hit-14      	  200000	       884.0 ns/op	   1131195 events/s	       100.0 hit-%	       841.9 mean-ns	       711.0 p50-ns	      1076 p95-ns	      1719 p99-ns	     19405 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/yaml/hit-14      	  200000	       939.9 ns/op	   1063918 events/s	       100.0 hit-%	       899.8 mean-ns	       712.0 p50-ns	      1247 p95-ns	      2602 p99-ns	     25413 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/yaml/hit-14      	  200000	       880.9 ns/op	   1135264 events/s	       100.0 hit-%	       837.2 mean-ns	       710.0 p50-ns	      1191 p95-ns	      1559 p99-ns	     17433 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/yaml/hit-14      	  200000	       856.9 ns/op	   1167048 events/s	       100.0 hit-%	       815.7 mean-ns	       720.0 p50-ns	      1070 p95-ns	      1392 p99-ns	     15320 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/yaml/miss-14     	  200000	     17100 ns/op	     58479 events/s	         0 hit-%	     17015 mean-ns	     11745 p50-ns	     31823 p95-ns	     97364 p99-ns	    379738 p99.9-ns	   49000 B/op	      41 allocs/op
+BenchmarkDecisionLatency/yaml/miss-14     	  200000	     17630 ns/op	     56721 events/s	         0 hit-%	     17537 mean-ns	     12241 p50-ns	     32426 p95-ns	     83155 p99-ns	    358079 p99.9-ns	   48998 B/op	      41 allocs/op
+BenchmarkDecisionLatency/yaml/miss-14     	  200000	     16975 ns/op	     58909 events/s	         0 hit-%	     16886 mean-ns	     11864 p50-ns	     31926 p95-ns	     80748 p99-ns	    316735 p99.9-ns	   48998 B/op	      41 allocs/op
+BenchmarkDecisionLatency/yaml/miss-14     	  200000	     17080 ns/op	     58549 events/s	         0 hit-%	     16990 mean-ns	     11981 p50-ns	     32068 p95-ns	     80143 p99-ns	    335529 p99.9-ns	   48998 B/op	      41 allocs/op
+BenchmarkDecisionLatency/yaml/miss-14     	  200000	     17028 ns/op	     58727 events/s	         0 hit-%	     16934 mean-ns	     11926 p50-ns	     31900 p95-ns	     80839 p99-ns	    308946 p99.9-ns	   48998 B/op	      41 allocs/op
+BenchmarkDecisionLatency/rust-advanced/hit-14         	  200000	       908.1 ns/op	   1101159 events/s	       100.0 hit-%	       868.8 mean-ns	       718.0 p50-ns	      1224 p95-ns	      2837 p99-ns	     13825 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/rust-advanced/hit-14         	  200000	       904.2 ns/op	   1106011 events/s	       100.0 hit-%	       863.6 mean-ns	       709.0 p50-ns	      1201 p95-ns	      2335 p99-ns	     12767 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/rust-advanced/hit-14         	  200000	       938.0 ns/op	   1066145 events/s	       100.0 hit-%	       892.9 mean-ns	       717.0 p50-ns	      1357 p95-ns	      2804 p99-ns	     14812 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/rust-advanced/hit-14         	  200000	       926.9 ns/op	   1078885 events/s	       100.0 hit-%	       885.2 mean-ns	       721.0 p50-ns	      1333 p95-ns	      2071 p99-ns	     15078 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/rust-advanced/hit-14         	  200000	       836.8 ns/op	   1194989 events/s	       100.0 hit-%	       797.1 mean-ns	       710.0 p50-ns	       895.0 p95-ns	      1443 p99-ns	     11885 p99.9-ns	     160 B/op	       2 allocs/op
+BenchmarkDecisionLatency/rust-advanced/miss-14        	  200000	     30580 ns/op	     32701 events/s	         0 hit-%	     30487 mean-ns	     24996 p50-ns	     54106 p95-ns	    115072 p99-ns	    402209 p99.9-ns	   37965 B/op	      59 allocs/op
+BenchmarkDecisionLatency/rust-advanced/miss-14        	  200000	     31152 ns/op	     32101 events/s	         0 hit-%	     31063 mean-ns	     25446 p50-ns	     54987 p95-ns	    115472 p99-ns	    377709 p99.9-ns	   37961 B/op	      59 allocs/op
+BenchmarkDecisionLatency/rust-advanced/miss-14        	  200000	     30918 ns/op	     32343 events/s	         0 hit-%	     30831 mean-ns	     25333 p50-ns	     54347 p95-ns	    111936 p99-ns	    368440 p99.9-ns	   37961 B/op	      59 allocs/op
+BenchmarkDecisionLatency/rust-advanced/miss-14        	  200000	     33854 ns/op	     29538 events/s	         0 hit-%	     33756 mean-ns	     26327 p50-ns	     60499 p95-ns	    127971 p99-ns	    448131 p99.9-ns	   37961 B/op	      59 allocs/op
+BenchmarkDecisionLatency/rust-advanced/miss-14        	  200000	     33028 ns/op	     30277 events/s	         0 hit-%	     32929 mean-ns	     26178 p50-ns	     58412 p95-ns	    127180 p99-ns	    409073 p99.9-ns	   37961 B/op	      59 allocs/op
+BenchmarkDecisionThroughputParallel/fixture/hit-14    	  200000	       853.9 ns/op	   1171089 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/fixture/hit-14    	  200000	       854.7 ns/op	   1169963 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/fixture/hit-14    	  200000	       917.5 ns/op	   1089914 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/fixture/hit-14    	  200000	       873.6 ns/op	   1144670 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/fixture/hit-14    	  200000	       896.6 ns/op	   1115281 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/fixture/miss-14   	  200000	     12514 ns/op	     79914 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/fixture/miss-14   	  200000	     13266 ns/op	     75382 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/fixture/miss-14   	  200000	     13188 ns/op	     75825 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/fixture/miss-14   	  200000	     12609 ns/op	     79307 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/fixture/miss-14   	  200000	     12510 ns/op	     79936 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/yaml/hit-14       	  200000	       855.0 ns/op	   1169651 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/yaml/hit-14       	  200000	       860.9 ns/op	   1161531 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/yaml/hit-14       	  200000	       986.2 ns/op	   1013967 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/yaml/hit-14       	  200000	       997.2 ns/op	   1002843 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/yaml/hit-14       	  200000	       966.5 ns/op	   1034677 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/yaml/miss-14      	  200000	     11992 ns/op	     83387 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/yaml/miss-14      	  200000	     11751 ns/op	     85102 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/yaml/miss-14      	  200000	     11803 ns/op	     84722 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/yaml/miss-14      	  200000	     11543 ns/op	     86636 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/yaml/miss-14      	  200000	     11545 ns/op	     86615 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/rust-advanced/hit-14         	  200000	       883.9 ns/op	   1131383 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/rust-advanced/hit-14         	  200000	       878.3 ns/op	   1138554 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/rust-advanced/hit-14         	  200000	       864.2 ns/op	   1157162 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/rust-advanced/hit-14         	  200000	       889.5 ns/op	   1124164 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/rust-advanced/hit-14         	  200000	       880.3 ns/op	   1135996 events/s	       100.0 hit-%
+BenchmarkDecisionThroughputParallel/rust-advanced/miss-14        	  200000	     13007 ns/op	     76882 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/rust-advanced/miss-14        	  200000	     14143 ns/op	     70707 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/rust-advanced/miss-14        	  200000	     14717 ns/op	     67947 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/rust-advanced/miss-14        	  200000	     14375 ns/op	     69566 events/s	         0 hit-%
+BenchmarkDecisionThroughputParallel/rust-advanced/miss-14        	  200000	     13926 ns/op	     71808 events/s	         0 hit-%
 PASS
-ok  	github.com/yasindce1998/warmor/internal/enforcer	281.459s
+ok  	github.com/yasindce1998/warmor/internal/enforcer	115.966s

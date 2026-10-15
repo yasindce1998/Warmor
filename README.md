@@ -97,7 +97,7 @@ The daemon prints a `Security posture:` line at startup that tells you whether L
 
 ### Performance (measured)
 
-Measured on one laptop (WSL2, Core Ultra 5 135U, not idle) with the harness
+Measured on one otherwise idle laptop (WSL2, Core Ultra 5 135U) with the harness
 in [docs/PERFORMANCE.md](docs/PERFORMANCE.md), which has the methodology,
 the caveats and the commands (`make bench`, `make bench-kernel`). The kernel
 numbers come from a nested KVM VM, not bare metal. "Declared" means the policy
@@ -106,14 +106,14 @@ no Rust crate under `policies/` does yet.
 
 | Metric | Measured | Design target |
 |--------|----------|---------------|
-| Decision latency, cache hit | P95 1.5–2.4 µs | <100 µs P95 |
-| Decision latency, cache miss (WASM) | P95 79 µs (YAML policy), 148 µs (Rust `advanced` crate) | <100 µs P95 |
+| Decision latency, cache hit | P95 1.2–1.3 µs | <100 µs P95 |
+| Decision latency, cache miss (WASM) | P95 32 µs (YAML policy), 55 µs (Rust `advanced` crate) | <100 µs P95 |
 | Decision cache hit rate, synthetic host workload | 95.4% declared; 0% undeclared (PID in every key) | >90% |
-| Throughput, daemon event loop | 170k events/s declared; 13k–26k undeclared | 100k events/s |
-| Memory (RSS, in-process harness) | 57–103 MB declared; 107–127 MB undeclared | <50 MB (not met) |
-| CPU at 10k events/s | 11% of one core declared; ~120% undeclared | <5% |
-| Kernel fast path (BPF program, policy_map hit) | 0.35 µs connect, 0.78 µs exec | <1 µs |
-| Kernel, event sent to userspace (every miss, every `open()`) | about +24 µs per event, mostly reader wake-up | none set |
+| Throughput, daemon event loop | 175k events/s declared; 24k–41k undeclared | 100k events/s |
+| Memory (RSS, in-process harness) | 60–104 MB declared; 105–128 MB undeclared | <50 MB (not met) |
+| CPU at 10k events/s | 11% of one core declared; 83% undeclared (fixture); the Rust crate fell short of 10k (9.2k achieved) | <5% |
+| Kernel fast path (BPF program, policy_map hit) | 0.11 µs connect, 0.34 µs exec | <1 µs |
+| Kernel, event sent to userspace (every miss, every `open()`) | about +13–20 µs per event, mostly reader wake-up | none set |
 
 ### Policy Engine
 
