@@ -108,16 +108,19 @@ type Enforcer struct {
 	netFilter      *NetFilter
 	sandbox        *SandboxManager
 	escape         *escape.Detector
-	policyPath     string
-	verifyKey      ed25519.PublicKey
-	evalTimeout    time.Duration
-	policyID       string // metrics label (see policyID()); guarded by evaluatorMu
-	syncFailLog    logLimiter
-	auditMode      bool
-	learningMode   bool
-	ctx            context.Context
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup
+	// containerStarts dates the container of an event's cgroup for
+	// policies that read container age (nil: always unknown).
+	containerStarts containerStarter
+	policyPath      string
+	verifyKey       ed25519.PublicKey
+	evalTimeout     time.Duration
+	policyID        string // metrics label (see policyID()); guarded by evaluatorMu
+	syncFailLog     logLimiter
+	auditMode       bool
+	learningMode    bool
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
 }
 
 // newPlatform constructs the platform monitor. It is a variable so tests can
@@ -176,10 +179,12 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		logger.LogInfo("✓ Policy signature verified")
 	}
 
-	// Escape detection only applies to container cgroups. Built before the
-	// platform so a bad mode can't leak it.
-	escapeDetector, err := newEscapeDetector(opts.EscapeDetect,
-		container.NewCgroupResolver("/sys/fs/cgroup").IsContainer)
+	// One resolver maps cgroup ids to containers for escape detection
+	// (which only applies to container cgroups) and dates containers for
+	// temporal policies. The detector is built before the platform so a bad
+	// mode can't leak it.
+	cgroups := container.NewCgroupResolver("/sys/fs/cgroup")
+	escapeDetector, err := newEscapeDetector(opts.EscapeDetect, cgroups.IsContainer)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +285,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 
 	// Initialize decision cache (10k entries, 5min TTL)
 	decisionCache := cache.NewDecisionCache(10000, 5*time.Minute)
-	decisionCache.SetPIDRelevant(pidRelevance(evaluator))
+	setCacheDependencies(decisionCache, evaluator)
 	logger.LogInfo("✓ Decision cache initialized (10k-entry LRU, 5min TTL)")
 
 	// Initialize action handler
@@ -320,28 +325,29 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	ctx, cancel := context.WithCancel(ctx)
 
 	return &Enforcer{
-		platform:       plat,
-		wasmRuntime:    wasmRuntime,
-		evaluator:      evaluator,
-		pool:           pool,
-		cache:          decisionCache,
-		actionHandler:  actionHandler,
-		logger:         logger,
-		metricsServer:  metricsServer,
-		policyMap:      policyMapSyncer,
-		pipeline:       pipeline,
-		lineageTracker: tracker,
-		netFilter:      netFilter,
-		sandbox:        sandboxMgr,
-		escape:         escapeDetector,
-		policyPath:     policyPath,
-		verifyKey:      opts.PolicyVerifyKey,
-		policyID:       pid,
-		evalTimeout:    opts.EvalTimeout,
-		auditMode:      opts.AuditMode,
-		learningMode:   opts.LearningMode,
-		ctx:            ctx,
-		cancel:         cancel,
+		platform:        plat,
+		wasmRuntime:     wasmRuntime,
+		evaluator:       evaluator,
+		pool:            pool,
+		cache:           decisionCache,
+		actionHandler:   actionHandler,
+		logger:          logger,
+		metricsServer:   metricsServer,
+		policyMap:       policyMapSyncer,
+		pipeline:        pipeline,
+		lineageTracker:  tracker,
+		netFilter:       netFilter,
+		sandbox:         sandboxMgr,
+		escape:          escapeDetector,
+		containerStarts: cgroups,
+		policyPath:      policyPath,
+		verifyKey:       opts.PolicyVerifyKey,
+		policyID:        pid,
+		evalTimeout:     opts.EvalTimeout,
+		auditMode:       opts.AuditMode,
+		learningMode:    opts.LearningMode,
+		ctx:             ctx,
+		cancel:          cancel,
 	}, nil
 }
 
@@ -510,6 +516,10 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	pid := e.policyID
 	e.evaluatorMu.RUnlock()
 
+	if evaluator.ReadsContainerAge(event.GetType()) {
+		e.annotateContainerStart(event)
+	}
+
 	evalStart := time.Now()
 	result, err := evaluator.Evaluate(e.ctx, event)
 	metrics.RecordWASMExec(pid, time.Since(evalStart).Seconds(), err, errors.Is(err, wasm.ErrEvaluationTimeout))
@@ -572,6 +582,11 @@ type kernelKeyFielder interface {
 func decisionDeterminedByKernelKey(pm PolicyMapSyncer, t api.EventType, fieldsRead uint32) bool {
 	kf, ok := pm.(kernelKeyFielder)
 	if !ok || fieldsRead == wasm.FieldsUnknown {
+		return false
+	}
+	if fieldsRead&wasm.TemporalFields != 0 {
+		// No kernel key holds the clock or container age: the kernel
+		// would keep applying the decision after its window changed.
 		return false
 	}
 	keyFields := kf.KernelKeyFields(t)
@@ -643,6 +658,34 @@ func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, g
 		// itself is already enforced in userspace.
 		_ = e.syncToPolicyMap(event, result, gen, evaluator.FieldsRead(event.GetType()))
 	}
+}
+
+// containerStarter dates the container a cgroup belongs to
+// (container.CgroupResolver).
+type containerStarter interface {
+	ContainerStart(cgroupID uint64) (time.Time, bool)
+}
+
+// annotateContainerStart sets event.ContainerStart from the event's cgroup,
+// so the policy host can send the container age. It is only called for
+// policies that read the age; an undeterminable start stays zero, which a
+// temporal rule treats as outside its window (fail closed).
+func (e *Enforcer) annotateContainerStart(event *api.Event) {
+	if e.containerStarts == nil || event.CgroupID == 0 || !event.ContainerStart.IsZero() {
+		return
+	}
+	if start, ok := e.containerStarts.ContainerStart(event.CgroupID); ok {
+		event.ContainerStart = start
+	}
+}
+
+// setCacheDependencies installs what the policy's decisions depend on beyond
+// the event fields into the decision cache: whether they read the PID, and
+// whether they read time (temporal policies), which keeps them out of the
+// cache altogether.
+func setCacheDependencies(c *cache.DecisionCache, evaluator *wasm.PolicyEvaluator) {
+	c.SetPIDRelevant(pidRelevance(evaluator))
+	c.SetTimeDependent(evaluator.TimeDependent)
 }
 
 // pidRelevance derives the decision cache's PID rule from the policy's
@@ -905,7 +948,7 @@ func (e *Enforcer) ReloadPolicy() error {
 	// the old policy see the bumped generation and are dropped.
 	var clearErr error
 	e.decisionMu.Lock()
-	e.cache.SetPIDRelevant(pidRelevance(newEvaluator))
+	setCacheDependencies(e.cache, newEvaluator)
 	if e.policyMap != nil {
 		clearErr = e.policyMap.Clear()
 	}
