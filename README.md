@@ -170,9 +170,20 @@ Z-score outlier detection over behavioural fingerprints of containers running th
 
 `warmor-server` supports percentage-based rollouts with consistent hashing: create, ramp, complete and abort through the admin API or `warmorctl`. The deny-rate `CanaryAnalyzer` that would trigger automatic rollback exists but is **not connected**. Nothing feeds it decisions, so there is **no automatic rollback** on `main`.
 
-### Temporal Policies — Experimental (library only, not yet wired into the daemon)
+### Temporal Policies — Shipped (YAML policies)
 
-Time constraints (container age, time of day, day of week) in `internal/temporal`. The YAML compiler does **not** understand a `temporal:` block yet. It silently ignores it, which turns the rule into an unconditional one, so do not use `temporal:` in policies today.
+A rule's `temporal:` block (`max_container_age`, `min_container_age`, UTC `time_of_day` with midnight wrap, `days_of_week`) is compiled into the WASM policy: the rule acts only when its conditions match and the event is outside the permitted window. The daemon sends the event's time and its container's age, dated from the oldest process in the container's cgroup (Linux, `hostPID`). Unknown age fails closed, so age rules also act on host processes. Event types with temporal rules are evaluated every time, never cached or synced to the kernel map. See [Temporal Policies](docs/temporal-policies.md).
+
+```yaml
+  - name: no-curl-after-startup
+    event: network
+    conditions:
+      all:
+        - comm: { eq: "curl" }
+    action: deny
+    temporal:
+      max_container_age: "5m"
+```
 
 ---
 
@@ -267,12 +278,12 @@ internal/                                      (status on main)
   metrics/        — Prometheus collector and exporter                    Partial (exporter metrics never updated)
   logging/        — Structured JSON (zerolog)                            Shipped
   policygen/ sbompolicy/ policydiff/ policymerge/ policybundle/          Shipped (CLI tools)
-  container/      — Runtime detection, containerd monitor                Library-only
+  container/      — Cgroup→container resolver, container start times     Shipped (escape, temporal); containerd monitor library-only
   escape/         — Container escape pattern correlator                  Shipped (--escape-detect)
   drift/          — Behavioral fingerprint + z-score detection           Library-only
   attackgraph/    — MITRE ATT&CK correlation + kill-chain DAG            Library-only
   blastradius/    — Container relationship graph + BFS reachability      Library-only
-  temporal/       — Time-dimension enricher + constraint evaluation      Library-only
+  temporal/       — Temporal constraint types + reference semantics      Shipped (compiled into YAML policies)
   patterns/       — Glob/regex matcher helpers                           Library-only
   dashboard/      — SSE dashboard (ring buffer, embedded HTML)           Library-only
 ```

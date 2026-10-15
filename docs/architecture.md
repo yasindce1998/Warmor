@@ -213,7 +213,9 @@ default_action: allow
 
 **Runtime compilation:** The daemon also accepts `.yaml`/`.yml` policy files directly and compiles them at load time. That needs `cargo` and the wasm32 target **on the enforcing host**, which the distroless image lacks. If a sibling `.wasm` with the same base name exists, it is loaded instead, even if stale.
 
-**Known gap:** keys the schema does not know, such as `temporal:`, are silently ignored.
+**Temporal rules:** a rule's `temporal:` block is compiled into the same evaluator (the action applies outside the permitted window) and reads the ABI v3 wall clock and container age; see [Temporal Policies](temporal-policies.md).
+
+**Known gap:** other keys the schema does not know are silently ignored.
 
 ### 6. Observability
 
@@ -682,7 +684,7 @@ See [OVERVIEW.md](OVERVIEW.md) for the phase-by-phase summary and
   - LSM hooks attach, but only exec/connect get kernel entries.
   - The policy server, mTLS/JWT, signed bundles and `warmorctl` ship.
   - The Helm chart, CRD, webhook, containerd and per-container policy do not work or are missing.
-- **Phase 9:** `warmor-learn` and `warmor-simulate` ship. Integrity is offline only. Escape, drift, temporal, attack graph, blast radius and canary auto-rollback are library-only.
+- **Phase 9:** `warmor-learn` and `warmor-simulate` ship, and so do YAML temporal policies. Integrity is offline only. Escape, drift, attack graph, blast radius and canary auto-rollback are library-only.
 
 ## Future Enhancements
 

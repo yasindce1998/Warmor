@@ -41,11 +41,11 @@ updates this page when it merges.
 
 | Feature | Status | What works today | Known gaps |
 |---------|--------|------------------|------------|
-| YAML DSL + `warmor-compile` | Shipped | YAML is compiled to Rust and then to `wasm32-unknown-unknown` WASM. `--validate` and `--rust-only` work. | Needs `cargo` and `rustup target add wasm32-unknown-unknown` at compile time. Unknown keys such as `temporal:` are **silently ignored**, so the rule becomes unconditional. |
+| YAML DSL + `warmor-compile` | Shipped | YAML is compiled to Rust and then to `wasm32-unknown-unknown` WASM. `--validate` and `--rust-only` work. | Needs `cargo` and `rustup target add wasm32-unknown-unknown` at compile time. Unknown rule keys are **silently ignored** (a misspelt `temporal:` key is not caught); the `temporal:` block itself is parsed strictly. |
 | YAML policy passed directly to `warmor-daemon --policy x.yaml` | Partial | The daemon compiles the YAML at load time | Needs `cargo` and the wasm32 target **on the enforcing host**. The distroless container image has neither. Pass a precompiled `.wasm` instead. |
-| `examples/policies/*.yaml` | Shipped | 6 example policies, all validate | CI validates every YAML policy with `warmor-compile --validate` and fails on an invalid one. |
+| `examples/policies/*.yaml` | Shipped | 7 example policies, all validate | CI validates every YAML policy with `warmor-compile --validate` and fails on an invalid one. |
 | `policies/yaml-example/**` | Shipped | 53 categorized YAML policies, all pass `warmor-compile --validate` | Not tested against live events in CI |
-| Rust policy crates (`policies/*`) | Shipped | All 10 crates build for `wasm32-unknown-unknown`, use the JSON ABI (`evaluate_syscall`), and are run through the real host in CI (`TestPolicyCrates`) | The host does not send `args`, `parent_comm`, `cgroup_id` or time context, so crate rules on those fields never fire. A module exporting the wrong signature is rejected at load. |
+| Rust policy crates (`policies/*`) | Shipped | All 10 crates build for `wasm32-unknown-unknown`, use the JSON ABI (`evaluate_syscall`), and are run through the real host in CI (`TestPolicyCrates`) | The host does not send `args`, `parent_comm` or `cgroup_id`, so crate rules on those fields never fire. Time context is only sent to ABI version 3 modules; the crates declare version 2, and `temporal-access` reads its own time keys, which are never sent. A module exporting the wrong signature is rejected at load. |
 | `warmor-learn` | Shipped | Reads the ndjson event log written by `--event-sink file:<path>` (or stdin), with `--follow`, and synthesizes a YAML allowlist policy | Learning mode is offline only. The enforcer's `LearningMode` option has no flag. |
 | `warmor-simulate` | Shipped | Replays `events-*.ndjson` files in a directory against a `.yaml` or `.wasm` policy | The daemon has no event-store sink. Point `--event-sink file:` at a filename matching `events-*.ndjson` instead. `--since` accepts Go durations and days (`7d`, `1d12h`). |
 | `warmor-policy-gen` | Shipped | Generates a policy from ndjson audit logs | None known |
@@ -53,7 +53,7 @@ updates this page when it merges.
 | `warmor-policy-diff`, `warmor-policy-merge` | Shipped | Compare and merge YAML policies (`--strategy union\|intersection\|deny-wins`) | None known |
 | `warmor-policy-bundle` | Shipped | OCI push/pull of policy bundles, Ed25519 `--keygen`, `--sign-key`, `--verify-key` | Signature verification only happens in `--pull --verify-key` |
 | Policy signature verification in the daemon | Shipped | `--verify-key` checks a detached ed25519 `<policy>.sig` over the exact bytes at startup, on every reload and on every server download (verified before writing); fails closed | Rollback to an older module signed with the same key is not prevented. YAML policies are refused with a key set (they are compiled on the node). |
-| Temporal constraints in YAML (`temporal:`) | Missing | None | The compiler ignores the key (see above). `internal/temporal` is library-only. |
+| Temporal constraints in YAML (`temporal:`) | Shipped | `max_container_age`, `min_container_age`, `time_of_day` (UTC, midnight wrap), `days_of_week`, compiled into the WASM policy; the rule acts outside the window. See [Temporal Policies](temporal-policies.md) | Container age is Linux-only and needs a container cgroup and `hostPID`; unknown age fails closed, so age rules also act on host processes. Event types with temporal rules bypass the decision cache and the kernel fast path. Not allowed on `allow` rules. |
 
 ## 3. Event streaming and observability
 
@@ -96,7 +96,7 @@ updates this page when it merges.
 |---------|--------|------------------|------------|
 | Supply-chain integrity (`warmor-integrity-scan`, `--integrity-db/--integrity-mode`) | Shipped | Offline scan/verify (`--all` for the whole rootfs). In-kernel exec check: a sleepable LSM program hashes each exec with IMA and refuses unlisted SHA-256s (enforce) or reports them (audit) | VM-tested on IMA-enabled 6.1 and 6.18 kernels built in CI (`ci/kernel/`). Needs `CONFIG_IMA` and IMA hash SHA-256 (checked at startup). Does not cover mmap'd libraries or interpreted scripts passed as arguments. Global allowlist; restart to update. |
 | Container escape detection | Shipped | `--escape-detect=alert\|deny`: 7 patterns on real hook data (mount source, ptrace target cgroup, runtime socket connects), scoped to container cgroups; `warmor_escape_alerts_total` | Detection is after the fact (deny terminates the process). Relative-path `/proc/*/ns` opens and non-standard runtime socket paths are not matched. |
-| Temporal policies | Library-only | `internal/temporal` (enricher, guard) | Not wired into the enforcer. The YAML `temporal:` key is ignored. |
+| Temporal policies | Shipped | YAML `temporal:` blocks are evaluated inside the compiled WASM policy with the event's time and container age (from the cgroup's oldest process) | See the policy engine row above and [Temporal Policies](temporal-policies.md#limits) |
 | Attack graph (MITRE ATT&CK) | Library-only | `internal/attackgraph` | Not wired |
 | Blast radius | Library-only | `internal/blastradius` | Not wired |
 | Pattern matcher helpers (glob/regex) | Library-only | `internal/patterns` | Not wired |

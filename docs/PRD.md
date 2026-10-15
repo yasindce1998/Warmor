@@ -38,7 +38,7 @@ Status as of current `main`. "Partial" means the phase's headline features are r
 | **Phase 6** | Partial | 7 LSM hooks attach (tested in a VM in CI). Kernel blocking happens only on a policy-map hit, and only exec and connect entries are ever written. A miss is allowed. | Linux |
 | **Phase 7** | Partial | Policy server with registration, heartbeats, versioned policies and percentage rollouts. Lineage is partial (no PPID). NetFilter, sandbox and SIEM syslog sink are library-only. | All |
 | **Phase 8** | Partial | mTLS/JWT, signed OCI bundles (`warmor-policy-bundle`), daemon signature verification (`--verify-key`) and the `warmorctl` TUI work. The OCI hook is experimental (no auth, bindings unused). containerd and per-container policy are missing. Exporter metrics are never updated. | All |
-| **Phase 9** | Mostly library-only | `warmor-learn` and `warmor-simulate` ship. Escape detection ships; in-kernel integrity is experimental (unverified on an IMA kernel in CI). Drift, temporal, attack graph, blast radius and canary auto-rollback are library-only (not wired into any binary). | Linux |
+| **Phase 9** | Mostly library-only | `warmor-learn` and `warmor-simulate` ship. Escape detection and YAML temporal policies ship; in-kernel integrity is experimental (unverified on an IMA kernel in CI). Drift, attack graph, blast radius and canary auto-rollback are library-only (not wired into any binary). | Linux |
 
 ### Key Metrics
 
@@ -53,10 +53,10 @@ None of the following has been measured on `main`. They are **design targets**, 
 ### Current Implementation Highlights
 
 **Code Status:**
-- 30 internal packages. 7 of them (`attackgraph`, `blastradius`, `dashboard`, `drift`, `patterns`, `temporal`, `testing`) are imported by no binary.
+- 30 internal packages. 6 of them (`attackgraph`, `blastradius`, `dashboard`, `drift`, `patterns`, `testing`) are imported by no binary.
 - 15 binaries under `cmd/` (13 released tools plus `test-ebpf` and `test-wasm`)
 - 10 Rust policy crates. 8 compile; on `main` all of them deny some or all events due to ABI/field mismatches (see [STATUS.md](STATUS.md#2-policy-engine-and-toolchain)).
-- 59 YAML example policies: 53 in `policies/yaml-example/` (all validate) and 6 in `examples/policies/` (all validate; CI fails on an invalid policy)
+- 60 YAML example policies: 53 in `policies/yaml-example/` (all validate) and 7 in `examples/policies/` (all validate; CI fails on an invalid policy)
 - Tests: Go unit tests with a 40% coverage gate on Linux; LSM attach integration tests in a VM; Windows ETW smoke tests on a real runner
 
 **Documentation:**
@@ -1019,7 +1019,7 @@ Source: `internal/container/` — detector.go, containerd_monitor.go, containerd
 - [x] Container escape detection (`--escape-detect`) — after-the-fact detection, scoped to containers
 - [ ] Drift detection (`internal/drift/`) — library-only
 - [ ] Canary auto-rollback (`internal/policyserver/` canary analyzer) — library-only; manual rollouts ship
-- [ ] Temporal policies (`internal/temporal/`) — library-only; the YAML `temporal:` key is silently ignored
+- [x] Temporal policies (YAML `temporal:`) — compiled into the WASM policy; container age from the cgroup (Linux), unknown age fails closed
 - [ ] Attack graph (`internal/attackgraph/`) — library-only
 - [ ] Blast radius (`internal/blastradius/`) — library-only
 
@@ -1209,7 +1209,7 @@ Planned enhancements beyond the current release. Tracked here as the single sour
 1. Kernel default-deny and preloading static rules; sync all key-determined decisions
 2. WASM memory/time limits; daemon-side policy signature verification
 3. Fix the Rust crate ABIs, build them in CI, and fix the failing example YAML policies
-4. Wire the library-only features (integrity runtime, escape, temporal, canary analyzer, SIEM sink)
+4. Wire the library-only features (integrity runtime, escape, canary analyzer, SIEM sink)
 5. Fix the Helm chart and add a kind e2e test
 6. Benchmark harness to measure the performance targets
 

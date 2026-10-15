@@ -24,9 +24,15 @@ rules:
         - field: { operator: value }
     action: allow | deny | audit
     reason: "Human-readable explanation"
+    temporal:      # optional, deny/log rules only: act only OUTSIDE this window
+      max_container_age: "5m"
+      time_of_day: { start: { hour: 9, minute: 0 }, end: { hour: 17, minute: 0 } }  # UTC
+      days_of_week: [Monday, Friday]
 
 default_action: allow | deny | audit
 ```
+
+See [Temporal Policies](temporal-policies.md) for the `temporal:` block.
 
 ## Event Types
 
@@ -103,6 +109,7 @@ When running with `--lsm-enforce`, deny rules are enforced synchronously at the 
 - **`any_of` lists** each element is individually hashed into the map after first evaluation
 - **Network rules** hash destination IP+port, so `remote_port: { any_of: [22, 4444] }` will populate map entries per observed connection
 - **Cgroup scoping** — rules apply per-cgroup by default; set cgroup_id=0 in the map for global rules
+- **Temporal rules** are never compiled into the BPF map (no kernel key holds time), and decisions for their event type are not cached; every such event is evaluated in WASM
 
 ### Audit vs Enforce Mode
 
@@ -166,7 +173,7 @@ warmor-compile --validate path/to/policy.yaml
 
 `warmor-daemon --validate-policy <path>` loads the policy in the WASM runtime (and checks its signature with `--verify-key`) without root or BPF, and exits 0 or 1. For YAML it only validates the schema, because compiling needs `cargo`.
 
-> **Note:** the compiler silently ignores keys it does not know, such as `temporal:`. Run `warmor-compile --rust-only path/to/policy.yaml` to see exactly which conditions were compiled.
+> **Note:** the compiler silently ignores rule keys it does not know (a misspelt `temporal:` key included; the `temporal:` block itself is checked strictly). Run `warmor-compile --rust-only path/to/policy.yaml` to see exactly which conditions were compiled.
 
 This needs no root or BPF and exits 0 if the policy is valid, 1 if not. For a
 `.yaml` file it checks the schema, and loads a precompiled `.wasm` with the
