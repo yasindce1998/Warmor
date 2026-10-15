@@ -35,6 +35,10 @@ func newTestEvaluator(t *testing.T) *wasm.PolicyEvaluator {
 		t.Fatalf("NewPool: %v", err)
 	}
 	ev := wasm.NewPolicyEvaluator(pool, "test-host")
+	// The default 50ms deadline is a production latency bound; under -race
+	// on a loaded machine an evaluation can exceed it, and Replay counts a
+	// failed evaluation as a deny without a denial detail.
+	ev.SetTimeout(10 * time.Second)
 	t.Cleanup(func() {
 		_ = ev.Close(ctx)
 		_ = rt.Close(ctx)
