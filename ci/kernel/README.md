@@ -18,6 +18,7 @@ because a dependency is missing on that kernel version.
 
 ```bash
 scripts/build-ci-kernel.sh 6.18.53 /tmp/kernel-6.18
+# vimto needs an absolute path: it resolves it from the test's package dir
 vimto -kernel /tmp/kernel-6.18/vmlinuz -- go test -tags integration ./internal/ebpf/
 ```
 

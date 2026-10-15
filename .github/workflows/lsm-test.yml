@@ -248,5 +248,5 @@ jobs:
           WARMOR_REQUIRE_IMA: "1"
         run: |
           CGO_ENABLED=0 $(go env GOPATH)/bin/vimto \
-            -kernel kernel-out/vmlinuz -- \
+            -kernel "$GITHUB_WORKSPACE/kernel-out/vmlinuz" -- \
             go test -v -count 1 -tags integration -timeout 300s ./internal/ebpf/
