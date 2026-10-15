@@ -131,6 +131,8 @@ func securityEventToAPIEvent(e *streaming.SecurityEvent) *api.Event {
 		Filename:  e.Filename,
 		Timestamp: e.Timestamp,
 		CgroupID:  e.CgroupID,
+
+		ContainerStart: e.ContainerStart,
 	}
 
 	switch e.EventType {

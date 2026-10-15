@@ -372,3 +372,27 @@ func TestNormalizeDecision(t *testing.T) {
 		}
 	}
 }
+
+// TestContainerStartRoundTrip: the container start the enforcer determined
+// is recorded by sinks and replayed, so age-based temporal rules see the
+// same container age in warmor-simulate as they did live.
+func TestContainerStartRoundTrip(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0).UTC()
+	ev := &api.Event{Comm: "curl", Timestamp: start.Add(time.Hour), CgroupID: 4, ContainerStart: start}
+	data, err := json.Marshal(streaming.FromAPIEvent(ev, &api.ActionResult{Action: api.ActionAllow}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var se streaming.SecurityEvent
+	if err := json.Unmarshal(data, &se); err != nil {
+		t.Fatal(err)
+	}
+	if got := securityEventToAPIEvent(&se); !got.ContainerStart.Equal(start) {
+		t.Errorf("replayed ContainerStart = %v, want %v (json %s)", got.ContainerStart, start, data)
+	}
+	// Unknown stays unknown and is not written at all.
+	data, _ = json.Marshal(streaming.FromAPIEvent(&api.Event{Comm: "x"}, nil))
+	if bytes.Contains(data, []byte("container_start")) {
+		t.Errorf("zero ContainerStart serialized: %s", data)
+	}
+}

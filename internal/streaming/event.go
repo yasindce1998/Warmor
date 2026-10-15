@@ -18,6 +18,10 @@ type SecurityEvent struct {
 	UID       uint32 `json:"uid"`
 	GID       uint32 `json:"gid"`
 	Comm      string `json:"comm"`
+	// ContainerStart is when the event's container started, if the
+	// enforcer determined it (only for policies that read container age).
+	// warmor-simulate replays it so temporal age rules see the same age.
+	ContainerStart time.Time `json:"container_start,omitzero"`
 
 	// Event-specific payload
 	Filename    string `json:"filename,omitempty"`
