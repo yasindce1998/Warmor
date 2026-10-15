@@ -158,17 +158,14 @@ Enforces runtime supply chain security:
 
 ### Temporal Access Control (`temporal-access/`)
 
-Time-based policy enforcement. This crate predates the host's temporal
-context: it declares ABI version 2 and reads its own optional keys
-(`container_age_secs`, `hour_of_day`, `day_of_week`, `is_maintenance_window`),
-which the host does not send. Under `warmor-daemon` its age and clock rules
-therefore see "unknown" and fall back to their allow or log branch, and the
-maintenance-tool rule always denies (the maintenance flag is never set). For
-temporal rules that are actually enforced, use a YAML `temporal:` block
-([Temporal Policies](temporal-policies.md)).
+Time-based policy enforcement in Rust. It declares ABI version 3, so the host
+sends `wall_clock_unix` and `container_age_ms` (0 = unknown), and derives the
+UTC hour and weekday itself. Unknown time keeps maintenance tools denied; other
+rules fall back to allow or log. All times are UTC. For declarative temporal
+rules, use a YAML `temporal:` block ([Temporal Policies](temporal-policies.md)).
 
 - **Startup-only binaries**: init processes (`tini`, `dumb-init`) allowed only in first 60s
-- **Maintenance windows**: package managers and dump tools require maintenance flag
+- **Maintenance window**: package managers and dump tools only Sunday 02:00-06:00 UTC (allowed and logged), denied otherwise
 - **Business hours**: SSH/SCP restricted to Mon-Fri 08:00-18:00
 - **Cron windows**: cron execution only during 02:00-04:00 and 06:00-07:00
 - **Post-stabilization blocking**: no new binaries from `/tmp` after 5 minutes

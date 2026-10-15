@@ -19,30 +19,55 @@ struct Event {
     remote_addr: String,
     remote_port: u16,
     parent_comm: String,
-    // Temporal context. The Warmor host does not currently send these, so
-    // each is optional and the rules that depend on it only fire when it is
-    // present. Absent maintenance flag means "not in a maintenance window".
-    container_age_secs: Option<u64>,
-    hour_of_day: Option<u8>,
-    day_of_week: Option<u8>,
-    is_maintenance_window: bool,
+    // Temporal context sent by the host to ABI v3 policies: the event's wall
+    // clock in UTC Unix seconds and the container's age in milliseconds. 0
+    // means unknown (e.g. a host process has no container age).
+    wall_clock_unix: u64,
+    container_age_ms: u64,
 }
 
+const SECS_PER_DAY: u64 = 86_400;
+
 impl Event {
+    fn known_time(&self) -> Option<u64> {
+        (self.wall_clock_unix > 0).then_some(self.wall_clock_unix)
+    }
+
+    /// UTC hour of day, if the time is known.
+    fn hour_of_day(&self) -> Option<u8> {
+        self.known_time().map(|t| ((t % SECS_PER_DAY) / 3600) as u8)
+    }
+
+    /// UTC weekday, 0 = Sunday ... 6 = Saturday (1970-01-01 was a Thursday).
+    fn day_of_week(&self) -> Option<u8> {
+        self.known_time().map(|t| ((t / SECS_PER_DAY + 4) % 7) as u8)
+    }
+
+    /// Container age in whole seconds, if known.
+    fn container_age_secs(&self) -> Option<u64> {
+        (self.container_age_ms > 0).then_some(self.container_age_ms / 1000)
+    }
+
     fn age_over(&self, secs: u64) -> bool {
-        matches!(self.container_age_secs, Some(age) if age > secs)
+        self.container_age_ms > 0 && self.container_age_ms / 1000 > secs
     }
 
     fn hour_in(&self, start: u8, end: u8) -> Option<bool> {
-        self.hour_of_day.map(|h| h >= start && h < end)
+        self.hour_of_day().map(|h| h >= start && h < end)
     }
 
-    /// Mon-Fri within [start, end) hours, if the time is known.
+    /// Mon-Fri within [start, end) hours UTC, if the time is known.
     fn within_hours(&self, start: u8, end: u8) -> Option<bool> {
-        match (self.day_of_week, self.hour_of_day) {
+        match (self.day_of_week(), self.hour_of_day()) {
             (Some(d), Some(h)) => Some((1..=5).contains(&d) && h >= start && h < end),
             _ => None,
         }
+    }
+
+    /// The maintenance window: Sunday 02:00-06:00 UTC. Unknown time is
+    /// outside it, so maintenance tools fail closed.
+    fn in_maintenance_window(&self) -> bool {
+        matches!((self.day_of_week(), self.hour_of_day()), (Some(0), Some(h)) if (2..6).contains(&h))
     }
 }
 
@@ -119,7 +144,8 @@ pub extern "C" fn free(ptr: *mut u8, size: usize) {
 
 #[no_mangle]
 pub extern "C" fn abi_version() -> u32 {
-    2
+    // 3: the host sends wall_clock_unix and container_age_ms.
+    3
 }
 
 #[no_mangle]
@@ -208,7 +234,7 @@ fn evaluate_process(event: &Event) -> Decision {
     // Maintenance-only tools: only during maintenance windows
     for tool in MAINTENANCE_ONLY_TOOLS {
         if event.filename == *tool {
-            if !event.is_maintenance_window {
+            if !event.in_maintenance_window() {
                 return Decision::deny(&format!(
                     "{} only allowed during maintenance windows",
                     tool
@@ -225,7 +251,7 @@ fn evaluate_process(event: &Event) -> Decision {
                 Some(true) => Decision::allow("Within business hours"),
                 Some(false) => Decision::deny(&format!(
                     "{} only allowed Mon-Fri 08:00-18:00 (current: day={:?}, hour={:?})",
-                    tool, event.day_of_week, event.hour_of_day
+                    tool, event.day_of_week(), event.hour_of_day()
                 )),
                 None => Decision::log(&format!("{} executed; time of day unknown", tool)),
             };
@@ -243,7 +269,7 @@ fn evaluate_process(event: &Event) -> Decision {
             Some(false) => {
                 return Decision::deny(&format!(
                     "Cron execution outside allowed windows (hour={:?})",
-                    event.hour_of_day
+                    event.hour_of_day()
                 ))
             }
             None => return Decision::log("Cron execution; time of day unknown"),
@@ -274,8 +300,8 @@ fn evaluate_file(event: &Event) -> Decision {
         for cfg_path in &config_paths {
             if event.path.starts_with(cfg_path) && event.operation == "write" {
                 return Decision::deny(&format!(
-                    "Config modification of {} blocked after startup (container age: {:?}s)",
-                    event.path, event.container_age_secs
+                    "Config modification of {} blocked after startup (container age: {}s)",
+                    event.path, event.container_age_ms / 1000
                 ));
             }
         }
@@ -288,7 +314,7 @@ fn evaluate_file(event: &Event) -> Decision {
             if event.within_hours(8, 18) == Some(false) {
                 return Decision::log(&format!(
                     "Sensitive data access outside business hours: {} (day={:?}, hour={:?})",
-                    event.path, event.day_of_week, event.hour_of_day
+                    event.path, event.day_of_week(), event.hour_of_day()
                 ));
             }
         }
@@ -301,7 +327,7 @@ fn evaluate_file(event: &Event) -> Decision {
             if event.hour_in(2, 4) == Some(false) {
                 return Decision::deny(&format!(
                     "Backup file creation outside window: {} (hour={:?})",
-                    event.path, event.hour_of_day
+                    event.path, event.hour_of_day()
                 ));
             }
         }
@@ -312,7 +338,7 @@ fn evaluate_file(event: &Event) -> Decision {
 
 fn evaluate_network(event: &Event) -> Decision {
     // Block all outbound during container first 5 seconds (prevent container-start exfiltration)
-    if let Some(age) = event.container_age_secs {
+    if let Some(age) = event.container_age_secs() {
         if age < 5 && event.remote_port != 53 {
             return Decision::deny(&format!(
                 "Outbound network blocked during container initialization (age={}s)",
@@ -328,12 +354,12 @@ fn evaluate_network(event: &Event) -> Decision {
         if !always_allowed.contains(&event.remote_port) {
             return Decision::deny(&format!(
                 "Non-critical network connection outside operating hours (port={}, hour={:?})",
-                event.remote_port, event.hour_of_day
+                event.remote_port, event.hour_of_day()
             ));
         }
         return Decision::log(&format!(
             "Network activity outside business hours: {}:{} (hour={:?})",
-            event.remote_addr, event.remote_port, event.hour_of_day
+            event.remote_addr, event.remote_port, event.hour_of_day()
         ));
     }
 

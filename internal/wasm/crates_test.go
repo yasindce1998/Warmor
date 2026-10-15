@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -24,6 +25,18 @@ import (
 // (as CI does) to turn a missing artifact into a failure.
 
 const crateTarget = "wasm32-unknown-unknown"
+
+// Fixed UTC instants for time-dependent crates.
+var (
+	wedMorning     = time.Date(2026, 10, 14, 10, 0, 0, 0, time.UTC) // Wednesday
+	wedNight       = time.Date(2026, 10, 14, 23, 0, 0, 0, time.UTC)
+	sunMaintenance = time.Date(2026, 10, 11, 3, 0, 0, 0, time.UTC) // Sunday
+)
+
+func at(t time.Time, ev *api.Event) *api.Event {
+	ev.Timestamp = t
+	return ev
+}
 
 func procEvent(uid uint32, comm, filename string) *api.Event {
 	ev := &api.Event{PID: 4242, UID: uid, GID: uid, Comm: comm, Filename: filename}
@@ -146,11 +159,17 @@ var crateSuites = []crateSuite{
 	},
 	{
 		dir: "temporal-access", lib: "warmor_policy_temporal_access.wasm",
+		// Time-dependent: every case carries a fixed UTC timestamp, so the
+		// result doesn't depend on when the test runs.
 		cases: []crateCase{
-			{"benign process", procEvent(1000, "ls", "/usr/bin/ls"), api.ActionAllow},
-			{"benign file", fileEvent(1000, "cat", "/home/user/notes.txt", "open", 0), api.ActionAllow},
-			{"benign network", netEvent(1000, "curl", "93.184.216.34", 443), api.ActionAllow},
-			{"maintenance-only tool outside window", procEvent(0, "apt-get", "/usr/bin/apt-get"), api.ActionDeny},
+			{"benign process", at(wedMorning, procEvent(1000, "ls", "/usr/bin/ls")), api.ActionAllow},
+			{"benign file", at(wedMorning, fileEvent(1000, "cat", "/home/user/notes.txt", "open", 0)), api.ActionAllow},
+			{"benign network in hours", at(wedMorning, netEvent(1000, "curl", "93.184.216.34", 443)), api.ActionAllow},
+			{"network outside hours is logged", at(wedNight, netEvent(1000, "curl", "93.184.216.34", 443)), api.ActionLog},
+			{"maintenance tool outside window", at(wedMorning, procEvent(0, "apt-get", "/usr/bin/apt-get")), api.ActionDeny},
+			{"maintenance tool in window is allowed and logged", at(sunMaintenance, procEvent(0, "apt-get", "/usr/bin/apt-get")), api.ActionLog},
+			{"ssh in business hours", at(wedMorning, procEvent(1000, "ssh", "/usr/bin/ssh")), api.ActionAllow},
+			{"ssh outside business hours", at(wedNight, procEvent(1000, "ssh", "/usr/bin/ssh")), api.ActionDeny},
 		},
 	},
 	{
