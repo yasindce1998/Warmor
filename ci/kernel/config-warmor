@@ -1,0 +1,17 @@
+# Warmor additions on top of the ci-kernels configuration.
+#
+# The ci-kernels images (ghcr.io/cilium/ci-kernels) are built without IMA, and
+# lsm_integrity hashes executables with bpf_ima_file_hash, which is a stub that
+# fails every call when CONFIG_IMA is off. These options give the test kernel a
+# working IMA with SHA-256 as its default hash, like distribution kernels.
+CONFIG_INTEGRITY=y
+CONFIG_IMA=y
+CONFIG_IMA_DEFAULT_HASH_SHA256=y
+CONFIG_IMA_DEFAULT_HASH_SHA1=n
+CONFIG_CRYPTO_SHA256=y
+
+# Inode storage and sleepable LSM programs (lsm_integrity) need BPF LSM, and
+# the integrity tests mount tmpfs and overlayfs.
+CONFIG_BPF_LSM=y
+CONFIG_TMPFS=y
+CONFIG_OVERLAY_FS=y

@@ -9,6 +9,8 @@ on:
       - "internal/enforcer/**"
       - "cmd/warmor-daemon/**"
       - ".github/workflows/lsm-test.yml"
+      - "ci/kernel/**"
+      - "scripts/build-ci-kernel.sh"
   pull_request:
     branches: [main]
     paths:
@@ -17,6 +19,8 @@ on:
       - "internal/enforcer/**"
       - "cmd/warmor-daemon/**"
       - ".github/workflows/lsm-test.yml"
+      - "ci/kernel/**"
+      - "scripts/build-ci-kernel.sh"
   workflow_dispatch:
 
 jobs:
@@ -170,3 +174,79 @@ jobs:
             -kernel ghcr.io/cilium/ci-kernels:${{ matrix.kernel }} -- \
             go test -v -count 1 -tags integration -timeout 120s ./internal/ebpf/
 
+  # The ci-kernels images are built without IMA, so the exec integrity tests
+  # only skip on them. Build the same configuration plus IMA (ci/kernel/),
+  # once per version and config: the result is cached.
+  ima-kernel:
+    name: Build IMA kernel (${{ matrix.version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Current longterm, and the oldest LTS the BPF programs target.
+        version: ["6.18.53", "6.1.188"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore kernel cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: kernel-out
+          key: ima-kernel-${{ matrix.version }}-${{ hashFiles('ci/kernel/**', 'scripts/build-ci-kernel.sh') }}
+
+      - name: Install build dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison bc cpio libelf-dev libssl-dev dwarves
+
+      - name: Build kernel
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: scripts/build-ci-kernel.sh ${{ matrix.version }} kernel-out
+
+      - name: Show IMA and LSM configuration
+        run: grep -E "^CONFIG_(IMA|IMA_DEFAULT_HASH|BPF_LSM|LSM)=" kernel-out/config
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ima-kernel-${{ matrix.version }}
+          path: kernel-out
+          retention-days: 7
+
+  lsm-integration-ima:
+    name: LSM Integration with IMA (${{ matrix.version }})
+    runs-on: ubuntu-latest
+    needs: [unit-tests, bpf-compile, ima-kernel]
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["6.18.53", "6.1.188"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ima-kernel-${{ matrix.version }}
+          path: kernel-out
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86
+          sudo chmod 0666 /dev/kvm
+          CGO_ENABLED=0 go install lmb.io/vimto@latest
+
+      # The committed bindings are used as is; the bpf-compile job checks the
+      # C sources still build.
+      - name: Run LSM integration tests in VM (integrity required)
+        env:
+          WARMOR_REQUIRE_IMA: "1"
+        run: |
+          CGO_ENABLED=0 $(go env GOPATH)/bin/vimto \
+            -kernel kernel-out/vmlinuz -- \
+            go test -v -count 1 -tags integration -timeout 300s ./internal/ebpf/
