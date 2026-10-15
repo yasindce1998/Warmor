@@ -122,6 +122,8 @@ func TestCEFSeverity(t *testing.T) {
 		{"allow", 1},
 		{"", 0},
 		{"unknown", 0},
+		{"DENY", 8},
+		{"Log", 4},
 	}
 	for _, tc := range tests {
 		if got := CEFSeverity(tc.decision); got != tc.expected {
@@ -226,7 +228,7 @@ func TestSyslogSink_Integration(t *testing.T) {
 }
 
 func TestSyslogSeverity(t *testing.T) {
-	tests := map[string]int{"deny": 2, "log": 5, "allow": 6, "": 6, "other": 6}
+	tests := map[string]int{"deny": 2, "log": 5, "allow": 6, "": 6, "other": 6, "DENY": 2, "Log": 5}
 	for decision, want := range tests {
 		if got := syslogSeverity(decision); got != want {
 			t.Errorf("syslogSeverity(%q) = %d, want %d", decision, got, want)

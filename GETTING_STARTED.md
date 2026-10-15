@@ -109,7 +109,7 @@ go build -o bin/ ./cmd/...
 
 This builds every tool into `bin/`. The compiled BPF objects and their Go bindings are checked in, so you don't need clang for this step. If you change `bpf/*.c`, run `make build-bpf generate` to rebuild them.
 
-> `make all` builds the BPF programs, the Go bindings, the example Rust policy and **only** `warmor-daemon`. It does not build `warmor-compile` or the other tools, so use `go build` as shown above.
+`make all` does the same and also rebuilds the BPF programs, the Go bindings and the example Rust policy, so it needs clang and the Rust toolchain.
 
 > **Build failing?** Jump to [Troubleshooting](#troubleshooting) below.
 
@@ -248,8 +248,8 @@ Leaving out `--lsm-enforce` alone is **not** observe-only. The kernel then only 
 ### "I want to test a policy before deploying"
 
 ```bash
-./bin/warmor-simulate --policy candidate.yaml --data /var/lib/warmor/events --since 168h --format json -o report.json
-# Shows what WOULD have been denied over the last 7 days (--since takes Go durations: 168h, not 7d)
+./bin/warmor-simulate --policy candidate.yaml --data /var/lib/warmor/events --since 7d --format json -o report.json
+# Shows what WOULD have been denied over the last 7 days
 ```
 
 ### "I want to validate my YAML without running anything"

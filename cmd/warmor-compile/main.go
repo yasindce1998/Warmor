@@ -5,18 +5,18 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/yasindce1998/warmor/internal/cliflag"
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/version"
 )
 
 var (
-	output   = flag.String("o", "policy.wasm", "Output file path")
-	rustOnly = flag.Bool("rust-only", false, "Emit Rust source without compiling to WASM")
-	validate = flag.Bool("validate", false, "Only validate the YAML policy, don't compile")
-	verbose  = flag.Bool("verbose", false, "Show cargo build output")
+	output      = flag.String("o", "policy.wasm", "Output file path")
+	rustOnly    = flag.Bool("rust-only", false, "Emit Rust source without compiling to WASM")
+	validate    = flag.Bool("validate", false, "Only validate the YAML policy, don't compile")
+	verbose     = flag.Bool("verbose", false, "Show cargo build output")
 	showVersion = flag.Bool("version", false, "Print version and exit")
 )
-
 
 func main() {
 	flag.Usage = func() {
@@ -27,24 +27,32 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  warmor-compile policy.yaml\n")
 		fmt.Fprintf(os.Stderr, "  warmor-compile -o custom.wasm policy.yaml\n")
+		fmt.Fprintf(os.Stderr, "  warmor-compile policy.yaml -o custom.wasm   # flags may follow the input\n")
 		fmt.Fprintf(os.Stderr, "  warmor-compile --rust-only policy.yaml > policy.rs\n")
 		fmt.Fprintf(os.Stderr, "  warmor-compile --validate policy.yaml\n")
 	}
 
-	flag.Parse()
+	args, err := cliflag.ParseInterspersed(flag.CommandLine, os.Args[1:])
+	if err != nil {
+		os.Exit(2)
+	}
 
 	if *showVersion {
 		fmt.Printf("warmor-compile %s\n", version.Version)
 		os.Exit(0)
 	}
 
-	if flag.NArg() < 1 {
+	if len(args) < 1 {
 		fmt.Fprintf(os.Stderr, "error: no input file specified\n\n")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	inputPath := flag.Arg(0)
+	inputPath := args[0]
+	if len(args) > 1 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q (only one input file is accepted)\n", args[1])
+		os.Exit(1)
+	}
 
 	policy, err := compiler.ParseFile(inputPath)
 	if err != nil {

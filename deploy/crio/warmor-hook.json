@@ -7,5 +7,5 @@
   "when": {
     "always": true
   },
-  "stages": ["createRuntime", "poststop"]
+  "stages": ["createRuntime"]
 }

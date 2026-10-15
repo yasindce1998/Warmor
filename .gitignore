@@ -37,3 +37,6 @@ go.work.sum
 tmp/
 temp/
 
+
+# make tools output
+bin/

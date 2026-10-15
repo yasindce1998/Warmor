@@ -3,6 +3,7 @@ package simulator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/streaming"
@@ -12,13 +13,13 @@ import (
 
 // SimulationResult contains the outcome of replaying a policy against recorded events.
 type SimulationResult struct {
-	TotalEvents      int             `json:"total_events"`
-	WouldAllow       int             `json:"would_allow"`
-	WouldDeny        int             `json:"would_deny"`
-	WouldLog         int             `json:"would_log"`
-	UniqueNewDenials []DenialDetail  `json:"unique_new_denials,omitempty"`
-	UniqueNewAllows  []AllowDetail   `json:"unique_new_allows,omitempty"`
-	Duration         time.Duration   `json:"duration"`
+	TotalEvents      int            `json:"total_events"`
+	WouldAllow       int            `json:"would_allow"`
+	WouldDeny        int            `json:"would_deny"`
+	WouldLog         int            `json:"would_log"`
+	UniqueNewDenials []DenialDetail `json:"unique_new_denials,omitempty"`
+	UniqueNewAllows  []AllowDetail  `json:"unique_new_allows,omitempty"`
+	Duration         time.Duration  `json:"duration"`
 }
 
 // DenialDetail describes a unique event that would be newly denied.
@@ -71,13 +72,18 @@ func Replay(ctx context.Context, events []*streaming.SecurityEvent, evaluator *w
 			result.WouldLog++
 		}
 
-		originalDecision := event.Decision
-		newDecision := actionResult.Action.String()
+		// Recorded decisions are lowercase ("allow"/"deny"/"log", see
+		// streaming.SecurityEvent) while api.Action.String() is uppercase,
+		// so compare normalized forms. "log" permits the event.
+		originalDecision := normalizeDecision(event.Decision)
+		newDecision := normalizeDecision(actionResult.Action.String())
+		wasPermitted := originalDecision == "allow" || originalDecision == "log"
+		nowPermitted := newDecision == "allow" || newDecision == "log"
 
 		target := eventTarget(event)
 		key := fmt.Sprintf("%s:%s:%s", event.EventType, event.Comm, target)
 
-		if originalDecision == "ALLOW" && newDecision == "DENY" {
+		if wasPermitted && newDecision == "deny" {
 			if d, ok := newDenials[key]; ok {
 				d.Count++
 			} else {
@@ -91,7 +97,7 @@ func Replay(ctx context.Context, events []*streaming.SecurityEvent, evaluator *w
 			}
 		}
 
-		if originalDecision == "DENY" && newDecision == "ALLOW" {
+		if originalDecision == "deny" && nowPermitted {
 			if a, ok := newAllows[key]; ok {
 				a.Count++
 			} else {
@@ -180,4 +186,10 @@ func eventTarget(e *streaming.SecurityEvent) string {
 	default:
 		return e.Filename
 	}
+}
+
+// normalizeDecision maps a decision string in any case ("allow", "ALLOW",
+// "Deny", ...) to the lowercase form the streaming pipeline records.
+func normalizeDecision(d string) string {
+	return strings.ToLower(strings.TrimSpace(d))
 }

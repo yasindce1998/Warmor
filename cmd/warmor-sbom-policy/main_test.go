@@ -136,3 +136,9 @@ func TestSBOM_Version(t *testing.T) {
 	}
 	assertContains(t, "stdout", r.stdout, "warmor-sbom-policy ")
 }
+
+func TestSBOM_FlagsAfterInput(t *testing.T) {
+	sbom := writeFile(t, filepath.Join(t.TempDir(), "sbom.json"), spdxSBOM)
+	stdout, _ := runMain(t, "", sbom, "-rootfs", apkRootFS(t), "-name", "late-flags")
+	assertContains(t, "policy", stdout, "name: late-flags", "/usr/sbin/nginx")
+}

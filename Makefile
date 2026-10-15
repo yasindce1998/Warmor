@@ -1,6 +1,7 @@
 .PHONY: all clean build-bpf build-policy build-daemon generate test help \
 	deploy deploy-audit undeploy status logs policy-check upgrade \
-	docker-build docker-push build-policy-merge build-policy-diff build-policy-bundle
+	docker-build docker-push build-policy-merge build-policy-diff build-policy-bundle \
+	tools build-tests deps
 
 NAMESPACE ?= warmor-system
 RELEASE ?= warmor
@@ -13,24 +14,30 @@ TAG ?= latest
 ifeq ($(OS),Windows_NT)
     BINARY_EXT := .exe
     RM := del /f /q
+    RMDIR := rmdir /s /q
 else
     BINARY_EXT :=
     RM := rm -f
+    RMDIR := rm -rf
 endif
 
 # Default target
+# The tools are built after generate (in the recipe, not as a prerequisite)
+# so a parallel make never compiles against half-written eBPF bindings.
 all: build-bpf generate build-policy build-daemon
+	@$(MAKE) --no-print-directory tools
 
 # Help target
 help:
 	@echo "warmor - WASM-powered security enforcer"
 	@echo ""
 	@echo "Build Targets:"
-	@echo "  all           - Build everything (default)"
+	@echo "  all           - Build everything incl. all tools in ./bin (default)"
 	@echo "  build-bpf     - Compile eBPF program"
 	@echo "  generate      - Generate eBPF Go bindings"
 	@echo "  build-policy  - Build WASM policy"
 	@echo "  build-daemon  - Build warmor daemon"
+	@echo "  tools         - Build every cmd/* binary into ./bin"
 	@echo "  test          - Run tests"
 	@echo "  clean         - Clean build artifacts"
 	@echo ""
@@ -81,6 +88,12 @@ build-daemon:
 	@echo "==> Building warmor daemon..."
 	go build -o warmor-daemon$(BINARY_EXT) ./cmd/warmor-daemon
 
+# Build every command under cmd/ into ./bin (go adds .exe on Windows).
+# Uses the committed eBPF bindings; run `make generate` first to refresh them.
+tools:
+	@echo "==> Building all tools into ./bin..."
+	go build -o bin/ ./cmd/...
+
 # Build policy merge tool
 build-policy-merge:
 	@echo "==> Building warmor-policy-merge..."
@@ -113,6 +126,7 @@ clean:
 	cd bpf && $(MAKE) clean
 	cd policies/example && $(MAKE) clean
 	$(RM) warmor-daemon$(BINARY_EXT) test-ebpf$(BINARY_EXT) test-wasm$(BINARY_EXT)
+	$(RMDIR) bin
 	$(RM) internal/ebpf/execve_monitor_bpfeb.go
 	$(RM) internal/ebpf/execve_monitor_bpfeb.o
 	$(RM) internal/ebpf/execve_monitor_bpfel.go

@@ -11,10 +11,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the gofmt step diffs against the base commit
 
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+
+      # Only files changed by this PR/push are checked, so pre-existing
+      # formatting debt elsewhere does not fail unrelated changes.
+      - name: gofmt (changed files)
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE_SHA" ] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            BASE_SHA=$(git rev-parse HEAD~1 2>/dev/null || git hash-object -t tree /dev/null)
+          fi
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$BASE_SHA" HEAD -- '*.go')
+          [ ${#files[@]} -eq 0 ] && { echo "No Go files changed."; exit 0; }
+          unformatted=$(gofmt -l "${files[@]}")
+          if [ -n "$unformatted" ]; then
+            echo "::error::These changed files are not gofmt-formatted (run gofmt -w):"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "gofmt OK for ${#files[@]} changed Go file(s)."
 
       - uses: golangci/golangci-lint-action@v6
         with:

@@ -149,7 +149,8 @@ This will:
 1. Compile the eBPF program
 2. Generate Go bindings
 3. Build the WASM policy
-4. Build the warmor daemon
+4. Build the warmor daemon (`./warmor-daemon`)
+5. Build every CLI tool under `cmd/` into `./bin` (also `make tools` on its own)
 
 ### Windows (Beta)
 
@@ -361,6 +362,7 @@ make build-bpf    # Build eBPF program only
 make generate     # Generate eBPF Go bindings only
 make build-policy # Build WASM policy only
 make build-daemon # Build warmor daemon only
+make tools        # Build every cmd/* binary into ./bin
 make build-tests  # Build test tools only
 make test         # Run Go tests
 make clean        # Clean all build artifacts

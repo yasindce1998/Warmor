@@ -136,7 +136,7 @@ Replay recorded events against a candidate policy **before deployment** to see w
 
 ```bash
 sudo warmor-daemon --policy current.wasm --audit --event-sink file:/var/lib/warmor/events/events-current.ndjson
-warmor-simulate --policy candidate.yaml --data /var/lib/warmor/events --since 168h --format json -o report.json
+warmor-simulate --policy candidate.yaml --data /var/lib/warmor/events --since 7d --format json -o report.json
 ```
 
 ### Supply Chain Integrity — Experimental (in-kernel, not yet verified on an IMA kernel in CI)

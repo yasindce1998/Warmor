@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/cliflag"
 	"github.com/yasindce1998/warmor/internal/simulator"
 	"github.com/yasindce1998/warmor/internal/wasm"
 )
@@ -18,7 +19,7 @@ var version = "dev"
 func main() {
 	policy := flag.String("policy", "", "Path to candidate policy (.yaml or .wasm)")
 	dataDir := flag.String("data", "", "Path to event store directory")
-	since := flag.Duration("since", 7*24*time.Hour, "Only replay events from this duration ago")
+	since := cliflag.Duration(flag.CommandLine, "since", 7*24*time.Hour, "Only replay events from this duration ago (Go duration or days, e.g. 24h, 7d)")
 	output := flag.String("o", "", "Output file (default: stdout)")
 	format := flag.String("format", "text", "Output format: text or json")
 	showVersion := flag.Bool("version", false, "Print version and exit")

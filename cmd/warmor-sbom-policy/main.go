@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/yasindce1998/warmor/internal/cliflag"
 	"github.com/yasindce1998/warmor/internal/sbompolicy"
 	"github.com/yasindce1998/warmor/internal/version"
 )
@@ -30,20 +31,27 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 	}
-	flag.Parse()
+	args, err := cliflag.ParseInterspersed(flag.CommandLine, os.Args[1:])
+	if err != nil {
+		os.Exit(2)
+	}
 
 	if *showVersion {
 		fmt.Printf("warmor-sbom-policy %s\n", version.Version)
 		os.Exit(0)
 	}
 
-	if flag.NArg() < 1 {
+	if len(args) < 1 {
 		fmt.Fprintf(os.Stderr, "Error: SBOM file path required\n\n")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	inputPath := flag.Arg(0)
+	inputPath := args[0]
+	if len(args) > 1 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q (only one input file is accepted)\n", args[1])
+		os.Exit(1)
+	}
 
 	if *level != "binary" && *level != "library" && *level != "all" {
 		fmt.Fprintf(os.Stderr, "Error: --level must be binary, library, or all\n")

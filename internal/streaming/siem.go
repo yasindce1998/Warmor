@@ -11,7 +11,7 @@ import (
 
 // CEFSeverity maps policy decisions to CEF severity levels (0-10).
 func CEFSeverity(decision string) int {
-	switch decision {
+	switch strings.ToLower(decision) {
 	case "deny":
 		return 8
 	case "log":
@@ -190,7 +190,7 @@ func (s *SyslogSink) Name() string {
 }
 
 func syslogSeverity(decision string) int {
-	switch decision {
+	switch strings.ToLower(decision) {
 	case "deny":
 		return 2 // LOG_CRIT
 	case "log":

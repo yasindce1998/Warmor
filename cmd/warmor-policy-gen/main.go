@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/yasindce1998/warmor/internal/cliflag"
 	"github.com/yasindce1998/warmor/internal/policygen"
 	"github.com/yasindce1998/warmor/internal/streaming"
 	"github.com/yasindce1998/warmor/internal/version"
@@ -38,20 +39,27 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  cat audit.ndjson | warmor-policy-gen -\n")
 	}
 
-	flag.Parse()
+	args, err := cliflag.ParseInterspersed(flag.CommandLine, os.Args[1:])
+	if err != nil {
+		os.Exit(2)
+	}
 
 	if *showVersion {
 		fmt.Printf("warmor-policy-gen %s\n", version.Version)
 		os.Exit(0)
 	}
 
-	if flag.NArg() < 1 {
+	if len(args) < 1 {
 		fmt.Fprintf(os.Stderr, "error: no input file specified\n\n")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	inputPath := flag.Arg(0)
+	inputPath := args[0]
+	if len(args) > 1 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q (only one input file is accepted)\n", args[1])
+		os.Exit(1)
+	}
 
 	var commList []string
 	if *commFilter != "" {
@@ -75,7 +83,6 @@ func main() {
 	}
 
 	var events []streaming.SecurityEvent
-	var err error
 
 	if inputPath == "-" {
 		events, err = policygen.ReadEvents(os.Stdin, readOpts)

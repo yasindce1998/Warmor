@@ -113,3 +113,8 @@ func TestGen_UsageAndVersion(t *testing.T) {
 	}
 	assertContains(t, "stdout", r.stdout, "warmor-policy-gen ")
 }
+
+func TestGen_FlagsAfterInput(t *testing.T) {
+	stdout, _ := runMain(t, "", writeLog(t), "-name", "late-flags", "-min-count", "1")
+	assertContains(t, "policy", stdout, "name: late-flags", "/usr/bin/python3")
+}
