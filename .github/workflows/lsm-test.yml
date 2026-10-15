@@ -120,8 +120,7 @@ jobs:
     #   longterm  = oldest of the three  (currently ~6.18)
     #   stable    = current stable        (the primary gate, ~6.19)
     #   mainline  = newest / -rc          (early warning, allowed to fail, ~7.0)
-    # The version spread is therefore narrow today; see docs/BPF_COMPATIBILITY.md
-    # for the path to testing older LTS kernels (5.15/6.1) with custom images.
+    # Older LTS coverage (6.1) comes from the IMA kernels built below.
     strategy:
       fail-fast: false
       matrix:

@@ -139,9 +139,9 @@ sudo warmor-daemon --policy current.wasm --audit --event-sink file:/var/lib/warm
 warmor-simulate --policy candidate.yaml --data /var/lib/warmor/events --since 7d --format json -o report.json
 ```
 
-### Supply Chain Integrity — Experimental (in-kernel, not yet verified on an IMA kernel in CI)
+### Supply Chain Integrity — Shipped (in-kernel; requires `CONFIG_IMA`)
 
-Refuse to execute any binary whose **content** isn't in an allowlist of known-good SHA-256 digests, wherever it lives. A sleepable LSM program hashes each exec with IMA. Requires `CONFIG_IMA` (the daemon checks at startup). The CI test kernels lack IMA, so the hashing has not run in CI yet; start with `audit`.
+Refuse to execute any binary whose **content** isn't in an allowlist of known-good SHA-256 digests, wherever it lives. A sleepable LSM program hashes each exec with IMA. Requires `CONFIG_IMA` with SHA-256 as IMA's hash (the daemon checks at startup). Tested in VMs on IMA-enabled 6.1 and 6.18 kernels; start with `audit`.
 
 ```bash
 warmor-integrity-scan --rootfs /path --all -o integrity-db.json

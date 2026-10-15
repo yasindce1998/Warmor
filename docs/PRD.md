@@ -1015,7 +1015,7 @@ Source: `internal/container/` — detector.go, containerd_monitor.go, containerd
 **Deliverables:**
 - [x] Learning mode — synthesize allowlist policies from recorded events (`warmor-learn`, `internal/learner/`). Offline only; no in-daemon learning flag.
 - [x] Policy simulator — replay recorded events against candidate policies (`warmor-simulate`, `internal/simulator/`). The daemon has no event-store sink; record with `--event-sink file:`.
-- [ ] Supply-chain integrity — in-kernel content-hash exec check (`--integrity-db`), **experimental**: not yet run on an IMA-enabled kernel in CI
+- [x] Supply-chain integrity — in-kernel content-hash exec check (`--integrity-db`), VM-tested on IMA-enabled 6.1 and 6.18 kernels
 - [x] Container escape detection (`--escape-detect`) — after-the-fact detection, scoped to containers
 - [ ] Drift detection (`internal/drift/`) — library-only
 - [ ] Canary auto-rollback (`internal/policyserver/` canary analyzer) — library-only; manual rollouts ship
