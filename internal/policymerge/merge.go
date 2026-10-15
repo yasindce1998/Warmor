@@ -248,10 +248,10 @@ func applyIntersection(rules []sourcedRule, opts MergeOptions, dedupCount *int) 
 func applyDenyWins(rules []sourcedRule, opts MergeOptions, dedupCount *int) []RuleYAML {
 	// Group by fingerprint; if any source has deny, final is deny
 	type fpEntry struct {
-		rule      RuleYAML
-		sources   []string
-		hasDeny   bool
-		hasAllow  bool
+		rule     RuleYAML
+		sources  []string
+		hasDeny  bool
+		hasAllow bool
 	}
 	fpMap := make(map[string]*fpEntry)
 	var order []string
@@ -299,13 +299,17 @@ func applyDenyWins(rules []sourcedRule, opts MergeOptions, dedupCount *int) []Ru
 }
 
 func ruleFingerprint(r RuleYAML) string {
-	// Fingerprint based on event type + conditions (ignoring name, action, reason)
+	// Fingerprint based on event type + conditions + temporal window
+	// (ignoring name, action, reason). Rules with different windows are
+	// different rules: merging them would keep only one window.
 	fp := struct {
 		Event      string
 		Conditions ConditionsYAML
+		Temporal   map[string]any `json:",omitempty"`
 	}{
 		Event:      r.Event,
 		Conditions: r.Conditions,
+		Temporal:   r.Temporal,
 	}
 	data, _ := json.Marshal(fp)
 	return string(data)

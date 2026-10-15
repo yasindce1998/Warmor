@@ -16,6 +16,10 @@ type RuleYAML struct {
 	Action     string         `yaml:"action"`
 	Mode       string         `yaml:"mode,omitempty"`
 	Reason     string         `yaml:"reason,omitempty"`
+	// Temporal is the rule's temporal: block, carried through verbatim
+	// (the compiler validates it). Dropping it would make the rule
+	// unconditional.
+	Temporal map[string]any `yaml:"temporal,omitempty"`
 }
 
 type ConditionsYAML struct {
