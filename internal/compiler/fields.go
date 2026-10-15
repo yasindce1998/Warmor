@@ -108,9 +108,10 @@ var eventTypeIDs = []struct {
 }{{"process", 0}, {"file", 1}, {"network", 2}}
 
 // FieldsRead returns, per event type ID (0 process, 1 file, 2 network), the
-// mask of fields any rule for that event type references. The default
-// action and rule order are constants of the policy, so these fields fully
-// determine the decision.
+// mask of fields any rule for that event type references, plus
+// FieldBitTime/FieldBitContainerAge for rules with a temporal block that
+// reads the clock or container age. The default action and rule order are
+// constants of the policy, so these inputs fully determine the decision.
 func FieldsRead(policy *Policy) map[int]uint32 {
 	out := make(map[int]uint32, len(eventTypeIDs))
 	for _, et := range eventTypeIDs {
@@ -121,6 +122,7 @@ func FieldsRead(policy *Policy) map[int]uint32 {
 					m |= FieldBit(c.Field)
 				}
 			}
+			m |= temporalFields(r.Temporal)
 		}
 		out[et.id] = m
 	}

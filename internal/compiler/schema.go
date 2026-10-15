@@ -1,14 +1,18 @@
 package compiler
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/yasindce1998/warmor/internal/temporal"
+)
 
 type Policy struct {
-	Name          string                       `yaml:"name"`
-	Version       int                          `yaml:"version"`
-	Description   string                       `yaml:"description,omitempty"`
-	Variables     map[string]interface{}        `yaml:"variables,omitempty"`
-	Rules         []Rule                       `yaml:"rules"`
-	DefaultAction string                       `yaml:"default_action"`
+	Name          string                 `yaml:"name"`
+	Version       int                    `yaml:"version"`
+	Description   string                 `yaml:"description,omitempty"`
+	Variables     map[string]interface{} `yaml:"variables,omitempty"`
+	Rules         []Rule                 `yaml:"rules"`
+	DefaultAction string                 `yaml:"default_action"`
 }
 
 type Rule struct {
@@ -18,6 +22,9 @@ type Rule struct {
 	Action     string     `yaml:"action"`
 	Mode       string     `yaml:"mode,omitempty"`
 	Reason     string     `yaml:"reason,omitempty"`
+	// Temporal is the rule's temporal: block (nil: none). The action only
+	// applies outside this window; see temporal.go.
+	Temporal *temporal.Constraint `yaml:"-"`
 }
 
 type Conditions struct {
@@ -33,17 +40,17 @@ type Condition struct {
 }
 
 type ConditionOperator struct {
-	Eq         interface{}   `yaml:"eq,omitempty"`
-	Not        interface{}   `yaml:"not,omitempty"`
-	AnyOf      interface{}   `yaml:"any_of,omitempty"`
-	NoneOf     interface{}   `yaml:"none_of,omitempty"`
-	Glob       string        `yaml:"glob,omitempty"`
-	Gt         *float64      `yaml:"gt,omitempty"`
-	Lt         *float64      `yaml:"lt,omitempty"`
-	Gte        *float64      `yaml:"gte,omitempty"`
-	Lte        *float64      `yaml:"lte,omitempty"`
-	StartsWith string        `yaml:"starts_with,omitempty"`
-	Contains   string        `yaml:"contains,omitempty"`
+	Eq         interface{} `yaml:"eq,omitempty"`
+	Not        interface{} `yaml:"not,omitempty"`
+	AnyOf      interface{} `yaml:"any_of,omitempty"`
+	NoneOf     interface{} `yaml:"none_of,omitempty"`
+	Glob       string      `yaml:"glob,omitempty"`
+	Gt         *float64    `yaml:"gt,omitempty"`
+	Lt         *float64    `yaml:"lt,omitempty"`
+	Gte        *float64    `yaml:"gte,omitempty"`
+	Lte        *float64    `yaml:"lte,omitempty"`
+	StartsWith string      `yaml:"starts_with,omitempty"`
+	Contains   string      `yaml:"contains,omitempty"`
 }
 
 func (p *Policy) Validate() error {
@@ -101,7 +108,7 @@ func (r *Rule) Validate() error {
 			return fmt.Errorf("conditions.not[%d]: %w", i, err)
 		}
 	}
-	return nil
+	return validateTemporal(r)
 }
 
 func (c *Condition) Validate(eventType string) error {
@@ -149,4 +156,4 @@ func isValidEvent(event string) bool {
 // Version identifies the YAML-to-WASM compiler. Bump it whenever the output
 // for an unchanged YAML policy changes (codegen, ABI or build settings), so
 // cached compiled policies are rebuilt.
-const Version = "2"
+const Version = "3"
