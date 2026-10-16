@@ -154,7 +154,7 @@ jobs:
           GOPACKAGE: ebpf
         run: |
           cd internal/ebpf
-          go run github.com/cilium/ebpf/cmd/bpf2go -type warmor_event -type policy_key -type policy_value lsm_exec ../../bpf/lsm_exec.bpf.c -- $BPF_CFLAGS
+          go run github.com/cilium/ebpf/cmd/bpf2go -type warmor_event -type policy_key -type policy_value -type lsm_config lsm_exec ../../bpf/lsm_exec.bpf.c -- $BPF_CFLAGS
           go run github.com/cilium/ebpf/cmd/bpf2go -type warmor_event lsm_file ../../bpf/lsm_file.bpf.c -- $BPF_CFLAGS
           go run github.com/cilium/ebpf/cmd/bpf2go lsm_connect ../../bpf/lsm_connect.bpf.c -- $BPF_CFLAGS
           go run github.com/cilium/ebpf/cmd/bpf2go lsm_bind ../../bpf/lsm_bind.bpf.c -- $BPF_CFLAGS

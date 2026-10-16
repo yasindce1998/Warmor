@@ -12,6 +12,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"time"
 
 	ciliumebpf "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
@@ -20,7 +21,7 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type warmor_event -type policy_key -type policy_value lsm_exec ../../bpf/lsm_exec.bpf.c -- -I../../bpf -I/usr/include/bpf -I/usr/include/x86_64-linux-gnu
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type warmor_event -type policy_key -type policy_value -type lsm_config lsm_exec ../../bpf/lsm_exec.bpf.c -- -I../../bpf -I/usr/include/bpf -I/usr/include/x86_64-linux-gnu
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type warmor_event lsm_file ../../bpf/lsm_file.bpf.c -- -I../../bpf -I/usr/include/bpf -I/usr/include/x86_64-linux-gnu
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go lsm_connect ../../bpf/lsm_connect.bpf.c -- -I../../bpf -I/usr/include/bpf -I/usr/include/x86_64-linux-gnu
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go lsm_bind ../../bpf/lsm_bind.bpf.c -- -I../../bpf -I/usr/include/bpf -I/usr/include/x86_64-linux-gnu
@@ -174,6 +175,10 @@ type LSMLoader struct {
 
 	// integrity is nil until EnableIntegrity loads lsm_integrity.
 	integrity *integrityProgram
+
+	// opts are the options the programs were loaded with; programs loaded
+	// later (lsm_integrity) must match them to share the maps.
+	opts LSMOptions
 }
 
 // IsLSMSupported checks whether the running kernel supports BPF LSM.
@@ -212,9 +217,57 @@ func kernelBTFAvailable() bool {
 	return err == nil
 }
 
-// LoadLSM loads and attaches all LSM-BPF programs.
+// OnEventLoss selects what the LSM hooks do with an operation whose event
+// could not be queued because the ring buffer was full. The policy map had no
+// entry for it, so userspace will never evaluate it.
+type OnEventLoss uint32
+
+const (
+	// OnLossLog allows the operation and counts the drop (default).
+	OnLossLog OnEventLoss = 0
+	// OnLossDeny refuses unknown execs and connects in enforce mode.
+	OnLossDeny OnEventLoss = 1
+)
+
+// ParseOnEventLoss parses the --on-event-loss flag.
+func ParseOnEventLoss(s string) (OnEventLoss, error) {
+	switch s {
+	case "", "log":
+		return OnLossLog, nil
+	case "deny":
+		return OnLossDeny, nil
+	}
+	return OnLossLog, fmt.Errorf("invalid --on-event-loss %q (valid: log, deny)", s)
+}
+
+// LSMOptions configures LoadLSMWithOptions.
+type LSMOptions struct {
+	// RingBufferSize is the event ring size in bytes; 0 keeps the default
+	// (LSM_RINGBUF_SIZE). It must be a power of two and a page multiple.
+	RingBufferSize uint32
+	OnEventLoss    OnEventLoss
+}
+
+// LoadLSM loads and attaches all LSM-BPF programs with default options.
 // Returns nil without error if LSM-BPF is not supported.
 func LoadLSM() (*LSMLoader, error) {
+	return LoadLSMWithOptions(LSMOptions{})
+}
+
+// validRingSize reports whether n is a valid BPF ring buffer size: a power of
+// two and a multiple of the page size.
+func validRingSize(n uint32) bool {
+	page := uint32(os.Getpagesize())
+	return n >= page && n&(n-1) == 0 && n%page == 0
+}
+
+// LoadLSMWithOptions loads and attaches all LSM-BPF programs.
+// Returns nil without error if LSM-BPF is not supported.
+func LoadLSMWithOptions(opts LSMOptions) (*LSMLoader, error) {
+	if opts.RingBufferSize != 0 && !validRingSize(opts.RingBufferSize) {
+		return nil, fmt.Errorf("LSM ring buffer size %d must be a power of two and a multiple of the page size (%d)",
+			opts.RingBufferSize, os.Getpagesize())
+	}
 	if !IsLSMSupported() {
 		log.Println("LSM-BPF not available, using tracepoint-only mode")
 		return nil, nil
@@ -232,17 +285,28 @@ func LoadLSM() (*LSMLoader, error) {
 			"CO-RE requires a kernel built with CONFIG_DEBUG_INFO_BTF=y")
 	}
 
-	l := &LSMLoader{}
+	l := &LSMLoader{opts: opts}
 
-	// All seven programs are CO-RE relocated against the same kernel BTF.
+	// All programs are CO-RE relocated against the same kernel BTF.
 	// cilium/ebpf no longer caches vmlinux globally, so share one cache
-	// across the loads instead of decoding vmlinux seven times.
+	// across the loads instead of decoding vmlinux once per program.
 	btfCache := btf.NewCache()
 
-	// Load exec LSM
+	// The exec objects own the shared maps; every other program reuses them.
+	execSpec, err := loadLsm_exec()
+	if err != nil {
+		return nil, fmt.Errorf("load lsm_exec spec: %w", err)
+	}
+	if opts.RingBufferSize != 0 {
+		execSpec.Maps["lsm_events"].MaxEntries = opts.RingBufferSize
+	}
 	l.execObjs = &lsm_execObjects{}
-	if err := loadLsm_execObjects(l.execObjs, &ciliumebpf.CollectionOptions{Cache: btfCache}); err != nil {
+	if err := execSpec.LoadAndAssign(l.execObjs, &ciliumebpf.CollectionOptions{Cache: btfCache}); err != nil {
 		return nil, fmt.Errorf("load lsm_exec objects: %w", err)
+	}
+	if err := l.execObjs.LsmCfg.Put(uint32(0), lsm_execLsmConfig{OnLoss: uint32(opts.OnEventLoss)}); err != nil {
+		l.Close()
+		return nil, fmt.Errorf("set lsm config: %w", err)
 	}
 
 	execLnk, err := link.AttachLSM(link.LSMOptions{
@@ -254,162 +318,56 @@ func LoadLSM() (*LSMLoader, error) {
 	}
 	l.execLink = execLnk
 
-	// Load file LSM — reuse policy_map from exec via MapReplacements
+	shared := &ciliumebpf.CollectionOptions{
+		Cache:           btfCache,
+		MapReplacements: l.sharedMaps(),
+	}
+
 	l.fileObjs = &lsm_fileObjects{}
-	fileOpts := &ciliumebpf.CollectionOptions{
-		Maps:  ciliumebpf.MapOptions{},
-		Cache: btfCache,
-	}
-	fileOpts.MapReplacements = map[string]*ciliumebpf.Map{
-		"policy_map":        l.execObjs.PolicyMap,
-		"lsm_events":        l.execObjs.LsmEvents,
-		"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
-		"lsm_enforce":       l.execObjs.LsmEnforce,
-	}
-	if err := loadLsm_fileObjects(l.fileObjs, fileOpts); err != nil {
-		l.Close()
-		return nil, fmt.Errorf("load lsm_file objects: %w", err)
-	}
-
-	fileLnk, err := link.AttachLSM(link.LSMOptions{
-		Program: l.fileObjs.LsmFileCheck,
-	})
-	if err != nil {
-		l.Close()
-		return nil, fmt.Errorf("attach lsm/file_open: %w", err)
-	}
-	l.fileLink = fileLnk
-
-	// Load connect LSM — reuse maps from exec
 	l.connectObjs = &lsm_connectObjects{}
-	connectOpts := &ciliumebpf.CollectionOptions{
-		Maps:  ciliumebpf.MapOptions{},
-		Cache: btfCache,
-	}
-	connectOpts.MapReplacements = map[string]*ciliumebpf.Map{
-		"unix_watch":        l.execObjs.UnixWatch,
-		"policy_map":        l.execObjs.PolicyMap,
-		"lsm_events":        l.execObjs.LsmEvents,
-		"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
-		"lsm_enforce":       l.execObjs.LsmEnforce,
-	}
-	if err := loadLsm_connectObjects(l.connectObjs, connectOpts); err != nil {
-		l.Close()
-		return nil, fmt.Errorf("load lsm_connect objects: %w", err)
-	}
-
-	connectLnk, err := link.AttachLSM(link.LSMOptions{
-		Program: l.connectObjs.LsmConnectCheck,
-	})
-	if err != nil {
-		l.Close()
-		return nil, fmt.Errorf("attach lsm/socket_connect: %w", err)
-	}
-	l.connectLink = connectLnk
-
-	// Load bind LSM — reuse maps from exec
 	l.bindObjs = &lsm_bindObjects{}
-	bindOpts := &ciliumebpf.CollectionOptions{
-		Maps:  ciliumebpf.MapOptions{},
-		Cache: btfCache,
-	}
-	bindOpts.MapReplacements = map[string]*ciliumebpf.Map{
-		"policy_map":        l.execObjs.PolicyMap,
-		"lsm_events":        l.execObjs.LsmEvents,
-		"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
-		"lsm_enforce":       l.execObjs.LsmEnforce,
-	}
-	if err := loadLsm_bindObjects(l.bindObjs, bindOpts); err != nil {
-		l.Close()
-		return nil, fmt.Errorf("load lsm_bind objects: %w", err)
-	}
-
-	bindLnk, err := link.AttachLSM(link.LSMOptions{
-		Program: l.bindObjs.LsmBindCheck,
-	})
-	if err != nil {
-		l.Close()
-		return nil, fmt.Errorf("attach lsm/socket_bind: %w", err)
-	}
-	l.bindLink = bindLnk
-
-	// Load listen LSM — reuse maps from exec
 	l.listenObjs = &lsm_listenObjects{}
-	listenOpts := &ciliumebpf.CollectionOptions{
-		Maps:  ciliumebpf.MapOptions{},
-		Cache: btfCache,
-	}
-	listenOpts.MapReplacements = map[string]*ciliumebpf.Map{
-		"policy_map":        l.execObjs.PolicyMap,
-		"lsm_events":        l.execObjs.LsmEvents,
-		"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
-		"lsm_enforce":       l.execObjs.LsmEnforce,
-	}
-	if err := loadLsm_listenObjects(l.listenObjs, listenOpts); err != nil {
-		l.Close()
-		return nil, fmt.Errorf("load lsm_listen objects: %w", err)
-	}
-
-	listenLnk, err := link.AttachLSM(link.LSMOptions{
-		Program: l.listenObjs.LsmListenCheck,
-	})
-	if err != nil {
-		l.Close()
-		return nil, fmt.Errorf("attach lsm/socket_listen: %w", err)
-	}
-	l.listenLink = listenLnk
-
-	// Load ptrace LSM — reuse maps from exec
 	l.ptraceObjs = &lsm_ptraceObjects{}
-	ptraceOpts := &ciliumebpf.CollectionOptions{
-		Maps:  ciliumebpf.MapOptions{},
-		Cache: btfCache,
-	}
-	ptraceOpts.MapReplacements = map[string]*ciliumebpf.Map{
-		"policy_map":        l.execObjs.PolicyMap,
-		"lsm_events":        l.execObjs.LsmEvents,
-		"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
-		"lsm_enforce":       l.execObjs.LsmEnforce,
-	}
-	if err := loadLsm_ptraceObjects(l.ptraceObjs, ptraceOpts); err != nil {
-		l.Close()
-		return nil, fmt.Errorf("load lsm_ptrace objects: %w", err)
-	}
-
-	ptraceLnk, err := link.AttachLSM(link.LSMOptions{
-		Program: l.ptraceObjs.LsmPtraceCheck,
-	})
-	if err != nil {
-		l.Close()
-		return nil, fmt.Errorf("attach lsm/ptrace_access_check: %w", err)
-	}
-	l.ptraceLink = ptraceLnk
-
-	// Load mount LSM — reuse maps from exec
 	l.mountObjs = &lsm_mountObjects{}
-	mountOpts := &ciliumebpf.CollectionOptions{
-		Maps:  ciliumebpf.MapOptions{},
-		Cache: btfCache,
+	programs := []struct {
+		name, hook string
+		load       func(*ciliumebpf.CollectionOptions) error
+		prog       func() *ciliumebpf.Program
+		link       *link.Link
+	}{
+		{"lsm_file", "lsm/file_open",
+			func(o *ciliumebpf.CollectionOptions) error { return loadResized(loadLsm_file, l.fileObjs, opts, o) },
+			func() *ciliumebpf.Program { return l.fileObjs.LsmFileCheck }, &l.fileLink},
+		{"lsm_connect", "lsm/socket_connect",
+			func(o *ciliumebpf.CollectionOptions) error {
+				return loadResized(loadLsm_connect, l.connectObjs, opts, o)
+			},
+			func() *ciliumebpf.Program { return l.connectObjs.LsmConnectCheck }, &l.connectLink},
+		{"lsm_bind", "lsm/socket_bind",
+			func(o *ciliumebpf.CollectionOptions) error { return loadResized(loadLsm_bind, l.bindObjs, opts, o) },
+			func() *ciliumebpf.Program { return l.bindObjs.LsmBindCheck }, &l.bindLink},
+		{"lsm_listen", "lsm/socket_listen",
+			func(o *ciliumebpf.CollectionOptions) error { return loadResized(loadLsm_listen, l.listenObjs, opts, o) },
+			func() *ciliumebpf.Program { return l.listenObjs.LsmListenCheck }, &l.listenLink},
+		{"lsm_ptrace", "lsm/ptrace_access_check",
+			func(o *ciliumebpf.CollectionOptions) error { return loadResized(loadLsm_ptrace, l.ptraceObjs, opts, o) },
+			func() *ciliumebpf.Program { return l.ptraceObjs.LsmPtraceCheck }, &l.ptraceLink},
+		{"lsm_mount", "lsm/sb_mount",
+			func(o *ciliumebpf.CollectionOptions) error { return loadResized(loadLsm_mount, l.mountObjs, opts, o) },
+			func() *ciliumebpf.Program { return l.mountObjs.LsmMountCheck }, &l.mountLink},
 	}
-	mountOpts.MapReplacements = map[string]*ciliumebpf.Map{
-		"policy_map":        l.execObjs.PolicyMap,
-		"lsm_events":        l.execObjs.LsmEvents,
-		"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
-		"lsm_enforce":       l.execObjs.LsmEnforce,
+	for _, p := range programs {
+		if err := p.load(shared); err != nil {
+			l.Close()
+			return nil, fmt.Errorf("load %s objects: %w", p.name, err)
+		}
+		lnk, err := link.AttachLSM(link.LSMOptions{Program: p.prog()})
+		if err != nil {
+			l.Close()
+			return nil, fmt.Errorf("attach %s: %w", p.hook, err)
+		}
+		*p.link = lnk
 	}
-	if err := loadLsm_mountObjects(l.mountObjs, mountOpts); err != nil {
-		l.Close()
-		return nil, fmt.Errorf("load lsm_mount objects: %w", err)
-	}
-
-	mountLnk, err := link.AttachLSM(link.LSMOptions{
-		Program: l.mountObjs.LsmMountCheck,
-	})
-	if err != nil {
-		l.Close()
-		return nil, fmt.Errorf("attach lsm/sb_mount: %w", err)
-	}
-	l.mountLink = mountLnk
 
 	// Open ring buffer reader on shared lsm_events
 	rd, err := ringbuf.NewReader(l.execObjs.LsmEvents)
@@ -424,14 +382,80 @@ func LoadLSM() (*LSMLoader, error) {
 	l.enforceMap = l.execObjs.LsmEnforce
 	l.filterMap = l.execObjs.LsmCgroupFilter
 
-	log.Println("LSM-BPF programs loaded: bprm_check_security, file_open, socket_connect, socket_bind, socket_listen, ptrace_access_check, sb_mount")
+	log.Printf("LSM-BPF programs loaded: bprm_check_security, file_open, socket_connect, socket_bind, "+
+		"socket_listen, ptrace_access_check, sb_mount (ring buffer %d KiB)", l.execObjs.LsmEvents.MaxEntries()/1024)
 	return l, nil
 }
 
+// loadResized loads a program's objects from its spec with the ring buffer
+// resized like the exec objects'. Each program declares lsm_events with the
+// default size, and a replacement map must match the declared spec.
+func loadResized(spec func() (*ciliumebpf.CollectionSpec, error), objs any, opts LSMOptions, o *ciliumebpf.CollectionOptions) error {
+	cs, err := spec()
+	if err != nil {
+		return err
+	}
+	if m, ok := cs.Maps["lsm_events"]; ok && opts.RingBufferSize != 0 {
+		m.MaxEntries = opts.RingBufferSize
+	}
+	return cs.LoadAndAssign(objs, o)
+}
+
+// sharedMaps returns the maps the exec objects own, which every other LSM
+// program must reuse rather than create privately: a private lsm_drops or
+// lsm_cfg would silently lose drop counts or ignore --on-event-loss.
+func (l *LSMLoader) sharedMaps() map[string]*ciliumebpf.Map {
+	return map[string]*ciliumebpf.Map{
+		"policy_map":        l.execObjs.PolicyMap,
+		"lsm_events":        l.execObjs.LsmEvents,
+		"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
+		"lsm_enforce":       l.execObjs.LsmEnforce,
+		"lsm_drops":         l.execObjs.LsmDrops,
+		"lsm_cfg":           l.execObjs.LsmCfg,
+		"unix_watch":        l.execObjs.UnixWatch,
+	}
+}
+
+// EventDrops returns, per LSM hook name, how many events could not be queued
+// because the ring buffer was full, summed across CPUs.
+func (l *LSMLoader) EventDrops() (map[string]uint64, error) {
+	out := make(map[string]uint64)
+	for t := uint32(0); t < lsmEventTypes; t++ {
+		var perCPU []uint64
+		if err := l.execObjs.LsmDrops.Lookup(t, &perCPU); err != nil {
+			return nil, fmt.Errorf("read lsm_drops[%d]: %w", t, err)
+		}
+		var n uint64
+		for _, v := range perCPU {
+			n += v
+		}
+		if n > 0 {
+			out[LSMHookName(uint8(t))] += n
+		}
+	}
+	return out, nil
+}
+
+// lsmEventTypes matches LSM_EVENT_TYPES in warmor_lsm.h.
+const lsmEventTypes = 8
+
+// lsmPollInterval bounds how long a queued event can wait for the reader.
+// The kernel only wakes the reader once LSM_WAKEUP_BYTES are queued (or for a
+// denial), so a lone event is picked up by this deadline instead.
+const lsmPollInterval = 5 * time.Millisecond
+
 // ReadLSMEvent reads the next event from the LSM ring buffer.
 func (l *LSMLoader) ReadLSMEvent() (*Event, error) {
-	record, err := l.lsmReader.Read()
-	if err != nil {
+	var record ringbuf.Record
+	for {
+		l.lsmReader.SetDeadline(time.Now().Add(lsmPollInterval))
+		err := l.lsmReader.ReadInto(&record)
+		if err == nil {
+			break
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			continue
+		}
 		if errors.Is(err, ringbuf.ErrClosed) {
 			return nil, err
 		}

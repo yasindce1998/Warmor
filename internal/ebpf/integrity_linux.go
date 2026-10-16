@@ -111,16 +111,11 @@ func (l *LSMLoader) EnableIntegrity(digests []Digest, mode IntegrityMode) error 
 		}
 		objs := &lsm_integrityObjects{}
 		opts := &ciliumebpf.CollectionOptions{
-			MapReplacements: map[string]*ciliumebpf.Map{
-				"lsm_events":        l.execObjs.LsmEvents,
-				"lsm_cgroup_filter": l.execObjs.LsmCgroupFilter,
-				// Unused by lsm_integrity but declared in warmor_lsm.h;
-				// share them so loading doesn't allocate duplicates.
-				"policy_map":  l.execObjs.PolicyMap,
-				"lsm_enforce": l.execObjs.LsmEnforce,
-			},
+			// Shares the ring, cgroup filter, drop counters and config with
+			// the other LSM programs.
+			MapReplacements: l.sharedMaps(),
 		}
-		if err := loadLsm_integrityObjects(objs, opts); err != nil {
+		if err := loadResized(loadLsm_integrity, objs, l.opts, opts); err != nil {
 			return fmt.Errorf("load lsm_integrity (needs CONFIG_IMA and a sleepable BPF LSM, kernel 5.18+): %w", err)
 		}
 		lnk, err := link.AttachLSM(link.LSMOptions{Program: objs.LsmIntegrityCheck})

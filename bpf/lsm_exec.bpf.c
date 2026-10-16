@@ -68,8 +68,10 @@ int BPF_PROG(lsm_exec_check, struct linux_binprm *bprm, int ret)
 		return 0;
 	}
 
-	// No policy map entry — emit to userspace for WASM evaluation
-	emit_lsm_event(EVENT_TYPE_EXEC, 0, fname_buf, len, cgid, 0, 0, 0, 0);
+	// No policy map entry — emit to userspace for WASM evaluation. If the
+	// ring is full nobody will evaluate it; --on-event-loss decides.
+	if (!emit_lsm_event(EVENT_TYPE_EXEC, 0, fname_buf, len, cgid, 0, 0, 0, 0))
+		return lost_verdict();
 	return 0;
 }
 

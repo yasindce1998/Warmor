@@ -19,7 +19,23 @@
 #define ACTION_DENY  1
 
 #define POLICY_MAP_MAX_ENTRIES 65536
-#define LSM_RINGBUF_SIZE (256 * 1024)
+// Default ring size; userspace can resize it before load (--lsm-ringbuf-size).
+#define LSM_RINGBUF_SIZE (4 * 1024 * 1024)
+
+// Wake the reader once this much data is queued instead of on every event.
+// Waking costs far more than queueing (a reader wakeup is ~10-20 us, a queue
+// ~0.1 us), so per-event wakeups made bursts overflow the ring. Userspace
+// also polls with a short deadline, so a lone event is never left waiting.
+#define LSM_WAKEUP_BYTES (64 * 1024)
+
+// Number of event types (EVENT_TYPE_*), the size of lsm_drops.
+#define LSM_EVENT_TYPES 8
+
+// What to do with an operation whose event could not be queued because the
+// ring is full (lsm_config.on_loss). The policy map had no entry for it, so
+// userspace will never evaluate it.
+#define ON_LOSS_LOG  0 // allow it, count the drop (default)
+#define ON_LOSS_DENY 1 // refuse it in enforce mode
 
 // Policy map key: cgroup + rule hash + event type
 struct policy_key {
@@ -75,6 +91,27 @@ struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, LSM_RINGBUF_SIZE);
 } lsm_events SEC(".maps");
+
+// Events that could not be queued because the ring was full, per event type.
+// A dropped miss is an operation nobody evaluated, so this must never be
+// silent.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, LSM_EVENT_TYPES);
+	__type(key, __u32);
+	__type(value, __u64);
+} lsm_drops SEC(".maps");
+
+struct lsm_config {
+	__u32 on_loss; // ON_LOSS_*
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct lsm_config);
+} lsm_cfg SEC(".maps");
 
 // Cgroup filter: if non-empty (sentinel key=0 present), only process listed cgroups
 struct {
@@ -159,8 +196,43 @@ struct {
 	__type(value, __u8);
 } unix_watch SEC(".maps");
 
+static __always_inline void count_drop(__u8 event_type)
+{
+	__u32 idx = event_type;
+	if (idx >= LSM_EVENT_TYPES)
+		return;
+	__u64 *n = bpf_map_lookup_elem(&lsm_drops, &idx);
+	if (n)
+		*n += 1;
+}
+
+// Wake the reader now for denials (userspace should hear about a block
+// promptly) or once LSM_WAKEUP_BYTES are queued; otherwise queue silently.
+static __always_inline __u64 submit_flags(__u8 decision)
+{
+	if (decision)
+		return BPF_RB_FORCE_WAKEUP;
+	if (bpf_ringbuf_query(&lsm_events, BPF_RB_AVAIL_DATA) >= LSM_WAKEUP_BYTES)
+		return BPF_RB_FORCE_WAKEUP;
+	return BPF_RB_NO_WAKEUP;
+}
+
+// lost_verdict returns what an LSM hook should return for an operation the
+// policy map didn't know and whose event was dropped: 0 to allow it, or
+// -EPERM in enforce mode with --on-event-loss=deny.
+static __always_inline int lost_verdict(void)
+{
+	__u32 zero = 0;
+	struct lsm_config *cfg = bpf_map_lookup_elem(&lsm_cfg, &zero);
+	if (cfg && cfg->on_loss == ON_LOSS_DENY && is_enforce_enabled())
+		return -1; // -EPERM
+	return 0;
+}
+
 // Emit an LSM event with hook-specific extras (see warmor_event.aux).
-static __always_inline void emit_lsm_event_aux(
+// Returns 1 if the event was queued, 0 if the ring was full (counted in
+// lsm_drops).
+static __always_inline int emit_lsm_event_aux(
 	__u8 event_type, __u8 decision,
 	const char *filename, int filename_len,
 	__u64 cgroup_id, __u16 family,
@@ -171,8 +243,10 @@ static __always_inline void emit_lsm_event_aux(
 	struct warmor_event *event;
 
 	event = bpf_ringbuf_reserve(&lsm_events, sizeof(*event), 0);
-	if (!event)
-		return;
+	if (!event) {
+		count_drop(event_type);
+		return 0;
+	}
 
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u64 uid_gid = bpf_get_current_uid_gid();
@@ -208,24 +282,26 @@ static __always_inline void emit_lsm_event_aux(
 		bpf_probe_read_kernel_str(&event->aux, sizeof(event->aux), aux);
 	event->aux_id = aux_id;
 
-	bpf_ringbuf_submit(event, 0);
+	bpf_ringbuf_submit(event, submit_flags(decision));
+	return 1;
 }
 
-// Emit an LSM event to the ring buffer
-static __always_inline void emit_lsm_event(
+// Emit an LSM event to the ring buffer. Returns 1 if it was queued.
+static __always_inline int emit_lsm_event(
 	__u8 event_type, __u8 decision,
 	const char *filename, int filename_len,
 	__u64 cgroup_id, __u16 family,
 	__u16 remote_port, __u32 remote_addr_v4,
 	const __u8 *remote_addr_v6)
 {
-	emit_lsm_event_aux(event_type, decision, filename, filename_len, cgroup_id,
-			   family, remote_port, remote_addr_v4, remote_addr_v6, 0, 0);
+	return emit_lsm_event_aux(event_type, decision, filename, filename_len, cgroup_id,
+				  family, remote_port, remote_addr_v4, remote_addr_v6, 0, 0);
 }
 
 // Force BTF type emission for bpf2go -type flag
 const struct warmor_event *unused_warmor_event __attribute__((unused));
 const struct policy_key *unused_policy_key __attribute__((unused));
 const struct policy_value *unused_policy_value __attribute__((unused));
+const struct lsm_config *unused_lsm_config __attribute__((unused));
 
 #endif /* __WARMOR_LSM_H */
