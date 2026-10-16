@@ -153,6 +153,28 @@ sudo ./warmor-daemon --policy /path/to/policy.wasm --lsm-enforce
 # pass your own policy and start with --audit. See docs/STATUS.md.
 ```
 
+### Event delivery under load
+
+The kernel hooks queue events in a ring buffer (4 MiB by default) for the
+daemon to evaluate. If the ring is full, an event is **dropped**: the hook has
+already allowed the operation, so it is never evaluated. Every drop is counted
+per hook in `warmor_lsm_events_dropped_total`, logged every 5 s, and the
+shipped alert rules fire on any drop.
+
+```bash
+# Bigger ring for bursty hosts (power of two)
+sudo ./warmor-daemon --policy policy.wasm --lsm-enforce --lsm-ringbuf-size 16MiB
+
+# Fail closed: refuse unknown execs and connects whose event can't be queued
+sudo ./warmor-daemon --policy policy.wasm --lsm-enforce --on-event-loss deny
+```
+
+`--on-event-loss=deny` only applies in enforce mode and only to exec and
+connect, and it can refuse legitimate operations during a flood. The default
+(`log`) keeps them allowed and counted. Scoping the daemon to pod cgroups
+(`--cgroup-filter auto`) is the most effective way to reduce volume, because
+`file_open` sends an event for every open in scope.
+
 ### Systemd Service
 Create `/etc/systemd/system/warmor.service`:
 ```ini

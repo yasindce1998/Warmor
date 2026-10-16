@@ -15,8 +15,8 @@ measurement and is labelled as a target.
 | Userspace decision, cache miss (WASM evaluation) | <100 µs P95 | P95 32 µs (YAML policy), 38 µs (fixture), 55 µs (Rust `advanced` crate) | Met |
 | Decision cache hit rate, synthetic host workload | >90% | 95.4% with a compiled YAML policy; **0%** with any policy that does not declare the fields it reads | Met only for declared policies |
 | Throughput (real event loop, one goroutine) | 100k events/s | 175k events/s (YAML policy); 41k (fixture) and 24k (Rust crate) | Met only for declared policies |
-| Kernel fast path (BPF program on a policy_map hit) | <1 µs | 0.11 µs (connect), 0.34 µs (exec), kernel-measured program time | Met for the program itself, in a VM |
-| Kernel cost when an event is sent to userspace | (none set) | about +13–20 µs per emitted event (connect, open; exec emits two) in this nested VM, almost all of it waking the ring-buffer reader | Not a fast path; every `open()` takes it |
+| Kernel fast path (BPF program on a policy_map hit) | <1 µs | 0.07–0.11 µs (connect), 0.34–0.82 µs (exec) across two runs, kernel-measured program time | Met for the program itself, in a VM |
+| Kernel cost when an event is sent to userspace | (none set) | 0.4–1.6 µs of program time per queued event; the reader is woken in batches, so a lone event can take up to 5 ms to reach userspace | Every `open()` takes it (no file fast path) |
 | Memory (RSS) | <50 MB | 60 MB at 1k events/s up to 104 MB at maximum rate (YAML policy); 105–128 MB with undeclared policies | **Not met** |
 | CPU | <5% | 11% of one core (0.8% of the 14-thread host) at 10k events/s with the YAML policy, net of the load generator; 83% of one core with the fixture; the Rust crate cannot sustain 10k events/s | Depends on the policy; see table |
 
@@ -311,56 +311,72 @@ this was found by these benchmarks.
 
 ### Kernel (vimto VM, nested virtualization)
 
-Median of 10 runs of each run's P50; overhead is against `none`.
+Median of 10 runs of each run's P50; overhead is against `none`. Raw output:
+`docs/perf/2026-10-16/kernel.txt` (current), `docs/perf/2026-10-15/kernel.txt`
+(before batched wake-ups).
 
-| Operation | none | lsm-hit | lsm-miss | lsm-miss-nowait | lsm-miss + tracepoints |
-|-----------|------|---------|----------|-----------------|------------------------|
-| connect (UDP) | 0.43 µs | 0.50 µs (+0.07) | 13.0 µs (+12.6) | 0.54 µs, **0.2 events/op delivered** | 25.5 µs (+25.1) |
-| execve (ENOEXEC) | 5.64 µs | 19.3 µs (+13.6)¹ | 31.4 µs (+25.7) | 6.89 µs (+1.2), 1.9 events/op | 46.9 µs (+41.3) |
-| open + close | 1.45 µs | n/a² | 20.9 µs (+19.5) | 2.02 µs, **0.5 events/op delivered** | 31.3 µs (+29.9) |
-| fork + exec + wait | 46.0 µs | 68.7 µs (+22.7)¹ | 80.1 µs (+34.1) | 118.7 µs | 132.2 µs (+86.2) |
+**Back-to-back operations (`lsm-miss-nowait`): cost to the process and events
+delivered.** This is the burst case, where one reader has to keep up:
+
+| Operation | none | Before: per-event wake-up | Now: batched wake-up |
+|-----------|------|---------------------------|----------------------|
+| connect (UDP) | 0.38 µs | 0.54 µs, **0.2 events/op delivered** | 0.59 µs, **1.0 events/op delivered** |
+| open + close | 0.67 µs | 2.02 µs, **0.5 events/op delivered** | 0.99 µs (+0.33), **1.0 events/op delivered** |
+| execve (ENOEXEC) | 4.66 µs | 6.89 µs, 1.9 of 2 events/op | 5.48 µs (+0.82), 2.0 of 2 events/op |
+| fork + exec + wait | 45.7 µs | 118.7 µs | 65.8 µs (+20.1) |
+
+**One operation at a time, waiting for its event to reach userspace
+(`lsm-miss`).** This measures delivery latency, not the cost to the process:
+
+| Operation | Before | Now |
+|-----------|--------|-----|
+| connect, open | 13–21 µs | 0.45–0.95 µs to the syscall, then up to 5 ms until the reader polls |
+| execve (ENOEXEC) / fork + exec + wait | 31.4 / 80.1 µs | 29.1 / 134.8 µs |
+
+With batching, the kernel no longer wakes the reader for every event: it wakes
+it once 64 KiB are queued or for a denial, and the reader otherwise polls every
+5 ms. So the syscall returns sooner (no per-event wake-up), but a lone event can
+reach userspace up to 5 ms later. The exec rows in the second table pay that
+wait (an exec emits an event for the binary's open), which is why they look
+slower; the process itself is not slower (first table, and the program times
+below). Denials still wake the reader at once.
 
 BPF program run time, measured by the kernel (`BPF_STATS_RUN_TIME`):
 
-| Program | policy_map hit | miss (event emitted, reader idle) |
-|---------|----------------|-----------------------------------|
-| `lsm/socket_connect` | **0.11 µs** | 11.7 µs |
-| `lsm/bprm_check_security` (execve ENOEXEC) | **0.34 µs** | 13.3 µs |
-| `lsm/bprm_check_security` (fork+exec) | 0.50 µs | 12.7 µs |
-| `lsm/file_open` | n/a² | 20.0 µs |
+| Program | policy_map hit | miss (event queued) |
+|---------|----------------|---------------------|
+| `lsm/socket_connect` | **0.07 µs** | 0.61 µs (was 11.7 µs) |
+| `lsm/bprm_check_security` (execve ENOEXEC) | **0.82 µs**³ | 1.06 µs (was 13.3 µs) |
+| `lsm/bprm_check_security` (fork+exec) | 1.17 µs³ | 1.63 µs (was 12.7 µs) |
+| `lsm/file_open` | n/a² | 0.42 µs (was 20.0 µs) |
 
-¹ An exec also opens the binary, and `file_open` has no hit path (²), so even
-an exec whose policy_map entry hits emits one event.
 ² The `file_open` hook only sees the dentry basename, so file decisions are
 never compiled into policy_map (see STATUS.md): every `open()` on the host
 emits an event to userspace. There is no file fast path.
+³ Higher than the earlier run's 0.34 / 0.50 µs. The hit path is unchanged by
+batching, so this is most likely run-to-run noise in the nested VM, but it was
+not investigated further.
 
 What this shows:
 
-- **The fast path itself is cheap.** On a policy_map hit the program runs in
-  0.11 µs (connect) to 0.34 µs (exec), and connect's syscall-level overhead is
-  +0.07 µs. That supports the "<1 µs kernel fast path" target for the BPF
-  program on a hit, in this VM. The fork+exec case measured 0.50 µs.
-- **Sending an event is expensive here, and it is the wake-up.** A miss costs
-  about +13 µs per event when the reader is idle (+12.6 µs connect, +13.6 µs
-  for the one event of an execve hit, +25.7 µs for the two of an execve miss),
-  and +19.5 µs for open. In the `nowait` execve run, events are still emitted
-  (1.9 per op) but the reader is usually behind, so no wake-up is needed, and
-  the overhead drops to +1.2 µs. The cost is the ring buffer's reader wake-up
-  (an irq_work self-IPI), which is very expensive under nested virtualization
-  (WSL2 → KVM → guest). It will be much cheaper on bare metal; that was **not
-  measured**.
-- **Back to back, events are dropped.** Without waiting, one reader cannot
-  keep up with connects or opens at 0.5–2 µs each: only 20–50% of events reach
-  userspace, the rest are lost when the ring is full. Those operations are
-  allowed and never evaluated.
-- **The tracepoint monitors add 1.5–2× to the miss cost**, because each emits
-  to its own ring buffer and wakes its own reader.
-- **fork+exec is noisier.** Its hit and miss rows are consistent with the
-  execve rows (one and two events), but `lsm-miss-nowait` (118.7 µs) is
-  slower than `lsm-miss`, presumably because the reader goroutine competes with
-  the child for the VM's two vCPUs. Prefer the execve (ENOEXEC) row and the
-  program run times.
+- **The fast path is cheap.** A policy_map hit costs 0.07 µs (connect) to about
+  1 µs (exec) of program time.
+- **Sending an event is now cheap too.** Queueing without a wake-up costs
+  0.4–1.6 µs of program time, down from 12–20 µs, because the expensive part
+  was the per-event reader wake-up (an irq_work self-IPI, very expensive under
+  nested virtualization).
+- **Bursts no longer lose events.** Back to back, connects and opens deliver
+  1.0 events per operation (were 0.2 and 0.5). Under a sustained flood beyond
+  what the reader can drain, events can still be dropped, but every drop is
+  counted (`warmor_lsm_events_dropped_total`, alerted), and with
+  `--on-event-loss=deny` an unknown exec or connect is refused rather than
+  allowed unevaluated. A VM test checks that every operation is either
+  delivered or counted.
+- **Trade-off: event latency.** A lone event can take up to 5 ms to reach
+  userspace. This affects how soon an after-the-fact deny (SIGKILL) or an
+  escape alert happens, not kernel-map decisions or denials.
+- **The tracepoint monitors still wake their reader per event** and add
+  +22–30 µs per miss; they were not changed.
 
 ## Caveats
 
