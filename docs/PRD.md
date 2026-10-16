@@ -32,7 +32,7 @@ Status as of current `main`. "Partial" means the phase's headline features are r
 |-------|--------|----------|----------|
 | **Phase 1** | Done | eBPF + WASM integration; execve/openat/connect tracepoints; SIGHUP reload | Linux |
 | **Phase 2** | Done, with gaps | ALLOW/DENY/LOG (DENY = `SIGKILL`); decision cache (not LRU, PID in key); Prometheus metrics. `--log-level` is ignored. | Linux |
-| **Phase 3** | Partial | Type-safe process/file/network events. **No** `sendto`/`recvfrom` hooks. Overhead not measured. | Linux |
+| **Phase 3** | Partial | Type-safe process/file/network events. **No** `sendto`/`recvfrom` hooks. Overhead measured in [PERFORMANCE.md](PERFORMANCE.md). | Linux |
 | **Phase 4** | Partial | Platform abstraction. Windows ETW (detect-then-terminate) works and is tested in CI. eBPF-for-Windows has never been built or run in CI. macOS ESF answers every AUTH event ALLOW and is not compiled in CI. | Linux/Windows/macOS |
 | **Phase 5** | Partial | YAML DSL and `warmor-compile` work. The Helm chart does **not** start (no LSM enforce value, YAML policy needs `cargo` in a distroless image). | Linux |
 | **Phase 6** | Partial | 7 LSM hooks attach (tested in a VM in CI). Kernel blocking happens only on a policy-map hit, and only exec and connect entries are ever written. A miss is allowed. | Linux |
@@ -42,11 +42,11 @@ Status as of current `main`. "Partial" means the phase's headline features are r
 
 ### Key Metrics
 
-None of the following has been measured on `main`. They are **design targets**, and a benchmark harness is in progress.
+Measured 2026-10-15 on one laptop; see [PERFORMANCE.md](PERFORMANCE.md) for the method and caveats. Targets are in parentheses.
 
-- **Performance:** P95 latency <100μs (target, unmeasured)
-- **Cache Hit Rate:** >90% (target, unmeasured)
-- **Memory Usage:** <50MB per instance (target, unmeasured)
+- **Performance:** P95 1.2–1.3μs on a cache hit; 32μs (YAML policy) to 55μs (Rust crate) on a miss (target <100μs P95)
+- **Cache Hit Rate:** 95.4% for policies that declare the fields they read (every YAML policy), 0% for those that do not (target >90%)
+- **Memory Usage:** 60–128MB RSS, not met (target <50MB per instance)
 - **Platform Support:** Linux enforcing; Windows and macOS experimental
 - **Event types:** process, file and network on all platforms; bind, listen, ptrace and mount via LSM on Linux
 
@@ -234,7 +234,7 @@ There is no existing solution that provides:
 **Linux Implementation:**
 - Use eBPF (kprobes/tracepoints) to intercept syscalls
 - Support for: `execve`, `openat`, `connect`, `sendto`, `recvfrom` (*on `main`: execve, openat and connect tracepoints, plus 7 LSM hooks; no `sendto`/`recvfrom`*)
-- Minimal performance overhead (<5% CPU impact)
+- Minimal performance overhead (<5% CPU impact) (*target; measured in [PERFORMANCE.md](PERFORMANCE.md): BPF program 0.11–0.34μs on a policy map hit, about +13–20μs per event sent to userspace in a nested VM*)
 - Graceful degradation if eBPF is unavailable
 
 **Windows Implementation:**
@@ -315,11 +315,11 @@ const ACTION_MODIFY: i32 = 3;
 - **LOG:** Syscall allowed but logged for audit
 - **MODIFY:** Syscall arguments modified before execution (advanced)
 
-**Performance Requirements:**
-- Policy evaluation: <100μs per syscall (P95)
-- Decision caching: 90%+ cache hit rate for repeated patterns
-- Memory usage: <50MB per enforcer instance
-- CPU overhead: <5% on average workload
+**Performance Requirements** (targets; measured values from [PERFORMANCE.md](PERFORMANCE.md) in italics):
+- Policy evaluation: <100μs per syscall (P95) (*hit 1.2–1.3μs; miss 32μs YAML, 55μs Rust crate*)
+- Decision caching: 90%+ cache hit rate for repeated patterns (*95.4% declared policies, 0% undeclared*)
+- Memory usage: <50MB per enforcer instance (*60–128MB, not met*)
+- CPU overhead: <5% on average workload (*11% of one core at 10k events/s, declared policy*)
 
 #### FR4: Hot-Reloading & Policy Management
 
@@ -419,20 +419,24 @@ warmor_errors_total{type="wasm_panic|timeout|invalid_decision"}
 
 ### 5.1 Performance
 
-**Latency:**
-- P50: <50μs per syscall evaluation
-- P95: <100μs per syscall evaluation
-- P99: <500μs per syscall evaluation
+These are targets. Measured values (2026-10-15, one laptop, see
+[PERFORMANCE.md](PERFORMANCE.md)) are in italics; "declared" policies export
+their fields-read declaration (every YAML policy), "undeclared" ones do not.
+
+**Latency** (cache miss, i.e. a WASM evaluation; a hit is P95 1.2–1.3μs):
+- P50: <50μs per syscall evaluation (*12μs YAML, 15μs fixture, 25μs Rust crate*)
+- P95: <100μs per syscall evaluation (*32μs, 38μs, 55μs*)
+- P99: <500μs per syscall evaluation (*81μs, 89μs, 115μs*)
 
 **Throughput:**
-- Support 100,000+ syscalls/second per enforcer
-- Horizontal scaling via multiple enforcer instances
-- Efficient batching for bulk operations
+- Support 100,000+ syscalls/second per enforcer (*175k events/s declared, 24k–41k undeclared, through the single-goroutine event loop*)
+- Horizontal scaling via multiple enforcer instances (*not implemented*)
+- Efficient batching for bulk operations (*not implemented*)
 
 **Resource Usage:**
-- Memory: <100MB per enforcer instance
-- CPU: <5% overhead on typical workload
-- Disk: <10MB for enforcer binary + policies
+- Memory: <100MB per enforcer instance (*60–104MB declared, 105–128MB undeclared*)
+- CPU: <5% overhead on typical workload (*not measured on a real workload; synthetic: 11% of one core at 10k events/s declared*)
+- Disk: <10MB for enforcer binary + policies (*not measured*)
 
 ### 5.2 Reliability
 
@@ -659,14 +663,14 @@ Cold Path (Cache Miss):
 **Success Criteria:**
 - Policy intercepts and logs process, file, and network events: met
 - WASM policy reloadable via signal without daemon restart: met
-- Latency <100μs per evaluation: **not measured**
+- Latency <100μs per evaluation: met (P95 on a miss 32μs YAML, 55μs Rust `advanced` crate); see PERFORMANCE.md
 
 ### Phase 2: Enforcement & Decision Making (Weeks 4-6) — Done, with gaps
 **Goal:** Move from logging to actual enforcement
 
 **Deliverables:**
 - [x] ALLOW/DENY/LOG actions (enforcer/actions.go)
-- [x] Decision caching layer (cache/cache.go, 10k entries, 5min TTL; O(n) oldest-expiry eviction, not LRU)
+- [x] Decision caching layer (cache/cache.go, 10k entries, 5min TTL; LRU with O(1) get, put and eviction)
 - [x] Policy evaluation framework (wasm/policy.go, wasm/evaluator.go)
 - [ ] Pattern matching library glob/regex (patterns/matcher.go): library-only. The YAML DSL supports glob.
 - [x] Structured logging with zerolog (logging/logger.go)
@@ -674,7 +678,7 @@ Cold Path (Cache Miss):
 
 **Success Criteria:**
 - Denies unauthorized operations: met, via `SIGKILL` after the event
-- >90% cache hit rate: **not measured**; the PID in the cache key makes it unlikely
+- >90% cache hit rate: met (95.4%) for policies that declare the fields they read, which drops the PID from the key; 0% for undeclared policies on short-lived processes (synthetic workload, PERFORMANCE.md)
 - JSON metrics and structured logging: met (`--log-level` is ignored)
 
 ### Phase 3: Multi-Syscall Support (Weeks 7-9) — Partial
@@ -690,8 +694,8 @@ Cold Path (Cache Miss):
 
 **Success Criteria:**
 - Support 3+ syscall types (process, file, network): met
-- CPU overhead <5% on typical workloads: **not measured**
-- Benchmarking: **not done**; a benchmark harness is in progress
+- CPU overhead <5% on typical workloads: not measured on a real workload; on a synthetic one, 11% of one core (0.8% of 14 threads) at 10k events/s with a YAML policy
+- Benchmarking: done, `make bench` and `make bench-kernel` (PERFORMANCE.md)
 
 ### Phase 4: Cross-Platform Support (Weeks 10-14) — Partial
 **Goal:** Extend to Windows and macOS
@@ -750,7 +754,7 @@ Cold Path (Cache Miss):
 - [x] Policy map feedback: WASM decision appears in BPF map after first evaluation
 - [x] Graceful fallback on kernels without CONFIG_BPF_LSM
 - [x] No regression in tracepoint-based monitoring
-- [ ] P95 kernel fast-path latency <10μs (map lookup only) — requires live benchmarking
+- [x] Kernel fast-path latency <10μs (map lookup only): BPF program run time 0.11μs (connect) and 0.34μs (exec) on a policy map hit, measured in a VM (PERFORMANCE.md). A miss, which sends an event to userspace, costs about 13–20μs per event there
 
 ### Phase 7: Advanced Features (Weeks 23-28) — Partial
 **Goal:** Add enterprise features
@@ -1075,11 +1079,11 @@ Planned enhancements beyond the current release. Tracked here as the single sour
 
 ### 8.1 Technical Metrics
 
-**Performance:**
-- Policy evaluation latency P95 <100μs
-- CPU overhead <5% on typical workload
-- Memory usage <100MB per instance
-- Cache hit rate >90%
+**Performance** (targets; measured in [PERFORMANCE.md](PERFORMANCE.md)):
+- Policy evaluation latency P95 <100μs (*miss: 32μs YAML, 55μs Rust crate; hit: 1.3μs*)
+- CPU overhead <5% on typical workload (*not measured on a real workload*)
+- Memory usage <100MB per instance (*60–128MB RSS*)
+- Cache hit rate >90% (*95.4% declared policies, 0% undeclared*)
 
 **Reliability:**
 - 99.9% uptime
@@ -1161,9 +1165,9 @@ Planned enhancements beyond the current release. Tracked here as the single sour
    - Decision: Rust for type safety and performance, can support Go/C with WASI
    - Status: YAML-generated Rust policies work. Several hand-written example crates have ABI bugs on `main` (see STATUS.md).
 
-4. **Performance Target:** **<100μs P95 (target, unmeasured)**
+4. **Performance Target:** **<100μs P95**
    - Decision: target kept
-   - Result: not yet benchmarked; a benchmark harness is in progress
+   - Result: measured (PERFORMANCE.md). Cache hits P95 1.3μs; WASM evaluations P95 32μs for a YAML policy, 55μs for the Rust `advanced` crate
 
 ### Remaining Open Questions
 

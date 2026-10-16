@@ -79,7 +79,7 @@ Traditional security enforcers are platform-specific:
 | **Windows** | Experimental beta | ETW (+ eBPF-for-Windows, never built or run in CI) | ETW: detect, then `TerminateProcess`. eBPF kernel blocking unverified. |
 | **macOS** | Experimental, detection only | ESF | None: every AUTH event is answered ALLOW |
 
-Latency and throughput targets (P95 <100μs, 100k events/s) are **unmeasured design targets**. See [Performance](#performance-characteristics).
+Latency and throughput are measured in [PERFORMANCE.md](PERFORMANCE.md); see [Performance](#performance-characteristics) for a summary.
 
 ---
 
@@ -154,7 +154,7 @@ pub extern "C" fn evaluate_syscall(event_ptr: *const u8, event_len: usize) -> i3
 **Features:**
 - Sandboxed execution in Wazero. A trap cannot crash the daemon, but there is **no memory or time limit yet**, so a looping policy hangs the event loop.
 - Hot reload via SIGHUP
-- Evaluation latency: target <100μs, unmeasured
+- Evaluation latency (target <100μs P95): measured P95 32μs for a compiled YAML policy and 55μs for the Rust `advanced` crate on a cache miss ([PERFORMANCE.md](PERFORMANCE.md))
 - Two ABIs: JSON `evaluate_syscall(ptr,len)` and binary `evaluate_event`. If a module exports `evaluate_event`, the host uses the binary ABI.
 
 ### 4. Decision Cache
@@ -497,16 +497,20 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
 
 ## Performance Characteristics
 
-**None of the numbers in earlier versions of this document were measured.**
-The following are design targets only. A benchmark harness is in progress.
+Measured 2026-10-15 on one laptop (WSL2; kernel numbers in a nested KVM VM).
+Methodology, raw output and caveats are in [PERFORMANCE.md](PERFORMANCE.md).
+"Declared" policies export their fields-read declaration (every compiled
+YAML policy); "undeclared" ones do not.
 
-| Target | Value |
-|--------|-------|
-| P95 evaluation latency (cache miss, WASM) | <100μs |
-| Kernel fast path (BPF map hit) | <1μs |
-| Throughput | 100k events/s |
-| CPU overhead | <5% |
-| Memory | <50MB |
+| Metric | Design target | Measured |
+|--------|---------------|----------|
+| P95 evaluation latency (cache miss, WASM) | <100μs | 32μs YAML, 38μs fixture, 55μs Rust `advanced` crate |
+| P95 latency, cache hit | | 1.2–1.3μs |
+| Kernel fast path (BPF map hit) | <1μs | 0.11μs connect, 0.34μs exec (BPF program run time) |
+| Kernel, event sent to userspace | | about +13–20μs per event (reader wake-up) |
+| Throughput (daemon event loop) | 100k events/s | 175k/s declared, 24k–41k/s undeclared |
+| CPU overhead | <5% | 11% of one core at 10k events/s declared |
+| Memory | <50MB | 60–128MB RSS (not met) |
 
 ---
 

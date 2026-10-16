@@ -113,17 +113,21 @@ updates this page when it merges.
 
 ## 8. Performance
 
-None of these numbers have been measured. They are **design targets**, not
-results. A benchmark harness is in progress.
+Measured 2026-10-15 with the harness described in
+[PERFORMANCE.md](PERFORMANCE.md) (methodology, raw output, caveats). One
+otherwise idle laptop under WSL2; kernel numbers are from a nested
+KVM VM, not bare metal. "Declared" policies export `warmor_fields_read`
+(every compiled YAML policy); "undeclared" ones do not (the test fixture and
+every Rust crate under `policies/`).
 
 | Metric | Design target | Measured on main |
 |--------|---------------|------------------|
-| P95 evaluation latency | <100 µs | Not measured |
-| Kernel fast path (BPF map hit) | <1 µs | Not measured |
-| Decision cache hit rate | >90% | Not measured (the PID in the cache key makes this unlikely) |
-| Daemon memory | <50 MB | Not measured |
-| CPU overhead | <5% | Not measured |
-| Throughput | 100k events/s | Not measured |
+| P95 evaluation latency | <100 µs | Hit: 1.2–1.3 µs. Miss: 32 µs (YAML), 38 µs (fixture), 55 µs (Rust `advanced` crate) |
+| Kernel fast path (BPF map hit) | <1 µs | BPF program run time 0.11 µs (connect), 0.34 µs (exec); connect syscall +0.07 µs. Any event sent to userspace costs about +13–20 µs (reader wake-up, inflated by nested virtualization), and `file_open` always sends one |
+| Decision cache hit rate | >90% | 95.4% declared, 0% undeclared, on a synthetic stream of short-lived processes |
+| Daemon memory | <50 MB | Not met: 60–104 MB RSS declared, 105–128 MB undeclared (in-process harness, lineage tracker full) |
+| CPU overhead | <5% | 10k events/s: 11% of one core (0.8% of 14 threads) declared, 83% of one core for the undeclared fixture; the undeclared Rust crate did not keep up (9.2k achieved) |
+| Throughput | 100k events/s | 175k events/s declared; 41k (fixture) and 24k (Rust crate) undeclared |
 
 ## 9. Hardening backlog (not started on main)
 

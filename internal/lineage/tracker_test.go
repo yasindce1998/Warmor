@@ -93,3 +93,28 @@ func TestCycleDetection(t *testing.T) {
 		t.Errorf("cycle detection failed, got %d ancestors", len(ancestors))
 	}
 }
+
+func TestTrackerEviction_ReExecIsNewest(t *testing.T) {
+	tr := NewTracker(TrackerConfig{MaxSize: 3})
+	tr.RecordExec(1, 0, 0, 0, "a", "a")
+	tr.RecordExec(2, 0, 0, 0, "b", "b")
+	tr.RecordExec(3, 0, 0, 0, "c", "c")
+	tr.RecordExec(1, 0, 0, 0, "a2", "a2") // re-exec: no eviction, now newest
+	if tr.Size() != 3 {
+		t.Fatalf("size = %d after re-exec, want 3", tr.Size())
+	}
+	tr.RecordExec(4, 0, 0, 0, "d", "d") // evicts 2, the oldest
+	if _, ok := tr.GetProcess(2); ok {
+		t.Error("expected PID 2 to be evicted")
+	}
+	for _, pid := range []uint32{1, 3, 4} {
+		if _, ok := tr.GetProcess(pid); !ok {
+			t.Errorf("expected PID %d to remain", pid)
+		}
+	}
+	tr.RecordExit(3)
+	tr.RecordExec(5, 0, 0, 0, "e", "e") // room after exit: no eviction
+	if _, ok := tr.GetProcess(1); !ok || tr.Size() != 3 {
+		t.Errorf("size = %d, PID 1 present = %v; want 3, true", tr.Size(), ok)
+	}
+}

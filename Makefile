@@ -1,7 +1,7 @@
 .PHONY: all clean build-bpf build-policy build-daemon generate test help \
 	deploy deploy-audit undeploy status logs policy-check upgrade \
 	docker-build docker-push build-policy-merge build-policy-diff build-policy-bundle \
-	tools build-tests deps
+	tools build-tests deps bench bench-kernel
 
 NAMESPACE ?= warmor-system
 RELEASE ?= warmor
@@ -39,6 +39,8 @@ help:
 	@echo "  build-daemon  - Build warmor daemon"
 	@echo "  tools         - Build every cmd/* binary into ./bin"
 	@echo "  test          - Run tests"
+	@echo "  bench         - Userspace performance harness (docs/PERFORMANCE.md)"
+	@echo "  bench-kernel  - Kernel fast-path benchmarks in a vimto VM (KERNEL=...)"
 	@echo "  clean         - Clean build artifacts"
 	@echo ""
 	@echo "Deploy Targets:"
@@ -119,6 +121,23 @@ build-tests:
 test:
 	@echo "==> Running tests..."
 	go test ./...
+
+# Performance harness (docs/PERFORMANCE.md). Raw results go to bench-results/.
+bench:
+	@echo "==> Running userspace benchmarks..."
+	scripts/bench.sh
+
+# Kernel fast-path benchmarks need root and a BPF-LSM kernel, so they run in
+# a vimto VM. KERNEL is an OCI image or an ABSOLUTE path to a kernel image.
+KERNEL ?= ghcr.io/cilium/ci-kernels:stable-selftests
+BENCH_KERNEL_COUNT ?= 10
+VIMTO ?= $(shell go env GOPATH)/bin/vimto
+bench-kernel:
+	@echo "==> Running kernel fast-path benchmarks in a VM ($(KERNEL))..."
+	@mkdir -p bench-results
+	CGO_ENABLED=0 $(VIMTO) -kernel $(KERNEL) -- \
+		go test -tags integration -run '^$$' -bench Kernel -benchtime 3000x \
+		-count $(BENCH_KERNEL_COUNT) ./internal/ebpf/ | tee bench-results/kernel.txt
 
 # Clean build artifacts
 clean:

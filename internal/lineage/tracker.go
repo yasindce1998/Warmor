@@ -1,6 +1,7 @@
 package lineage
 
 import (
+	"container/list"
 	"sync"
 	"time"
 )
@@ -21,8 +22,12 @@ type ProcessInfo struct {
 type Tracker struct {
 	mu        sync.RWMutex
 	processes map[uint32]*ProcessInfo
-	maxDepth  int
-	maxSize   int
+	// order lists tracked PIDs from oldest to newest StartTime, so the
+	// oldest is evicted in O(1); elems indexes it by PID.
+	order    *list.List
+	elems    map[uint32]*list.Element
+	maxDepth int
+	maxSize  int
 }
 
 // TrackerConfig configures the process lineage tracker.
@@ -41,6 +46,8 @@ func NewTracker(cfg TrackerConfig) *Tracker {
 	}
 	return &Tracker{
 		processes: make(map[uint32]*ProcessInfo, 4096),
+		order:     list.New(),
+		elems:     make(map[uint32]*list.Element, 4096),
 		maxDepth:  cfg.MaxDepth,
 		maxSize:   cfg.MaxSize,
 	}
@@ -51,8 +58,14 @@ func (t *Tracker) RecordExec(pid, ppid, uid, gid uint32, comm, filename string) 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if len(t.processes) >= t.maxSize {
-		t.evictOldest()
+	if el, ok := t.elems[pid]; ok {
+		// Re-exec of a tracked PID: it becomes the newest entry.
+		t.order.MoveToBack(el)
+	} else {
+		if len(t.processes) >= t.maxSize {
+			t.evictOldest()
+		}
+		t.elems[pid] = t.order.PushBack(pid)
 	}
 
 	t.processes[pid] = &ProcessInfo{
@@ -70,6 +83,14 @@ func (t *Tracker) RecordExec(pid, ppid, uid, gid uint32, comm, filename string) 
 func (t *Tracker) RecordExit(pid uint32) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.remove(pid)
+}
+
+func (t *Tracker) remove(pid uint32) {
+	if el, ok := t.elems[pid]; ok {
+		t.order.Remove(el)
+		delete(t.elems, pid)
+	}
 	delete(t.processes, pid)
 }
 
@@ -131,19 +152,12 @@ func (t *Tracker) Size() int {
 	return len(t.processes)
 }
 
+// evictOldest drops the process with the oldest StartTime. Entries are
+// appended (or moved to the back) whenever StartTime is set, so that is the
+// front of order.
 func (t *Tracker) evictOldest() {
-	var oldest uint32
-	var oldestTime time.Time
-	first := true
-
-	for pid, info := range t.processes {
-		if first || info.StartTime.Before(oldestTime) {
-			oldest = pid
-			oldestTime = info.StartTime
-			first = false
-		}
-	}
-	if !first {
-		delete(t.processes, oldest)
+	if el := t.order.Front(); el != nil {
+		pid, _ := el.Value.(uint32)
+		t.remove(pid)
 	}
 }
