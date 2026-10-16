@@ -33,6 +33,11 @@ type lsm_integrityIntegrityConfig struct {
 	Generation uint32
 }
 
+type lsm_integrityLsmConfig struct {
+	_      structs.HostLayout
+	OnLoss uint32
+}
+
 type lsm_integrityPolicyKey struct {
 	_         structs.HostLayout
 	CgroupId  uint64
@@ -57,7 +62,9 @@ const (
 	lsm_integrityMapIntegrityCache        = "integrity_cache"
 	lsm_integrityMapIntegrityCfg          = "integrity_cfg"
 	lsm_integrityMapIntegrityStats        = "integrity_stats"
+	lsm_integrityMapLsmCfg                = "lsm_cfg"
 	lsm_integrityMapLsmCgroupFilter       = "lsm_cgroup_filter"
+	lsm_integrityMapLsmDrops              = "lsm_drops"
 	lsm_integrityMapLsmEnforce            = "lsm_enforce"
 	lsm_integrityMapLsmEvents             = "lsm_events"
 	lsm_integrityMapPolicyMap             = "policy_map"
@@ -65,6 +72,7 @@ const (
 	lsm_integrityProgLsmIntegrityCheck    = "lsm_integrity_check"
 	lsm_integrityVarUnusedDigestKey       = "unused_digest_key"
 	lsm_integrityVarUnusedIntegrityConfig = "unused_integrity_config"
+	lsm_integrityVarUnusedLsmConfig       = "unused_lsm_config"
 	lsm_integrityVarUnusedPolicyKey       = "unused_policy_key"
 	lsm_integrityVarUnusedPolicyValue     = "unused_policy_value"
 	lsm_integrityVarUnusedWarmorEvent     = "unused_warmor_event"
@@ -123,7 +131,9 @@ type lsm_integrityMapSpecs struct {
 	IntegrityCache  *ebpf.MapSpec `ebpf:"integrity_cache"`
 	IntegrityCfg    *ebpf.MapSpec `ebpf:"integrity_cfg"`
 	IntegrityStats  *ebpf.MapSpec `ebpf:"integrity_stats"`
+	LsmCfg          *ebpf.MapSpec `ebpf:"lsm_cfg"`
 	LsmCgroupFilter *ebpf.MapSpec `ebpf:"lsm_cgroup_filter"`
+	LsmDrops        *ebpf.MapSpec `ebpf:"lsm_drops"`
 	LsmEnforce      *ebpf.MapSpec `ebpf:"lsm_enforce"`
 	LsmEvents       *ebpf.MapSpec `ebpf:"lsm_events"`
 	PolicyMap       *ebpf.MapSpec `ebpf:"policy_map"`
@@ -136,6 +146,7 @@ type lsm_integrityMapSpecs struct {
 type lsm_integrityVariableSpecs struct {
 	UnusedDigestKey       *ebpf.VariableSpec `ebpf:"unused_digest_key"`
 	UnusedIntegrityConfig *ebpf.VariableSpec `ebpf:"unused_integrity_config"`
+	UnusedLsmConfig       *ebpf.VariableSpec `ebpf:"unused_lsm_config"`
 	UnusedPolicyKey       *ebpf.VariableSpec `ebpf:"unused_policy_key"`
 	UnusedPolicyValue     *ebpf.VariableSpec `ebpf:"unused_policy_value"`
 	UnusedWarmorEvent     *ebpf.VariableSpec `ebpf:"unused_warmor_event"`
@@ -165,7 +176,9 @@ type lsm_integrityMaps struct {
 	IntegrityCache  *ebpf.Map `ebpf:"integrity_cache"`
 	IntegrityCfg    *ebpf.Map `ebpf:"integrity_cfg"`
 	IntegrityStats  *ebpf.Map `ebpf:"integrity_stats"`
+	LsmCfg          *ebpf.Map `ebpf:"lsm_cfg"`
 	LsmCgroupFilter *ebpf.Map `ebpf:"lsm_cgroup_filter"`
+	LsmDrops        *ebpf.Map `ebpf:"lsm_drops"`
 	LsmEnforce      *ebpf.Map `ebpf:"lsm_enforce"`
 	LsmEvents       *ebpf.Map `ebpf:"lsm_events"`
 	PolicyMap       *ebpf.Map `ebpf:"policy_map"`
@@ -178,7 +191,9 @@ func (m *lsm_integrityMaps) Close() error {
 		m.IntegrityCache,
 		m.IntegrityCfg,
 		m.IntegrityStats,
+		m.LsmCfg,
 		m.LsmCgroupFilter,
+		m.LsmDrops,
 		m.LsmEnforce,
 		m.LsmEvents,
 		m.PolicyMap,
@@ -192,6 +207,7 @@ func (m *lsm_integrityMaps) Close() error {
 type lsm_integrityVariables struct {
 	UnusedDigestKey       *ebpf.Variable `ebpf:"unused_digest_key"`
 	UnusedIntegrityConfig *ebpf.Variable `ebpf:"unused_integrity_config"`
+	UnusedLsmConfig       *ebpf.Variable `ebpf:"unused_lsm_config"`
 	UnusedPolicyKey       *ebpf.Variable `ebpf:"unused_policy_key"`
 	UnusedPolicyValue     *ebpf.Variable `ebpf:"unused_policy_value"`
 	UnusedWarmorEvent     *ebpf.Variable `ebpf:"unused_warmor_event"`

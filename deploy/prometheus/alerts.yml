@@ -28,6 +28,15 @@ groups:
           summary: "Kernel policy map writes failing"
           description: "Decisions on {{ $labels.instance }} cannot be written to the kernel policy map; they are still enforced in userspace, without the kernel fast path."
 
+      - alert: WarmorLSMEventsDropped
+        expr: sum(rate(warmor_lsm_events_dropped_total[5m])) by (instance, hook) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kernel LSM events dropped ({{ $labels.hook }})"
+          description: "The kernel ring buffer on {{ $labels.instance }} is full, so {{ $labels.hook }} operations the policy map did not know were never evaluated (allowed, or refused with --on-event-loss=deny). Raise --lsm-ringbuf-size or scope the daemon with --cgroup-filter."
+
       - alert: WarmorEventsDropped
         expr: rate(warmor_events_dropped_total[5m]) > 0
         for: 1m

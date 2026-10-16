@@ -117,6 +117,10 @@ alerting:
       enabled: true
       for: 1m
       severity: critical
+    lsmEventsDropped:
+      enabled: true
+      for: 1m
+      severity: critical
     wasmEvaluationErrors:
       enabled: true
       threshold: 0

@@ -52,6 +52,16 @@ spec:
             summary: "Kernel enforcement not active on {{ "{{" }} $labels.instance {{ "}}" }}"
             description: "Warmor was started with kernel LSM enforcement (--lsm-enforce) but it is not active; only userspace enforcement has been running for more than {{ .Values.alerting.rules.ebpfLoaderFailure.for }}."
         {{- end }}
+        {{- if .Values.alerting.rules.lsmEventsDropped.enabled }}
+        - alert: WarmorLSMEventsDropped
+          expr: sum(rate(warmor_lsm_events_dropped_total[5m])) by (instance, hook) > 0
+          for: {{ .Values.alerting.rules.lsmEventsDropped.for }}
+          labels:
+            severity: {{ .Values.alerting.rules.lsmEventsDropped.severity }}
+          annotations:
+            summary: "Kernel LSM events dropped on {{ "{{" }} $labels.instance {{ "}}" }}"
+            description: "The kernel ring buffer is full, so {{ "{{" }} $labels.hook {{ "}}" }} operations the policy map did not know were never evaluated. Raise --lsm-ringbuf-size or scope the daemon with --cgroup-filter."
+        {{- end }}
         {{- if .Values.alerting.rules.wasmEvaluationErrors.enabled }}
         - alert: WarmorWASMEvaluationErrors
           expr: sum(rate(warmor_wasm_exec_errors_total[5m])) by (instance, policy_id, kind) > {{ .Values.alerting.rules.wasmEvaluationErrors.threshold }}

@@ -1,0 +1,266 @@
+goos: linux
+goarch: amd64
+pkg: github.com/yasindce1998/warmor/internal/ebpf
+cpu: Intel(R) Core(TM) Ultra 5 135U
+BenchmarkKernelExec/none-2       	    3000	     78523 ns/op	     78415 op-mean-ns	     58986 op-p50-ns
+BenchmarkKernelExec/none-2       	    3000	     80211 ns/op	     80109 op-mean-ns	     60547 op-p50-ns
+BenchmarkKernelExec/none-2       	    3000	     79945 ns/op	     79831 op-mean-ns	     59786 op-p50-ns
+BenchmarkKernelExec/none-2       	    3000	     93916 ns/op	     93803 op-mean-ns	     60280 op-p50-ns
+BenchmarkKernelExec/none-2       	    3000	     62672 ns/op	     62587 op-mean-ns	     45836 op-p50-ns
+BenchmarkKernelExec/none-2       	    3000	     57572 ns/op	     57467 op-mean-ns	     44835 op-p50-ns
+BenchmarkKernelExec/none-2       	    3000	     58884 ns/op	     58801 op-mean-ns	     44641 op-p50-ns
+BenchmarkKernelExec/none-2       	    3000	     62960 ns/op	     62848 op-mean-ns	     45544 op-p50-ns
+BenchmarkKernelExec/none-2       	    3000	     59680 ns/op	     59600 op-mean-ns	     44981 op-p50-ns
+BenchmarkKernelExec/none-2       	    3000	     61388 ns/op	     61310 op-mean-ns	     45154 op-p50-ns
+2026/10/16 06:48:43 LSM-BPF programs loaded: bprm_check_security, file_open, socket_connect, socket_bind, socket_listen, ptrace_access_check, sb_mount (ring buffer 4096 KiB)
+BenchmarkKernelExec/lsm-hit-2    	    3000	   4337016 ns/op	         1.000 events/op	    182781 op-mean-ns	    115724 op-p50-ns
+BenchmarkKernelExec/lsm-hit-2    	    3000	   4385884 ns/op	         1.000 events/op	    181146 op-mean-ns	    117461 op-p50-ns
+BenchmarkKernelExec/lsm-hit-2    	    3000	   4368689 ns/op	         1.000 events/op	    218862 op-mean-ns	    139355 op-p50-ns
+BenchmarkKernelExec/lsm-hit-2    	    3000	   4374473 ns/op	         1.000 events/op	    248214 op-mean-ns	    158394 op-p50-ns
+BenchmarkKernelExec/lsm-hit-2    	    3000	   4360469 ns/op	         1.000 events/op	    252240 op-mean-ns	    166543 op-p50-ns
+BenchmarkKernelExec/lsm-hit-2    	    3000	   4340827 ns/op	         1.000 events/op	    284830 op-mean-ns	    188982 op-p50-ns
+BenchmarkKernelExec/lsm-hit-2    	    3000	   4366786 ns/op	         1.000 events/op	    283002 op-mean-ns	    199264 op-p50-ns
+BenchmarkKernelExec/lsm-hit-2    	    3000	   4409352 ns/op	         0.9997 events/op	    274710 op-mean-ns	    126806 op-p50-ns
+BenchmarkKernelExec/lsm-hit-2    	    3000	   4406991 ns/op	         1.000 events/op	    241840 op-mean-ns	    124337 op-p50-ns
+BenchmarkKernelExec/lsm-hit-2    	    3000	   4362958 ns/op	         1.000 events/op	    178589 op-mean-ns	    119135 op-p50-ns
+BenchmarkKernelExec/lsm-miss-2   	    3000	   4404460 ns/op	         2.000 events/op	    163446 op-mean-ns	    115469 op-p50-ns
+BenchmarkKernelExec/lsm-miss-2   	    3000	   4374090 ns/op	         2.000 events/op	    220553 op-mean-ns	    136213 op-p50-ns
+BenchmarkKernelExec/lsm-miss-2   	    3000	   4403671 ns/op	         2.000 events/op	    256227 op-mean-ns	    168732 op-p50-ns
+BenchmarkKernelExec/lsm-miss-2   	    3000	   4413811 ns/op	         2.000 events/op	    185184 op-mean-ns	    122036 op-p50-ns
+BenchmarkKernelExec/lsm-miss-2   	    3000	   4433427 ns/op	         2.000 events/op	    281715 op-mean-ns	    143741 op-p50-ns
+BenchmarkKernelExec/lsm-miss-2   	    3000	   4400912 ns/op	         2.000 events/op	    223012 op-mean-ns	    134433 op-p50-ns
+BenchmarkKernelExec/lsm-miss-2   	    3000	   4405652 ns/op	         2.000 events/op	    215358 op-mean-ns	    133567 op-p50-ns
+BenchmarkKernelExec/lsm-miss-2   	    3000	   4417606 ns/op	         2.000 events/op	    206375 op-mean-ns	    132128 op-p50-ns
+BenchmarkKernelExec/lsm-miss-2   	    3000	   4407720 ns/op	         2.000 events/op	    215095 op-mean-ns	    138939 op-p50-ns
+BenchmarkKernelExec/lsm-miss-2   	    3000	   4395003 ns/op	         2.000 events/op	    208986 op-mean-ns	    135238 op-p50-ns
+BenchmarkKernelExec/lsm-miss-nowait-2         	    3000	     89566 ns/op	         1.978 events/op	     89434 op-mean-ns	     64774 op-p50-ns
+BenchmarkKernelExec/lsm-miss-nowait-2         	    3000	     86329 ns/op	         1.979 events/op	     86189 op-mean-ns	     66413 op-p50-ns
+BenchmarkKernelExec/lsm-miss-nowait-2         	    3000	     90283 ns/op	         1.997 events/op	     90181 op-mean-ns	     64331 op-p50-ns
+BenchmarkKernelExec/lsm-miss-nowait-2         	    3000	     86356 ns/op	         1.979 events/op	     86263 op-mean-ns	     65333 op-p50-ns
+BenchmarkKernelExec/lsm-miss-nowait-2         	    3000	     85625 ns/op	         1.997 events/op	     85532 op-mean-ns	     65968 op-p50-ns
+BenchmarkKernelExec/lsm-miss-nowait-2         	    3000	     86315 ns/op	         1.991 events/op	     86217 op-mean-ns	     64741 op-p50-ns
+BenchmarkKernelExec/lsm-miss-nowait-2         	    3000	     86616 ns/op	         1.998 events/op	     86500 op-mean-ns	     66208 op-p50-ns
+BenchmarkKernelExec/lsm-miss-nowait-2         	    3000	     85098 ns/op	         1.976 events/op	     84982 op-mean-ns	     65684 op-p50-ns
+BenchmarkKernelExec/lsm-miss-nowait-2         	    3000	     87225 ns/op	         1.987 events/op	     87129 op-mean-ns	     67436 op-p50-ns
+BenchmarkKernelExec/lsm-miss-nowait-2         	    3000	     87399 ns/op	         2.011 events/op	     87294 op-mean-ns	     67680 op-p50-ns
+BenchmarkKernelExec/progstats-hit-2           	    3000	   4379447 ns/op	         1.000 events/op	    208452 op-mean-ns	    131520 op-p50-ns	      1214 prog-ns
+BenchmarkKernelExec/progstats-hit-2           	    3000	   4404793 ns/op	         1.000 events/op	    197813 op-mean-ns	    132311 op-p50-ns	      1114 prog-ns
+BenchmarkKernelExec/progstats-hit-2           	    3000	   4379573 ns/op	         1.000 events/op	    210818 op-mean-ns	    136100 op-p50-ns	      1085 prog-ns
+BenchmarkKernelExec/progstats-hit-2           	    3000	   4386711 ns/op	         1.000 events/op	    236248 op-mean-ns	    149887 op-p50-ns	      1117 prog-ns
+BenchmarkKernelExec/progstats-hit-2           	    3000	   4375627 ns/op	         1.000 events/op	    220607 op-mean-ns	    140300 op-p50-ns	      1101 prog-ns
+BenchmarkKernelExec/progstats-hit-2           	    3000	   4356244 ns/op	         1.000 events/op	    220434 op-mean-ns	    142689 op-p50-ns	      1105 prog-ns
+BenchmarkKernelExec/progstats-hit-2           	    3000	   4385181 ns/op	         1.000 events/op	    308231 op-mean-ns	    164553 op-p50-ns	      1271 prog-ns
+BenchmarkKernelExec/progstats-hit-2           	    3000	   4392576 ns/op	         1.000 events/op	    237726 op-mean-ns	    150279 op-p50-ns	      1283 prog-ns
+BenchmarkKernelExec/progstats-hit-2           	    3000	   4391219 ns/op	         1.000 events/op	    277027 op-mean-ns	    182042 op-p50-ns	      1319 prog-ns
+BenchmarkKernelExec/progstats-hit-2           	    3000	   4370962 ns/op	         1.000 events/op	    214349 op-mean-ns	    137424 op-p50-ns	      1305 prog-ns
+BenchmarkKernelExec/progstats-miss-2          	    3000	   4414434 ns/op	         2.000 events/op	    255515 op-mean-ns	    126887 op-p50-ns	      2632 prog-ns
+BenchmarkKernelExec/progstats-miss-2          	    3000	   4391640 ns/op	         2.000 events/op	    176722 op-mean-ns	    118175 op-p50-ns	      2002 prog-ns
+BenchmarkKernelExec/progstats-miss-2          	    3000	   4414324 ns/op	         2.000 events/op	    173716 op-mean-ns	    119181 op-p50-ns	      1789 prog-ns
+BenchmarkKernelExec/progstats-miss-2          	    3000	   4396100 ns/op	         2.000 events/op	    165550 op-mean-ns	    114329 op-p50-ns	      1612 prog-ns
+BenchmarkKernelExec/progstats-miss-2          	    3000	   4407958 ns/op	         2.000 events/op	    165822 op-mean-ns	    116337 op-p50-ns	      1537 prog-ns
+BenchmarkKernelExec/progstats-miss-2          	    3000	   4393548 ns/op	         2.000 events/op	    262312 op-mean-ns	    161091 op-p50-ns	      1589 prog-ns
+BenchmarkKernelExec/progstats-miss-2          	    3000	   4384956 ns/op	         2.000 events/op	    262259 op-mean-ns	    173114 op-p50-ns	      1647 prog-ns
+BenchmarkKernelExec/progstats-miss-2          	    3000	   4395817 ns/op	         2.000 events/op	    218731 op-mean-ns	    136116 op-p50-ns	      1621 prog-ns
+BenchmarkKernelExec/progstats-miss-2          	    3000	   4411795 ns/op	         2.000 events/op	    220351 op-mean-ns	    137659 op-p50-ns	      1608 prog-ns
+BenchmarkKernelExec/progstats-miss-2          	    3000	   4398558 ns/op	         2.000 events/op	    334263 op-mean-ns	    248974 op-p50-ns	      1707 prog-ns
+2026/10/16 06:57:33 eBPF programs loaded: execve, openat, connect
+BenchmarkKernelExec/lsm-miss+tp-2             	    3000	   4416543 ns/op	         2.000 events/op	    426012 op-mean-ns	    260435 op-p50-ns
+BenchmarkKernelExec/lsm-miss+tp-2             	    3000	   4379623 ns/op	         2.000 events/op	    310292 op-mean-ns	    223639 op-p50-ns
+BenchmarkKernelExec/lsm-miss+tp-2             	    3000	   4386249 ns/op	         2.000 events/op	    282994 op-mean-ns	    197497 op-p50-ns
+BenchmarkKernelExec/lsm-miss+tp-2             	    3000	   4382578 ns/op	         2.000 events/op	    266303 op-mean-ns	    171251 op-p50-ns
+BenchmarkKernelExec/lsm-miss+tp-2             	    3000	   4386559 ns/op	         2.000 events/op	    221051 op-mean-ns	    154456 op-p50-ns
+BenchmarkKernelExec/lsm-miss+tp-2             	    3000	   4387251 ns/op	         2.000 events/op	    302980 op-mean-ns	    184035 op-p50-ns
+BenchmarkKernelExec/lsm-miss+tp-2             	    3000	   4337697 ns/op	         2.000 events/op	    207997 op-mean-ns	    140873 op-p50-ns
+BenchmarkKernelExec/lsm-miss+tp-2             	    3000	   4352432 ns/op	         2.000 events/op	    199864 op-mean-ns	    141957 op-p50-ns
+BenchmarkKernelExec/lsm-miss+tp-2             	    3000	   4350426 ns/op	         2.000 events/op	    227547 op-mean-ns	    153658 op-p50-ns
+BenchmarkKernelExec/lsm-miss+tp-2             	    3000	   5661747 ns/op	         2.000 events/op	   1507526 op-mean-ns	    187002 op-p50-ns
+BenchmarkKernelExecveENOEXEC/none-2           	    3000	      9233 ns/op	      9176 op-mean-ns	      4637 op-p50-ns
+BenchmarkKernelExecveENOEXEC/none-2           	    3000	      8153 ns/op	      8097 op-mean-ns	      4633 op-p50-ns
+BenchmarkKernelExecveENOEXEC/none-2           	    3000	      6385 ns/op	      6329 op-mean-ns	      4713 op-p50-ns
+BenchmarkKernelExecveENOEXEC/none-2           	    3000	      5740 ns/op	      5682 op-mean-ns	      4618 op-p50-ns
+BenchmarkKernelExecveENOEXEC/none-2           	    3000	      6052 ns/op	      5995 op-mean-ns	      4637 op-p50-ns
+BenchmarkKernelExecveENOEXEC/none-2           	    3000	     11707 ns/op	     11648 op-mean-ns	      4675 op-p50-ns
+BenchmarkKernelExecveENOEXEC/none-2           	    3000	      5750 ns/op	      5692 op-mean-ns	      4697 op-p50-ns
+BenchmarkKernelExecveENOEXEC/none-2           	    3000	      6250 ns/op	      6193 op-mean-ns	      5469 op-p50-ns
+BenchmarkKernelExecveENOEXEC/none-2           	    3000	      5367 ns/op	      5302 op-mean-ns	      4634 op-p50-ns
+BenchmarkKernelExecveENOEXEC/none-2           	    3000	      5511 ns/op	      5449 op-mean-ns	      4688 op-p50-ns
+2026/10/16 06:59:49 LSM-BPF programs loaded: bprm_check_security, file_open, socket_connect, socket_bind, socket_listen, ptrace_access_check, sb_mount (ring buffer 4096 KiB)
+BenchmarkKernelExecveENOEXEC/lsm-hit-2        	    3000	   3700874 ns/op	         1.000 events/op	     56082 op-mean-ns	     32260 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-hit-2        	    3000	   3757472 ns/op	         1.000 events/op	     47832 op-mean-ns	     29210 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-hit-2        	    3000	   3802719 ns/op	         1.000 events/op	     54555 op-mean-ns	     28888 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-hit-2        	    3000	   3748570 ns/op	         1.000 events/op	     45337 op-mean-ns	     27367 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-hit-2        	    3000	   3851157 ns/op	         1.000 events/op	     44198 op-mean-ns	     28713 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-hit-2        	    3000	   3819458 ns/op	         1.000 events/op	     62161 op-mean-ns	     34772 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-hit-2        	    3000	   3873066 ns/op	         1.000 events/op	     42457 op-mean-ns	     27502 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-hit-2        	    3000	   3823660 ns/op	         1.000 events/op	     44210 op-mean-ns	     27624 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-hit-2        	    3000	   3789259 ns/op	         1.000 events/op	     46106 op-mean-ns	     26076 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-hit-2        	    3000	   3798212 ns/op	         1.000 events/op	     45338 op-mean-ns	     27836 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-2       	    3000	   3814726 ns/op	         2.000 events/op	     45488 op-mean-ns	     28578 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-2       	    3000	   4043131 ns/op	         2.000 events/op	     46542 op-mean-ns	     28530 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-2       	    3000	   3963194 ns/op	         2.000 events/op	     45668 op-mean-ns	     28751 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-2       	    3000	   4101011 ns/op	         2.000 events/op	     45268 op-mean-ns	     28691 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-2       	    3000	   4155490 ns/op	         2.000 events/op	     49168 op-mean-ns	     29003 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-2       	    3000	   3945934 ns/op	         2.000 events/op	     50670 op-mean-ns	     30040 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-2       	    3000	   4064060 ns/op	         2.000 events/op	     43698 op-mean-ns	     29134 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-2       	    3000	   4059325 ns/op	         2.000 events/op	     46900 op-mean-ns	     29887 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-2       	    3000	   3966483 ns/op	         2.000 events/op	     50111 op-mean-ns	     30679 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-2       	    3000	   4186624 ns/op	         2.000 events/op	     48580 op-mean-ns	     29900 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-nowait-2         	    3000	      8373 ns/op	         1.972 events/op	      8312 op-mean-ns	      5593 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-nowait-2         	    3000	      8448 ns/op	         1.967 events/op	      8378 op-mean-ns	      5489 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-nowait-2         	    3000	      7119 ns/op	         1.974 events/op	      7065 op-mean-ns	      5287 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-nowait-2         	    3000	      6865 ns/op	         1.972 events/op	      6806 op-mean-ns	      5340 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-nowait-2         	    3000	      7571 ns/op	         2.007 events/op	      7517 op-mean-ns	      5378 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-nowait-2         	    3000	      8111 ns/op	         1.964 events/op	      8054 op-mean-ns	      5668 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-nowait-2         	    3000	      7293 ns/op	         1.983 events/op	      7233 op-mean-ns	      5519 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-nowait-2         	    3000	      6945 ns/op	         1.971 events/op	      6890 op-mean-ns	      5460 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-nowait-2         	    3000	      6703 ns/op	         2.001 events/op	      6649 op-mean-ns	      5482 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss-nowait-2         	    3000	      6970 ns/op	         1.994 events/op	      6829 op-mean-ns	      5475 op-p50-ns
+BenchmarkKernelExecveENOEXEC/progstats-hit-2           	    3000	   3781184 ns/op	         1.000 events/op	     48589 op-mean-ns	     28098 op-p50-ns	       741.5 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-hit-2           	    3000	   3797460 ns/op	         1.000 events/op	     43440 op-mean-ns	     28380 op-p50-ns	       748.9 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-hit-2           	    3000	   3790369 ns/op	         1.000 events/op	     46065 op-mean-ns	     27479 op-p50-ns	       738.1 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-hit-2           	    3000	   3795285 ns/op	         1.000 events/op	     59105 op-mean-ns	     34791 op-p50-ns	       770.5 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-hit-2           	    3000	   3953697 ns/op	         1.000 events/op	     67491 op-mean-ns	     48837 op-p50-ns	       853.0 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-hit-2           	    3000	   3843963 ns/op	         1.000 events/op	     55804 op-mean-ns	     38906 op-p50-ns	       865.0 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-hit-2           	    3000	   3775132 ns/op	         1.000 events/op	     48397 op-mean-ns	     32440 op-p50-ns	       861.4 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-hit-2           	    3000	   3843714 ns/op	         1.000 events/op	     47855 op-mean-ns	     28561 op-p50-ns	       836.9 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-hit-2           	    3000	   3678669 ns/op	         1.000 events/op	     42901 op-mean-ns	     26772 op-p50-ns	       827.9 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-hit-2           	    3000	   3801497 ns/op	         1.000 events/op	     44454 op-mean-ns	     27921 op-p50-ns	       819.9 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-miss-2          	    3000	   4128433 ns/op	         2.000 events/op	     44983 op-mean-ns	     28439 op-p50-ns	      1063 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-miss-2          	    3000	   4102778 ns/op	         2.000 events/op	     44165 op-mean-ns	     28881 op-p50-ns	      1059 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-miss-2          	    3000	   4041474 ns/op	         2.000 events/op	     44662 op-mean-ns	     28296 op-p50-ns	      1038 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-miss-2          	    3000	   3875499 ns/op	         2.000 events/op	     39474 op-mean-ns	     27254 op-p50-ns	      1060 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-miss-2          	    3000	   4154661 ns/op	         2.000 events/op	     44409 op-mean-ns	     28189 op-p50-ns	      1047 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-miss-2          	    3000	   4034640 ns/op	         2.000 events/op	     45296 op-mean-ns	     28409 op-p50-ns	      1039 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-miss-2          	    3000	   3782888 ns/op	         2.000 events/op	     42057 op-mean-ns	     27032 op-p50-ns	      1026 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-miss-2          	    3000	   4163838 ns/op	         2.000 events/op	     54574 op-mean-ns	     32025 op-p50-ns	      1057 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-miss-2          	    3000	   4249467 ns/op	         2.000 events/op	     64479 op-mean-ns	     36604 op-p50-ns	      1130 prog-ns
+BenchmarkKernelExecveENOEXEC/progstats-miss-2          	    3000	   4187298 ns/op	         2.000 events/op	     74006 op-mean-ns	     43334 op-p50-ns	      1173 prog-ns
+2026/10/16 07:07:41 eBPF programs loaded: execve, openat, connect
+BenchmarkKernelExecveENOEXEC/lsm-miss+tp-2             	    3000	   4327646 ns/op	         2.000 events/op	     70272 op-mean-ns	     47774 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss+tp-2             	    3000	   4341710 ns/op	         2.000 events/op	     85701 op-mean-ns	     53999 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss+tp-2             	    3000	   4314563 ns/op	         2.000 events/op	     62619 op-mean-ns	     42174 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss+tp-2             	    3000	   4318708 ns/op	         2.000 events/op	     60559 op-mean-ns	     41300 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss+tp-2             	    3000	   4318424 ns/op	         2.000 events/op	     55772 op-mean-ns	     39968 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss+tp-2             	    3000	   4320221 ns/op	         2.000 events/op	     56783 op-mean-ns	     39953 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss+tp-2             	    3000	   4320551 ns/op	         2.000 events/op	     52566 op-mean-ns	     38934 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss+tp-2             	    3000	   4344044 ns/op	         2.000 events/op	     58695 op-mean-ns	     41066 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss+tp-2             	    3000	   4308460 ns/op	         2.000 events/op	     60688 op-mean-ns	     43343 op-p50-ns
+BenchmarkKernelExecveENOEXEC/lsm-miss+tp-2             	    3000	   4322959 ns/op	         2.000 events/op	     83256 op-mean-ns	     61747 op-p50-ns
+BenchmarkKernelOpen/none-2                             	    3000	       812.1 ns/op	       763.2 op-mean-ns	       662.0 op-p50-ns
+BenchmarkKernelOpen/none-2                             	    3000	      2262 ns/op	      2129 op-mean-ns	      1885 op-p50-ns
+BenchmarkKernelOpen/none-2                             	    3000	       814.5 ns/op	       761.6 op-mean-ns	       657.0 op-p50-ns
+BenchmarkKernelOpen/none-2                             	    3000	       812.4 ns/op	       764.0 op-mean-ns	       655.0 op-p50-ns
+BenchmarkKernelOpen/none-2                             	    3000	      1217 ns/op	      1106 op-mean-ns	      1015 op-p50-ns
+BenchmarkKernelOpen/none-2                             	    3000	       835.6 ns/op	       782.3 op-mean-ns	       666.0 op-p50-ns
+BenchmarkKernelOpen/none-2                             	    3000	       829.2 ns/op	       780.0 op-mean-ns	       664.0 op-p50-ns
+BenchmarkKernelOpen/none-2                             	    3000	       864.9 ns/op	       815.3 op-mean-ns	       752.0 op-p50-ns
+BenchmarkKernelOpen/none-2                             	    3000	       778.5 ns/op	       729.8 op-mean-ns	       695.0 op-p50-ns
+BenchmarkKernelOpen/none-2                             	    3000	       729.1 ns/op	       682.2 op-mean-ns	       660.0 op-p50-ns
+2026/10/16 07:09:51 LSM-BPF programs loaded: bprm_check_security, file_open, socket_connect, socket_bind, socket_listen, ptrace_access_check, sb_mount (ring buffer 4096 KiB)
+BenchmarkKernelOpen/lsm-miss-2                         	    3000	    343941 ns/op	         1.000 events/op	      1859 op-mean-ns	       888.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-2                         	    3000	    545508 ns/op	         1.000 events/op	      2333 op-mean-ns	       970.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-2                         	    3000	    419462 ns/op	         1.000 events/op	      2246 op-mean-ns	       970.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-2                         	    3000	    582976 ns/op	         1.000 events/op	      2445 op-mean-ns	       959.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-2                         	    3000	    382449 ns/op	         1.000 events/op	      2122 op-mean-ns	       953.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-2                         	    3000	    316137 ns/op	         1.000 events/op	      1623 op-mean-ns	       953.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-2                         	    3000	    494146 ns/op	         1.000 events/op	      2320 op-mean-ns	       936.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-2                         	    3000	    383390 ns/op	         1.000 events/op	      1985 op-mean-ns	       930.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-2                         	    3000	    321845 ns/op	         1.000 events/op	      1631 op-mean-ns	       882.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-2                         	    3000	    475272 ns/op	         1.000 events/op	      2649 op-mean-ns	       938.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-nowait-2                  	    3000	      3567 ns/op	         0.9617 events/op	      3340 op-mean-ns	      1009 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-nowait-2                  	    3000	      2652 ns/op	         0.9613 events/op	      2591 op-mean-ns	       993.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-nowait-2                  	    3000	      3389 ns/op	         0.9633 events/op	      3328 op-mean-ns	      1019 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-nowait-2                  	    3000	      2870 ns/op	         0.9637 events/op	      2810 op-mean-ns	      1008 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-nowait-2                  	    3000	      2343 ns/op	         0.9613 events/op	      2285 op-mean-ns	       990.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-nowait-2                  	    3000	      2349 ns/op	         0.9627 events/op	      2286 op-mean-ns	       988.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-nowait-2                  	    3000	      2443 ns/op	         0.9720 events/op	      2385 op-mean-ns	       983.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-nowait-2                  	    3000	      2386 ns/op	         0.9887 events/op	      2330 op-mean-ns	       992.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-nowait-2                  	    3000	      2885 ns/op	         0.9617 events/op	      2821 op-mean-ns	       910.0 op-p50-ns
+BenchmarkKernelOpen/lsm-miss-nowait-2                  	    3000	      4329 ns/op	         0.9623 events/op	      4258 op-mean-ns	       983.0 op-p50-ns
+BenchmarkKernelOpen/progstats-miss-2                   	    3000	    456410 ns/op	         1.000 events/op	      1775 op-mean-ns	       952.0 op-p50-ns	       332.8 prog-ns
+BenchmarkKernelOpen/progstats-miss-2                   	    3000	    404018 ns/op	         1.000 events/op	      1717 op-mean-ns	       931.0 op-p50-ns	       334.9 prog-ns
+BenchmarkKernelOpen/progstats-miss-2                   	    3000	    347882 ns/op	         1.000 events/op	      1967 op-mean-ns	       942.0 op-p50-ns	       368.0 prog-ns
+BenchmarkKernelOpen/progstats-miss-2                   	    3000	    411340 ns/op	         1.000 events/op	      2280 op-mean-ns	       996.0 op-p50-ns	       395.4 prog-ns
+BenchmarkKernelOpen/progstats-miss-2                   	    3000	    330604 ns/op	         1.000 events/op	      2121 op-mean-ns	       996.0 op-p50-ns	       423.7 prog-ns
+BenchmarkKernelOpen/progstats-miss-2                   	    3000	    198466 ns/op	         1.000 events/op	      1931 op-mean-ns	       980.0 op-p50-ns	       420.9 prog-ns
+BenchmarkKernelOpen/progstats-miss-2                   	    3000	    231335 ns/op	         1.000 events/op	      1809 op-mean-ns	       978.0 op-p50-ns	       413.9 prog-ns
+BenchmarkKernelOpen/progstats-miss-2                   	    3000	    281812 ns/op	         1.000 events/op	      2541 op-mean-ns	      1021 op-p50-ns	       430.0 prog-ns
+BenchmarkKernelOpen/progstats-miss-2                   	    3000	    676293 ns/op	         1.000 events/op	      3214 op-mean-ns	      1007 op-p50-ns	       450.2 prog-ns
+BenchmarkKernelOpen/progstats-miss-2                   	    3000	    532475 ns/op	         1.000 events/op	      2743 op-mean-ns	       992.0 op-p50-ns	       457.3 prog-ns
+2026/10/16 07:10:16 eBPF programs loaded: execve, openat, connect
+BenchmarkKernelOpen/lsm-miss+tp-2                      	    3000	   4300258 ns/op	         1.000 events/op	     70621 op-mean-ns	     27090 op-p50-ns
+BenchmarkKernelOpen/lsm-miss+tp-2                      	    3000	   4349233 ns/op	         1.000 events/op	     77430 op-mean-ns	     22964 op-p50-ns
+BenchmarkKernelOpen/lsm-miss+tp-2                      	    3000	   4357764 ns/op	         1.000 events/op	     75895 op-mean-ns	     21585 op-p50-ns
+BenchmarkKernelOpen/lsm-miss+tp-2                      	    3000	   4357052 ns/op	         1.000 events/op	     79042 op-mean-ns	     22861 op-p50-ns
+BenchmarkKernelOpen/lsm-miss+tp-2                      	    3000	   4373482 ns/op	         1.000 events/op	     80160 op-mean-ns	     22569 op-p50-ns
+BenchmarkKernelOpen/lsm-miss+tp-2                      	    3000	   4347788 ns/op	         1.000 events/op	     76065 op-mean-ns	     23501 op-p50-ns
+BenchmarkKernelOpen/lsm-miss+tp-2                      	BenchmarkKernelConnect/none-2         	    3000	       502.0 ns/op	       445.2 op-mean-ns	       386.0 op-p50-ns
+BenchmarkKernelConnect/none-2         	    3000	       612.6 ns/op	       555.7 op-mean-ns	       389.0 op-p50-ns
+BenchmarkKernelConnect/none-2         	    3000	       514.4 ns/op	       441.7 op-mean-ns	       382.0 op-p50-ns
+BenchmarkKernelConnect/none-2         	    3000	       638.3 ns/op	       553.2 op-mean-ns	       386.0 op-p50-ns
+BenchmarkKernelConnect/none-2         	    3000	       508.6 ns/op	       447.1 op-mean-ns	       383.0 op-p50-ns
+BenchmarkKernelConnect/none-2         	    3000	       514.2 ns/op	       448.8 op-mean-ns	       384.0 op-p50-ns
+BenchmarkKernelConnect/none-2         	    3000	       493.4 ns/op	       434.7 op-mean-ns	       387.0 op-p50-ns
+BenchmarkKernelConnect/none-2         	    3000	       547.8 ns/op	       475.9 op-mean-ns	       384.0 op-p50-ns
+BenchmarkKernelConnect/none-2         	    3000	       640.6 ns/op	       584.8 op-mean-ns	       387.0 op-p50-ns
+BenchmarkKernelConnect/none-2         	    3000	       469.8 ns/op	       412.3 op-mean-ns	       381.0 op-p50-ns
+BenchmarkKernelConnect/lsm-hit-2      	    3000	       675.6 ns/op	         0 events/op	       595.1 op-mean-ns	       462.0 op-p50-ns
+BenchmarkKernelConnect/lsm-hit-2      	    3000	       569.3 ns/op	         0 events/op	       506.4 op-mean-ns	       462.0 op-p50-ns
+BenchmarkKernelConnect/lsm-hit-2      	    3000	       590.1 ns/op	         0 events/op	       525.8 op-mean-ns	       460.0 op-p50-ns
+BenchmarkKernelConnect/lsm-hit-2      	    3000	       583.5 ns/op	         0 events/op	       521.7 op-mean-ns	       460.0 op-p50-ns
+BenchmarkKernelConnect/lsm-hit-2      	    3000	      1202 ns/op	         0 events/op	      1083 op-mean-ns	       645.0 op-p50-ns
+BenchmarkKernelConnect/lsm-hit-2      	    3000	       776.3 ns/op	         0 events/op	       693.7 op-mean-ns	       462.0 op-p50-ns
+BenchmarkKernelConnect/lsm-hit-2      	    3000	       576.1 ns/op	         0 events/op	       512.9 op-mean-ns	       462.0 op-p50-ns
+BenchmarkKernelConnect/lsm-hit-2      	    3000	       636.9 ns/op	         0 events/op	       574.6 op-mean-ns	       461.0 op-p50-ns
+BenchmarkKernelConnect/lsm-hit-2      	    3000	       589.3 ns/op	         0 events/op	       526.9 op-mean-ns	       464.0 op-p50-ns
+BenchmarkKernelConnect/lsm-hit-2      	    3000	       976.4 ns/op	         0 events/op	       890.8 op-mean-ns	       648.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-2     	    3000	    272154 ns/op	         1.000 events/op	      2185 op-mean-ns	       463.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-2     	    3000	    195369 ns/op	         1.000 events/op	      1369 op-mean-ns	       449.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-2     	    3000	    374807 ns/op	         1.000 events/op	      2175 op-mean-ns	       453.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-2     	    3000	    201096 ns/op	         1.000 events/op	      1556 op-mean-ns	       452.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-2     	    3000	    438402 ns/op	         1.000 events/op	      2569 op-mean-ns	       452.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-2     	    3000	    530514 ns/op	         1.000 events/op	      2668 op-mean-ns	       486.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-2     	    3000	    378569 ns/op	         1.000 events/op	      2166 op-mean-ns	       453.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-2     	    3000	    247979 ns/op	         1.000 events/op	      1474 op-mean-ns	       444.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-2     	    3000	    252642 ns/op	         1.000 events/op	      1460 op-mean-ns	       439.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-2     	    3000	    189045 ns/op	         1.000 events/op	      1277 op-mean-ns	       443.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-nowait-2         	    3000	      6387 ns/op	         0.9484 events/op	      6326 op-mean-ns	       991.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-nowait-2         	    3000	      4250 ns/op	         0.9603 events/op	      4172 op-mean-ns	       506.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-nowait-2         	    3000	      3993 ns/op	         0.8607 events/op	      3897 op-mean-ns	      4655 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-nowait-2         	    3000	      2838 ns/op	         0.9374 events/op	      2790 op-mean-ns	       598.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-nowait-2         	    3000	      2180 ns/op	         1.022 events/op	      2134 op-mean-ns	       506.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-nowait-2         	    3000	      3361 ns/op	         0.9577 events/op	      3274 op-mean-ns	      4893 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-nowait-2         	    3000	      2133 ns/op	         0.9837 events/op	      2075 op-mean-ns	       574.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-nowait-2         	    3000	      2697 ns/op	         0.9637 events/op	      2648 op-mean-ns	       569.0 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-nowait-2         	    3000	      2166 ns/op	         0.9927 events/op	      2083 op-mean-ns	      1170 op-p50-ns
+BenchmarkKernelConnect/lsm-miss-nowait-2         	    3000	      2183 ns/op	         0.9627 events/op	      2137 op-mean-ns	       500.0 op-p50-ns
+BenchmarkKernelConnect/progstats-hit-2           	    3000	       444.3 ns/op	         0 events/op	       399.2 op-mean-ns	       367.0 op-p50-ns	        57.17 prog-ns
+BenchmarkKernelConnect/progstats-hit-2           	    3000	       876.7 ns/op	         0 events/op	       783.5 op-mean-ns	       370.0 op-p50-ns	        87.34 prog-ns
+BenchmarkKernelConnect/progstats-hit-2           	    3000	       434.8 ns/op	         0 events/op	       388.7 op-mean-ns	       363.0 op-p50-ns	        77.33 prog-ns
+BenchmarkKernelConnect/progstats-hit-2           	    3000	       440.8 ns/op	         0 events/op	       395.4 op-mean-ns	       366.0 op-p50-ns	        72.34 prog-ns
+BenchmarkKernelConnect/progstats-hit-2           	    3000	       445.7 ns/op	         0 events/op	       400.4 op-mean-ns	       365.0 op-p50-ns	        69.57 prog-ns
+BenchmarkKernelConnect/progstats-hit-2           	    3000	       450.9 ns/op	         0 events/op	       406.0 op-mean-ns	       365.0 op-p50-ns	        67.73 prog-ns
+BenchmarkKernelConnect/progstats-hit-2           	    3000	       527.1 ns/op	         0 events/op	       479.9 op-mean-ns	       364.0 op-p50-ns	        66.88 prog-ns
+BenchmarkKernelConnect/progstats-hit-2           	    3000	       523.7 ns/op	         0 events/op	       475.2 op-mean-ns	       366.0 op-p50-ns	        67.62 prog-ns
+BenchmarkKernelConnect/progstats-hit-2           	    3000	       472.3 ns/op	         0 events/op	       421.7 op-mean-ns	       366.0 op-p50-ns	        66.47 prog-ns
+BenchmarkKernelConnect/progstats-hit-2           	    3000	       433.0 ns/op	         0 events/op	       389.0 op-mean-ns	       367.0 op-p50-ns	        66.05 prog-ns
+BenchmarkKernelConnect/progstats-miss-2          	    3000	    263778 ns/op	         1.000 events/op	      1618 op-mean-ns	       482.0 op-p50-ns	       441.4 prog-ns
+BenchmarkKernelConnect/progstats-miss-2          	    3000	    230628 ns/op	         1.000 events/op	      1469 op-mean-ns	       484.0 op-p50-ns	       429.6 prog-ns
+BenchmarkKernelConnect/progstats-miss-2          	    3000	    132179 ns/op	         1.000 events/op	      1015 op-mean-ns	       481.0 op-p50-ns	       384.3 prog-ns
+BenchmarkKernelConnect/progstats-miss-2          	    3000	    535766 ns/op	         1.000 events/op	      3703 op-mean-ns	       498.0 op-p50-ns	       549.9 prog-ns
+BenchmarkKernelConnect/progstats-miss-2          	    3000	    465727 ns/op	         0.9997 events/op	      2616 op-mean-ns	       507.0 op-p50-ns	       581.1 prog-ns
+BenchmarkKernelConnect/progstats-miss-2          	    3000	    532835 ns/op	         1.000 events/op	      3872 op-mean-ns	       860.0 op-p50-ns	       635.2 prog-ns
+BenchmarkKernelConnect/progstats-miss-2          	    3000	    442191 ns/op	         1.000 events/op	      2991 op-mean-ns	       695.0 op-p50-ns	       658.8 prog-ns
+BenchmarkKernelConnect/progstats-miss-2          	    3000	    393288 ns/op	         1.000 events/op	      3242 op-mean-ns	       754.0 op-p50-ns	       675.7 prog-ns
+BenchmarkKernelConnect/progstats-miss-2          	    3000	    295801 ns/op	         1.000 events/op	      2307 op-mean-ns	       756.0 op-p50-ns	       677.9 prog-ns
+BenchmarkKernelConnect/progstats-miss-2          	    3000	    302752 ns/op	         1.000 events/op	      2485 op-mean-ns	       761.0 op-p50-ns	       673.5 prog-ns
+BenchmarkKernelConnect/lsm-miss+tp-2             	    3000	   4276293 ns/op	         1.000 events/op	     77276 op-mean-ns	     49870 op-p50-ns
+BenchmarkKernelConnect/lsm-miss+tp-2             	    3000	   4284214 ns/op	         1.000 events/op	     73897 op-mean-ns	     42548 op-p50-ns
+BenchmarkKernelConnect/lsm-miss+tp-2             	    3000	   4347254 ns/op	         1.000 events/op	     73761 op-mean-ns	     30638 op-p50-ns
+BenchmarkKernelConnect/lsm-miss+tp-2             	    3000	   4330853 ns/op	         1.000 events/op	     66900 op-mean-ns	     29955 op-p50-ns
+BenchmarkKernelConnect/lsm-miss+tp-2             	    3000	   4305204 ns/op	         1.000 events/op	     69890 op-mean-ns	     29136 op-p50-ns
+BenchmarkKernelConnect/lsm-miss+tp-2             	    3000	   4338746 ns/op	         1.000 events/op	     65173 op-mean-ns	     30389 op-p50-ns
+BenchmarkKernelConnect/lsm-miss+tp-2             	    3000	   4291124 ns/op	         1.000 events/op	     67242 op-mean-ns	     28471 op-p50-ns
+BenchmarkKernelConnect/lsm-miss+tp-2             	    3000	   4257350 ns/op	         1.000 events/op	     62204 op-mean-ns	     27168 op-p50-ns
+BenchmarkKernelConnect/lsm-miss+tp-2             	    3000	   4252611 ns/op	         1.000 events/op	     65797 op-mean-ns	     28804 op-p50-ns
+BenchmarkKernelConnect/lsm-miss+tp-2             	    3000	   4305384 ns/op	         1.000 events/op	     65121 op-mean-ns	     29356 op-p50-ns

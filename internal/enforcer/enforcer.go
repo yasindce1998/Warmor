@@ -61,6 +61,11 @@ type Options struct {
 	// (log, count and stream matches) or "deny" (also terminate the process).
 	EscapeDetect string
 
+	// LSMRingBufferSize (bytes, 0 = default) and OnEventLoss ("log" or
+	// "deny") configure the kernel event ring; see platform.Config.
+	LSMRingBufferSize uint32
+	OnEventLoss       string
+
 	// Streaming pipeline configuration
 	StreamSinks []streaming.Sink
 	Labels      map[string]string
@@ -204,6 +209,9 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		IntegrityMode:    opts.IntegrityMode,
 		IntegrityDigests: opts.IntegrityDigests,
 		UnixWatch:        unixWatch,
+
+		LSMRingBufferSize: opts.LSMRingBufferSize,
+		OnEventLoss:       opts.OnEventLoss,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize platform: %w", err)

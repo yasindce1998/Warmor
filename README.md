@@ -113,7 +113,7 @@ no Rust crate under `policies/` does yet.
 | Memory (RSS, in-process harness) | 60–104 MB declared; 105–128 MB undeclared | <50 MB (not met) |
 | CPU at 10k events/s | 11% of one core declared; 83% undeclared (fixture); the Rust crate fell short of 10k (9.2k achieved) | <5% |
 | Kernel fast path (BPF program, policy_map hit) | 0.11 µs connect, 0.34 µs exec | <1 µs |
-| Kernel, event sent to userspace (every miss, every `open()`) | about +13–20 µs per event, mostly reader wake-up | none set |
+| Kernel, event sent to userspace (every miss, every `open()`) | 0.4–1.6 µs per event; delivered in batches, up to 5 ms later | none set |
 
 ### Policy Engine
 

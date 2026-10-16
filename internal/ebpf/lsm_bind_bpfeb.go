@@ -13,6 +13,11 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type lsm_bindLsmConfig struct {
+	_      structs.HostLayout
+	OnLoss uint32
+}
+
 type lsm_bindPolicyKey struct {
 	_         structs.HostLayout
 	CgroupId  uint64
@@ -33,12 +38,15 @@ type lsm_bindPolicyValue struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	lsm_bindMapLsmCfg            = "lsm_cfg"
 	lsm_bindMapLsmCgroupFilter   = "lsm_cgroup_filter"
+	lsm_bindMapLsmDrops          = "lsm_drops"
 	lsm_bindMapLsmEnforce        = "lsm_enforce"
 	lsm_bindMapLsmEvents         = "lsm_events"
 	lsm_bindMapPolicyMap         = "policy_map"
 	lsm_bindMapUnixWatch         = "unix_watch"
 	lsm_bindProgLsmBindCheck     = "lsm_bind_check"
+	lsm_bindVarUnusedLsmConfig   = "unused_lsm_config"
 	lsm_bindVarUnusedPolicyKey   = "unused_policy_key"
 	lsm_bindVarUnusedPolicyValue = "unused_policy_value"
 	lsm_bindVarUnusedWarmorEvent = "unused_warmor_event"
@@ -93,7 +101,9 @@ type lsm_bindProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type lsm_bindMapSpecs struct {
+	LsmCfg          *ebpf.MapSpec `ebpf:"lsm_cfg"`
 	LsmCgroupFilter *ebpf.MapSpec `ebpf:"lsm_cgroup_filter"`
+	LsmDrops        *ebpf.MapSpec `ebpf:"lsm_drops"`
 	LsmEnforce      *ebpf.MapSpec `ebpf:"lsm_enforce"`
 	LsmEvents       *ebpf.MapSpec `ebpf:"lsm_events"`
 	PolicyMap       *ebpf.MapSpec `ebpf:"policy_map"`
@@ -104,6 +114,7 @@ type lsm_bindMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type lsm_bindVariableSpecs struct {
+	UnusedLsmConfig   *ebpf.VariableSpec `ebpf:"unused_lsm_config"`
 	UnusedPolicyKey   *ebpf.VariableSpec `ebpf:"unused_policy_key"`
 	UnusedPolicyValue *ebpf.VariableSpec `ebpf:"unused_policy_value"`
 	UnusedWarmorEvent *ebpf.VariableSpec `ebpf:"unused_warmor_event"`
@@ -129,7 +140,9 @@ func (o *lsm_bindObjects) Close() error {
 //
 // It can be passed to loadLsm_bindObjects or ebpf.CollectionSpec.LoadAndAssign.
 type lsm_bindMaps struct {
+	LsmCfg          *ebpf.Map `ebpf:"lsm_cfg"`
 	LsmCgroupFilter *ebpf.Map `ebpf:"lsm_cgroup_filter"`
+	LsmDrops        *ebpf.Map `ebpf:"lsm_drops"`
 	LsmEnforce      *ebpf.Map `ebpf:"lsm_enforce"`
 	LsmEvents       *ebpf.Map `ebpf:"lsm_events"`
 	PolicyMap       *ebpf.Map `ebpf:"policy_map"`
@@ -138,7 +151,9 @@ type lsm_bindMaps struct {
 
 func (m *lsm_bindMaps) Close() error {
 	return _Lsm_bindClose(
+		m.LsmCfg,
 		m.LsmCgroupFilter,
+		m.LsmDrops,
 		m.LsmEnforce,
 		m.LsmEvents,
 		m.PolicyMap,
@@ -150,6 +165,7 @@ func (m *lsm_bindMaps) Close() error {
 //
 // It can be passed to loadLsm_bindObjects or ebpf.CollectionSpec.LoadAndAssign.
 type lsm_bindVariables struct {
+	UnusedLsmConfig   *ebpf.Variable `ebpf:"unused_lsm_config"`
 	UnusedPolicyKey   *ebpf.Variable `ebpf:"unused_policy_key"`
 	UnusedPolicyValue *ebpf.Variable `ebpf:"unused_policy_value"`
 	UnusedWarmorEvent *ebpf.Variable `ebpf:"unused_warmor_event"`
