@@ -64,6 +64,12 @@ type Config struct {
 	// UnixWatch lists unix socket paths whose connects the kernel reports
 	// (Linux LSM only); used for container runtime socket access detection.
 	UnixWatch []string
+	// LSMRingBufferSize is the LSM event ring size in bytes (0 = default).
+	LSMRingBufferSize uint32
+	// OnEventLoss is "log" (default) or "deny": what the kernel does with an
+	// unknown exec/connect whose event can't be queued because the ring is
+	// full. Linux LSM only.
+	OnEventLoss string
 }
 
 // Current returns the platform for the current OS with default config.

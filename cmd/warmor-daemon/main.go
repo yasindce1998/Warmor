@@ -33,6 +33,8 @@ var (
 	evalTimeout   = flag.Duration("eval-timeout", 50*time.Millisecond, "Deadline for one WASM policy evaluation; a policy exceeding it is denied (fail closed)")
 
 	integrityDB   = flag.String("integrity-db", "", "Integrity database from warmor-integrity-scan; its SHA-256 digests become the kernel exec allowlist")
+	lsmRingSize   = flag.String("lsm-ringbuf-size", "4MiB", "LSM event ring buffer size (power of two, e.g. 1MiB, 4MiB, 16MiB); a larger ring absorbs bigger bursts before events are dropped")
+	onEventLoss   = flag.String("on-event-loss", "log", "When the LSM event ring is full: log (allow the operation, count the drop) or deny (refuse unknown exec/connect in enforce mode)")
 	escapeDetect  = flag.String("escape-detect", "off", "Container escape detection: off, alert (log, count and stream matches) or deny (also terminate the process)")
 	integrityMode = flag.String("integrity-mode", "off", "Exec integrity check: off, audit (report unlisted binaries) or enforce (refuse them in-kernel)")
 
@@ -186,6 +188,14 @@ func runDaemon(stop <-chan struct{}) {
 		log.Printf("Policy Server: %s", *serverURL)
 	}
 
+	ringSize, err := parseByteSize(*lsmRingSize)
+	if err != nil {
+		log.Fatalf("❌ --lsm-ringbuf-size: %v", err)
+	}
+	if *onEventLoss != "log" && *onEventLoss != "deny" {
+		log.Fatalf("❌ invalid --on-event-loss %q (valid: log, deny)", *onEventLoss)
+	}
+
 	digests, err := loadIntegrityDigests(*integrityMode, *integrityDB)
 	if err != nil {
 		log.Fatalf("❌ %v", err)
@@ -208,6 +218,9 @@ func runDaemon(stop <-chan struct{}) {
 		IntegrityMode:    *integrityMode,
 		IntegrityDigests: digests,
 		EscapeDetect:     *escapeDetect,
+
+		LSMRingBufferSize: ringSize,
+		OnEventLoss:       *onEventLoss,
 	})
 	if err != nil {
 		log.Fatalf("❌ Failed to create enforcer: %v", err)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/yasindce1998/warmor/internal/ebpf"
 	"github.com/yasindce1998/warmor/internal/metrics"
@@ -25,6 +26,9 @@ type LinuxConfig struct {
 	IntegrityMode    string
 	IntegrityDigests []string
 	UnixWatch        []string
+
+	LSMRingBufferSize uint32
+	OnEventLoss       string
 }
 
 type LinuxPlatform struct {
@@ -87,7 +91,15 @@ func (p *LinuxPlatform) Load(ctx context.Context) error {
 		p.logSecurityPosture()
 		return nil
 	}
-	lsmLoader, err := ebpf.LoadLSM()
+	onLoss, err := ebpf.ParseOnEventLoss(p.config.OnEventLoss)
+	if err != nil {
+		loader.Close()
+		return err
+	}
+	lsmLoader, err := ebpf.LoadLSMWithOptions(ebpf.LSMOptions{
+		RingBufferSize: p.config.LSMRingBufferSize,
+		OnEventLoss:    onLoss,
+	})
 	if err != nil {
 		if p.config.RequireLSM {
 			loader.Close()
@@ -199,7 +211,7 @@ func (p *LinuxPlatform) Start(ctx context.Context, eventChan chan<- *api.Event) 
 
 	goroutines := 3
 	if p.lsmEnabled {
-		goroutines = 4
+		goroutines = 5
 	}
 	p.wg.Add(goroutines)
 	go p.monitorProcessEvents(ctx)
@@ -208,6 +220,7 @@ func (p *LinuxPlatform) Start(ctx context.Context, eventChan chan<- *api.Event) 
 
 	if p.lsmEnabled {
 		go p.monitorLSMEvents(ctx)
+		go p.monitorEventDrops(ctx)
 	}
 
 	return nil
@@ -463,6 +476,52 @@ func (p *LinuxPlatform) monitorLSMEvents(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// dropPollInterval is how often the kernel drop counters are published.
+const dropPollInterval = 5 * time.Second
+
+// monitorEventDrops publishes the kernel's per-hook event drop counters (the
+// ring buffer was full) as warmor_lsm_events_dropped_total and logs when new
+// drops appear: a dropped miss is an operation nobody evaluated.
+func (p *LinuxPlatform) monitorEventDrops(ctx context.Context) {
+	defer p.wg.Done()
+	seen := make(map[string]uint64)
+	tick := time.NewTicker(dropPollInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.stopChan:
+			return
+		case <-tick.C:
+		}
+		drops, err := p.lsmLoader.EventDrops()
+		if err != nil {
+			continue
+		}
+		var fresh uint64
+		for hook, total := range drops {
+			if d := total - seen[hook]; d > 0 {
+				metrics.RecordLSMEventsDropped(hook, d)
+				fresh += d
+			}
+			seen[hook] = total
+		}
+		if fresh > 0 {
+			fmt.Printf("WARNING: %d LSM events dropped in the last %s (ring buffer full); "+
+				"those operations were %s without evaluation. See warmor_lsm_events_dropped_total.\n",
+				fresh, dropPollInterval, p.lossVerb())
+		}
+	}
+}
+
+func (p *LinuxPlatform) lossVerb() string {
+	if p.config.OnEventLoss == "deny" && p.config.LSMEnforce {
+		return "refused (exec/connect) or allowed (other hooks)"
+	}
+	return "allowed"
 }
 
 // Stop signals the monitors to exit and waits for them. It is idempotent.

@@ -34,6 +34,7 @@ func TestDeployReferencesOnlyExportedMetrics(t *testing.T) {
 	SetMapEntries("policy_map", 1)
 	SetEBPFLoaderStatus(true)
 	RecordPolicyMapSync(SyncSynced)
+	RecordLSMEventsDropped("exec", 0)
 
 	families, err := prometheus.DefaultGatherer.Gather()
 	if err != nil {

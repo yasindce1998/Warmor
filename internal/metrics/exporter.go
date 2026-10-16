@@ -155,6 +155,23 @@ func status(err error) string {
 	return StatusSuccess
 }
 
+// LSMEventsDropped counts LSM events the kernel could not queue because the
+// ring buffer was full. Each is an operation userspace never evaluated.
+var LSMEventsDropped = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "warmor",
+		Subsystem: "lsm",
+		Name:      "events_dropped_total",
+		Help:      "LSM events dropped because the kernel ring buffer was full (operations never evaluated), by hook.",
+	},
+	[]string{"hook"},
+)
+
+// RecordLSMEventsDropped adds n kernel-reported drops for hook.
+func RecordLSMEventsDropped(hook string, n uint64) {
+	LSMEventsDropped.WithLabelValues(hook).Add(float64(n))
+}
+
 // RecordLSMDecision counts one kernel-reported LSM hook outcome.
 func RecordLSMDecision(hook, action string) {
 	HookDecisions.WithLabelValues(hook, action).Inc()
@@ -261,6 +278,7 @@ func init() {
 		MapEntries,
 		EBPFLoaderStatus,
 		PolicyMapSyncs,
+		LSMEventsDropped,
 	)
 }
 
