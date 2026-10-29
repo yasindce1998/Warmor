@@ -1,6 +1,6 @@
 # Warmor Feature Status
 
-**Applies to:** current `main` (audited 2026-10-14)
+**Applies to:** current `main` (audited 2026-10-14, re-verified 2026-10-29)
 
 This is the reference for what Warmor ships today. If another document
 disagrees with this page, this page is correct and the other document is a bug.
@@ -26,14 +26,14 @@ updates this page when it merges.
 | Tracepoint monitoring (execve, openat, connect) | Shipped | `warmor-daemon` loads the tracepoint programs and streams events to userspace | None that change correctness |
 | LSM-BPF hooks (`bprm_check_security`, `file_open`, `socket_connect`, `socket_bind`, `socket_listen`, `ptrace_access_check`, `sb_mount`) | Partial | All 7 attach when `CONFIG_BPF_LSM=y` and `bpf` is in the active LSM list. CI tests the attach in a VM on longterm/stable kernels. With `--lsm-enforce`, a hook returns `-EPERM` **only when the kernel policy map already has a deny entry** for that key | On a map miss the hook **allows** the operation and emits an event. The policy map has no default-deny mode and is not preloaded from the compiled policy. If the event ring is full the event is dropped and counted (`warmor_lsm_events_dropped_total`); with `--on-event-loss=deny` an unknown exec/connect is then refused. |
 | LSM event delivery (`--lsm-ringbuf-size`, `--on-event-loss`) | Shipped | 4 MiB ring by default; the reader is woken in batches. Back-to-back connects and opens deliver every event in VM benchmarks. Every dropped event is counted per hook, logged and alerted. | Events reach userspace up to 5 ms after the syscall. A sustained flood beyond the reader's speed still drops events (counted); `file_open` sends an event for every open on the host. |
-| Kernel policy map population (WASM to BPF feedback) | Partial | After the WASM policy decides, the daemon writes the decision into the kernel map for **exec (exact path)** and **connect (remote address and port)** events | `file_open`, `socket_bind`, `socket_listen`, `ptrace_access_check` and `sb_mount` never receive kernel entries, so **they never block in the kernel**. Only tracepoint-origin events are synced; LSM-origin events are not. The map is a plain HASH (65536 entries, no eviction) and sync errors are discarded. The map is not cleared on policy reload. The key is cgroup + path or endpoint, so a decision that depended on uid or args applies to every caller. |
+| Kernel policy map population (WASM to BPF feedback) | Partial | After the WASM policy decides, the daemon writes the decision into the kernel map for **exec (exact path)** and **connect (remote address and port)** events | `file_open`, `socket_bind`, `socket_listen`, `ptrace_access_check` and `sb_mount` never receive kernel entries, so **they never block in the kernel**. Only tracepoint-origin events are synced; LSM-origin events are not. The map is an LRU_HASH (65536 entries) and sync errors are discarded. The map is not cleared on policy reload. The key is cgroup + path or endpoint, so a decision that depended on uid or args applies to every caller. |
 | Userspace deny (all event types) | Shipped | When WASM returns DENY and `--audit` is not set, the daemon sends `SIGKILL` to the process | This happens **after** the operation has started or completed (detect-then-kill), not before. Kernel-denied LSM events are re-evaluated and can be acted on twice. |
 | `--audit` mode | Shipped | Deny decisions are logged, nothing is killed, and kernel entries are written as audit-only | None |
 | `--lsm-enforce`, `--require-lsm`, `--no-lsm` | Shipped | Turn kernel blocking on, fail closed if LSM can't load, or skip LSM | Without `--lsm-enforce` the LSM programs run in audit-only mode |
 | `sendto` / `recvfrom` hooks | Missing | None | No such hooks exist |
-| Decision cache (userspace) | Partial | 10,000 entries with a 5-minute TTL | The key includes the PID, so repeat events from new processes always miss. Eviction is O(n) oldest-expiry, not LRU. |
-| Hot reload (SIGHUP) | Partial | The WASM module is swapped without a restart | The kernel map keeps entries from the old policy. Reloading a `.yaml` loads a stale sibling `.wasm` if one exists. |
-| Fail-closed on WASM error | Partial | An evaluation error is treated as DENY | There is no WASM memory or time limit, so a looping policy hangs the event loop |
+| Decision cache (userspace) | Partial | 10,000 entries, 5-minute TTL, true O(1) LRU. For policies that declare their fields-read (every compiled YAML policy), the PID is omitted from the key for event types that don't read it; temporal decisions are never cached | Undeclared policies (every Rust crate under `policies/`) always key on PID, so short-lived processes always miss |
+| Hot reload (SIGHUP) | Partial | The WASM module is swapped without a restart. A reloaded `.yaml` is always recompiled from its own content (cached by content hash); a sibling `.wasm` never shadows it | The kernel map keeps entries from the old policy |
+| Fail-closed on WASM error | Shipped | An evaluation error, an exceeded `--eval-timeout` (default 50 ms) or the 16 MiB per-instance memory cap is treated as DENY | None known |
 | `--log-level` | Missing (flag ignored) | The flag is accepted | The enforcer hardcodes `info` |
 | Process lineage | Partial | A tracker and enricher exist and run | Events carry no PPID (the tracker is fed `ppid=0`), so ancestry is empty |
 | Cgroup filter (`--cgroup-filter`, `auto`) | Shipped | Restricts the LSM programs to the given cgroups | None |
@@ -62,8 +62,8 @@ updates this page when it merges.
 |---------|--------|------------------|------------|
 | Event sinks `stdout`, `file:<path>` (with rotation), `webhook:<url>` | Shipped | `--event-sink`, `--event-file-max`, `--webhook-header`, `--event-labels` | None |
 | SIEM / CEF syslog sink | Library-only | Sink code exists | No `--event-sink syslog:` spec reaches it |
-| Prometheus `/metrics` and `/health` on `--metrics-port` | Partial | `warmor_events_total`, `warmor_cache_*`, `warmor_evaluation_latency_microseconds`, `warmor_policy_info`, `warmor_events_processing_errors_total`, `warmor_audit_denied_total` | The second metric set in `internal/metrics/exporter.go` (LSM decisions, policy loads, heartbeats) is registered but never updated, so Grafana panels built on it are empty. The alert rule for eBPF loader failure references a metric that does not exist. |
-| Grafana dashboards / docker-compose monitoring stack | Partial | Dashboards and alert rules are provisioned | Some panels and alerts depend on the never-updated metrics above |
+| Prometheus `/metrics` and `/health` on `--metrics-port` | Shipped | `warmor_events_total`, `warmor_cache_*`, `warmor_evaluation_latency_microseconds`, `warmor_policy_info`, `warmor_events_processing_errors_total`, `warmor_audit_denied_total`, plus the LSM-decision, policy-load, heartbeat, agent, WASM-exec and loader-status metrics | None known |
+| Grafana dashboards / docker-compose monitoring stack | Shipped | Dashboards and alert rules are provisioned and reference updated metrics | None known |
 | SSE web dashboard (`/dashboard`, `warmor-dashboard`) | Library-only | `internal/dashboard` exists | There is no `warmor-dashboard` binary and no route serves it |
 | Windows Event Viewer | Partial | Service lifecycle messages (`warmor-daemon service install`) | Policy events are not written to Event Viewer |
 
@@ -74,7 +74,7 @@ updates this page when it merges.
 | `warmor-server` REST API | Shipped | `/api/v1/register`, `/api/v1/heartbeat`, `/api/v1/policy`, `/api/v1/policy/wasm` (agents). `/api/v1/admin/policies[/{id}]`, `/api/v1/admin/agents`, `/api/v1/admin/rollouts[/{id}]` (admin JWT). | None |
 | mTLS, JWT (HMAC and EdDSA) | Shipped | `warmor-server --ca-cert/--tls-cert/--tls-key/--jwt-secret`. The daemon uses `--server/--tls-ca/--tls-cert/--tls-key/--server-token`. | None |
 | Daemon policy download from server | Shipped | `--server` with `--poll-interval`; the downloaded WASM replaces `--policy` | With `--verify-key`, downloads are verified in memory before being written; a bad signature keeps the old policy |
-| Percentage rollouts (A/B, consistent hashing) | Shipped | Create, ramp, complete and abort through the admin API or `warmorctl` | Ramping is manual |
+| Percentage rollouts (A/B, consistent hashing) | Shipped | Create, ramp, complete and abort through the admin API (`warmorctl`'s Rollouts tab is view-only) | Ramping is manual |
 | Canary auto-rollback (deny-rate analyzer) | Library-only | `CanaryAnalyzer` exists with tests | Nothing feeds it decisions and nothing calls it. **There is no automatic rollback.** |
 | Drift detection (z-score fleet fingerprinting) | Library-only | `internal/drift` | Not wired into server or agents |
 | `warmorctl` TUI | Shipped | Tabs for dashboard, agents, policies, rollouts and certs. The Certs tab generates a CA, certs and a signing key (keys `g` and `s`). | There is no non-interactive `warmorctl certs generate` or `warmorctl agents list` subcommand |

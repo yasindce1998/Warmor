@@ -46,8 +46,10 @@ A userspace `DENY` (without `--audit`) is enforced by sending `SIGKILL` to the
 process, after the event was observed. This applies in **every** mode below
 except `--audit`, including tracepoint-only mode.
 
-There is no WASM memory or time limit on `main`. A policy that loops forever
-blocks the event loop instead of failing closed.
+WASM evaluation is resource-bounded: each instance is capped at 16 MiB of
+linear memory, and each evaluation has a deadline (`--eval-timeout`, default
+50 ms). A policy that exceeds either **fails closed** — the decision becomes
+`DENY` — rather than hanging the event loop.
 
 ## Enforcement modes
 

@@ -22,15 +22,16 @@ sudo apt-get install -y -qq \
     curl \
     git
 
-# Install Go
-echo "[3/6] Installing Go 1.21.5..."
+# Install Go (the repo requires 1.26+, see go.mod)
+GO_VERSION="1.26.2"
+echo "[3/6] Installing Go ${GO_VERSION}..."
 if ! command -v go &> /dev/null; then
     cd /tmp
-    wget -q https://go.dev/dl/go1.21.5.linux-amd64.tar.gz
-    sudo tar -C /usr/local -xzf go1.21.5.linux-amd64.tar.gz
+    wget -q "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+    sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
     echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
     export PATH=$PATH:/usr/local/go/bin
-    rm go1.21.5.linux-amd64.tar.gz
+    rm "go${GO_VERSION}.linux-amd64.tar.gz"
 else
     echo "Go already installed: $(go version)"
 fi
@@ -51,13 +52,13 @@ echo "[5/6] Verifying installations..."
 echo "  Go: $(go version)"
 echo "  Rust: $(rustc --version)"
 echo "  Clang: $(clang --version | head -n1)"
-echo "  LLVM: $(llvm-config --version)"
+echo "  LLVM: $(llvm-config --version 2>/dev/null || echo 'not found (ok if clang works)')"
 
 # Check kernel version
 echo "[6/6] Checking kernel compatibility..."
 KERNEL_VERSION=$(uname -r | cut -d. -f1,2)
 echo "  Kernel: $(uname -r)"
-if (( $(echo "$KERNEL_VERSION >= 5.8" | bc -l) )); then
+if [ "$(printf '%s\n' 5.8 "$KERNEL_VERSION" | sort -V | head -n1)" = "5.8" ]; then
     echo "  ✅ Kernel version is compatible with eBPF"
 else
     echo "  ⚠️  Kernel version may not support all eBPF features"
@@ -68,9 +69,9 @@ echo "=== Setup Complete ==="
 echo ""
 echo "Next steps:"
 echo "  1. Reload shell: source ~/.bashrc"
-echo "  2. Build eBPF programs: cd bpf && make"
+echo "  2. Build every tool (BPF objects and bindings are committed): go build -o bin/ ./cmd/..."
 echo "  3. Build WASM policies: cd policies/example && cargo build --release --target wasm32-unknown-unknown"
-echo "  4. Build warmor: go build -o warmor cmd/warmor/main.go"
+echo "  4. Rebuild BPF objects and bindings (only after changing bpf/*.c): make build-bpf generate"
 echo "  5. Run tests: go test ./... -v"
 
 

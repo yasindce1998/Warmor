@@ -90,10 +90,12 @@ session := learner.NewSession(learner.Config{
 })
 
 // Attach session.Recorder() to the streaming pipeline as a sink
-pipeline.AddSink(session.Recorder())
+pipeline := streaming.NewPipeline(streaming.PipelineConfig{
+    Sinks: []streaming.Sink{session.Recorder()},
+})
 
 // Block until duration elapses or context is cancelled
-session.Run(ctx)
+_ = session.Run(ctx)
 
 // Retrieve stats and policy
 fmt.Println(session.Stats())

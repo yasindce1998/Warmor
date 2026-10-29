@@ -1,6 +1,6 @@
 # warmor Architecture
 
-**Last Updated:** 2026-10-14
+**Last Updated:** 2026-10-29
 **Status:** Describes current `main`. Phases 1-8 are partially done, and Phase 9 is mostly library-only. See [Feature Status](STATUS.md) for the per-feature reference.
 
 ---
@@ -152,20 +152,21 @@ pub extern "C" fn evaluate_syscall(event_ptr: *const u8, event_len: usize) -> i3
 ```
 
 **Features:**
-- Sandboxed execution in Wazero. A trap cannot crash the daemon, but there is **no memory or time limit yet**, so a looping policy hangs the event loop.
+- Sandboxed execution in Wazero. A trap cannot crash the daemon. Each instance is capped at 16 MiB of linear memory and each evaluation at `--eval-timeout` (default 50 ms); exceeding either fails closed (DENY).
 - Hot reload via SIGHUP
 - Evaluation latency (target <100μs P95): measured P95 32μs for a compiled YAML policy and 55μs for the Rust `advanced` crate on a cache miss ([PERFORMANCE.md](PERFORMANCE.md))
 - Two ABIs: JSON `evaluate_syscall(ptr,len)` and binary `evaluate_event`. If a module exports `evaluate_event`, the host uses the binary ABI.
 
 ### 4. Decision Cache
 
-**Implementation:** map with TTL (5 min). When full, it evicts the entry with the oldest expiry with an O(n) scan. This is not a true LRU.
+**Implementation:** fixed-capacity LRU (`container/list`) with a per-entry TTL (5 min). Get, Put and eviction are O(1); Get refreshes recency.
 
-**Key Format:** `{type}:{pid}:{uid}:{target_hash}`
+**Key Format:** a struct covering every field the host exposes to a policy (type, uid, gid, comm, filename, and the process/file/network sub-event fields). The PID is included only for event types whose policy reads it (see the fields-read declaration); declared policies that don't read the PID omit it, so new processes can hit.
 
-**Performance:**
+**Limits:**
 - 10,000 entry capacity
-- Hit rate has not been measured. The PID in the key means a new process always misses.
+- Decisions that may depend on the wall clock or container age (temporal policies) are never cached.
+- Undeclared policies (every Rust crate under `policies/`) are treated as reading everything, so their keys always include the PID: short-lived processes always miss (0% hit rate in benchmarks).
 
 ### 5. YAML Policy Compiler
 
@@ -211,7 +212,7 @@ default_action: allow
 - Exports: `malloc(size)`, `evaluate_syscall(ptr, len) -> i32`
 - Return values: 0=ALLOW, 1=DENY, 2=LOG
 
-**Runtime compilation:** The daemon also accepts `.yaml`/`.yml` policy files directly and compiles them at load time. That needs `cargo` and the wasm32 target **on the enforcing host**, which the distroless image lacks. If a sibling `.wasm` with the same base name exists, it is loaded instead, even if stale.
+**Runtime compilation:** The daemon also accepts `.yaml`/`.yml` policy files directly and compiles them at load time. That needs `cargo` and the wasm32 target **on the enforcing host**, which the distroless image lacks. The YAML is always compiled from its own content (cached under the WASM cache directory by content hash); a sibling `.wasm` is never substituted for it.
 
 **Temporal rules:** a rule's `temporal:` block is compiled into the same evaluator (the action applies outside the permitted window) and reads the ABI v3 wall clock and container age; see [Temporal Policies](temporal-policies.md).
 
@@ -230,6 +231,7 @@ default_action: allow
 - `warmor_audit_denied_total`
 - `warmor_events_processed_total{event_type}`, `warmor_events_dropped_total` (Windows monitors only; Linux readers block instead of dropping)
 - `warmor_lsm_decisions_total{hook, action="deny|pass"}` (outcomes the kernel reports to userspace)
+- `warmor_lsm_events_dropped_total{hook}` (LSM events dropped when the ring buffer is full)
 - `warmor_policy_map_syncs_total{result="synced|failed|skipped_unmatchable|skipped_unsound|skipped_stale"}`, `warmor_ebpf_map_entries{map_name}`
 - `warmor_ebpf_loader_status` (1 = requested kernel enforcement active, 0 = degraded)
 - `warmor_wasm_exec_duration_seconds{policy_id}`, `warmor_wasm_exec_errors_total{policy_id, kind="timeout|error"}`
@@ -273,7 +275,7 @@ Application → Syscall → eBPF Hook → Ring Buffer → warmor Daemon → WASM
 **Key Features:**
 - Kernel-space monitoring through ring buffers
 - Tracepoints observe only. A deny for a tracepoint event is enforced by `SIGKILL` from userspace.
-- Latency and throughput have not been measured
+- Latency and throughput are measured in [PERFORMANCE.md](PERFORMANCE.md)
 
 **Implementation Files:**
 - `internal/platform/linux.go` - Platform implementation
@@ -282,7 +284,7 @@ Application → Syscall → eBPF Hook → Ring Buffer → warmor Daemon → WASM
 
 **Documentation:** [PLATFORM_LINUX.md](PLATFORM_LINUX.md)
 
-### LSM-BPF Kernel Enforcement (Linux 5.7+)
+### LSM-BPF Kernel Enforcement (Linux 5.7+, 5.8+ recommended — see [BPF Compatibility](BPF_COMPATIBILITY.md))
 
 **Architecture:**
 ```
@@ -294,7 +296,7 @@ Application → Syscall → LSM Hook → Policy Map Lookup
 
 Unlike tracepoint-based monitoring, which observes syscalls after they begin, LSM-BPF hooks are **synchronous**. They run inline in the kernel security path and can return `-EPERM` to block an operation before it completes. They do so **only on a map hit**. A miss is allowed (default-allow) and reported.
 
-**What reaches the map on `main`:** the daemon writes WASM decisions into the map only for **exec** (exact path) and **connect** (endpoint) events, and only for tracepoint-origin events. File (the hook sees only the basename), bind, listen, ptrace and mount entries are never written, so those hooks never block. The map is not preloaded from the compiled policy, not cleared on reload, and has no eviction (HASH, 65536 entries).
+**What reaches the map on `main`:** the daemon writes WASM decisions into the map only for **exec** (exact path) and **connect** (endpoint) events, and only for tracepoint-origin events. File (the hook sees only the basename), bind, listen, ptrace and mount entries are never written, so those hooks never block. The map is not preloaded from the compiled policy and not cleared on reload; it is an LRU_HASH with 65536 entries, so a full map evicts the least recently used decision instead of failing.
 
 **LSM Programs:**
 - `lsm_exec.bpf.c` — `bprm_check_security` (can block exec on a map hit)
@@ -542,7 +544,8 @@ YAML policy); "undeclared" ones do not.
 - Memory-safe execution
 
 **Resource Limits:**
-- None on `main`. There is no memory-page limit or per-evaluation deadline, so an infinite loop in a policy hangs the event loop. Adding limits is in progress.
+- 16 MiB per-instance linear memory cap (`internal/wasm/runtime.go`)
+- Per-evaluation deadline, `--eval-timeout` (default 50 ms). A policy that exceeds either fails closed: the decision becomes DENY (`internal/wasm/context.go`)
 
 ### Attack Surface
 
@@ -630,11 +633,10 @@ YAML policy); "undeclared" ones do not.
 │                                                              │
 │   warmor-daemon ──(metrics:9090)──▶ Prometheus ──▶ Grafana  │
 │                                                              │
-│   Alert rules ship in deploy/prometheus and the Helm chart.  │
-│   Rules on warmor_events_total work. Rules on LSM-decision,  │
-│   heartbeat and policy-load metrics never fire (the metrics  │
-│   are not updated), and warmor_ebpf_loader_status does not   │
-│   exist.                                                     │
+│   Alert rules ship in deploy/prometheus and the Helm chart,  │
+│   and reference metrics the daemon updates (events, LSM      │
+│   decisions, policy loads, heartbeats, WASM errors, drops    │
+│   and warmor_ebpf_loader_status).                            │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -723,5 +725,5 @@ See [OVERVIEW.md](OVERVIEW.md) for the phase-by-phase summary and
 
 ---
 
-**Last Updated:** 2026-10-14  
-**Status:** Phase 6 In Progress (LSM-BPF Kernel Enforcement)
+**Last Updated:** 2026-10-29  
+**Status:** Describes current `main`; see [Feature Status](STATUS.md)

@@ -80,7 +80,7 @@ The daemon prints a `Security posture:` line at startup that tells you whether L
 
 1. **Kernel hooks** see operations (LSM-BPF and tracepoints on Linux; ETW, plus experimental eBPF-for-Windows, on Windows; ESF on macOS)
 2. **BPF policy map** answers operations that already have an entry, in the kernel. A miss is allowed and reported to userspace.
-3. **WASM sandbox** evaluates each new event in an isolated module. It has no memory or time limit yet, so a looping policy can stall the event loop.
+3. **WASM sandbox** evaluates each new event in an isolated module, capped at 16 MiB of memory and a 50 ms evaluation deadline (`--eval-timeout`); exceeding either fails closed (DENY).
 4. **Decisions feed back** into the kernel map, for exec and connect only on `main`. A userspace DENY kills the offending process.
 
 ---
@@ -176,7 +176,7 @@ Z-score outlier detection over behavioural fingerprints of containers running th
 
 ### Canary Rollout — Partial (manual ramp; auto-rollback is library only)
 
-`warmor-server` supports percentage-based rollouts with consistent hashing: create, ramp, complete and abort through the admin API or `warmorctl`. The deny-rate `CanaryAnalyzer` that would trigger automatic rollback exists but is **not connected**. Nothing feeds it decisions, so there is **no automatic rollback** on `main`.
+`warmor-server` supports percentage-based rollouts with consistent hashing: create, ramp, complete and abort through the admin API (`warmorctl`'s Rollouts tab is view-only). The deny-rate `CanaryAnalyzer` that would trigger automatic rollback exists but is **not connected**. Nothing feeds it decisions, so there is **no automatic rollback** on `main`.
 
 ### Temporal Policies — Shipped (YAML policies)
 
@@ -221,7 +221,7 @@ There is no `warmor-dashboard` binary on `main`. The SSE dashboard in `internal/
 
 10 example Rust policy crates covering threat scenarios.
 
-All 10 crates build for `wasm32-unknown-unknown` and use the JSON ABI (`evaluate_syscall`). CI builds every crate and runs each through the real WASM host (`TestPolicyCrates`): benign events must be allowed and the crate's own attack examples denied. The host does not send `args`, `parent_comm`, `cgroup_id` or time context yet, so rules on those fields never fire.
+All 10 crates build for `wasm32-unknown-unknown` and use the JSON ABI (`evaluate_syscall`). CI builds every crate and runs each through the real WASM host (`TestPolicyCrates`): benign events must be allowed and the crate's own attack examples denied. The host does not send `args`, `parent_comm` or `cgroup_id`, so rules on those fields never fire; time context is sent only to modules declaring ABI version 3 (`temporal-access`).
 
 | Policy | Threat Domain | Pattern |
 |--------|--------------|---------|
@@ -261,7 +261,7 @@ See [Rust Policy Examples](docs/rust-policy-examples.md) for full documentation 
 >
 > See [Feature Status](docs/STATUS.md#5-container-runtime-and-kubernetes).
 
-The chart (`deploy/helm/warmor`) contains a DaemonSet with BPF capabilities, RBAC, a ServiceMonitor, Grafana dashboards and alert rules. Some of the dashboards and alerts depend on metrics that the daemon does not update yet.
+The chart (`deploy/helm/warmor`) contains a DaemonSet with BPF capabilities, RBAC, a ServiceMonitor, Grafana dashboards and alert rules.
 
 ---
 
@@ -283,7 +283,7 @@ internal/                                      (status on main)
   compiler/       — YAML → Rust → WASM compilation pipeline              Shipped
   platform/       — Linux eBPF, Windows ETW / eBPF-for-Windows, macOS    Linux shipped; Windows/macOS experimental
   crypto/         — mTLS (Ed25519), JWT (HMAC+EdDSA), bundle signing     Shipped
-  metrics/        — Prometheus collector and exporter                    Partial (exporter metrics never updated)
+  metrics/        — Prometheus collector and exporter                    Shipped
   logging/        — Structured JSON (zerolog)                            Shipped
   policygen/ sbompolicy/ policydiff/ policymerge/ policybundle/          Shipped (CLI tools)
   container/      — Cgroup→container resolver, container start times     Shipped (escape, temporal); containerd monitor library-only

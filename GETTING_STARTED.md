@@ -17,11 +17,11 @@ By the end of this guide, you'll have:
 
 ## Before You Begin
 
-You need a **Linux machine** (or VM/WSL2) with kernel 5.10 or newer and BTF enabled. Check with:
+You need a **Linux machine** (or VM/WSL2) with kernel 5.8 or newer (5.7 minimum; see [BPF Compatibility](docs/BPF_COMPATIBILITY.md)) and BTF enabled. Check with:
 
 ```bash
 uname -r
-# Should show 5.10+ (e.g., 6.1.0, 5.15.0)
+# Should show 5.8+ (e.g., 6.1.0, 5.15.0)
 ```
 
 > **Don't have Linux?** Use WSL2 on Windows, a VM, or a cloud instance (Ubuntu 22.04+ works great).
@@ -305,7 +305,7 @@ eBPF requires root. Always run `warmor-daemon` with `sudo`.
 ### "Failed to load eBPF objects"
 
 ```bash
-# Check kernel version (need 5.10+)
+# Check kernel version (need 5.8+)
 uname -r
 
 # BTF must be available (CO-RE)
