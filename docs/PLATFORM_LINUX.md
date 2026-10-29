@@ -361,7 +361,7 @@ sudo aa-complain /usr/local/bin/warmor-daemon
 | `--lsm-ringbuf-size` | `4 MiB` | Size of the LSM event ring buffer (power of two). Bigger rings absorb bursts. |
 | `--on-event-loss` | `log` | What to do when the ring is full: `log` (default; dropped events are counted per hook) or `deny` (fail closed: refuse unknown execs/connects whose event could not be queued; enforce mode only). |
 | `--cgroup-filter` | — | Restrict the LSM programs to the given cgroup paths, or `auto` for pod cgroups. |
-| `--verify-key` | — | Ed25519 public key PEM; require a valid detached `<policy>.sig` at startup, on reload and on every policy-server download. Fails closed. See [policy-bundle.md](policy-bundle.md#detached-signatures-daemon-and-policy-server). |
+| `--verify-key` | — | Ed25519 public key PEM; require a valid detached `<policy>.sig` at startup, on reload and on every policy-server download. Fails closed. see [Policy toolchain](policy-toolchain.md#detached-signatures-daemon-and-policy-server). |
 | `--integrity-db` / `--integrity-mode` | — | Content-hash exec integrity: a sleepable LSM program hashes each exec with IMA and refuses (`enforce`) or reports (`audit`) binaries whose SHA-256 is not in the database. Requires `CONFIG_IMA` with SHA-256. See [supply-chain-integrity.md](supply-chain-integrity.md). |
 | `--escape-detect` | — | `alert` or `deny`: match container-breakout patterns (mount sources, cross-cgroup ptrace, runtime socket connects) on container cgroups. `deny` also terminates the process. See [escape-detection.md](escape-detection.md). |
 | `--eval-timeout` | `50ms` | Per-evaluation WASM deadline; a policy exceeding it fails closed (DENY). |
