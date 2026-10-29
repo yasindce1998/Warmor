@@ -37,7 +37,7 @@ Status as of current `main`. "Partial" means the phase's headline features are r
 | **Phase 5** | Partial | YAML DSL and `warmor-compile` work. The Helm chart does **not** start (no LSM enforce value, YAML policy needs `cargo` in a distroless image). | Linux |
 | **Phase 6** | Partial | 7 LSM hooks attach (tested in a VM in CI). Kernel blocking happens only on a policy-map hit, and only exec and connect entries are ever written. A miss is allowed. | Linux |
 | **Phase 7** | Partial | Policy server with registration, heartbeats, versioned policies and percentage rollouts. Lineage is partial (no PPID). NetFilter, sandbox and SIEM syslog sink are library-only. | All |
-| **Phase 8** | Partial | mTLS/JWT, signed OCI bundles (`warmor-policy-bundle`), daemon signature verification (`--verify-key`) and the `warmorctl` TUI work. The OCI hook is experimental (no auth, bindings unused). containerd and per-container policy are missing. Exporter metrics are never updated. | All |
+| **Phase 8** | Partial | mTLS/JWT, signed OCI bundles (`warmor-policy-bundle`), daemon signature verification (`--verify-key`) and the `warmorctl` TUI work. The OCI hook is experimental (no auth, bindings unused). containerd and per-container policy are missing. | All |
 | **Phase 9** | Mostly library-only | `warmor-learn` and `warmor-simulate` ship. Escape detection and YAML temporal policies ship; in-kernel integrity is experimental (unverified on an IMA kernel in CI). Drift, attack graph, blast radius and canary auto-rollback are library-only (not wired into any binary). | Linux |
 
 ### Key Metrics
@@ -468,7 +468,7 @@ their fields-read declaration (every YAML policy), "undeclared" ones do not.
 ### 5.4 Compatibility
 
 **Operating Systems:**
-- Linux: Kernel 5.10+ (eBPF support)
+- Linux: Kernel 5.7 minimum, 5.8+ recommended (eBPF support; see [BPF_COMPATIBILITY.md](BPF_COMPATIBILITY.md))
 - Windows: Windows 10/11, Server 2019+
 - macOS: 10.15+ (Endpoint Security Framework)
 
@@ -874,7 +874,7 @@ opts := &enforcer.Options{StreamSinks: []streaming.Sink{sink}}
 - [x] Keyboard navigation (j/k, tab, 1-5 views, r=refresh, g=generate)
 
 **Track C: Runtime Observability** — Partial
-- [ ] Prometheus metrics exporter (hook decisions, latency histograms, WASM exec): metrics registered, **never updated**
+- [x] Prometheus metrics exporter (hook decisions, latency histograms, WASM exec): metrics registered and updated
 - [x] `/metrics`, `/health`, `/ready` endpoints with event, cache and latency metrics
 - [x] Grafana dashboard JSON templates (overview + LSM hooks + WASM + agents)
 - [ ] Prometheus alert rules (high deny rate, latency, events dropped, stale agent): shipped, but most reference never-updated metrics, and `warmor_ebpf_loader_status` does not exist
@@ -958,7 +958,7 @@ warmorctl --server https://server:8443 --token "$WARMOR_TOKEN" --ca-cert ca.crt 
 | Dashboard | Agent, policy and active-rollout counts; recent agents |
 | Agents | Connected agents with heartbeat status, labels, assigned policy |
 | Policies | CRUD operations on fleet policies |
-| Rollouts | A/B testing rollout management with percentage ramps |
+| Rollouts | A/B testing rollout overview (view-only; ramps via the admin API) |
 | Certs | Generate a CA + server/agent certificates, or a signing key pair |
 
 Key bindings: `Tab`/`Shift+Tab` switch tabs, `j`/`k` navigate, `Enter` select, `q` quit.
@@ -980,7 +980,7 @@ Updated by the daemon:
 | `warmor_policy_info` | Gauge |
 | `warmor_events_processing_errors_total`, `warmor_audit_denied_total` | Counter |
 
-Registered but **never updated** on `main` (`internal/metrics/exporter.go`): `warmor_lsm_decisions_total`, `warmor_lsm_decision_duration_seconds`, `warmor_policy_loads_total`, agent heartbeat/registration, WASM exec duration/errors, events processed/dropped and map-entry metrics.
+Also exported and updated on `main` (`internal/metrics/exporter.go`): `warmor_lsm_decisions_total`, `warmor_policy_loads_total`, agent heartbeat/registration, WASM exec duration/errors, events processed/dropped and map-entry metrics, and `warmor_ebpf_loader_status`.
 
 #### Grafana & Alerting
 

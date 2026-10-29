@@ -22,14 +22,14 @@ rules:
         - field: { operator: value }
       any:         # OR — at least one must match
         - field: { operator: value }
-    action: allow | deny | audit
+    action: allow | deny | log
     reason: "Human-readable explanation"
     temporal:      # optional, deny/log rules only: act only OUTSIDE this window
       max_container_age: "5m"
       time_of_day: { start: { hour: 9, minute: 0 }, end: { hour: 17, minute: 0 } }  # UTC
       days_of_week: [Monday, Friday]
 
-default_action: allow | deny | audit
+default_action: allow | deny | log
 ```
 
 See [Temporal Policies](temporal-policies.md) for the `temporal:` block.
@@ -38,19 +38,32 @@ See [Temporal Policies](temporal-policies.md) for the `temporal:` block.
 
 | Event | Description | Available Fields |
 |-------|-------------|-----------------|
-| `process` | Process execution (execve) | `path`, `uid`, `gid`, `comm` |
-| `file` | File system access | `path`, `uid`, `operation` |
-| `network` | Network connections | `uid`, `remote_port`, `remote_ip`, `protocol` |
+| `process` | Process execution (execve) | `pid`, `uid`, `gid`, `comm`, `path`, `args`* |
+| `file` | File system access | `pid`, `uid`, `gid`, `comm`, `path`, `operation`, `flags` |
+| `network` | Network connections | `pid`, `uid`, `gid`, `comm`, `operation`, `protocol`, `remote_addr`, `remote_port`, `local_port` |
+
+\* `args` is accepted by the schema but the host does not send it to WASM yet, so rules on it never fire.
 
 ## Condition Operators
 
 | Operator | Description | Example |
 |----------|-------------|---------|
-| `glob` | Glob pattern match | `path: { glob: "/tmp/**" }` |
-| `any_of` | Value in list | `path: { any_of: $my_list }` |
+| `eq` | Exact match | `comm: { eq: "python3" }` |
 | `not` | Not equal to | `uid: { not: 0 }` |
-| `equals` | Exact match | `comm: { equals: "python3" }` |
-| `prefix` | String prefix | `path: { prefix: "/opt/app" }` |
+| `any_of` | Value in list | `path: { any_of: $my_list }` |
+| `none_of` | Value not in list | `path: { none_of: $blocked }` |
+| `glob` | Glob pattern match | `path: { glob: "/tmp/**" }` |
+| `gt` / `lt` / `gte` / `lte` | Numeric comparison | `uid: { gte: 1000 }` |
+| `starts_with` | String prefix | `path: { starts_with: "/opt/app" }` |
+| `contains` | Substring match | `path: { contains: "passwd" }` |
+
+## Actions
+
+| Action | Audit Mode | Enforce Mode |
+|--------|-----------|--------------|
+| `allow` | Allow + no log | Allow + no log |
+| `deny` | Allow + log | Block + log |
+| `log` | Allow + log | Allow + log |
 
 ## Variables
 
@@ -72,14 +85,6 @@ rules:
     action: deny
 ```
 
-## Actions
-
-| Action | Audit Mode | Enforce Mode |
-|--------|-----------|--------------|
-| `allow` | Allow + no log | Allow + no log |
-| `deny` | Allow + log | Block + log |
-| `audit` | Allow + log | Allow + log |
-
 ## Tips
 
 - Start with `default_action: allow` and explicit deny rules
@@ -91,24 +96,24 @@ rules:
 
 ## LSM-BPF Kernel Enforcement
 
-When running with `--lsm-enforce`, deny rules are enforced synchronously at the kernel level via LSM-BPF hooks. This means:
+With `--lsm-enforce`, deny rules can be enforced synchronously in the kernel via LSM-BPF hooks — but on `main` only for **exec** (exact path) and **connect** (remote address and port), and only **after** the WASM policy has seen that exact operation once:
 
-- **Denied exec operations return EPERM** — the process never starts
-- **Denied file opens fail immediately** — the file is never accessed
-- **Denied connections fail at connect()** — no network handshake occurs
+- **Denied exec operations return EPERM** on repeat attempts — the process never starts
+- **Denied connections fail at connect()** on repeat attempts — no network handshake occurs
+- **File, bind, listen, ptrace and mount denies are never blocked in the kernel** — they are detected in userspace and the process is killed with `SIGKILL` after the fact
 
 ### How It Works
 
-1. The first time an event matches a deny rule, WASM evaluates it and the decision is compiled into a BPF hash map
+1. The first time an event matches a deny rule, the kernel map has no entry: the operation is allowed, the event reaches WASM, and the decision is compiled into a BPF hash map (exec and connect only)
 2. On subsequent identical events, the kernel LSM hook looks up the hash map and returns `-EPERM` without any userspace round-trip
-3. The hash key uses FNV-1a over the filename/pattern, scoped by cgroup ID and event type
+3. The hash key uses FNV-1a over the filename or endpoint, scoped by cgroup ID and event type
 
 ### Policy Design for LSM
 
-- **Glob patterns** (`/tmp/**`) are matched in userspace WASM on the first hit, then the specific filename that matched is hashed into the BPF map
-- **`any_of` lists** each element is individually hashed into the map after first evaluation
-- **Network rules** hash destination IP+port, so `remote_port: { any_of: [22, 4444] }` will populate map entries per observed connection
-- **Cgroup scoping** — rules apply per-cgroup by default; set cgroup_id=0 in the map for global rules
+- **Glob patterns** (`/tmp/**`) are matched in userspace WASM on the first hit, then the specific filename that was observed is hashed into the BPF map — not the pattern itself
+- **`any_of` lists** are also matched in userspace first; a map entry is written only for the specific value that was observed (other elements get entries once they are seen and denied)
+- **Network rules** hash the observed destination IP+port, so `remote_port: { any_of: [22, 4444] }` populates map entries per observed connection
+- **Cgroup scoping** — entries are written with the cgroup of the event that triggered them; there is no way to request a global (cgroup 0) entry from YAML
 - **Temporal rules** are never compiled into the BPF map (no kernel key holds time), and decisions for their event type are not cached; every such event is evaluated in WASM
 
 ### Audit vs Enforce Mode
@@ -118,14 +123,14 @@ When running with `--lsm-enforce`, deny rules are enforced synchronously at the 
 | `--lsm-enforce=false` (default) | LSM programs load but never deny — all events are observed and logged |
 | `--lsm-enforce=true` | LSM programs actively block denied operations in kernel |
 
-Start with audit mode to validate your policy won't disrupt workloads, then enable enforcement.
+Start with `--audit` to validate your policy won't disrupt workloads, then enable enforcement. Note that leaving out `--lsm-enforce` alone is **not** observe-only: denied processes are still killed with `SIGKILL` from userspace.
 
 ### Requirements
 
-- Linux kernel 5.7+ with `CONFIG_BPF_LSM=y`
+- Linux kernel 5.7+ (5.8+ recommended) with `CONFIG_BPF_LSM=y` — see [BPF Compatibility](BPF_COMPATIBILITY.md)
 - `/sys/kernel/security/lsm` must contain "bpf"
 - `CAP_SYS_ADMIN` + `CAP_BPF` (or root)
-- If requirements are not met, warmor falls back to tracepoint-only mode automatically
+- If requirements are not met, warmor falls back to tracepoint-only mode automatically (or refuses to start with `--require-lsm`)
 
 ---
 
@@ -171,16 +176,9 @@ Validate a policy locally before deploying:
 warmor-compile --validate path/to/policy.yaml
 ```
 
-`warmor-daemon --validate-policy <path>` loads the policy in the WASM runtime (and checks its signature with `--verify-key`) without root or BPF, and exits 0 or 1. For YAML it only validates the schema, because compiling needs `cargo`.
+`warmor-daemon --validate-policy <path>` loads the policy the way the daemon would (and checks its signature with `--verify-key`) without root or BPF, and exits 0 or 1. For a `.yaml` file it checks the schema and, if a precompiled `.wasm` with the same base name exists next to it, loads that in the WASM runtime — it does not compile the YAML, because that needs `cargo`. For a `.wasm` file it compiles and instantiates the module in the WASM runtime. Add `--verify-key signing.pub` to also check the policy's detached signature (see [policy-bundle.md](policy-bundle.md#detached-signatures-daemon-and-policy-server)).
 
 > **Note:** the compiler silently ignores rule keys it does not know (a misspelt `temporal:` key included; the `temporal:` block itself is checked strictly). Run `warmor-compile --rust-only path/to/policy.yaml` to see exactly which conditions were compiled.
-
-This needs no root or BPF and exits 0 if the policy is valid, 1 if not. For a
-`.yaml` file it checks the schema, and loads a precompiled `.wasm` with the
-same base name if there is one. It does not compile the YAML. For a `.wasm`
-file it compiles and instantiates the module in the WASM runtime. Add
-`--verify-key signing.pub` to also check the policy's detached signature
-(see [policy-bundle.md](policy-bundle.md#detached-signatures-daemon-and-policy-server)).
 
 ---
 

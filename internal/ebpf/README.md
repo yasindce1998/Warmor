@@ -31,7 +31,7 @@ This package provides the eBPF loader for warmor.
 
 ## Generated Files
 
-The `go generate` command uses `bpf2go` to generate Go bindings from the eBPF C code. These files are **not** checked into git (see `.gitignore`).
+The `go generate` command uses `bpf2go` to generate Go bindings from the eBPF C code. The generated bindings and compiled objects **are** checked into git, so a plain `go build ./...` works without clang; regenerate them only when you change `bpf/*.c`.
 
 ### What Gets Generated
 
@@ -86,7 +86,7 @@ Make sure `$GOPATH/bin` is in your `$PATH`.
 
 ### "Failed to load eBPF objects"
 
-1. Check kernel version: `uname -r` (need 5.10+)
+1. Check kernel version: `uname -r` (need 5.7 minimum, 5.8+ recommended — see `docs/BPF_COMPATIBILITY.md`)
 2. Check if eBPF is enabled: `zgrep CONFIG_BPF /proc/config.gz`
 3. Run with root: `sudo ./your-program`
 
@@ -95,14 +95,14 @@ Make sure `$GOPATH/bin` is in your `$PATH`.
 - `loader.go` - Main eBPF loader implementation
 - `events.go` - Event structures and conversion
 - `README.md` - This file
-- `execve_monitor_*.go` - Generated Go bindings (not in git)
-- `execve_monitor_*.o` - Generated eBPF objects (not in git)
+- `*_bpfeb.go` / `*_bpfel.go` - Generated Go bindings (committed)
+- `*_bpfeb.o` / `*_bpfel.o` - Generated eBPF objects (committed)
 
 ## Dependencies
 
 - `github.com/cilium/ebpf` - eBPF library for Go
 - `github.com/cilium/ebpf/cmd/bpf2go` - Code generator
-- Linux kernel 5.10+ with eBPF support
+- Linux kernel 5.7+ (5.8+ recommended) with eBPF support — see `docs/BPF_COMPATIBILITY.md`
 - `libbpf-dev` and `linux-headers` packages
 
 ---

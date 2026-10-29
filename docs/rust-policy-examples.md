@@ -1,6 +1,6 @@
 # Rust WASM Policy Examples
 
-> **Status:** all 10 crates build and are checked against the real host in CI (`TestPolicyCrates`). The host sends only the fields listed under [Host contract](#host-contract); rules on other fields (`args`, `parent_comm`, `cgroup_id`, time) never fire yet.
+> **Status:** all 10 crates build and are checked against the real host in CI (`TestPolicyCrates`). The host sends only the fields listed under [Host contract](#host-contract); rules on other fields (`args`, `parent_comm`, `cgroup_id`) never fire yet. Time context is sent only to modules that declare `abi_version() -> 3` (of the crates, only `temporal-access`).
 >
 > See [Feature Status](STATUS.md).
 
@@ -123,7 +123,7 @@ Internally the rules build a `Decision` (action + reason) that `evaluate_syscall
 
 ### ABI Version
 
-All advanced policies export `abi_version() -> u32` returning `2`, signaling support for the multi-event format and extended fields. Version `3` additionally opts in to the temporal context (`wall_clock_unix`, `container_age_ms`; see the host contract above); YAML-compiled policies declare it.
+The host accepts `abi_version()` returning `1`, `2` or `3` and refuses anything else. Most crates return `2` (multi-event format and extended fields); `cross-platform` returns `1` and `temporal-access` returns `3` to opt in to the temporal context (`wall_clock_unix`, `container_age_ms`; see the host contract above). YAML-compiled policies declare `3`.
 
 ## Policy Descriptions
 
@@ -267,6 +267,6 @@ All policies use the same action constants:
 2. Set `crate-type = ["cdylib"]` in `Cargo.toml`
 3. Add `serde`, `serde_json` dependencies
 4. Export `malloc`, `free`, and `evaluate_syscall(ptr, len) -> i32`; mark event structs `#[serde(default)]`
-5. Optionally export `abi_version() -> u32` (return 2 for multi-event support; other values are rejected)
+5. Optionally export `abi_version() -> u32` — the host accepts 1, 2 and 3; 3 additionally opts in to temporal context
 6. Build with `cargo build --release --target wasm32-unknown-unknown`
 7. Load with `warmor-daemon --policy path/to/policy.wasm`

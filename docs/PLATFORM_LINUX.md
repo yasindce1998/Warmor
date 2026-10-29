@@ -27,9 +27,14 @@ This guide covers warmor's Linux implementation using eBPF (Extended Berkeley Pa
                  ▼
 ┌─────────────────────────────────────┐
 │         eBPF Programs (BPF)         │
+│  Tracepoints (observe):             │
 │  - execve_monitor.bpf.c             │
 │  - openat_monitor.bpf.c             │
 │  - connect_monitor.bpf.c            │
+│  LSM hooks (can block):             │
+│  - lsm_exec / lsm_file / lsm_connect│
+│  - lsm_bind / lsm_listen            │
+│  - lsm_ptrace / lsm_mount           │
 └─────────────────────────────────────┘
                  │
                  ▼
@@ -43,9 +48,13 @@ This guide covers warmor's Linux implementation using eBPF (Extended Berkeley Pa
 ## Requirements
 
 ### Kernel Version
-- **Minimum:** Linux 5.8+ (for CO-RE support)
-- **Recommended:** Linux 5.15+ (LTS)
-- **Optimal:** Linux 6.0+ (latest features)
+
+The canonical kernel requirements and the tested-kernel matrix live in
+[BPF_COMPATIBILITY.md](BPF_COMPATIBILITY.md). In short: 5.7 minimum (the
+`lsm/*` attach type), 5.8+ recommended (ring buffer maps), `CONFIG_BPF_LSM=y`
+and `bpf` in the active LSM list for kernel blocking, and BTF for CO-RE.
+CI currently exercises the LSM programs on 6.1, 6.18 and the stable/mainline
+ci-kernels channels.
 
 ### Kernel Configuration
 Required kernel options:
@@ -129,13 +138,16 @@ This generates:
 go generate ./internal/ebpf/...
 ```
 
-This creates:
-- `internal/ebpf/execve_bpfel.go` - eBPF program bindings
-- `internal/ebpf/execve_bpfel.o` - Embedded eBPF bytecode
+This creates (for each program, both endiannesses):
+- `internal/ebpf/execve_monitor_bpfel.go` - eBPF program bindings
+- `internal/ebpf/execve_monitor_bpfel.o` - Embedded eBPF bytecode
+
+The generated bindings and objects are committed, so steps 1-2 are only needed
+after changing `bpf/*.c`.
 
 ### 3. Build warmor
 ```bash
-GOOS=linux GOARCH=amd64 go build -o warmor cmd/warmor/main.go
+go build -o bin/ ./cmd/...
 ```
 
 ## Running
@@ -184,7 +196,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/warmor --policy /etc/warmor/policy.wasm
+ExecStart=/usr/local/bin/warmor-daemon --policy /etc/warmor/policy.wasm --lsm-enforce
 Restart=always
 RestartSec=5
 User=root
@@ -209,8 +221,10 @@ Monitors process execution via `execve()` syscall.
 - PID, UID, GID
 - Command name
 - Executable path
-- Arguments (up to 5)
-- Parent PID
+- Cgroup ID
+
+(Exec arguments and the parent PID are not captured; the WASM policy never
+sees them.)
 
 **Hook Point:** `tracepoint/syscalls/sys_enter_execve`
 
@@ -242,25 +256,26 @@ The Linux platform provides full monitoring and enforcement:
 
 ```go
 Capabilities{
-    ProcessMonitoring: true,  // ✅ Full support
-    FileMonitoring:    true,  // ✅ Full support
-    NetworkMonitoring: true,  // ✅ Full support
-    Enforcement:       true,  // ✅ Can block syscalls
+    ProcessMonitoring: true,   // ✅ Full support
+    FileMonitoring:    true,   // ✅ Full support
+    NetworkMonitoring: true,   // ✅ Full support
+    Enforcement:       true,   // ✅ SIGKILL on userspace deny
+    LSMEnforcement:    true,   // ✅ In-kernel -EPERM for cached exec/connect denies (--lsm-enforce)
 }
 ```
 
 ## Performance
 
-### Overhead
-- **Per-event latency:** <10μs
-- **CPU overhead:** <1% on typical workloads
-- **Memory overhead:** ~10MB for eBPF maps
+Measured numbers (with methodology and caveats) are in
+[PERFORMANCE.md](PERFORMANCE.md). Highlights on the benchmark hardware:
+P95 cache hit 1.2–1.3 µs; P95 cache miss 32 µs (YAML policy); kernel fast
+path 0.11 µs (connect) / 0.34 µs (exec); 175k events/s declared throughput;
+11% of one core at 10k events/s.
 
 ### Optimization Tips
-1. **Use BPF maps for caching** - Reduce userspace roundtrips
-2. **Filter events in kernel** - Only send relevant events
-3. **Batch event processing** - Process multiple events together
-4. **Use CO-RE** - Avoid BTF generation overhead
+1. **Scope with `--cgroup-filter`** - the biggest lever; `file_open` emits an event for every open in scope
+2. **Use declared policies** - compiled YAML policies export their fields-read, enabling decision-cache hits
+3. **Size the ring buffer** - `--lsm-ringbuf-size` for bursty hosts (drops are counted in `warmor_lsm_events_dropped_total`)
 
 ## Debugging
 
@@ -332,8 +347,27 @@ sudo semanage permissive -a warmor_t
 
 **AppArmor:**
 ```bash
-sudo aa-complain /usr/local/bin/warmor
+sudo aa-complain /usr/local/bin/warmor-daemon
 ```
+
+## Enforcement-Related Flags
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--lsm-enforce` | `false` | Arm kernel blocking for exec/connect `DENY` rules already in the policy map. Without it the LSM programs run audit-only (denied processes are still `SIGKILL`ed from userspace). |
+| `--require-lsm` | `false` | Refuse to start unless the LSM programs load and arm. Without it the daemon degrades to tracepoint-only observe mode with a warning. |
+| `--no-lsm` | `false` | Skip LSM-BPF entirely (tracepoint-only). |
+| `--audit` | `false` | Log would-be denials; kill and block nothing. The only true dry-run mode. |
+| `--lsm-ringbuf-size` | `4 MiB` | Size of the LSM event ring buffer (power of two). Bigger rings absorb bursts. |
+| `--on-event-loss` | `log` | What to do when the ring is full: `log` (default; dropped events are counted per hook) or `deny` (fail closed: refuse unknown execs/connects whose event could not be queued; enforce mode only). |
+| `--cgroup-filter` | — | Restrict the LSM programs to the given cgroup paths, or `auto` for pod cgroups. |
+| `--verify-key` | — | Ed25519 public key PEM; require a valid detached `<policy>.sig` at startup, on reload and on every policy-server download. Fails closed. See [policy-bundle.md](policy-bundle.md#detached-signatures-daemon-and-policy-server). |
+| `--integrity-db` / `--integrity-mode` | — | Content-hash exec integrity: a sleepable LSM program hashes each exec with IMA and refuses (`enforce`) or reports (`audit`) binaries whose SHA-256 is not in the database. Requires `CONFIG_IMA` with SHA-256. See [supply-chain-integrity.md](supply-chain-integrity.md). |
+| `--escape-detect` | — | `alert` or `deny`: match container-breakout patterns (mount sources, cross-cgroup ptrace, runtime socket connects) on container cgroups. `deny` also terminates the process. See [escape-detection.md](escape-detection.md). |
+| `--eval-timeout` | `50ms` | Per-evaluation WASM deadline; a policy exceeding it fails closed (DENY). |
+
+Posture guidance for combining these flags is in
+[SECURITY_POSTURE.md](SECURITY_POSTURE.md).
 
 ## Limitations
 

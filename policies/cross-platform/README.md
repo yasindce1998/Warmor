@@ -25,7 +25,7 @@ The policy includes platform-specific path handling:
 4. **Network Monitoring** - Detects suspicious port connections
 5. **Privilege Escalation Prevention** - Blocks root/admin execution of user binaries
 6. **Package Manager Monitoring** - Tracks apt, brew, choco, etc.
-7. **Suspicious Argument Detection** - Monitors for shell injection patterns
+7. **Suspicious Argument Detection** - Monitors for shell injection patterns *(never fires on `main`: the host does not send exec arguments to WASM yet)*
 
 ## Building
 
@@ -40,18 +40,23 @@ Output: `target/wasm32-unknown-unknown/release/cross_platform_policy.wasm`
 
 ### Linux
 ```bash
-sudo ./warmor --policy cross_platform_policy.wasm
+sudo ./warmor-daemon --policy cross_platform_policy.wasm
 ```
 
 ### Windows (Administrator)
 ```powershell
-.\warmor.exe --policy cross_platform_policy.wasm
+.\warmor-daemon.exe --policy cross_platform_policy.wasm
 ```
 
-### macOS (with SIP disabled for development)
+### macOS (System Extension installed and approved)
 ```bash
-sudo ./warmor --policy cross_platform_policy.wasm
+sudo ./warmor-daemon --policy cross_platform_policy.wasm
 ```
+
+On macOS the daemon is detection-only on `main` (every AUTH event is answered
+ALLOW), and on Windows the ETW backend is what runs; see
+[PLATFORM_WINDOWS.md](../../docs/PLATFORM_WINDOWS.md) and
+[PLATFORM_MACOS.md](../../docs/PLATFORM_MACOS.md).
 
 ## Testing
 

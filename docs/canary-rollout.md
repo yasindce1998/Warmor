@@ -1,6 +1,6 @@
 # Canary Rollout
 
-> **Status: Partial.** Percentage rollouts are **shipped**: create, ramp, complete and abort through the admin API or `warmorctl`, with consistent-hash cohorts and versioned policies. The **deny-rate `CanaryAnalyzer` and automatic rollback are library-only.** `NewCanaryAnalyzer` is never called, agents don't report per-decision data to it, and the rollout API does not accept a `CanaryConfig`. On `main` you monitor and abort manually. See [Feature Status](STATUS.md).
+> **Status: Partial.** Percentage rollouts are **shipped**: create, ramp, complete and abort through the admin API (the `warmorctl` Rollouts tab is view-only), with consistent-hash cohorts and versioned policies. The **deny-rate `CanaryAnalyzer` and automatic rollback are library-only.** `NewCanaryAnalyzer` is never called, agents don't report per-decision data to it, and the rollout API does not accept a `CanaryConfig`. On `main` you monitor and abort manually. See [Feature Status](STATUS.md).
 
 The policy server supports A/B canary rollouts for Wasm policies. You can gradually shift agents to a new policy version and abort back to the baseline. A canary analyzer that compares deny rates between cohorts and rolls back automatically exists as a library, but it is not wired in yet.
 

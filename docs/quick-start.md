@@ -158,7 +158,7 @@ Tabs:
 - **Dashboard** — agent and policy summary from the server
 - **Agents** — registered agents, heartbeat status, assigned policies
 - **Policies** — list, create, update and delete policies
-- **Rollouts** — percentage rollout management
+- **Rollouts** — percentage rollout overview (view-only; create, ramp and abort via the admin API, see [Canary Rollout](canary-rollout.md))
 - **Certs** — press `g` to generate a CA plus server and agent certificates, or
   `s` to generate a policy-signing key pair
 
@@ -226,11 +226,8 @@ The daemon exports `warmor_events_total`, `warmor_cache_hits_total`,
 `warmor_cache_misses_total`, `warmor_cache_size`,
 `warmor_evaluation_latency_microseconds`, `warmor_policy_info`,
 `warmor_events_processing_errors_total` and `warmor_audit_denied_total` on
-`--metrics-port` (default 9090).
-
-> Panels and alerts built on the LSM-decision, policy-load and heartbeat
-> metrics stay empty on `main`. Those metrics are registered but never updated,
-> and the eBPF-loader-failure alert references a metric that does not exist.
+`--metrics-port` (default 9090), plus the LSM-decision, policy-load,
+heartbeat, WASM-exec and loader-status metrics the dashboards and alerts use.
 
 ---
 

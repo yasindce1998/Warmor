@@ -63,7 +63,7 @@ This guide provides detailed instructions for building warmor from source.
    ```
 
 **System Requirements:**
-- **OS:** Linux with kernel 5.10+ (for eBPF support)
+- **OS:** Linux with kernel 5.7 minimum, 5.8+ recommended (see [docs/BPF_COMPATIBILITY.md](docs/BPF_COMPATIBILITY.md))
 - **Architecture:** x86_64 or ARM64
 - **Privileges:** Root access required for running (eBPF requirement)
 
@@ -667,7 +667,7 @@ sudo ./warmor-daemon
 
 ### "Failed to load eBPF objects"
 
-1. Check kernel version: `uname -r` (need 5.10+)
+1. Check kernel version: `uname -r` (need 5.7 minimum, 5.8+ recommended)
 2. Check if eBPF is enabled: `zgrep CONFIG_BPF /proc/config.gz`
 3. Regenerate bindings: `go generate ./internal/ebpf`
 

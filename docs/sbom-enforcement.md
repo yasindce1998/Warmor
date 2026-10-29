@@ -73,9 +73,17 @@ Package names alone don't tell the kernel what to allow — file paths do. The t
 |--------|------------------|--------|
 | Alpine (APK) | `/lib/apk/db/installed` | Plain text with P:/F:/R: records |
 | Debian/Ubuntu (DEB) | `/var/lib/dpkg/info/<pkg>.list` | One absolute path per line |
-| RHEL/Fedora (RPM) | `/var/lib/rpm/` | Binary DB or manifest |
+| RHEL/Fedora (RPM) | `/var/lib/rpm/Packages.manifest` | Plain-text manifest only (see warning) |
 
 This requires access to the container's filesystem via `--rootfs`.
+
+> **RPM warning.** The resolver only reads a plain-text
+> `var/lib/rpm/Packages.manifest`, which standard RHEL/Fedora images do not
+> ship (they have a binary BerkeleyDB RPM database, which is not parsed).
+> On such images the package map comes up empty, so the generated policy has
+> **no allow rules at all** — with `default_action: deny` it denies every
+> execution. Always inspect the generated YAML (`-o -`) and test in audit
+> mode before enforcing. Distroless/Alpine/Debian images are unaffected.
 
 ### Step 3: Filter by Enforcement Level
 

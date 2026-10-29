@@ -226,15 +226,11 @@ same ConfigMap or Secret).
 
 ## Authentication
 
-The tool uses the standard Docker/OCI credential chain:
-- `~/.docker/config.json` (Docker login)
-- Environment variables (`REGISTRY_TOKEN`, etc.)
-- Platform-specific credential helpers
-
-For GitHub Container Registry:
-```bash
-echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
-```
+None on `main`: the tool connects to the registry **anonymously**. No Docker
+credential chain (`~/.docker/config.json`), environment variable or credential
+helper is read, so pushes and pulls against registries that require
+authentication fail. Use a registry that allows anonymous pull (or anonymous
+push, e.g. a local ZOT instance) until credential support is wired in.
 
 ## Typical Workflow
 
