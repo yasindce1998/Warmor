@@ -682,8 +682,7 @@ YAML policy); "undeclared" ones do not.
 
 ## Development Phases
 
-See [OVERVIEW.md](OVERVIEW.md) for the phase-by-phase summary and
-[STATUS.md](STATUS.md) for the per-feature reference. In short:
+See [STATUS.md](STATUS.md) for the per-feature, per-phase reference. In short:
 
 - **Phases 1-2:** done. DENY is enforced by `SIGKILL`.
 - **Phases 3-8:** partial. Highlights:
@@ -707,8 +706,8 @@ See [OVERVIEW.md](OVERVIEW.md) for the phase-by-phase summary and
 
 ### Documentation
 - [Product Requirements](PRD.md)
-- [Project Overview](OVERVIEW.md)
-- [Quick Start](quick-start.md)
+- [Feature Status](STATUS.md)
+- [Operations Guide](operations.md)
 - [Linux Platform Guide](PLATFORM_LINUX.md)
 - [Windows Platform Guide](PLATFORM_WINDOWS.md)
 - [macOS Platform Guide](PLATFORM_MACOS.md)

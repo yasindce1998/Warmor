@@ -118,7 +118,7 @@ validly signed with the same key. Rotate keys, or use separate keys per policy
 line, when an old policy must never return.
 
 The flow and commands are in
-[policy-bundle.md](policy-bundle.md#detached-signatures-daemon-and-policy-server).
+[Policy toolchain](policy-toolchain.md#detached-signatures-daemon-and-policy-server).
 
 ## Recommended postures
 

@@ -1,6 +1,6 @@
 # WarmorPolicy CRD Usage
 
-> **Status: Missing on `main`, schema only.** The chart installs the `WarmorPolicy` CRD, but **there is no controller**. Resources are stored in etcd and never applied to any node, and `status` is never populated. The chart's `ValidatingWebhookConfiguration` has **no handler behind it**, and with `failurePolicy: Fail` enabling it would reject `WarmorPolicy` writes. `policySync.source` is unused. The Helm chart itself does not start on `main` (see [Quick Start](quick-start.md#kubernetes-not-working-on-main-yet)). The rest of this page describes the intended design. See [Feature Status](STATUS.md).
+> **Status: Missing on `main`, schema only.** The chart installs the `WarmorPolicy` CRD, but **there is no controller**. Resources are stored in etcd and never applied to any node, and `status` is never populated. The chart's `ValidatingWebhookConfiguration` has **no handler behind it**, and with `failurePolicy: Fail` enabling it would reject `WarmorPolicy` writes. `policySync.source` is unused. The Helm chart itself does not start on `main` (see [Operations Guide](operations.md#kubernetes-not-working-on-main-yet)). The rest of this page describes the intended design. See [Feature Status](STATUS.md).
 
 The `WarmorPolicy` Custom Resource Definition lets you manage security policies as native Kubernetes objects, scoped per namespace.
 

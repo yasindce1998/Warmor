@@ -121,7 +121,7 @@ no Rust crate under `policies/` does yet.
 - **Rust WASM** — Full Rust policies compiled to `wasm32-unknown-unknown` for complex logic
 - **Hot-Reload** — SIGHUP swaps the WASM module without a restart. Kernel map entries from the old policy are not cleared yet.
 - **Two-Tier Cache** — A userspace decision cache, plus the kernel policy map for exec and connect decisions
-- **Policy Signing** — Ed25519 signatures on WASM policies: signed OCI bundles (`warmor-policy-bundle --push/--pull`), and detached `<policy>.sig` files that `warmor-daemon --verify-key` checks at startup, on reload and on every policy server download, failing closed (see [Policy Bundle](docs/policy-bundle.md#detached-signatures-daemon-and-policy-server))
+- **Policy Signing** — Ed25519 signatures on WASM policies: signed OCI bundles (`warmor-policy-bundle --push/--pull`), and detached `<policy>.sig` files that `warmor-daemon --verify-key` checks at startup, on reload and on every policy server download, failing closed (see [Policy Toolchain](docs/policy-toolchain.md#detached-signatures-daemon-and-policy-server))
 
 ---
 
@@ -304,15 +304,15 @@ See [Architecture Deep Dive](docs/architecture.md) for data flow diagrams.
 
 | Category | Documents |
 |----------|-----------|
-| **Getting Started** | [Quick Start](docs/quick-start.md) &bull; [Build Guide](BUILD.md) &bull; [Getting Started](GETTING_STARTED.md) |
+| **Getting Started** | [Getting Started](GETTING_STARTED.md) &bull; [Build Guide](BUILD.md) |
 | **Architecture** | [System Design](docs/architecture.md) &bull; [Security Posture](docs/SECURITY_POSTURE.md) &bull; [BPF Compatibility](docs/BPF_COMPATIBILITY.md) |
 | **Platforms** | [Linux](docs/PLATFORM_LINUX.md) &bull; [Windows](docs/PLATFORM_WINDOWS.md) &bull; [macOS](docs/PLATFORM_MACOS.md) |
 | **Policies** | [Authoring Guide](docs/policy-authoring.md) &bull; [Rust Examples](docs/rust-policy-examples.md) &bull; [YAML DSL](docs/policy-authoring.md) |
-| **Toolchain** | [Policy Gen](docs/policy-generation.md) &bull; [SBOM Enforcement](docs/sbom-enforcement.md) &bull; [Diff](docs/policy-diff.md) &bull; [Merge](docs/policy-merge.md) &bull; [Bundle](docs/policy-bundle.md) |
-| **Intelligence** | [Learning Mode](docs/learning-mode.md) &bull; [Simulator](docs/policy-simulator.md) &bull; [Escape Detection](docs/escape-detection.md) &bull; [Supply Chain](docs/supply-chain-integrity.md) |
-| **Fleet** | [Canary Rollout](docs/canary-rollout.md) &bull; [Drift Detection](docs/drift-detection.md) &bull; [Attack Graph](docs/attack-graph.md) &bull; [Blast Radius](docs/blast-radius.md) &bull; [Temporal](docs/temporal-policies.md) |
+| **Toolchain** | [Policy Toolchain](docs/policy-toolchain.md) — generate (SBOM/audit), merge, diff, simulate, sign & distribute |
+| **Intelligence** | [Learning Mode](docs/learning-mode.md) &bull; [Escape Detection](docs/escape-detection.md) &bull; [Supply Chain](docs/supply-chain-integrity.md) |
+| **Fleet** | [Canary Rollout](docs/canary-rollout.md) &bull; [Experimental Features](docs/experimental-features.md) &bull; [Temporal](docs/temporal-policies.md) |
 | **Kubernetes** | [CRD Usage](docs/crd-usage.md) &bull; [Helm Chart](deploy/helm/warmor/) |
-| **Project** | [Feature Status](docs/STATUS.md) &bull; [Overview](docs/OVERVIEW.md) &bull; [PRD, Phase Tracking & Roadmap](docs/PRD.md) |
+| **Project** | [Feature Status](docs/STATUS.md) &bull; [PRD, Phase Tracking & Roadmap](docs/PRD.md) |
 
 ---
 

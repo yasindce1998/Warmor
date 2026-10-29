@@ -17,12 +17,16 @@ By the end of this guide, you'll have:
 
 ## Before You Begin
 
-You need a **Linux machine** (or VM/WSL2) with kernel 5.8 or newer (5.7 minimum; see [BPF Compatibility](docs/BPF_COMPATIBILITY.md)) and BTF enabled. Check with:
+You need a **Linux machine** (or VM/WSL2) with kernel 5.8 or newer (5.7 minimum; see [BPF Compatibility](docs/BPF_COMPATIBILITY.md)), BTF enabled (`ls /sys/kernel/btf/vmlinux`), x86_64 or arm64, and root (required for eBPF). Check with:
 
 ```bash
 uname -r
 # Should show 5.8+ (e.g., 6.1.0, 5.15.0)
 ```
+
+For kernel-level blocking you additionally need `CONFIG_BPF_LSM=y` and `bpf`
+listed in `/sys/kernel/security/lsm`. Without it, warmor falls back to
+tracepoint-only mode (detect, then kill).
 
 > **Don't have Linux?** Use WSL2 on Windows, a VM, or a cloud instance (Ubuntu 22.04+ works great).
 
@@ -99,7 +103,9 @@ If all three commands work, you're ready to go.
 
 ---
 
-## Step 2: Clone and Build
+## Step 2: Get the Binaries
+
+### From source (tracks `main`)
 
 ```bash
 git clone https://github.com/yasindce1998/warmor.git
@@ -109,7 +115,21 @@ go build -o bin/ ./cmd/...
 
 This builds every tool into `bin/`. The compiled BPF objects and their Go bindings are checked in, so you don't need clang for this step. If you change `bpf/*.c`, run `make build-bpf generate` to rebuild them.
 
-`make all` does the same and also rebuilds the BPF programs, the Go bindings and the example Rust policy, so it needs clang and the Rust toolchain.
+`make all` does the same and also rebuilds the BPF programs, the Go bindings and the example Rust policy, so it needs clang and the Rust toolchain. See [BUILD.md](BUILD.md) for the full build guide.
+
+### From a release
+
+Releases ship one archive per platform containing all tools and a `SHA256SUMS` file. Release binaries are built from the tag, not from `main`.
+
+```bash
+VERSION=v0.3.0   # pick from https://github.com/yasindce1998/warmor/releases
+curl -LO https://github.com/yasindce1998/warmor/releases/download/${VERSION}/warmor-${VERSION}-linux-amd64.tar.gz
+tar -xzf warmor-${VERSION}-linux-amd64.tar.gz
+cd warmor-${VERSION}-linux-amd64 && sha256sum -c SHA256SUMS
+sudo install -m 0755 warmor-daemon warmor-compile /usr/local/bin/
+```
+
+Use `linux-arm64` for ARM64 hosts.
 
 > **Build failing?** Jump to [Troubleshooting](#troubleshooting) below.
 
@@ -261,11 +281,10 @@ Leaving out `--lsm-enforce` alone is **not** observe-only. The kernel then only 
 
 ### "I want metrics in Prometheus/Grafana"
 
-Warmor exposes metrics at `http://localhost:9090/metrics` by default:
-
-```bash
-curl http://localhost:9090/metrics | grep warmor
-```
+Warmor exposes metrics at `http://localhost:9090/metrics` by default. For the
+bundled Prometheus + Grafana stack, see the
+[Monitoring stack](docs/operations.md#monitoring-stack) section of the
+operations guide.
 
 ---
 
@@ -354,12 +373,13 @@ Ubuntu 22.04+, Fedora 36+, and Debian 12+ ship with BTF enabled by default.
 | Goal | Where to Go |
 |------|------------|
 | Understand the architecture | [docs/architecture.md](docs/architecture.md) |
+| Run it as a service, manage a fleet, monitor it | [docs/operations.md](docs/operations.md) |
+| Generate, merge, diff, simulate and distribute policies | [docs/policy-toolchain.md](docs/policy-toolchain.md) |
 | Write advanced YAML policies | [docs/policy-authoring.md](docs/policy-authoring.md) |
 | Write Rust WASM policies | [docs/rust-policy-examples.md](docs/rust-policy-examples.md) |
 | Deploy on Windows or macOS | [docs/PLATFORM_WINDOWS.md](docs/PLATFORM_WINDOWS.md) / [docs/PLATFORM_MACOS.md](docs/PLATFORM_MACOS.md) |
 | See what ships and what doesn't | [docs/STATUS.md](docs/STATUS.md) |
 | Set up fleet management | [docs/canary-rollout.md](docs/canary-rollout.md) |
-| Full project overview | [docs/OVERVIEW.md](docs/OVERVIEW.md) |
 
 ---
 
