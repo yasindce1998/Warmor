@@ -311,7 +311,7 @@ warmor/
 
 ## Kubernetes Deployment
 
-> **Not working on `main` yet.** The Helm chart is being fixed. It has no way to enable `--lsm-enforce`, and it ships a YAML policy that the distroless image cannot compile. See [Feature Status](docs/STATUS.md#5-container-runtime-and-kubernetes).
+> **Not working on `main` yet.** The Helm chart is being fixed. It ships a YAML policy that the distroless image cannot compile, so the daemon crashloops. See [Feature Status](docs/STATUS.md#5-container-runtime-and-kubernetes).
 
 ---
 

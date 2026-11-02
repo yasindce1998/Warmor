@@ -64,7 +64,7 @@ jobs:
 
           for tool in "${TOOLS[@]}"; do
             echo "Building ${tool}..."
-            go build -ldflags="-s -w -X main.version=${VERSION}" \
+            go build -ldflags="-s -w -X github.com/yasindce1998/warmor/internal/version.Version=${VERSION}" \
               -o "${OUTDIR}/${tool}${EXT}" \
               "./cmd/${tool}"
           done

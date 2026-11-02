@@ -2,8 +2,8 @@ apiVersion: v2
 name: warmor
 description: WASM-powered cross-platform security enforcer
 type: application
-version: 0.2.0
-appVersion: "1.1.0-beta"
+version: 0.3.0
+appVersion: "0.3.0"
 keywords:
   - security
   - ebpf
