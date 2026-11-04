@@ -34,7 +34,7 @@ Status as of current `main`. "Partial" means the phase's headline features are r
 | **Phase 2** | Done, with gaps | ALLOW/DENY/LOG (DENY = `SIGKILL`); decision cache (not LRU, PID in key); Prometheus metrics. `--log-level` is ignored. | Linux |
 | **Phase 3** | Partial | Type-safe process/file/network events. **No** `sendto`/`recvfrom` hooks. Overhead measured in [PERFORMANCE.md](PERFORMANCE.md). | Linux |
 | **Phase 4** | Partial | Platform abstraction. Windows ETW (detect-then-terminate) works and is tested in CI. eBPF-for-Windows has never been built or run in CI. macOS ESF answers every AUTH event ALLOW and is not compiled in CI. | Linux/Windows/macOS |
-| **Phase 5** | Partial | YAML DSL and `warmor-compile` work. The Helm chart does **not** start (the YAML policy needs `cargo` in a distroless image). | Linux |
+| **Phase 5** | Partial | YAML DSL and `warmor-compile` work. The Helm chart installs and the daemon runs (kind e2e-tested in CI), with a policy compiled into the image. | Linux |
 | **Phase 6** | Partial | 7 LSM hooks attach (tested in a VM in CI). Kernel blocking happens only on a policy-map hit, and only exec and connect entries are ever written. A miss is allowed. | Linux |
 | **Phase 7** | Partial | Policy server with registration, heartbeats, versioned policies and percentage rollouts. Lineage is partial (no PPID). NetFilter, sandbox and SIEM syslog sink are library-only. | All |
 | **Phase 8** | Partial | mTLS/JWT, signed OCI bundles (`warmor-policy-bundle`), daemon signature verification (`--verify-key`) and the `warmorctl` TUI work. The OCI hook is experimental (no auth, bindings unused). containerd and per-container policy are missing. | All |
@@ -503,7 +503,7 @@ The full component and data-flow design lives in
 
 Deployment modes: a standalone daemon running as a systemd service on each
 host, or a Kubernetes DaemonSet with policies distributed via the policy
-server (the Helm chart — not working on `main`, see [STATUS.md](STATUS.md)).
+server (the Helm chart — working, observe-only on nodes without BPF-LSM; see [STATUS.md](STATUS.md)).
 
 ---
 
@@ -678,7 +678,9 @@ strength differs sharply by platform and event type.
 1. Kernel default-deny and preloading static rules; sync all key-determined decisions
 2. Fix the Rust crate ABIs, build them in CI, and fix the failing example YAML policies
 3. Wire the library-only features (integrity runtime, escape, canary analyzer, SIEM sink)
-4. Fix the Helm chart and add a kind e2e test
+
+Done recently: the Helm chart now installs and the daemon runs in-cluster
+(policy compiled into the image, kind e2e test in CI).
 
 ---
 

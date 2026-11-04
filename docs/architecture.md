@@ -601,7 +601,7 @@ YAML policy); "undeclared" ones do not.
 - Grafana dashboard ConfigMap for sidecar auto-provisioning
 - Policy ConfigMap with default YAML policy
 
-**Install:** not working on `main`. The YAML policy needs `cargo` in a distroless image, and the webhook has no handler. See [Feature Status](STATUS.md#5-container-runtime-and-kubernetes).
+**Install:** working on `main` (kind e2e-tested); the chart ships a policy compiled into the image. The webhook has no handler, and in-cluster kernel enforcement needs BPF-LSM nodes. See [Feature Status](STATUS.md#5-container-runtime-and-kubernetes).
 
 ### Distributed Mode with mTLS
 
@@ -670,7 +670,7 @@ YAML policy); "undeclared" ones do not.
 ### Container Runtime
 - **CRI-O / OCI hook** - `warmor-oci-hook` (experimental: no auth/TLS, bindings unused)
 - **containerd** - library code only (`internal/container`), not wired
-- **Kubernetes** - Helm chart and DaemonSet manifests (not working on `main`)
+- **Kubernetes** - Helm chart (working, e2e-tested) and DaemonSet manifests (manifests configure the daemon through env vars it does not read)
 
 ### Observability
 - **Prometheus** - Metrics collection (events, cache, evaluation latency)
