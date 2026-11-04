@@ -311,7 +311,13 @@ warmor/
 
 ## Kubernetes Deployment
 
-> **Not working on `main` yet.** The Helm chart is being fixed. It ships a YAML policy that the distroless image cannot compile, so the daemon crashloops. See [Feature Status](docs/STATUS.md#5-container-runtime-and-kubernetes).
+> **Works on `main`, observe-only in most clusters.** The chart installs and
+> the daemon runs (verified by a kind e2e test in CI), using a policy compiled
+> into the image. Most hosted clusters and kind nodes lack `CONFIG_BPF_LSM`,
+> so in-cluster the daemon runs tracepoint-only observe mode — kernel
+> enforcement additionally needs `daemon.lsmEnforce: true` and BPF-LSM nodes.
+> See the [chart README](deploy/helm/warmor/README.md) and
+> [Feature Status](docs/STATUS.md#5-container-runtime-and-kubernetes).
 
 ---
 

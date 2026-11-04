@@ -149,3 +149,23 @@ jobs:
 
       - name: Template Helm chart
         run: helm template warmor deploy/helm/warmor/
+
+  # End-to-end: the chart must actually start the daemon in a real cluster.
+  # This is the test that catches "renders fine, crashloops in production"
+  # (docs/operations.md, scripts/kind-e2e.sh).
+  k8s-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kind and kubectl
+        run: |
+          curl -sLo kind "https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64"
+          chmod +x kind && sudo mv kind /usr/local/bin/
+          curl -sLO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+
+      - uses: azure/setup-helm@v4
+
+      - name: kind e2e (build image, install chart, verify daemon)
+        run: ./scripts/kind-e2e.sh warmor:ci-e2e

@@ -21,32 +21,13 @@ daemon:
   cgroupFilter: ""
 
 policy:
-  yaml: |
-    name: cluster-default
-    version: 1
-    description: "Default cluster security policy"
-    variables:
-      blocked_bins:
-        - "/usr/bin/nc"
-        - "/usr/bin/ncat"
-        - "/usr/bin/socat"
-    rules:
-      - name: block-tmp-exec
-        event: process
-        conditions:
-          all:
-            - path: { glob: "/tmp/**" }
-        action: deny
-        reason: "Execution from temp directory"
-      - name: block-network-tools
-        event: process
-        conditions:
-          all:
-            - uid: { not: 0 }
-            - path: { any_of: $blocked_bins }
-        action: deny
-        reason: "Blocked network tool"
-    default_action: allow
+  # The image ships with a default policy compiled in at build time
+  # (deploy/default-policy.yaml -> /etc/warmor/policy.wasm). To use your own
+  # policy, compile it on a machine with the Rust toolchain
+  #   (warmor-compile -o policy.wasm my-policy.yaml)
+  # and reference a ConfigMap that holds the resulting binary under the
+  # "policy.wasm" key. The ConfigMap is mounted over /etc/warmor.
+  existingConfigMap: ""
 
 resources:
   limits:
@@ -77,7 +58,8 @@ podSecurityContext:
 priorityClass:
   enabled: true
   name: ""
-  value: 2000000000
+  # 1000000000 is the maximum allowed for a user-defined PriorityClass.
+  value: 1000000000
 
 updateStrategy:
   type: RollingUpdate

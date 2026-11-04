@@ -1,16 +1,15 @@
 # warmor Helm chart
 
-Deploys the warmor daemon as a DaemonSet with an optional policy-server
-adjacent monitoring stack (ServiceMonitor, Prometheus alerts, Grafana
-dashboard).
+Deploys the warmor daemon as a DaemonSet with an optional monitoring stack
+(ServiceMonitor, Prometheus alerts, Grafana dashboard).
 
-> **Status: does not run on `main` yet.** The chart renders and passes
-> `helm lint`, but the daemon container cannot start: the policy ships as
-> YAML in a ConfigMap and the daemon compiles YAML policies at startup,
-> which needs `cargo` — the distroless image does not include it. The
-> `validate-policy` init container passes (it only schema-checks the YAML),
-> then the main container crashloops. See
-> [Known issues](#known-issues) for the full list and what works today.
+> **Status: working on `main`.** The chart installs and the daemon runs —
+> verified end-to-end by a kind test in CI (`scripts/kind-e2e.sh`): install →
+> pods Ready → policy loaded → metrics serving. The image bakes in a
+> compiled default policy, so no Rust toolchain is needed on the nodes.
+> Caveats: on nodes without `CONFIG_BPF_LSM` (kind, most hosted clusters)
+> the daemon runs tracepoint-only **observe mode** — see
+> [Known issues](#known-issues).
 
 ## Install
 
@@ -27,6 +26,24 @@ helm install warmor deploy/helm/warmor/
 `image.tag` defaults to the chart's `appVersion`, which tracks the latest
 release tag.
 
+## Custom policies
+
+The image ships with a default policy compiled at build time
+(`deploy/default-policy.yaml` → `/etc/warmor/policy.wasm`). To deploy your
+own, compile it where the Rust toolchain lives and mount the binary:
+
+```bash
+warmor-compile -o policy.wasm my-policy.yaml
+kubectl create configmap warmor-policy --from-file=policy.wasm
+helm install warmor oci://ghcr.io/yasindce1998/warmor/charts/warmor \
+  --set policy.existingConfigMap=warmor-policy
+```
+
+The ConfigMap must hold the binary under the `policy.wasm` key; it is
+mounted over `/etc/warmor`. Do not ship YAML policies to the cluster — the
+daemon compiles YAML on the node at startup, and the distroless image has
+no `cargo`.
+
 ## Values
 
 | Key | Default | Description |
@@ -39,12 +56,12 @@ release tag.
 | `daemon.lsmEnforce` | `false` | Pass `--lsm-enforce`: kernel-level blocking (EPERM) for cached exec/connect denies. Requires `CONFIG_BPF_LSM=y` and `bpf` in `/sys/kernel/security/lsm` on the nodes |
 | `daemon.requireLSM` | `false` | Pass `--require-lsm`: fail to start unless BPF-LSM enforcement can be loaded |
 | `daemon.cgroupFilter` | `""` | Pass `--cgroup-filter` (cgroup paths or `auto` for K8s pod discovery); also mounts the host cgroup fs |
-| `policy.yaml` | cluster-default starter policy | Inline YAML policy mounted at `/etc/warmor/policy.yaml` |
+| `policy.existingConfigMap` | `""` | ConfigMap (with a `policy.wasm` key) mounted over `/etc/warmor`; empty = use the policy baked into the image |
 | `resources` | requests 100m/128Mi, limits 500m/256Mi | Daemon container resources |
 | `tolerations` / `nodeSelector` / `affinity` | schedule everywhere | Standard DaemonSet scheduling |
 | `serviceAccount.create` / `.name` / `.annotations` | `true` / auto / `{}` | Service account for the daemon |
 | `podAnnotations` / `podSecurityContext` | — | Pod-level annotations / security context |
-| `priorityClass.*` | enabled, value 2000000000 | PriorityClass for the daemon pods |
+| `priorityClass.*` | enabled, value 1000000000 | PriorityClass for the daemon pods (1000000000 is the K8s maximum for user-defined classes) |
 | `updateStrategy` | `RollingUpdate`, `maxUnavailable: 10%` | DaemonSet update strategy |
 | `networkPolicy.enabled` / `.extraEgress` | `true` / `[]` | Restrict daemon egress |
 | `podDisruptionBudget.*` | enabled, `maxUnavailable: 1` | PDB for the daemon |
@@ -55,8 +72,12 @@ release tag.
 
 ## What works today
 
-- Rendering, `helm lint` and `helm template`
-- The `validate-policy` init container (schema-checks the YAML policy)
+- Install → daemon Running → metrics and health endpoints, verified by the
+  kind e2e test in CI (`k8s-e2e` job)
+- Policy loading from the image (compiled at build time) or from a
+  user-supplied ConfigMap (`policy.existingConfigMap`)
+- The `validate-policy` init container loads the actual `.wasm` in a
+  throwaway WASM runtime before the daemon starts
 - Metrics: scrape annotations, ServiceMonitor, alert rules (they reference
   the daemon's real metric names) and the Grafana dashboard
 - Flag passthrough: `--audit`, `--lsm-enforce`, `--require-lsm`,
@@ -65,12 +86,14 @@ release tag.
 ## Known issues
 
 Everything below is open on `main`; see
-[Feature Status](https://github.com/yasindce1998/Warmor/blob/main/docs/STATUS.md)
+[Feature Status](https://github.com/yasindce1998/warmor/blob/main/docs/STATUS.md)
 for the tracked items.
 
-1. **The daemon cannot start with the shipped policy.** YAML policies are
-   compiled on the node at startup and the distroless image has no `cargo`.
-   Fixing this needs the chart to ship (or build) a precompiled `.wasm`.
+1. **No kernel enforcement on most clusters.** Kind nodes and typical
+   hosted clusters lack `CONFIG_BPF_LSM`, so the daemon degrades to
+   tracepoint-only observe mode (detect, then `SIGKILL`). Set
+   `daemon.lsmEnforce: true` on BPF-LSM nodes for kernel blocking;
+   `daemon.requireLSM: true` makes the daemon refuse to start without it.
 2. **The `WarmorPolicy` CRD has no controller.** Resources are stored but
    never applied to any node; `status` is never populated. The
    ValidatingWebhookConfiguration has no handler behind it — leave

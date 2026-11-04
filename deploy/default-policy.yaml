@@ -1,0 +1,28 @@
+# Default policy baked into the warmor container image
+# (deploy/Dockerfile compiles it to /etc/warmor/policy.wasm).
+# Override at install time with policy.existingConfigMap in the Helm chart.
+name: cluster-default
+version: 1
+description: "Default cluster security policy"
+variables:
+  blocked_bins:
+    - "/usr/bin/nc"
+    - "/usr/bin/ncat"
+    - "/usr/bin/socat"
+rules:
+  - name: block-tmp-exec
+    event: process
+    conditions:
+      all:
+        - path: { glob: "/tmp/**" }
+    action: deny
+    reason: "Execution from temp directory"
+  - name: block-network-tools
+    event: process
+    conditions:
+      all:
+        - uid: { not: 0 }
+        - path: { any_of: $blocked_bins }
+    action: deny
+    reason: "Blocked network tool"
+default_action: allow

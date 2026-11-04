@@ -148,15 +148,35 @@ sudo cp deploy/crio/warmor-hook.json deploy/crio/warmor-hook-stop.json /etc/cont
 Not available on `main`. There are no `--containerd-socket` or
 `--per-container-policy` flags. `internal/container` is library-only.
 
-## Kubernetes (not working on main yet)
+## Kubernetes
 
-The Helm chart in `deploy/helm/warmor` is being fixed. On `main`:
+The Helm chart in `deploy/helm/warmor` installs and the daemon runs — a kind
+e2e test in CI (`scripts/kind-e2e.sh`) verifies install → pods Ready →
+policy loaded → metrics serving.
 
-- The policy is shipped as YAML in a ConfigMap. The daemon would need `cargo`
-  to compile it, and the distroless image does not include it.
+```bash
+helm install warmor oci://ghcr.io/yasindce1998/warmor/charts/warmor
+```
+
+The image bakes in a default policy (`deploy/default-policy.yaml`, compiled
+to `/etc/warmor/policy.wasm` at build time). To use your own policy, compile
+it where the Rust toolchain is available and reference the resulting binary:
+
+```bash
+warmor-compile -o policy.wasm my-policy.yaml
+kubectl create configmap warmor-policy --from-file=policy.wasm
+helm install warmor oci://ghcr.io/yasindce1998/warmor/charts/warmor \
+  --set policy.existingConfigMap=warmor-policy
+```
+
+Caveats on `main`:
+
+- Most hosted clusters and kind nodes lack `CONFIG_BPF_LSM`, so in-cluster
+  the daemon runs tracepoint-only observe mode. Kernel enforcement needs
+  `daemon.lsmEnforce: true` **and** nodes with BPF-LSM enabled.
 - The `ValidatingWebhookConfiguration` has no handler, and the `WarmorPolicy`
-  CRD has no controller (see [CRD usage](crd-usage.md)).
-- `deploy/kubernetes/warmor-daemonset.yaml` configures the daemon through
-  environment variables it does not read.
-
-Instructions will return here once the chart works.
+  CRD has no controller (see [CRD usage](crd-usage.md)). Leave
+  `webhook.enabled` off.
+- `deploy/kubernetes/warmor-daemonset.yaml` (the static manifests) still
+  configures the daemon through environment variables it does not read —
+  prefer the chart.
