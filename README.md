@@ -32,7 +32,9 @@ Warmor (WebAssembly + Armor) is a runtime security enforcer. It hooks the kernel
 1. **In the kernel (Linux, `--lsm-enforce`).** LSM hooks return `-EPERM` for operations that already have a deny entry in the kernel policy map. On `main`, those entries are only written for **exec (exact binary path)** and **connect (remote address and port)**. They are written after the WASM policy has seen that operation once.
 2. **In userspace (everything else).** A map miss is allowed by the kernel and sent to the daemon. The WASM policy evaluates it, and on DENY the daemon kills the process with `SIGKILL`. The first occurrence of a denied operation, and every file, bind, listen, ptrace or mount deny, is therefore **detected and then killed, not prevented**.
 
-Pre-loading kernel rules from the compiled policy and a default-deny mode are in progress. See **[Feature Status](docs/STATUS.md)** for exactly what ships on `main`.
+**Kernel default-deny (`--default-deny`, opt-in)** closes that first-occurrence gap for exec and connect: when the policy is an allowlist (`default_action: deny` with exact `eq` rules on the path / endpoint), the daemon preloads every allow rule into the kernel policy map at startup and marks the domain, so the hooks refuse (EPERM) anything not on the allowlist — no seeing-it-once first. Policies that are not eligible (globs, field-dependent rules, `default_action: allow`) simply keep the miss-allowed behaviour. See [the design](docs/design/kernel-default-deny.md) for the exact eligibility rules and safety ordering.
+
+See **[Feature Status](docs/STATUS.md)** for exactly what ships on `main`.
 
 ---
 

@@ -18,6 +18,13 @@ daemon:
   lsmEnforce: false
   # Refuse to start unless BPF-LSM kernel enforcement can be loaded.
   requireLSM: false
+  # Pass --default-deny: preload the policy's static allow rules and refuse
+  # (EPERM) exec/connect the policy does not allow, instead of allowing what
+  # the kernel has not yet seen. Requires lsmEnforce and an allowlist policy
+  # (default_action: deny + exact eq rules); see
+  # docs/design/kernel-default-deny.md. Misses stay allowed when the policy
+  # is not eligible.
+  defaultDeny: false
   cgroupFilter: ""
 
 policy:

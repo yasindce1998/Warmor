@@ -186,6 +186,46 @@ static __always_inline int is_enforce_enabled(void)
 	return 0;
 }
 
+// Default-deny domains: when userspace has proven a (cgroup, event_type)
+// domain's policy-map entries are a complete allowlist, it marks the domain
+// here and a policy-map miss denies instead of allowing. The key mirrors
+// policy_key's cgroup+event_type (rule_hash does not apply). A plain HASH,
+// not LRU: the marking must never be evicted — an evicted marking silently
+// reopens the allow-on-miss hole it closed.
+struct default_deny_key {
+	__u64 cgroup_id;
+	__u8  event_type;
+	__u8  pad[7];
+};
+
+// value: DEFAULT_DENY_MODE_DENY or DEFAULT_DENY_MODE_AUDIT. 0 is not a valid
+// value, so the helper's 0 return unambiguously means "not marked".
+#define DEFAULT_DENY_MODE_DENY  1 // refuse (with -EPERM in enforce mode)
+#define DEFAULT_DENY_MODE_AUDIT 2 // emit the would-deny, allow through
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 64);
+	__type(key, struct default_deny_key);
+	__type(value, __u8);
+} default_deny SEC(".maps");
+
+// Lookup the default-deny marking for a cgroup+event type, cgroup-specific
+// first then the global (cgroup_id = 0) domain, like the policy map. Returns
+// the DEFAULT_DENY_MODE_* byte, or 0 when the domain is not marked.
+static __always_inline __u8 lookup_default_deny(__u64 cgid, __u8 event_type)
+{
+	struct default_deny_key ddkey = {
+		.cgroup_id = cgid,
+		.event_type = event_type,
+	};
+	__u8 *dd = bpf_map_lookup_elem(&default_deny, &ddkey);
+	if (!dd) {
+		ddkey.cgroup_id = 0;
+		dd = bpf_map_lookup_elem(&default_deny, &ddkey);
+	}
+	return dd ? *dd : 0;
+}
+
 // Unix socket paths whose connects are reported (key: fnv1a of sun_path,
 // populated by userspace). Unix connects are far too frequent to report all
 // of them, but the container runtime sockets are a classic escape route.
@@ -303,5 +343,6 @@ const struct warmor_event *unused_warmor_event __attribute__((unused));
 const struct policy_key *unused_policy_key __attribute__((unused));
 const struct policy_value *unused_policy_value __attribute__((unused));
 const struct lsm_config *unused_lsm_config __attribute__((unused));
+const struct default_deny_key *unused_default_deny_key __attribute__((unused));
 
 #endif /* __WARMOR_LSM_H */

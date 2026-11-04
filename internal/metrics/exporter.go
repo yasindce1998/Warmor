@@ -140,6 +140,19 @@ var (
 			Help:      "1 if the kernel monitor loaded with the requested enforcement, 0 if degraded (e.g. LSM enforcement requested but unavailable).",
 		},
 	)
+
+	// DefaultDeny is 1 when the event type's domain is marked kernel
+	// default-deny (a policy-map miss is denied), 0 when misses stay
+	// allowed (not requested, or the policy is not a complete allowlist).
+	DefaultDeny = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "warmor",
+			Subsystem: "kernel",
+			Name:      "default_deny_active",
+			Help:      "1 if the event type's policy-map misses are denied in-kernel (complete allowlist), 0 if misses stay allowed.",
+		},
+		[]string{"event_type"},
+	)
 )
 
 // Status label values.
@@ -218,6 +231,16 @@ func RecordEventDropped() {
 	EventsDropped.Inc()
 }
 
+// SetDefaultDeny reports whether the event type's domain is marked kernel
+// default-deny.
+func SetDefaultDeny(eventType string, active bool) {
+	v := 0.0
+	if active {
+		v = 1
+	}
+	DefaultDeny.WithLabelValues(eventType).Set(v)
+}
+
 // SetMapEntries sets the entry count of a kernel map.
 func SetMapEntries(mapName string, n int) {
 	MapEntries.WithLabelValues(mapName).Set(float64(n))
@@ -279,6 +302,7 @@ func init() {
 		EBPFLoaderStatus,
 		PolicyMapSyncs,
 		LSMEventsDropped,
+		DefaultDeny,
 	)
 }
 

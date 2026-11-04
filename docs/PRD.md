@@ -675,14 +675,17 @@ strength differs sharply by platform and event type.
 
 ### Next Priorities
 
-1. Kernel default-deny and preloading static rules; sync all key-determined decisions
-2. Fix the Rust crate ABIs, build them in CI, and fix the failing example YAML policies
-3. Wire the library-only features (integrity runtime, escape, canary analyzer, SIEM sink)
+1. Fix the Rust crate ABIs, build them in CI, and fix the failing example YAML policies
+2. Wire the library-only features (integrity runtime, escape, canary analyzer, SIEM sink)
 
-Done recently: the Helm chart now installs and the daemon runs in-cluster
-(policy compiled into the image, kind e2e test in CI).
+Done recently: kernel default-deny (`--default-deny`) — the daemon preloads
+an allowlist policy's static rules into the kernel policy map and the BPF
+hooks refuse exec/connect the policy does not allow (see
+[design/kernel-default-deny.md](design/kernel-default-deny.md)); and the
+Helm chart now installs and the daemon runs in-cluster (policy compiled
+into the image, kind e2e test in CI).
 
 ---
 
-**Last Updated:** 2026-10-29
+**Last Updated:** 2026-11-04
 **Status:** See [STATUS.md](STATUS.md)

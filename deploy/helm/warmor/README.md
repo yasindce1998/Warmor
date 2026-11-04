@@ -55,6 +55,7 @@ no `cargo`.
 | `daemon.auditMode` | `false` | Pass `--audit`: log deny decisions without enforcing |
 | `daemon.lsmEnforce` | `false` | Pass `--lsm-enforce`: kernel-level blocking (EPERM) for cached exec/connect denies. Requires `CONFIG_BPF_LSM=y` and `bpf` in `/sys/kernel/security/lsm` on the nodes |
 | `daemon.requireLSM` | `false` | Pass `--require-lsm`: fail to start unless BPF-LSM enforcement can be loaded |
+| `daemon.defaultDeny` | `false` | Pass `--default-deny`: preload the policy's static allow rules and refuse (EPERM) exec/connect the policy does not allow. Requires `daemon.lsmEnforce` and an allowlist policy (`default_action: deny` + exact `eq` rules); misses stay allowed when the policy is not eligible. See [the design](https://github.com/yasindce1998/warmor/blob/main/docs/design/kernel-default-deny.md) |
 | `daemon.cgroupFilter` | `""` | Pass `--cgroup-filter` (cgroup paths or `auto` for K8s pod discovery); also mounts the host cgroup fs |
 | `policy.existingConfigMap` | `""` | ConfigMap (with a `policy.wasm` key) mounted over `/etc/warmor`; empty = use the policy baked into the image |
 | `resources` | requests 100m/128Mi, limits 500m/256Mi | Daemon container resources |
@@ -81,7 +82,8 @@ no `cargo`.
 - Metrics: scrape annotations, ServiceMonitor, alert rules (they reference
   the daemon's real metric names) and the Grafana dashboard
 - Flag passthrough: `--audit`, `--lsm-enforce`, `--require-lsm`,
-  `--cgroup-filter`, log level, stats interval, metrics port
+  `--default-deny`, `--cgroup-filter`, log level, stats interval, metrics
+  port
 
 ## Known issues
 

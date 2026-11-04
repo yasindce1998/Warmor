@@ -13,6 +13,13 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type lsm_ptraceDefaultDenyKey struct {
+	_         structs.HostLayout
+	CgroupId  uint64
+	EventType uint8
+	Pad       [7]uint8
+}
+
 type lsm_ptraceLsmConfig struct {
 	_      structs.HostLayout
 	OnLoss uint32
@@ -38,18 +45,20 @@ type lsm_ptracePolicyValue struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	lsm_ptraceMapLsmCfg            = "lsm_cfg"
-	lsm_ptraceMapLsmCgroupFilter   = "lsm_cgroup_filter"
-	lsm_ptraceMapLsmDrops          = "lsm_drops"
-	lsm_ptraceMapLsmEnforce        = "lsm_enforce"
-	lsm_ptraceMapLsmEvents         = "lsm_events"
-	lsm_ptraceMapPolicyMap         = "policy_map"
-	lsm_ptraceMapUnixWatch         = "unix_watch"
-	lsm_ptraceProgLsmPtraceCheck   = "lsm_ptrace_check"
-	lsm_ptraceVarUnusedLsmConfig   = "unused_lsm_config"
-	lsm_ptraceVarUnusedPolicyKey   = "unused_policy_key"
-	lsm_ptraceVarUnusedPolicyValue = "unused_policy_value"
-	lsm_ptraceVarUnusedWarmorEvent = "unused_warmor_event"
+	lsm_ptraceMapDefaultDeny          = "default_deny"
+	lsm_ptraceMapLsmCfg               = "lsm_cfg"
+	lsm_ptraceMapLsmCgroupFilter      = "lsm_cgroup_filter"
+	lsm_ptraceMapLsmDrops             = "lsm_drops"
+	lsm_ptraceMapLsmEnforce           = "lsm_enforce"
+	lsm_ptraceMapLsmEvents            = "lsm_events"
+	lsm_ptraceMapPolicyMap            = "policy_map"
+	lsm_ptraceMapUnixWatch            = "unix_watch"
+	lsm_ptraceProgLsmPtraceCheck      = "lsm_ptrace_check"
+	lsm_ptraceVarUnusedDefaultDenyKey = "unused_default_deny_key"
+	lsm_ptraceVarUnusedLsmConfig      = "unused_lsm_config"
+	lsm_ptraceVarUnusedPolicyKey      = "unused_policy_key"
+	lsm_ptraceVarUnusedPolicyValue    = "unused_policy_value"
+	lsm_ptraceVarUnusedWarmorEvent    = "unused_warmor_event"
 )
 
 // loadLsm_ptrace returns the embedded CollectionSpec for lsm_ptrace.
@@ -101,6 +110,7 @@ type lsm_ptraceProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type lsm_ptraceMapSpecs struct {
+	DefaultDeny     *ebpf.MapSpec `ebpf:"default_deny"`
 	LsmCfg          *ebpf.MapSpec `ebpf:"lsm_cfg"`
 	LsmCgroupFilter *ebpf.MapSpec `ebpf:"lsm_cgroup_filter"`
 	LsmDrops        *ebpf.MapSpec `ebpf:"lsm_drops"`
@@ -114,10 +124,11 @@ type lsm_ptraceMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type lsm_ptraceVariableSpecs struct {
-	UnusedLsmConfig   *ebpf.VariableSpec `ebpf:"unused_lsm_config"`
-	UnusedPolicyKey   *ebpf.VariableSpec `ebpf:"unused_policy_key"`
-	UnusedPolicyValue *ebpf.VariableSpec `ebpf:"unused_policy_value"`
-	UnusedWarmorEvent *ebpf.VariableSpec `ebpf:"unused_warmor_event"`
+	UnusedDefaultDenyKey *ebpf.VariableSpec `ebpf:"unused_default_deny_key"`
+	UnusedLsmConfig      *ebpf.VariableSpec `ebpf:"unused_lsm_config"`
+	UnusedPolicyKey      *ebpf.VariableSpec `ebpf:"unused_policy_key"`
+	UnusedPolicyValue    *ebpf.VariableSpec `ebpf:"unused_policy_value"`
+	UnusedWarmorEvent    *ebpf.VariableSpec `ebpf:"unused_warmor_event"`
 }
 
 // lsm_ptraceObjects contains all objects after they have been loaded into the kernel.
@@ -140,6 +151,7 @@ func (o *lsm_ptraceObjects) Close() error {
 //
 // It can be passed to loadLsm_ptraceObjects or ebpf.CollectionSpec.LoadAndAssign.
 type lsm_ptraceMaps struct {
+	DefaultDeny     *ebpf.Map `ebpf:"default_deny"`
 	LsmCfg          *ebpf.Map `ebpf:"lsm_cfg"`
 	LsmCgroupFilter *ebpf.Map `ebpf:"lsm_cgroup_filter"`
 	LsmDrops        *ebpf.Map `ebpf:"lsm_drops"`
@@ -151,6 +163,7 @@ type lsm_ptraceMaps struct {
 
 func (m *lsm_ptraceMaps) Close() error {
 	return _Lsm_ptraceClose(
+		m.DefaultDeny,
 		m.LsmCfg,
 		m.LsmCgroupFilter,
 		m.LsmDrops,
@@ -165,10 +178,11 @@ func (m *lsm_ptraceMaps) Close() error {
 //
 // It can be passed to loadLsm_ptraceObjects or ebpf.CollectionSpec.LoadAndAssign.
 type lsm_ptraceVariables struct {
-	UnusedLsmConfig   *ebpf.Variable `ebpf:"unused_lsm_config"`
-	UnusedPolicyKey   *ebpf.Variable `ebpf:"unused_policy_key"`
-	UnusedPolicyValue *ebpf.Variable `ebpf:"unused_policy_value"`
-	UnusedWarmorEvent *ebpf.Variable `ebpf:"unused_warmor_event"`
+	UnusedDefaultDenyKey *ebpf.Variable `ebpf:"unused_default_deny_key"`
+	UnusedLsmConfig      *ebpf.Variable `ebpf:"unused_lsm_config"`
+	UnusedPolicyKey      *ebpf.Variable `ebpf:"unused_policy_key"`
+	UnusedPolicyValue    *ebpf.Variable `ebpf:"unused_policy_value"`
+	UnusedWarmorEvent    *ebpf.Variable `ebpf:"unused_warmor_event"`
 }
 
 // lsm_ptracePrograms contains all programs after they have been loaded into the kernel.

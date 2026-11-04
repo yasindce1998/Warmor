@@ -90,6 +90,9 @@ spec:
             {{- if .Values.daemon.requireLSM }}
             - "-require-lsm"
             {{- end }}
+            {{- if .Values.daemon.defaultDeny }}
+            - "-default-deny"
+            {{- end }}
             {{- if .Values.daemon.cgroupFilter }}
             - "-cgroup-filter"
             - {{ .Values.daemon.cgroupFilter | quote }}

@@ -25,6 +25,7 @@ func GenerateRust(policy *Policy) (string, error) {
 	writeEvaluateEventFunction(&b, policy)
 	writeGetLastMatchedRule(&b)
 	writeFieldsRead(&b, policy)
+	writeStaticRules(&b, policy)
 	writeABIVersion(&b)
 
 	// Host callback extern declarations
@@ -370,6 +371,40 @@ func writeRuleCheckBinary(b *strings.Builder, rule Rule, eventType string, ruleI
 func writeTemporalReads(b *strings.Builder) {
 	b.WriteString("    let wall = read_u32(base, OFF_WALL_CLOCK);\n")
 	b.WriteString("    let age_ms = read_u48(base, OFF_CONTAINER_AGE);\n")
+}
+
+// writeStaticRules emits the kernel default-deny preload tables (see
+// compiler.StaticRulesExport). An ineligible domain's table is [0]; the host
+// then knows not to mark it.
+func writeStaticRules(b *strings.Builder, policy *Policy) {
+	// staticRulesForEvent returns rules only for an eligible domain; its
+	// "" reason means eligible even with zero rules (default deny, nothing
+	// allowed).
+	processRules, processReason := staticRulesForEvent(policy, "process")
+	networkRules, networkReason := staticRulesForEvent(policy, "network")
+
+	b.WriteString("// Kernel default-deny preload tables (see compiler.StaticRulesExport).\n")
+	b.WriteString(fmt.Sprintf("static STATIC_RULES_PROCESS: &[u8] = %s;\n",
+		rustByteSlice(encodeStaticRules(processRules, "process", processReason == ""))))
+	b.WriteString(fmt.Sprintf("static STATIC_RULES_NETWORK: &[u8] = %s;\n\n",
+		rustByteSlice(encodeStaticRules(networkRules, "network", networkReason == ""))))
+
+	fmt.Fprintf(b, `#[no_mangle]
+pub extern "C" fn %s(event_type: u32, buf: *mut u8, cap: u32) -> u32 {
+    // 0 = process, 2 = network (the binary ABI's event_type; the u8
+    // EVENT_* constants above are for the event struct).
+    let src: &[u8] = match event_type {
+        0 => &STATIC_RULES_PROCESS,
+        2 => &STATIC_RULES_NETWORK,
+        _ => &[],
+    };
+    if (cap as usize) >= src.len() {
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), buf, src.len()); }
+    }
+    src.len() as u32
+}
+
+`, StaticRulesExport)
 }
 
 // writeABIVersion declares ABI version 3, under which the host sends the

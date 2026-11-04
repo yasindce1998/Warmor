@@ -5,6 +5,7 @@ package ebpf
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -148,5 +149,80 @@ func TestLSMEventCarriesHookAndDecision(t *testing.T) {
 		if got := LSMHookName(et); got != want {
 			t.Errorf("LSMHookName(%d) = %q, want %q", et, got, want)
 		}
+	}
+}
+
+// fakeDefaultDenyBackend is an in-memory defaultDenyBackend.
+type fakeDefaultDenyBackend struct {
+	entries map[DefaultDenyKey]uint8
+	putErr  error
+}
+
+func (f *fakeDefaultDenyBackend) Put(key, value any) error {
+	if f.putErr != nil {
+		return f.putErr
+	}
+	if f.entries == nil {
+		f.entries = map[DefaultDenyKey]uint8{}
+	}
+	f.entries[key.(DefaultDenyKey)] = value.(uint8)
+	return nil
+}
+
+func (f *fakeDefaultDenyBackend) Delete(key any) error {
+	delete(f.entries, key.(DefaultDenyKey))
+	return nil
+}
+
+func (f *fakeDefaultDenyBackend) ddKeys() ([]DefaultDenyKey, error) {
+	var ks []DefaultDenyKey
+	for k := range f.entries {
+		ks = append(ks, k)
+	}
+	return ks, nil
+}
+
+func TestDefaultDeny_MarkAndClear(t *testing.T) {
+	dd := &fakeDefaultDenyBackend{}
+	m := &PolicyMapManager{defaultDenyMap: dd}
+
+	if err := m.SetDefaultDeny(EventTypeExec, DefaultDenyModeDeny); err != nil {
+		t.Fatalf("SetDefaultDeny: %v", err)
+	}
+	if err := m.SetDefaultDeny(EventTypeNetwork, DefaultDenyModeAudit); err != nil {
+		t.Fatalf("SetDefaultDeny: %v", err)
+	}
+	want := map[DefaultDenyKey]uint8{
+		{EventType: EventTypeExec}:    DefaultDenyModeDeny,
+		{EventType: EventTypeNetwork}: DefaultDenyModeAudit,
+	}
+	if !reflect.DeepEqual(dd.entries, want) {
+		t.Errorf("entries = %v, want %v", dd.entries, want)
+	}
+
+	if err := m.ClearDefaultDeny(); err != nil {
+		t.Fatalf("ClearDefaultDeny: %v", err)
+	}
+	if len(dd.entries) != 0 {
+		t.Errorf("entries = %v, want cleared", dd.entries)
+	}
+}
+
+func TestDefaultDeny_RejectsInvalidModeAndNilMap(t *testing.T) {
+	m := &PolicyMapManager{}
+	if err := m.SetDefaultDeny(EventTypeExec, DefaultDenyModeDeny); err == nil {
+		t.Error("SetDefaultDeny on a manager without the map must fail")
+	}
+	m.defaultDenyMap = &fakeDefaultDenyBackend{}
+	if err := m.SetDefaultDeny(EventTypeExec, 0); err == nil {
+		t.Error("mode 0 must be rejected (it reads as not-marked in the kernel)")
+	}
+	if err := m.SetDefaultDeny(EventTypeExec, 3); err == nil {
+		t.Error("unknown mode must be rejected")
+	}
+	// Clearing a manager without the map is a no-op, not an error: the
+	// reload path calls it unconditionally.
+	if err := (&PolicyMapManager{}).ClearDefaultDeny(); err != nil {
+		t.Errorf("ClearDefaultDeny without the map: %v", err)
 	}
 }
