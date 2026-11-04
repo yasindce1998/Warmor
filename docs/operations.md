@@ -152,7 +152,6 @@ Not available on `main`. There are no `--containerd-socket` or
 
 The Helm chart in `deploy/helm/warmor` is being fixed. On `main`:
 
-- The chart has no `lsmEnforce` value and never passes `--lsm-enforce`.
 - The policy is shipped as YAML in a ConfigMap. The daemon would need `cargo`
   to compile it, and the distroless image does not include it.
 - The `ValidatingWebhookConfiguration` has no handler, and the `WarmorPolicy`

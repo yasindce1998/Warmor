@@ -34,7 +34,7 @@ Status as of current `main`. "Partial" means the phase's headline features are r
 | **Phase 2** | Done, with gaps | ALLOW/DENY/LOG (DENY = `SIGKILL`); decision cache (not LRU, PID in key); Prometheus metrics. `--log-level` is ignored. | Linux |
 | **Phase 3** | Partial | Type-safe process/file/network events. **No** `sendto`/`recvfrom` hooks. Overhead measured in [PERFORMANCE.md](PERFORMANCE.md). | Linux |
 | **Phase 4** | Partial | Platform abstraction. Windows ETW (detect-then-terminate) works and is tested in CI. eBPF-for-Windows has never been built or run in CI. macOS ESF answers every AUTH event ALLOW and is not compiled in CI. | Linux/Windows/macOS |
-| **Phase 5** | Partial | YAML DSL and `warmor-compile` work. The Helm chart does **not** start (no LSM enforce value, YAML policy needs `cargo` in a distroless image). | Linux |
+| **Phase 5** | Partial | YAML DSL and `warmor-compile` work. The Helm chart does **not** start (the YAML policy needs `cargo` in a distroless image). | Linux |
 | **Phase 6** | Partial | 7 LSM hooks attach (tested in a VM in CI). Kernel blocking happens only on a policy-map hit, and only exec and connect entries are ever written. A miss is allowed. | Linux |
 | **Phase 7** | Partial | Policy server with registration, heartbeats, versioned policies and percentage rollouts. Lineage is partial (no PPID). NetFilter, sandbox and SIEM syslog sink are library-only. | All |
 | **Phase 8** | Partial | mTLS/JWT, signed OCI bundles (`warmor-policy-bundle`), daemon signature verification (`--verify-key`) and the `warmorctl` TUI work. The OCI hook is experimental (no auth, bindings unused). containerd and per-container policy are missing. | All |

@@ -11,6 +11,13 @@ daemon:
   statsInterval: 30s
   metricsPort: 9090
   auditMode: false
+  # Pass --lsm-enforce to the daemon: kernel-level blocking (EPERM) for
+  # cached exec/connect denies. Requires CONFIG_BPF_LSM=y and "bpf" in
+  # /sys/kernel/security/lsm on the nodes; without it the daemon degrades
+  # to observe-only unless daemon.requireLSM is set.
+  lsmEnforce: false
+  # Refuse to start unless BPF-LSM kernel enforcement can be loaded.
+  requireLSM: false
   cgroupFilter: ""
 
 policy:
@@ -138,20 +145,3 @@ webhook:
     enabled: false
     issuerRef: {}
   caBundle: ""
-
-ebpf:
-  pinPrograms: true
-  pinPath: /sys/fs/bpf/warmor
-
-logging:
-  format: json
-  output: stdout
-  siem:
-    enabled: false
-    endpoint: ""
-    format: "cef"
-
-policySync:
-  enabled: false
-  source: ""
-  namespace: "warmor-system"

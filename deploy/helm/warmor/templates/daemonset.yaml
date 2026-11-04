@@ -77,6 +77,12 @@ spec:
             {{- if .Values.daemon.auditMode }}
             - "-audit"
             {{- end }}
+            {{- if .Values.daemon.lsmEnforce }}
+            - "-lsm-enforce"
+            {{- end }}
+            {{- if .Values.daemon.requireLSM }}
+            - "-require-lsm"
+            {{- end }}
             {{- if .Values.daemon.cgroupFilter }}
             - "-cgroup-filter"
             - {{ .Values.daemon.cgroupFilter | quote }}
