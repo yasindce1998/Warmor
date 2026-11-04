@@ -25,6 +25,7 @@ var (
 	lsmEnforce    = flag.Bool("lsm-enforce", false, "Enable LSM-BPF kernel-level blocking (requires CONFIG_BPF_LSM)")
 	requireLSM    = flag.Bool("require-lsm", false, "Fail to start unless BPF-LSM kernel enforcement can be loaded (fail-closed; default is to degrade to observe-only)")
 	noLSM         = flag.Bool("no-lsm", false, "Skip LSM-BPF loading entirely (tracepoint-only observe mode)")
+	defaultDeny   = flag.Bool("default-deny", false, "Refuse in-kernel (EPERM) what the policy does not allow: preload the policy's static allow rules and deny policy-map misses (requires --lsm-enforce and an allowlist policy: default_action deny + exact eq rules; see docs/design/kernel-default-deny.md)")
 	eventSink     = flag.String("event-sink", "", "Event sinks: stdout, file:<path>, webhook:<url> (comma-separated)")
 	eventFileMax  = flag.Int64("event-file-max", 100*1024*1024, "Max event file size before rotation (bytes)")
 	webhookHeader = flag.String("webhook-header", "", "Webhook auth header (format: Key:Value)")
@@ -103,6 +104,9 @@ func runDaemon(stop <-chan struct{}) {
 	log.Printf("Audit Mode: %v", *auditMode)
 	log.Printf("LSM Enforce: %v", *lsmEnforce)
 	log.Printf("Require LSM: %v", *requireLSM)
+	if *defaultDeny {
+		log.Printf("Default-Deny: requested (kernel refuses exec/connect the policy does not allow)")
+	}
 	if *cgroupFilter != "" {
 		log.Printf("Cgroup Filter: %s", *cgroupFilter)
 	}
@@ -221,6 +225,7 @@ func runDaemon(stop <-chan struct{}) {
 
 		LSMRingBufferSize: ringSize,
 		OnEventLoss:       *onEventLoss,
+		DefaultDeny:       *defaultDeny,
 	})
 	if err != nil {
 		log.Fatalf("❌ Failed to create enforcer: %v", err)

@@ -13,6 +13,13 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type lsm_integrityDefaultDenyKey struct {
+	_         structs.HostLayout
+	CgroupId  uint64
+	EventType uint8
+	Pad       [7]uint8
+}
+
 type lsm_integrityDigestKey struct {
 	_      structs.HostLayout
 	Digest [32]uint8
@@ -58,6 +65,7 @@ type lsm_integrityPolicyValue struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	lsm_integrityMapDefaultDeny           = "default_deny"
 	lsm_integrityMapIntegrityAllow        = "integrity_allow"
 	lsm_integrityMapIntegrityCache        = "integrity_cache"
 	lsm_integrityMapIntegrityCfg          = "integrity_cfg"
@@ -70,6 +78,7 @@ const (
 	lsm_integrityMapPolicyMap             = "policy_map"
 	lsm_integrityMapUnixWatch             = "unix_watch"
 	lsm_integrityProgLsmIntegrityCheck    = "lsm_integrity_check"
+	lsm_integrityVarUnusedDefaultDenyKey  = "unused_default_deny_key"
 	lsm_integrityVarUnusedDigestKey       = "unused_digest_key"
 	lsm_integrityVarUnusedIntegrityConfig = "unused_integrity_config"
 	lsm_integrityVarUnusedLsmConfig       = "unused_lsm_config"
@@ -127,6 +136,7 @@ type lsm_integrityProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type lsm_integrityMapSpecs struct {
+	DefaultDeny     *ebpf.MapSpec `ebpf:"default_deny"`
 	IntegrityAllow  *ebpf.MapSpec `ebpf:"integrity_allow"`
 	IntegrityCache  *ebpf.MapSpec `ebpf:"integrity_cache"`
 	IntegrityCfg    *ebpf.MapSpec `ebpf:"integrity_cfg"`
@@ -144,6 +154,7 @@ type lsm_integrityMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type lsm_integrityVariableSpecs struct {
+	UnusedDefaultDenyKey  *ebpf.VariableSpec `ebpf:"unused_default_deny_key"`
 	UnusedDigestKey       *ebpf.VariableSpec `ebpf:"unused_digest_key"`
 	UnusedIntegrityConfig *ebpf.VariableSpec `ebpf:"unused_integrity_config"`
 	UnusedLsmConfig       *ebpf.VariableSpec `ebpf:"unused_lsm_config"`
@@ -172,6 +183,7 @@ func (o *lsm_integrityObjects) Close() error {
 //
 // It can be passed to loadLsm_integrityObjects or ebpf.CollectionSpec.LoadAndAssign.
 type lsm_integrityMaps struct {
+	DefaultDeny     *ebpf.Map `ebpf:"default_deny"`
 	IntegrityAllow  *ebpf.Map `ebpf:"integrity_allow"`
 	IntegrityCache  *ebpf.Map `ebpf:"integrity_cache"`
 	IntegrityCfg    *ebpf.Map `ebpf:"integrity_cfg"`
@@ -187,6 +199,7 @@ type lsm_integrityMaps struct {
 
 func (m *lsm_integrityMaps) Close() error {
 	return _Lsm_integrityClose(
+		m.DefaultDeny,
 		m.IntegrityAllow,
 		m.IntegrityCache,
 		m.IntegrityCfg,
@@ -205,6 +218,7 @@ func (m *lsm_integrityMaps) Close() error {
 //
 // It can be passed to loadLsm_integrityObjects or ebpf.CollectionSpec.LoadAndAssign.
 type lsm_integrityVariables struct {
+	UnusedDefaultDenyKey  *ebpf.Variable `ebpf:"unused_default_deny_key"`
 	UnusedDigestKey       *ebpf.Variable `ebpf:"unused_digest_key"`
 	UnusedIntegrityConfig *ebpf.Variable `ebpf:"unused_integrity_config"`
 	UnusedLsmConfig       *ebpf.Variable `ebpf:"unused_lsm_config"`

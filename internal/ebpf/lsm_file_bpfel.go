@@ -13,6 +13,13 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type lsm_fileDefaultDenyKey struct {
+	_         structs.HostLayout
+	CgroupId  uint64
+	EventType uint8
+	Pad       [7]uint8
+}
+
 type lsm_fileLsmConfig struct {
 	_      structs.HostLayout
 	OnLoss uint32
@@ -59,18 +66,20 @@ type lsm_fileWarmorEvent struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	lsm_fileMapLsmCfg            = "lsm_cfg"
-	lsm_fileMapLsmCgroupFilter   = "lsm_cgroup_filter"
-	lsm_fileMapLsmDrops          = "lsm_drops"
-	lsm_fileMapLsmEnforce        = "lsm_enforce"
-	lsm_fileMapLsmEvents         = "lsm_events"
-	lsm_fileMapPolicyMap         = "policy_map"
-	lsm_fileMapUnixWatch         = "unix_watch"
-	lsm_fileProgLsmFileCheck     = "lsm_file_check"
-	lsm_fileVarUnusedLsmConfig   = "unused_lsm_config"
-	lsm_fileVarUnusedPolicyKey   = "unused_policy_key"
-	lsm_fileVarUnusedPolicyValue = "unused_policy_value"
-	lsm_fileVarUnusedWarmorEvent = "unused_warmor_event"
+	lsm_fileMapDefaultDeny          = "default_deny"
+	lsm_fileMapLsmCfg               = "lsm_cfg"
+	lsm_fileMapLsmCgroupFilter      = "lsm_cgroup_filter"
+	lsm_fileMapLsmDrops             = "lsm_drops"
+	lsm_fileMapLsmEnforce           = "lsm_enforce"
+	lsm_fileMapLsmEvents            = "lsm_events"
+	lsm_fileMapPolicyMap            = "policy_map"
+	lsm_fileMapUnixWatch            = "unix_watch"
+	lsm_fileProgLsmFileCheck        = "lsm_file_check"
+	lsm_fileVarUnusedDefaultDenyKey = "unused_default_deny_key"
+	lsm_fileVarUnusedLsmConfig      = "unused_lsm_config"
+	lsm_fileVarUnusedPolicyKey      = "unused_policy_key"
+	lsm_fileVarUnusedPolicyValue    = "unused_policy_value"
+	lsm_fileVarUnusedWarmorEvent    = "unused_warmor_event"
 )
 
 // loadLsm_file returns the embedded CollectionSpec for lsm_file.
@@ -122,6 +131,7 @@ type lsm_fileProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type lsm_fileMapSpecs struct {
+	DefaultDeny     *ebpf.MapSpec `ebpf:"default_deny"`
 	LsmCfg          *ebpf.MapSpec `ebpf:"lsm_cfg"`
 	LsmCgroupFilter *ebpf.MapSpec `ebpf:"lsm_cgroup_filter"`
 	LsmDrops        *ebpf.MapSpec `ebpf:"lsm_drops"`
@@ -135,10 +145,11 @@ type lsm_fileMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type lsm_fileVariableSpecs struct {
-	UnusedLsmConfig   *ebpf.VariableSpec `ebpf:"unused_lsm_config"`
-	UnusedPolicyKey   *ebpf.VariableSpec `ebpf:"unused_policy_key"`
-	UnusedPolicyValue *ebpf.VariableSpec `ebpf:"unused_policy_value"`
-	UnusedWarmorEvent *ebpf.VariableSpec `ebpf:"unused_warmor_event"`
+	UnusedDefaultDenyKey *ebpf.VariableSpec `ebpf:"unused_default_deny_key"`
+	UnusedLsmConfig      *ebpf.VariableSpec `ebpf:"unused_lsm_config"`
+	UnusedPolicyKey      *ebpf.VariableSpec `ebpf:"unused_policy_key"`
+	UnusedPolicyValue    *ebpf.VariableSpec `ebpf:"unused_policy_value"`
+	UnusedWarmorEvent    *ebpf.VariableSpec `ebpf:"unused_warmor_event"`
 }
 
 // lsm_fileObjects contains all objects after they have been loaded into the kernel.
@@ -161,6 +172,7 @@ func (o *lsm_fileObjects) Close() error {
 //
 // It can be passed to loadLsm_fileObjects or ebpf.CollectionSpec.LoadAndAssign.
 type lsm_fileMaps struct {
+	DefaultDeny     *ebpf.Map `ebpf:"default_deny"`
 	LsmCfg          *ebpf.Map `ebpf:"lsm_cfg"`
 	LsmCgroupFilter *ebpf.Map `ebpf:"lsm_cgroup_filter"`
 	LsmDrops        *ebpf.Map `ebpf:"lsm_drops"`
@@ -172,6 +184,7 @@ type lsm_fileMaps struct {
 
 func (m *lsm_fileMaps) Close() error {
 	return _Lsm_fileClose(
+		m.DefaultDeny,
 		m.LsmCfg,
 		m.LsmCgroupFilter,
 		m.LsmDrops,
@@ -186,10 +199,11 @@ func (m *lsm_fileMaps) Close() error {
 //
 // It can be passed to loadLsm_fileObjects or ebpf.CollectionSpec.LoadAndAssign.
 type lsm_fileVariables struct {
-	UnusedLsmConfig   *ebpf.Variable `ebpf:"unused_lsm_config"`
-	UnusedPolicyKey   *ebpf.Variable `ebpf:"unused_policy_key"`
-	UnusedPolicyValue *ebpf.Variable `ebpf:"unused_policy_value"`
-	UnusedWarmorEvent *ebpf.Variable `ebpf:"unused_warmor_event"`
+	UnusedDefaultDenyKey *ebpf.Variable `ebpf:"unused_default_deny_key"`
+	UnusedLsmConfig      *ebpf.Variable `ebpf:"unused_lsm_config"`
+	UnusedPolicyKey      *ebpf.Variable `ebpf:"unused_policy_key"`
+	UnusedPolicyValue    *ebpf.Variable `ebpf:"unused_policy_value"`
+	UnusedWarmorEvent    *ebpf.Variable `ebpf:"unused_warmor_event"`
 }
 
 // lsm_filePrograms contains all programs after they have been loaded into the kernel.

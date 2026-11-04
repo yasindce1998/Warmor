@@ -62,6 +62,7 @@ func main() {
 
 	if *validate {
 		fmt.Printf("✓ %s is valid (%d rules, default_action=%s)\n", policy.Name, len(policy.Rules), policy.DefaultAction)
+		reportDefaultDeny(policy)
 		os.Exit(0)
 	}
 
@@ -96,4 +97,21 @@ func main() {
 	defer compiler.Cleanup(result)
 
 	fmt.Printf("✓ Compiled to %s\n", result.WasmPath)
+	reportDefaultDeny(policy)
+}
+
+// reportDefaultDeny tells the operator at compile time whether the policy
+// can run with kernel default-deny (--default-deny on the daemon), and why
+// not: the daemon only sees the eligibility bit, not the reasons.
+func reportDefaultDeny(policy *compiler.Policy) {
+	rules, ineligible := compiler.StaticRules(policy)
+	if len(ineligible) == 0 {
+		fmt.Printf("✓ kernel default-deny eligible: %d static rules preloaded at daemon startup (--default-deny)\n", len(rules))
+		return
+	}
+	for event, reason := range ineligible {
+		fmt.Printf("⚠ kernel default-deny ineligible for %s events: %s\n", event, reason)
+	}
+	fmt.Printf("  (the daemon refuses exec/connect the policy does not allow only when eligible;\n" +
+		"   see docs/design/kernel-default-deny.md)\n")
 }

@@ -3,6 +3,7 @@ package enforcer
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -85,6 +86,49 @@ type fakePolicyMap struct {
 	clears   int
 	clearErr error
 	setErr   error // returned by SetRule, which then records nothing
+
+	// default-deny recording: marks, clears and an ordered event log so
+	// tests can assert the preload order (clear, entries, mark).
+	ddClears   int
+	ddMarks    []ddMark
+	ddClearErr error
+	ddMarkErr  error
+	log        []string
+}
+
+// ddMark is one default-deny domain marking.
+type ddMark struct {
+	eventType uint8
+	mode      uint8
+}
+
+func (f *fakePolicyMap) SetDefaultDeny(eventType uint8, mode uint8) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ddMarkErr != nil {
+		return f.ddMarkErr
+	}
+	f.ddMarks = append(f.ddMarks, ddMark{eventType, mode})
+	f.log = append(f.log, fmt.Sprintf("mark:%d:%d", eventType, mode))
+	return nil
+}
+
+func (f *fakePolicyMap) ClearDefaultDeny() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ddClears++
+	if f.ddClearErr != nil {
+		return f.ddClearErr
+	}
+	f.ddMarks = nil
+	f.log = append(f.log, "clear-dd")
+	return nil
+}
+
+func (f *fakePolicyMap) eventLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.log...)
 }
 
 // Clear drops every recorded rule, like PolicyMapManager.Clear.
@@ -123,6 +167,7 @@ func (f *fakePolicyMap) SetRule(cgroupID uint64, eventType uint8, pattern string
 		return f.setErr
 	}
 	f.rules = append(f.rules, policyRule{cgroupID, eventType, pattern, action, audit})
+	f.log = append(f.log, "rule:"+pattern)
 	return nil
 }
 
@@ -942,6 +987,7 @@ func (f *fakeEndpointPolicyMap) SetEndpointRule(cgroupID uint64, eventType uint8
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.endpoints = append(f.endpoints, endpointRule{cgroupID, eventType, addr, port, action, audit})
+	f.log = append(f.log, fmt.Sprintf("endpoint:%s:%d", addr, port))
 	return nil
 }
 

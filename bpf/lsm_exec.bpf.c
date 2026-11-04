@@ -68,6 +68,25 @@ int BPF_PROG(lsm_exec_check, struct linux_binprm *bprm, int ret)
 		return 0;
 	}
 
+	// No policy map entry. If userspace marked exec a default-deny domain,
+	// this path is not on the allowlist: refuse it (enforce) or record the
+	// would-deny (audit). This also covers a possibly-truncated filename —
+	// an allowlisted path never fills the buffer (exact rules cap at 254
+	// bytes), so a truncated name is not provably allowed.
+	__u8 dd = lookup_default_deny(cgid, EVENT_TYPE_EXEC);
+	if (dd == DEFAULT_DENY_MODE_DENY) {
+		// The verdict is known, so a full ring cannot soften it: emit is
+		// best effort, the deny stands.
+		if (is_enforce_enabled()) {
+			emit_lsm_event(EVENT_TYPE_EXEC, 1, fname_buf, len,
+				cgid, 0, 0, 0, 0);
+			return -1; // -EPERM
+		}
+	} else if (dd == DEFAULT_DENY_MODE_AUDIT) {
+		// Fall through to the miss emit below: userspace re-evaluates the
+		// event through WASM (which denies) and records the would-deny.
+	}
+
 	// No policy map entry — emit to userspace for WASM evaluation. If the
 	// ring is full nobody will evaluate it; --on-event-loss decides.
 	if (!emit_lsm_event(EVENT_TYPE_EXEC, 0, fname_buf, len, cgid, 0, 0, 0, 0))

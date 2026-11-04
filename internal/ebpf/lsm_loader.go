@@ -172,6 +172,9 @@ type LSMLoader struct {
 	policyMap  *PolicyMapManager
 	enforceMap *ciliumebpf.Map
 	filterMap  *ciliumebpf.Map
+	// defaultDenyMap is the kernel default-deny domain map (see
+	// docs/design/kernel-default-deny.md); managed through policyMap.
+	defaultDenyMap *ciliumebpf.Map
 
 	// integrity is nil until EnableIntegrity loads lsm_integrity.
 	integrity *integrityProgram
@@ -377,8 +380,9 @@ func LoadLSMWithOptions(opts LSMOptions) (*LSMLoader, error) {
 	}
 	l.lsmReader = rd
 
-	// Initialize policy map manager
+	// Initialize policy map manager (also manages the default-deny map)
 	l.policyMap = NewPolicyMapManager(l.execObjs.PolicyMap)
+	l.policyMap.setDefaultDenyMap(l.execObjs.DefaultDeny)
 	l.enforceMap = l.execObjs.LsmEnforce
 	l.filterMap = l.execObjs.LsmCgroupFilter
 
@@ -413,6 +417,7 @@ func (l *LSMLoader) sharedMaps() map[string]*ciliumebpf.Map {
 		"lsm_drops":         l.execObjs.LsmDrops,
 		"lsm_cfg":           l.execObjs.LsmCfg,
 		"unix_watch":        l.execObjs.UnixWatch,
+		"default_deny":      l.execObjs.DefaultDeny,
 	}
 }
 

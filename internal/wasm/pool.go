@@ -25,6 +25,10 @@ type Pool struct {
 	fields [numEventTypes]uint32
 	// temporal: the module is sent temporal context (ABI >= 3).
 	temporal bool
+	// staticProcess/staticNetwork are the kernel default-deny declarations
+	// (compiler.StaticRulesExport), read once from the first instance.
+	staticProcess StaticDomain
+	staticNetwork StaticDomain
 
 	// mu serialises Put against Close so no instance is returned to the
 	// channel after it has been drained.
@@ -59,6 +63,8 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 		if i == 0 {
 			p.fields = readFieldsDeclaration(ctx, policy)
 			p.temporal = policy.temporal
+			p.staticProcess = readStaticDomain(ctx, policy, 0)
+			p.staticNetwork = readStaticDomain(ctx, policy, 2)
 		}
 		p.instances <- policy
 	}

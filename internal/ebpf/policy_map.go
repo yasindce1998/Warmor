@@ -49,6 +49,20 @@ type PolicyValue struct {
 	HitCount uint32
 }
 
+// DefaultDenyKey matches struct default_deny_key in warmor_lsm.h.
+type DefaultDenyKey struct {
+	CgroupID  uint64
+	EventType uint8
+	Pad       [7]uint8
+}
+
+// Default-deny value bytes (DEFAULT_DENY_MODE_* in warmor_lsm.h). Zero is
+// not a valid value, so a missing key reads unambiguously as "not marked".
+const (
+	DefaultDenyModeDeny  uint8 = 1
+	DefaultDenyModeAudit uint8 = 2
+)
+
 // CachedDecision represents a WASM policy evaluation result to be compiled into the BPF map.
 type CachedDecision struct {
 	CgroupID  uint64
@@ -61,7 +75,85 @@ type CachedDecision struct {
 // PolicyMapManager manages the BPF policy map from userspace.
 type PolicyMapManager struct {
 	policyMap policyMapBackend
-	mu        sync.Mutex
+	// defaultDenyMap marks (cgroup, event_type) domains whose policy-map
+	// entries are a complete allowlist; a miss in a marked domain is denied
+	// by the BPF programs. Nil when the loaded objects predate the map (or
+	// in tests): default-deny is then unavailable and Clear is a no-op for
+	// it. See docs/design/kernel-default-deny.md.
+	defaultDenyMap defaultDenyBackend
+	mu             sync.Mutex
+}
+
+// setDefaultDenyMap attaches the kernel default_deny map. Called by the LSM
+// loader right after NewPolicyMapManager; not exported because the marking
+// API below is the only supported writer.
+func (m *PolicyMapManager) setDefaultDenyMap(dd *ebpf.Map) {
+	if dd == nil {
+		return
+	}
+	m.defaultDenyMap = kernelDefaultDenyMap{dd}
+}
+
+// defaultDenyBackend is the subset of *ebpf.Map the default-deny map uses.
+type defaultDenyBackend interface {
+	Put(key, value any) error
+	Delete(key any) error
+	// ddKeys returns every key currently in the map.
+	ddKeys() ([]DefaultDenyKey, error)
+}
+
+// kernelDefaultDenyMap adapts a loaded *ebpf.Map to defaultDenyBackend.
+type kernelDefaultDenyMap struct{ *ebpf.Map }
+
+func (m kernelDefaultDenyMap) ddKeys() ([]DefaultDenyKey, error) {
+	var (
+		key  DefaultDenyKey
+		keys []DefaultDenyKey
+	)
+	iter := m.Iterate()
+	for iter.Next(&key, new(uint8)) {
+		keys = append(keys, key)
+	}
+	return keys, iter.Err()
+}
+
+// SetDefaultDeny marks the global (cgroup_id = 0) domain for eventType as
+// default-deny: the BPF programs deny a policy-map miss for it. mode is
+// DefaultDenyModeDeny or DefaultDenyModeAudit.
+func (m *PolicyMapManager) SetDefaultDeny(eventType uint8, mode uint8) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.defaultDenyMap == nil {
+		return errors.New("default-deny map not loaded")
+	}
+	if mode != DefaultDenyModeDeny && mode != DefaultDenyModeAudit {
+		return fmt.Errorf("invalid default-deny mode %d", mode)
+	}
+	return m.defaultDenyMap.Put(DefaultDenyKey{EventType: eventType}, mode)
+}
+
+// ClearDefaultDeny unmarks every default-deny domain. Called before the
+// policy map is rebuilt so misses allow (today's behaviour) while the new
+// allowlist is preloaded; the marking goes back in only after the entries.
+func (m *PolicyMapManager) ClearDefaultDeny() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.defaultDenyMap == nil {
+		return nil
+	}
+	keys, err := m.defaultDenyMap.ddKeys()
+	var errs []error
+	if err != nil {
+		errs = append(errs, fmt.Errorf("iterate default-deny map: %w", err))
+	}
+	for _, k := range keys {
+		if err := m.defaultDenyMap.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			errs = append(errs, fmt.Errorf("delete default-deny key %+v: %w", k, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // policyMapBackend is the subset of *ebpf.Map the manager uses, so the

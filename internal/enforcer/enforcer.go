@@ -66,6 +66,14 @@ type Options struct {
 	LSMRingBufferSize uint32
 	OnEventLoss       string
 
+	// DefaultDeny preloads the policy's static allow rules into the kernel
+	// policy map and marks the eligible domains default-deny, so the BPF
+	// LSM hooks refuse (EPERM) what the policy does not allow instead of
+	// allowing what they have not seen. Requires an eligible policy
+	// (default_action: deny, exact eq rules on the kernel key); see
+	// docs/design/kernel-default-deny.md.
+	DefaultDeny bool
+
 	// Streaming pipeline configuration
 	StreamSinks []streaming.Sink
 	Labels      map[string]string
@@ -123,6 +131,7 @@ type Enforcer struct {
 	syncFailLog     logLimiter
 	auditMode       bool
 	learningMode    bool
+	defaultDeny     bool
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
@@ -332,7 +341,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 
 	ctx, cancel := context.WithCancel(ctx)
 
-	return &Enforcer{
+	e := &Enforcer{
 		platform:        plat,
 		wasmRuntime:     wasmRuntime,
 		evaluator:       evaluator,
@@ -354,9 +363,19 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		evalTimeout:     opts.EvalTimeout,
 		auditMode:       opts.AuditMode,
 		learningMode:    opts.LearningMode,
+		defaultDeny:     opts.DefaultDeny,
 		ctx:             ctx,
 		cancel:          cancel,
-	}, nil
+	}
+
+	// Preload the kernel default-deny domains from the policy's static
+	// rules. No events flow yet; decisionMu is uncontended but held for
+	// symmetry with the reload path.
+	e.decisionMu.Lock()
+	e.applyDefaultDeny(evaluator)
+	e.decisionMu.Unlock()
+
+	return e, nil
 }
 
 // Start begins processing events
@@ -954,12 +973,16 @@ func (e *Enforcer) ReloadPolicy() error {
 	// are evicted. Holding decisionMu exclusively waits out any
 	// persistDecision already past its generation check; later ones from
 	// the old policy see the bumped generation and are dropped.
+	// applyDefaultDeny then rebuilds the static allowlist and re-marks the
+	// default-deny domains from the *new* policy (unmarking first, so a
+	// policy that loses eligibility cannot keep denying misses).
 	var clearErr error
 	e.decisionMu.Lock()
 	setCacheDependencies(e.cache, newEvaluator)
 	if e.policyMap != nil {
 		clearErr = e.policyMap.Clear()
 	}
+	e.applyDefaultDeny(newEvaluator)
 	e.decisionMu.Unlock()
 	e.updateMapEntries()
 
