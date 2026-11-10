@@ -243,14 +243,16 @@ func (p *LinuxPlatform) monitorProcessEvents(ctx context.Context) {
 		}
 
 		event := &api.Event{
-			Type:      api.EventTypeProcess,
-			PID:       ev.PID,
-			UID:       ev.UID,
-			GID:       ev.GID,
-			Comm:      ev.Comm,
-			Filename:  ev.Filename,
-			Timestamp: ev.Timestamp,
-			CgroupID:  ev.CgroupID,
+			Type:       api.EventTypeProcess,
+			PID:        ev.PID,
+			UID:        ev.UID,
+			GID:        ev.GID,
+			Comm:       ev.Comm,
+			Filename:   ev.Filename,
+			Timestamp:  ev.Timestamp,
+			CgroupID:   ev.CgroupID,
+			PPID:       ev.PPID,
+			ParentComm: ev.ParentComm,
 			Process: &api.ProcessEvent{
 				BaseEvent: api.BaseEvent{
 					Type:      api.EventTypeProcess,
@@ -262,6 +264,7 @@ func (p *LinuxPlatform) monitorProcessEvents(ctx context.Context) {
 					CgroupID:  ev.CgroupID,
 				},
 				Filename: ev.Filename,
+				Args:     ev.Args,
 			},
 		}
 

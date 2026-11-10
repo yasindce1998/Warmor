@@ -17,10 +17,15 @@ import (
 // decide them identically). It exists so the decision cache's key can be
 // checked against the real serialization in tests.
 func PolicyInputs(event *api.Event, temporal bool) [][]byte {
+	abiVersion := uint32(0)
+	if temporal {
+		abiVersion = TemporalABIVersion
+	}
+
 	bin := make([]byte, eventStructSize)
 	writeEventBinary(bin, event, temporal)
 
-	js, err := marshalEventForWASM(event, temporal)
+	js, err := marshalEventForWASM(event, abiVersion)
 	if err != nil {
 		js = []byte("marshal error: " + err.Error())
 	}

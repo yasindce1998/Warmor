@@ -11,6 +11,7 @@ import (
 func ProcessEvent(info ProcInfo, ts time.Time) *api.Event {
 	ev := &api.Event{
 		PID:       info.PID,
+		PPID:      info.PPID,
 		Comm:      info.Comm,
 		Filename:  info.Image,
 		Timestamp: ts,

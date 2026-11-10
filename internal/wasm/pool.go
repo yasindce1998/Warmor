@@ -62,7 +62,7 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 		}
 		if i == 0 {
 			p.fields = readFieldsDeclaration(ctx, policy)
-			p.temporal = policy.temporal
+			p.temporal = policy.temporal()
 			p.staticProcess = readStaticDomain(ctx, policy, 0)
 			p.staticNetwork = readStaticDomain(ctx, policy, 2)
 		}

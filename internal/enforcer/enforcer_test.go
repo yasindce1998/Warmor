@@ -346,6 +346,22 @@ func TestHandleEvent_PolicyAllow(t *testing.T) {
 	}
 }
 
+func TestHandleEvent_LineageRecordsPPID(t *testing.T) {
+	// The exec sensor now reports the parent's PID; the tracker must
+	// receive it, so ancestry is not always empty (ABI v4 capture).
+	e, _ := newTestEnforcer(t, testEnforcerOpts{})
+
+	parent := &api.Event{PID: 777, UID: 0, Comm: "bash", Filename: "/bin/bash"}
+	e.handleEvent(parent)
+	child := &api.Event{PID: 4242, PPID: 777, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"}
+	e.handleEvent(child)
+
+	ancestors := e.lineageTracker.GetAncestors(4242)
+	if len(ancestors) == 0 || ancestors[0].PID != 777 {
+		t.Fatalf("ancestors = %+v, want the parent 777 first", ancestors)
+	}
+}
+
 func TestHandleEvent_PolicyDeny(t *testing.T) {
 	pm := &fakePolicyMap{}
 	e, _ := newTestEnforcer(t, testEnforcerOpts{policyMap: pm})

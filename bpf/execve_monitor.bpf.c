@@ -3,7 +3,19 @@
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
 #include "tracepoint_defs.h"
+
+// Minimal CO-RE view of the parent chain; the ___warmor suffix is dropped
+// when relocating against kernel BTF (same pattern as lsm_ptrace.bpf.c).
+struct task_struct___warmor {
+	__s32 tgid;
+	char comm[16];
+	struct task_struct___warmor *real_parent;
+} __attribute__((preserve_access_index));
+
+#define ARGS_MAX  16
+#define ARG_LEN   64
 
 // Event structure sent to userspace
 struct execve_event {
@@ -14,6 +26,9 @@ struct execve_event {
 	char filename[256];     // Executable path
 	__u64 timestamp;
 	__u64 cgroup_id;
+	__u32 ppid;                 // real_parent's tgid (0 when unreadable)
+	char parent_comm[16];       // real_parent's comm ("" when unreadable)
+	char args[ARGS_MAX][ARG_LEN]; // argv, NUL-padded; all-zero = none captured
 };
 
 // Ring buffer for sending events to userspace
@@ -71,6 +86,34 @@ int tracepoint__syscalls__sys_enter_execve(struct trace_event_raw_sys_enter* ctx
 	// Get filename from syscall arguments
 	const char *filename_ptr = (const char *)ctx->args[0];
 	bpf_probe_read_user_str(&event->filename, sizeof(event->filename), filename_ptr);
+
+	// Parent context: real_parent's PID and comm. The ringbuf reservation
+	// zeroed the event, so on any read failure ppid stays 0 and parent_comm
+	// stays "" — userspace treats both as "unknown".
+	struct task_struct___warmor *parent =
+		BPF_CORE_READ((struct task_struct___warmor *)bpf_get_current_task(), real_parent);
+	if (parent) {
+		__s32 ppid = BPF_CORE_READ(parent, tgid);
+		event->ppid = ppid > 0 ? (__u32)ppid : 0;
+		BPF_CORE_READ_STR_INTO(&event->parent_comm, parent, comm);
+	}
+
+	// Walk the syscall's argv (ctx->args[1]). The loop is bounded and stops
+	// at the first NULL pointer or unreadable entry; the ringbuf reservation
+	// zeroed args, so the remainder reads as "not captured". A longer
+	// argument is truncated to ARG_LEN-1 bytes.
+	const char **argv = (const char **)ctx->args[1];
+	if (argv) {
+		for (int i = 0; i < ARGS_MAX; i++) {
+			const char *argp;
+			if (bpf_probe_read_user(&argp, sizeof(argp), &argv[i]) != 0)
+				break;
+			if (!argp)
+				break;
+			if (bpf_probe_read_user_str(&event->args[i], ARG_LEN, argp) < 0)
+				break;
+		}
+	}
 
 	// Submit event to userspace
 	bpf_ringbuf_submit(event, 0);
