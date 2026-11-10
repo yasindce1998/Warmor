@@ -36,9 +36,9 @@ Status as of current `main`. "Partial" means the phase's headline features are r
 | **Phase 4** | Partial | Platform abstraction. Windows ETW (detect-then-terminate) works and is tested in CI. eBPF-for-Windows has never been built or run in CI. macOS ESF answers every AUTH event ALLOW and is not compiled in CI. | Linux/Windows/macOS |
 | **Phase 5** | Partial | YAML DSL and `warmor-compile` work. The Helm chart installs and the daemon runs (kind e2e-tested in CI), with a policy compiled into the image. | Linux |
 | **Phase 6** | Partial | 7 LSM hooks attach (tested in a VM in CI). Kernel blocking happens only on a policy-map hit, and only exec and connect entries are ever written. A miss is allowed. | Linux |
-| **Phase 7** | Partial | Policy server with registration, heartbeats, versioned policies and percentage rollouts. Lineage is partial (no PPID). NetFilter, sandbox and SIEM syslog sink are library-only. | All |
+| **Phase 7** | Partial | Policy server with registration, heartbeats, versioned policies and percentage rollouts. The SIEM syslog sink ships (`--event-sink syslog:`); NetFilter and sandbox remain library-only. | All |
 | **Phase 8** | Partial | mTLS/JWT, signed OCI bundles (`warmor-policy-bundle`), daemon signature verification (`--verify-key`) and the `warmorctl` TUI work. The OCI hook is experimental (no auth, bindings unused). containerd and per-container policy are missing. | All |
-| **Phase 9** | Mostly library-only | `warmor-learn` and `warmor-simulate` ship. Escape detection and YAML temporal policies ship; in-kernel integrity is experimental (unverified on an IMA kernel in CI). Drift, attack graph, blast radius and canary auto-rollback are library-only (not wired into any binary). | Linux |
+| **Phase 9** | Partial | `warmor-learn` and `warmor-simulate` ship. Escape detection, YAML temporal policies, the MITRE attack graph (`--attack-graph`), the SSE dashboard (`--dashboard-port`) and the SIEM syslog sink ship; in-kernel integrity is experimental (unverified on an IMA kernel in CI). Drift and canary auto-rollback are library-only (not wired into any binary). | Linux |
 
 ### Key Metrics
 
@@ -53,7 +53,7 @@ Measured 2026-10-15 on one laptop; see [PERFORMANCE.md](PERFORMANCE.md) for the 
 ### Current Implementation Highlights
 
 **Code Status:**
-- 30 internal packages. 6 of them (`attackgraph`, `blastradius`, `dashboard`, `drift`, `patterns`, `testing`) are imported by no binary.
+- 30 internal packages. 3 of them (`drift`, `patterns`, `testing`) are imported by no binary.
 - 15 binaries under `cmd/` (13 released tools plus `test-ebpf` and `test-wasm`)
 - 10 Rust policy crates. All compile for `wasm32-unknown-unknown` and are run through the real WASM host in CI, including their `args`/`parent_comm`/`cgroup_id`/`direction` rules (ABI version 4; see [STATUS.md](STATUS.md#2-policy-engine-and-toolchain)).
 - 60 YAML example policies: 53 in `policies/yaml-example/` (all validate) and 7 in `examples/policies/` (all validate; CI fails on an invalid policy)
@@ -675,15 +675,20 @@ strength differs sharply by platform and event type.
 
 ### Next Priorities
 
-1. Wire the library-only features (integrity runtime, escape, canary analyzer, SIEM sink)
+1. Fleet drift detection: agents fingerprint container behavior and ship fingerprints in heartbeats; the server runs the z-score detector and exposes outliers (admin API, metrics)
 
-Done recently: JSON ABI version 4 — the exec tracepoint captures argv and
-the parent's comm/PID, and the host sends `args`, `parent_comm`,
-`cgroup_id` and `direction` to modules declaring it, so the Rust crates'
-rules on those fields fire (see
-[design/abi-v4-process-context.md](design/abi-v4-process-context.md)); and
-kernel default-deny (`--default-deny`) — the daemon preloads
-an allowlist policy's static rules into the kernel policy map and the BPF
+Done recently: the node-side intelligence chain — `--attack-graph`
+correlates events to MITRE techniques, labels every streamed event and
+exports attack-graph/blast-radius metrics, `--dashboard-port` serves the
+SSE dashboard, and `--event-sink syslog:` streams CEF to SIEMs (see
+[design/intelligence-chain.md](design/intelligence-chain.md)); and JSON
+ABI version 4 — the exec tracepoint captures argv and the parent's
+comm/PID, and the host sends `args`, `parent_comm`, `cgroup_id` and
+`direction` to modules declaring it, so the Rust crates' rules on those
+fields fire (see
+[design/abi-v4-process-context.md](design/abi-v4-process-context.md));
+and kernel default-deny (`--default-deny`) — the daemon preloads an
+allowlist policy's static rules into the kernel policy map and the BPF
 hooks refuse exec/connect the policy does not allow (see
 [design/kernel-default-deny.md](design/kernel-default-deny.md)); and the
 Helm chart now installs and the daemon runs in-cluster (policy compiled

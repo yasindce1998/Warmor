@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/dashboard"
 	"github.com/yasindce1998/warmor/internal/enforcer"
 	"github.com/yasindce1998/warmor/internal/policyserver"
 	"github.com/yasindce1998/warmor/internal/streaming"
@@ -26,10 +29,12 @@ var (
 	requireLSM    = flag.Bool("require-lsm", false, "Fail to start unless BPF-LSM kernel enforcement can be loaded (fail-closed; default is to degrade to observe-only)")
 	noLSM         = flag.Bool("no-lsm", false, "Skip LSM-BPF loading entirely (tracepoint-only observe mode)")
 	defaultDeny   = flag.Bool("default-deny", false, "Refuse in-kernel (EPERM) what the policy does not allow: preload the policy's static allow rules and deny policy-map misses (requires --lsm-enforce and an allowlist policy: default_action deny + exact eq rules; see docs/design/kernel-default-deny.md)")
-	eventSink     = flag.String("event-sink", "", "Event sinks: stdout, file:<path>, webhook:<url> (comma-separated)")
+	eventSink     = flag.String("event-sink", "", "Event sinks: stdout, file:<path>, webhook:<url>, syslog:[udp|tcp://]host:port (comma-separated)")
 	eventFileMax  = flag.Int64("event-file-max", 100*1024*1024, "Max event file size before rotation (bytes)")
 	webhookHeader = flag.String("webhook-header", "", "Webhook auth header (format: Key:Value)")
 	eventLabels   = flag.String("event-labels", "", "Labels to attach to streamed events and report to the policy server (format: k=v,k2=v2)")
+	attackGraph   = flag.Bool("attack-graph", false, "Build the MITRE attack graph and blast-radius metrics from observed events (labels streamed events with technique IDs)")
+	dashboardPort = flag.Int("dashboard-port", 0, "Serve the web dashboard (SSE) on this port (0 = off)")
 	showVersion   = flag.Bool("version", false, "Show version and exit")
 	evalTimeout   = flag.Duration("eval-timeout", 50*time.Millisecond, "Deadline for one WASM policy evaluation; a policy exceeding it is denied (fail closed)")
 
@@ -152,11 +157,57 @@ func runDaemon(stop <-chan struct{}) {
 					URL:     url,
 					Headers: headers,
 				}))
+			case strings.HasPrefix(spec, "syslog:"):
+				rest := strings.TrimPrefix(spec, "syslog:")
+				network := "udp"
+				if i := strings.Index(rest, "://"); i >= 0 {
+					network = rest[:i]
+					rest = rest[i+3:]
+				}
+				if network != "udp" && network != "tcp" {
+					log.Fatalf("event sink %s: network must be udp or tcp", spec)
+				}
+				if rest == "" {
+					log.Fatalf("event sink %s: missing host:port", spec)
+				}
+				s, err := streaming.NewSyslogSink(streaming.SyslogConfig{Network: network, Addr: rest})
+				if err != nil {
+					log.Fatalf("event sink %s: %v", spec, err)
+				}
+				sinks = append(sinks, s)
 			default:
-				log.Fatalf("unknown event sink: %s (valid: stdout, file:<path>, webhook:<url>)", spec)
+				log.Fatalf("unknown event sink: %s (valid: stdout, file:<path>, webhook:<url>, syslog:[udp|tcp://]host:port)", spec)
 			}
 		}
 		log.Printf("Event Sinks: %s", *eventSink)
+	}
+
+	// Web dashboard (--dashboard-port): served on its own HTTP server so
+	// the SSE stream is not cut by the metrics server's write timeout.
+	var dashboardServer *http.Server
+	if *dashboardPort > 0 {
+		dashHandler := dashboard.New(200)
+		sinks = append(sinks, dashboard.NewSink(dashHandler))
+		mux := http.NewServeMux()
+		mux.Handle("/dashboard", dashHandler)
+		mux.Handle("/dashboard/events", dashHandler)
+		dashboardServer = &http.Server{
+			Addr:    fmt.Sprintf(":%d", *dashboardPort),
+			Handler: mux,
+			// No WriteTimeout: /dashboard/events is a long-lived SSE stream.
+		}
+		go func() {
+			if err := dashboardServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatalf("dashboard server: %v", err)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = dashboardServer.Shutdown(shutdownCtx)
+		}()
+		log.Printf("✓ Web dashboard on http://localhost:%d/dashboard", *dashboardPort)
 	}
 
 	// Parse event labels
@@ -226,6 +277,7 @@ func runDaemon(stop <-chan struct{}) {
 		LSMRingBufferSize: ringSize,
 		OnEventLoss:       *onEventLoss,
 		DefaultDeny:       *defaultDeny,
+		AttackGraph:       *attackGraph,
 	})
 	if err != nil {
 		log.Fatalf("❌ Failed to create enforcer: %v", err)

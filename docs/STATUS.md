@@ -61,10 +61,10 @@ updates this page when it merges.
 | Feature | Status | What works today | Known gaps |
 |---------|--------|------------------|------------|
 | Event sinks `stdout`, `file:<path>` (with rotation), `webhook:<url>` | Shipped | `--event-sink`, `--event-file-max`, `--webhook-header`, `--event-labels` | None |
-| SIEM / CEF syslog sink | Library-only | Sink code exists | No `--event-sink syslog:` spec reaches it |
-| Prometheus `/metrics` and `/health` on `--metrics-port` | Shipped | `warmor_events_total`, `warmor_cache_*`, `warmor_evaluation_latency_microseconds`, `warmor_policy_info`, `warmor_events_processing_errors_total`, `warmor_audit_denied_total`, plus the LSM-decision, policy-load, heartbeat, agent, WASM-exec and loader-status metrics | None known |
+| SIEM / CEF syslog sink | Shipped | `--event-sink syslog:[udp\|tcp://]host:port` (bare `syslog:host:port` = UDP); CEF-formatted events, optionally labeled with MITRE techniques via `--attack-graph` | None |
+| Prometheus `/metrics` and `/health` on `--metrics-port` | Shipped | `warmor_events_total`, `warmor_cache_*`, `warmor_evaluation_latency_microseconds`, `warmor_policy_info`, `warmor_events_processing_errors_total`, `warmor_audit_denied_total`, plus the LSM-decision, policy-load, heartbeat, agent, WASM-exec and loader-status metrics, and the intelligence gauges (`warmor_attack_graph_*`, `warmor_blast_radius_*`, with `--attack-graph`) | None known |
 | Grafana dashboards / docker-compose monitoring stack | Shipped | Dashboards and alert rules are provisioned and reference updated metrics | None known |
-| SSE web dashboard (`/dashboard`, `warmor-dashboard`) | Library-only | `internal/dashboard` exists | There is no `warmor-dashboard` binary and no route serves it |
+| SSE web dashboard (`/dashboard`) | Shipped | `--dashboard-port <port>` serves `/dashboard` (live policy evaluations over SSE, embedded UI) on its own HTTP server (no write timeout, so streams survive) | Shows policy evaluations only; attack graph and blast radius are exposed as metrics, not in the dashboard UI. Listens on all interfaces with no auth — bind it to localhost or protect it |
 | Windows Event Viewer | Partial | Service lifecycle messages (`warmor-daemon service install`) | Policy events are not written to Event Viewer |
 
 ## 4. Fleet management
@@ -98,8 +98,8 @@ updates this page when it merges.
 | Supply-chain integrity (`warmor-integrity-scan`, `--integrity-db/--integrity-mode`) | Shipped | Offline scan/verify (`--all` for the whole rootfs). In-kernel exec check: a sleepable LSM program hashes each exec with IMA and refuses unlisted SHA-256s (enforce) or reports them (audit) | VM-tested on IMA-enabled 6.1 and 6.18 kernels built in CI (`ci/kernel/`). Needs `CONFIG_IMA` and IMA hash SHA-256 (checked at startup). Does not cover mmap'd libraries or interpreted scripts passed as arguments. Global allowlist; restart to update. |
 | Container escape detection | Shipped | `--escape-detect=alert\|deny`: 7 patterns on real hook data (mount source, ptrace target cgroup, runtime socket connects), scoped to container cgroups; `warmor_escape_alerts_total` | Detection is after the fact (deny terminates the process). Relative-path `/proc/*/ns` opens and non-standard runtime socket paths are not matched. |
 | Temporal policies | Shipped | YAML `temporal:` blocks are evaluated inside the compiled WASM policy with the event's time and container age (from the cgroup's oldest process) | See the policy engine row above and [Temporal Policies](temporal-policies.md#limits) |
-| Attack graph (MITRE ATT&CK) | Library-only | `internal/attackgraph` | Not wired |
-| Blast radius | Library-only | `internal/blastradius` | Not wired |
+| Attack graph (MITRE ATT&CK) | Shipped | `--attack-graph`: pipeline enrichers correlate events to technique IDs (`mitre_techniques`/`mitre_tactic` labels on every streamed event) and build per-container kill-chain graphs; `warmor_attack_graph_*` gauges | Container entries are kept after exit (no cgroup-removal → `Graph.Remove` wiring). See [intelligence-chain design](design/intelligence-chain.md) |
+| Blast radius | Shipped (metrics) | `--attack-graph` also feeds the container-relationship graph; `warmor_blast_radius_reachable{cgroup}` per container | Remote/volume resolution is not implemented, so edges (and the metric) are mostly 0 until container runtime integration lands |
 | Pattern matcher helpers (glob/regex) | Library-only | `internal/patterns` | Not wired |
 | Network filter (`NetFilter`) | Library-only | `internal/enforcer/netfilter.go` | There are no flags to configure it |
 | Process sandbox (`ApplySandbox`) | Library-only | `internal/enforcer/sandbox*.go` | Nothing calls it |
