@@ -144,8 +144,9 @@ pub extern "C" fn free(ptr: *mut u8, size: usize) {
 
 #[no_mangle]
 pub extern "C" fn abi_version() -> u32 {
-    // 3: the host sends wall_clock_unix and container_age_ms.
-    3
+    // 4: the host sends the temporal context of version 3 plus
+    // cgroup_id, parent_comm, args and direction.
+    4
 }
 
 #[no_mangle]

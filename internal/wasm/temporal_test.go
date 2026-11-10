@@ -82,7 +82,11 @@ func TestMarshalEventForWASM_Temporal(t *testing.T) {
 	ts := time.Unix(1_700_000_000, 0)
 	ev := &api.Event{Timestamp: ts, ContainerStart: ts.Add(-1500 * time.Millisecond)}
 	for _, temporal := range []bool{false, true} {
-		data, err := marshalEventForWASM(ev, temporal)
+		version := uint32(0)
+		if temporal {
+			version = TemporalABIVersion
+		}
+		data, err := marshalEventForWASM(ev, version)
 		if err != nil {
 			t.Fatal(err)
 		}

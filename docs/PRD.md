@@ -55,7 +55,7 @@ Measured 2026-10-15 on one laptop; see [PERFORMANCE.md](PERFORMANCE.md) for the 
 **Code Status:**
 - 30 internal packages. 6 of them (`attackgraph`, `blastradius`, `dashboard`, `drift`, `patterns`, `testing`) are imported by no binary.
 - 15 binaries under `cmd/` (13 released tools plus `test-ebpf` and `test-wasm`)
-- 10 Rust policy crates. 8 compile; on `main` all of them deny some or all events due to ABI/field mismatches (see [STATUS.md](STATUS.md#2-policy-engine-and-toolchain)).
+- 10 Rust policy crates. All compile for `wasm32-unknown-unknown` and are run through the real WASM host in CI, including their `args`/`parent_comm`/`cgroup_id`/`direction` rules (ABI version 4; see [STATUS.md](STATUS.md#2-policy-engine-and-toolchain)).
 - 60 YAML example policies: 53 in `policies/yaml-example/` (all validate) and 7 in `examples/policies/` (all validate; CI fails on an invalid policy)
 - Tests: Go unit tests with a 40% coverage gate on Linux; LSM attach integration tests in a VM; Windows ETW smoke tests on a real runner
 
@@ -675,10 +675,14 @@ strength differs sharply by platform and event type.
 
 ### Next Priorities
 
-1. Fix the Rust crate ABIs, build them in CI, and fix the failing example YAML policies
-2. Wire the library-only features (integrity runtime, escape, canary analyzer, SIEM sink)
+1. Wire the library-only features (integrity runtime, escape, canary analyzer, SIEM sink)
 
-Done recently: kernel default-deny (`--default-deny`) — the daemon preloads
+Done recently: JSON ABI version 4 — the exec tracepoint captures argv and
+the parent's comm/PID, and the host sends `args`, `parent_comm`,
+`cgroup_id` and `direction` to modules declaring it, so the Rust crates'
+rules on those fields fire (see
+[design/abi-v4-process-context.md](design/abi-v4-process-context.md)); and
+kernel default-deny (`--default-deny`) — the daemon preloads
 an allowlist policy's static rules into the kernel policy map and the BPF
 hooks refuse exec/connect the policy does not allow (see
 [design/kernel-default-deny.md](design/kernel-default-deny.md)); and the
@@ -687,5 +691,5 @@ into the image, kind e2e test in CI).
 
 ---
 
-**Last Updated:** 2026-11-04
+**Last Updated:** 2026-11-10
 **Status:** See [STATUS.md](STATUS.md)

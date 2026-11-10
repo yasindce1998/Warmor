@@ -43,10 +43,16 @@ type Policy struct {
 	eventBufPtr uint32
 	// Which ABI does this module support?
 	useBinaryABI bool
-	// temporal: the module declared ABI version >= 3, so it is sent the
-	// event's wall clock and container age.
-	temporal bool
+	// abiVersion is the version the module declared (0 when it declares
+	// none). It selects which optional context the host sends: >= 3 the
+	// temporal fields, >= 4 the process-context fields (args, parent_comm,
+	// cgroup_id, direction).
+	abiVersion uint32
 }
+
+// temporal reports whether the module is sent the event's time context
+// (ABI version >= TemporalABIVersion).
+func (p *Policy) temporal() bool { return p.abiVersion >= TemporalABIVersion }
 
 // NewPolicy creates a new policy instance from a compiled module.
 func NewPolicy(ctx context.Context, runtime *Runtime) (*Policy, error) {
@@ -70,7 +76,7 @@ func (p *Policy) Evaluate(ctx context.Context, event *api.Event) (api.Action, er
 
 func (p *Policy) evaluateBinary(ctx context.Context, event *api.Event) (api.Action, error) {
 	buf := make([]byte, eventStructSize)
-	writeEventBinary(buf, event, p.temporal)
+	writeEventBinary(buf, event, p.temporal())
 
 	if !p.instance.Memory().Write(p.eventBufPtr, buf) {
 		return api.ActionDeny, fmt.Errorf("failed to write event to WASM memory")
@@ -86,7 +92,7 @@ func (p *Policy) evaluateBinary(ctx context.Context, event *api.Event) (api.Acti
 }
 
 func (p *Policy) evaluateJSON(ctx context.Context, event *api.Event) (api.Action, error) {
-	eventJSON, err := marshalEventForWASM(event, p.temporal)
+	eventJSON, err := marshalEventForWASM(event, p.abiVersion)
 	if err != nil {
 		return api.ActionDeny, fmt.Errorf("marshal event: %w", err)
 	}
@@ -246,8 +252,11 @@ func copyStringToBuffer(dst []byte, s string) {
 //
 // With temporal (modules declaring ABI version >= 3) every document also
 // carries wall_clock_unix (UTC seconds) and container_age_ms, each 0 when
-// unknown (see temporalInputs).
-func marshalEventForWASM(event *api.Event, temporal bool) ([]byte, error) {
+// unknown (see temporalInputs). With process context (modules declaring
+// ABI version >= 4, see docs/design/abi-v4-process-context.md) it also
+// carries cgroup_id (all types), parent_comm and args (PROCESS) and
+// direction (NETWORK).
+func marshalEventForWASM(event *api.Event, abiVersion uint32) ([]byte, error) {
 	// Every key below is always present so policies that deserialize into a
 	// fixed struct do not fail to parse (and deny) on event types that lack a
 	// field. "filename" is the executed binary and is only non-empty for
@@ -259,10 +268,13 @@ func marshalEventForWASM(event *api.Event, temporal bool) ([]byte, error) {
 		"comm":     event.Comm,
 		"filename": "",
 	}
-	if temporal {
+	if abiVersion >= TemporalABIVersion {
 		wall, age := temporalInputs(event)
 		m["wall_clock_unix"] = wall
 		m["container_age_ms"] = age
+	}
+	if abiVersion >= ProcessContextABIVersion {
+		m["cgroup_id"] = event.CgroupID
 	}
 
 	switch event.GetType() {
@@ -271,6 +283,17 @@ func marshalEventForWASM(event *api.Event, temporal bool) ([]byte, error) {
 		m["filename"] = event.Filename
 		if event.Process != nil {
 			m["filename"] = event.Process.Filename
+		}
+		if abiVersion >= ProcessContextABIVersion {
+			m["parent_comm"] = event.ParentComm
+			args := []string{}
+			if event.Process != nil {
+				args = event.Process.Args
+			}
+			if args == nil {
+				args = []string{}
+			}
+			m["args"] = args
 		}
 	case api.EventTypeFile:
 		m["type"] = "FILE"
@@ -297,6 +320,17 @@ func marshalEventForWASM(event *api.Event, temporal bool) ([]byte, error) {
 			m["remote_addr"] = ""
 			m["remote_port"] = uint16(0)
 			m["local_port"] = uint16(0)
+		}
+		if abiVersion >= ProcessContextABIVersion {
+			// The sensors only see outbound connects today; sendto/recvfrom
+			// hooks do not exist yet. connect/sendto are egress, recvfrom
+			// ingress, matching what the crates' zero-trust rules expect.
+			switch m["operation"] {
+			case "recvfrom":
+				m["direction"] = "ingress"
+			default:
+				m["direction"] = "egress"
+			}
 		}
 	default:
 		m["type"] = "PROCESS"

@@ -63,6 +63,13 @@ pub extern "C" fn free(ptr: *mut u8, size: usize) {
 }
 
 #[no_mangle]
+pub extern "C" fn abi_version() -> u32 {
+    // 4: the host sends cgroup_id, parent_comm, args and direction
+    // (see docs/design/abi-v4-process-context.md).
+    4
+}
+
+#[no_mangle]
 pub extern "C" fn evaluate_syscall(event_ptr: *const u8, event_len: usize) -> i32 {
     // Parse event from JSON
     let event_bytes = unsafe { slice::from_raw_parts(event_ptr, event_len) };

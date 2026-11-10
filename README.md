@@ -223,7 +223,7 @@ There is no `warmor-dashboard` binary on `main`. The SSE dashboard in `internal/
 
 10 example Rust policy crates covering threat scenarios.
 
-All 10 crates build for `wasm32-unknown-unknown` and use the JSON ABI (`evaluate_syscall`). CI builds every crate and runs each through the real WASM host (`TestPolicyCrates`): benign events must be allowed and the crate's own attack examples denied. The host does not send `args`, `parent_comm` or `cgroup_id`, so rules on those fields never fire; time context is sent only to modules declaring ABI version 3 (`temporal-access`).
+All 10 crates build for `wasm32-unknown-unknown` and use the JSON ABI (`evaluate_syscall`). CI builds every crate and runs each through the real WASM host (`TestPolicyCrates`): benign events must be allowed and the crate's own attack examples denied, including rules on `args`, `parent_comm`, `cgroup_id` and `direction` — the Linux exec sensor captures argv and the parent's comm/PPID, and the host sends them (plus time context) to modules declaring ABI version 3/4, which every crate does. See [the ABI v4 design](docs/design/abi-v4-process-context.md).
 
 | Policy | Threat Domain | Pattern |
 |--------|--------------|---------|

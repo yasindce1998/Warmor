@@ -14,15 +14,19 @@ import (
 )
 
 type execve_monitorExecveEvent struct {
-	_         structs.HostLayout
-	Pid       uint32
-	Uid       uint32
-	Gid       uint32
-	Comm      [16]int8
-	Filename  [256]int8
-	_         [4]byte
-	Timestamp uint64
-	CgroupId  uint64
+	_          structs.HostLayout
+	Pid        uint32
+	Uid        uint32
+	Gid        uint32
+	Comm       [16]int8
+	Filename   [256]int8
+	_          [4]byte
+	Timestamp  uint64
+	CgroupId   uint64
+	Ppid       uint32
+	ParentComm [16]int8
+	Args       [16][64]int8
+	_          [4]byte
 }
 
 // Names of all BPF objects in the ELF.

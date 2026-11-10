@@ -438,7 +438,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 		if event.Process != nil {
 			filename = event.Process.Filename
 		}
-		e.lineageTracker.RecordExec(event.PID, 0, event.UID, event.GID, event.Comm, filename)
+		e.lineageTracker.RecordExec(event.PID, event.PPID, event.UID, event.GID, event.Comm, filename)
 	}
 
 	// Network filter: check blocklist and rate limit before policy eval

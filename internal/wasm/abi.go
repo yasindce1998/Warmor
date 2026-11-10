@@ -18,16 +18,30 @@ import (
 //	3  adds temporal context: the event's wall clock and container age
 //	   (binary offsets 245/249, JSON wall_clock_unix/container_age_ms);
 //	   see TemporalABIVersion
+//	4  adds process context: JSON cgroup_id (all types), parent_comm and
+//	   args (PROCESS) and direction (NETWORK); see ProcessContextABIVersion
+//	   and docs/design/abi-v4-process-context.md
 //
-// All versions use the same wire format; version 3 only fills bytes that
-// were padding and adds JSON keys, and only for modules declaring it. The
-// host rejects anything outside this range so a policy built for a future,
-// incompatible contract fails loudly at load time instead of silently
-// mis-evaluating every event.
+// All versions use the same wire format; versions 3 and 4 only fill bytes
+// that were padding and add JSON keys, and only for modules declaring
+// them. The host rejects anything outside this range so a policy built
+// for a future, incompatible contract fails loudly at load time instead
+// of silently mis-evaluating every event.
 const (
 	MinABIVersion uint32 = 1
-	MaxABIVersion uint32 = 3
+	MaxABIVersion uint32 = 4
 )
+
+// ProcessContextABIVersion is the first policy ABI version whose modules
+// are sent process context: the event's cgroup (JSON cgroup_id, all types),
+// the parent's comm and the command's argv (JSON parent_comm and args,
+// PROCESS events) and the network direction (JSON direction, NETWORK
+// events). See docs/design/abi-v4-process-context.md.
+//
+// Modules declaring an older version, or none, never see these keys, so a
+// module built against the old contract cannot start failing on unknown
+// JSON keys.
+const ProcessContextABIVersion uint32 = 4
 
 // Export names that make up the host <-> policy contract.
 const (
@@ -146,7 +160,7 @@ func initPolicy(ctx context.Context, runtime *Runtime, instance wazeroapi.Module
 		return nil, err
 	}
 
-	p := &Policy{runtime: runtime, instance: instance, temporal: version >= TemporalABIVersion}
+	p := &Policy{runtime: runtime, instance: instance, abiVersion: version}
 	if abi == abiBinary {
 		p.useBinaryABI = true
 		results, err := instance.ExportedFunction(exportMalloc).Call(ctx, uint64(eventStructSize))

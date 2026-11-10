@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -87,7 +88,13 @@ func putCString(buf []byte, off, n int, s string) {
 // rawExecveEvent builds a struct execve_event exactly as laid out by the C
 // compiler in bpf/execve_monitor.bpf.c (little-endian, natural alignment).
 func rawExecveEvent(pid, uid, gid uint32, comm, filename string, ts, cgid uint64) []byte {
-	buf := make([]byte, 304)
+	return rawExecveEventCtx(pid, uid, gid, comm, filename, ts, cgid, 0, "", nil)
+}
+
+// rawExecveEventCtx additionally fills the ABI v4 capture fields: the
+// parent's PID and comm and up to 16 NUL-padded 64-byte argv slots.
+func rawExecveEventCtx(pid, uid, gid uint32, comm, filename string, ts, cgid uint64, ppid uint32, parentComm string, args []string) []byte {
+	buf := make([]byte, 1348)
 	binary.LittleEndian.PutUint32(buf[0:], pid)
 	binary.LittleEndian.PutUint32(buf[4:], uid)
 	binary.LittleEndian.PutUint32(buf[8:], gid)
@@ -96,6 +103,19 @@ func rawExecveEvent(pid, uid, gid uint32, comm, filename string, ts, cgid uint64
 	// 4 bytes of padding at 284..288
 	binary.LittleEndian.PutUint64(buf[288:], ts)
 	binary.LittleEndian.PutUint64(buf[296:], cgid)
+	binary.LittleEndian.PutUint32(buf[304:], ppid)
+	putCString(buf, 308, 16, parentComm)
+	for i, arg := range args {
+		if i >= ExecveArgsMax {
+			break
+		}
+		// Mirror bpf_probe_read_user_str: an argument longer than the slot
+		// is truncated with a forced NUL terminator.
+		if len(arg) > ExecveArgLen-1 {
+			arg = arg[:ExecveArgLen-1]
+		}
+		putCString(buf, 324+i*ExecveArgLen, ExecveArgLen, arg)
+	}
 	return buf
 }
 
@@ -136,7 +156,7 @@ func TestEventStructSizes(t *testing.T) {
 		v    any
 		want int
 	}{
-		{"ExecveEvent", ExecveEvent{}, 304},
+		{"ExecveEvent", ExecveEvent{}, 1348},
 		{"OpenatEvent", OpenatEvent{}, 312},
 		{"ConnectEvent", ConnectEvent{}, 72},
 	}
@@ -176,6 +196,64 @@ func TestExecveEvent_DecodeAndConvert(t *testing.T) {
 	}
 	if got.Flags != 0 || got.Mode != 0 || got.RemoteAddr != "" || got.RemotePort != 0 || got.Family != 0 {
 		t.Errorf("unexpected non-process fields set: %+v", got)
+	}
+}
+
+func TestExecveEvent_DecodeProcessContext(t *testing.T) {
+	raw := rawExecveEventCtx(4242, 1000, 1001, "curl", "/usr/bin/curl", 5_000_000_000, 0xdeadbeef,
+		777, "bash", []string{"-sSL", "http://example.com/fetch.sh", "--output", "/tmp/x"})
+
+	var ev ExecveEvent
+	if err := binary.Read(bytes.NewReader(raw), binary.LittleEndian, &ev); err != nil {
+		t.Fatalf("binary.Read failed: %v", err)
+	}
+
+	got := ev.ToEvent()
+	if got.PPID != 777 {
+		t.Errorf("PPID = %d, want 777", got.PPID)
+	}
+	if got.ParentComm != "bash" {
+		t.Errorf("ParentComm = %q, want bash", got.ParentComm)
+	}
+	wantArgs := []string{"-sSL", "http://example.com/fetch.sh", "--output", "/tmp/x"}
+	if !slices.Equal(got.Args, wantArgs) {
+		t.Errorf("Args = %q, want %q", got.Args, wantArgs)
+	}
+}
+
+func TestExecveEvent_DecodeProcessContext_NoneCaptured(t *testing.T) {
+	// All-zero capture fields (the sensor could not read them) decode to
+	// unknown, not to phantom args.
+	raw := rawExecveEvent(4242, 1000, 1001, "bash", "/bin/sh", 0, 0)
+
+	var ev ExecveEvent
+	if err := binary.Read(bytes.NewReader(raw), binary.LittleEndian, &ev); err != nil {
+		t.Fatalf("binary.Read failed: %v", err)
+	}
+
+	got := ev.ToEvent()
+	if got.PPID != 0 || got.ParentComm != "" {
+		t.Errorf("PPID/ParentComm = %d/%q, want 0/\"\"", got.PPID, got.ParentComm)
+	}
+	if len(got.Args) != 0 {
+		t.Errorf("Args = %q, want empty", got.Args)
+	}
+}
+
+func TestExecveEvent_DecodeProcessContext_TruncatedArg(t *testing.T) {
+	// An argument longer than ARG_LEN-1 is truncated by the sensor; the
+	// following slot still decodes.
+	long := strings.Repeat("a", 100)
+	raw := rawExecveEventCtx(1, 0, 0, "x", "/bin/x", 0, 0, 0, "", []string{long, "second"})
+
+	var ev ExecveEvent
+	if err := binary.Read(bytes.NewReader(raw), binary.LittleEndian, &ev); err != nil {
+		t.Fatalf("binary.Read failed: %v", err)
+	}
+
+	got := ev.ToEvent()
+	if len(got.Args) != 2 || got.Args[0] != strings.Repeat("a", ExecveArgLen-1) || got.Args[1] != "second" {
+		t.Errorf("Args = %q, want [truncated-63-a, second]", got.Args)
 	}
 }
 
@@ -295,7 +373,7 @@ func TestEventDecode_ShortInput(t *testing.T) {
 		dst  any
 		size int
 	}{
-		{"execve", &ExecveEvent{}, 304},
+		{"execve", &ExecveEvent{}, 1348},
 		{"openat", &OpenatEvent{}, 312},
 		{"connect", &ConnectEvent{}, 72},
 	}

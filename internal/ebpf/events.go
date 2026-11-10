@@ -26,28 +26,55 @@ const (
 	EventKindNetwork
 )
 
+// ExecveArgsMax and ExecveArgLen mirror ARGS_MAX/ARG_LEN in
+// execve_monitor.bpf.c.
+const (
+	ExecveArgsMax = 16
+	ExecveArgLen  = 64
+)
+
 type ExecveEvent struct {
-	PID       uint32
-	UID       uint32
-	GID       uint32
-	Comm      [16]byte
-	Filename  [256]byte
-	_         [4]byte
-	Timestamp uint64
-	CgroupID  uint64
+	PID        uint32
+	UID        uint32
+	GID        uint32
+	Comm       [16]byte
+	Filename   [256]byte
+	_          [4]byte
+	Timestamp  uint64
+	CgroupID   uint64
+	PPID       uint32
+	ParentComm [16]byte
+	Args       [ExecveArgsMax][ExecveArgLen]byte
 }
 
 func (e *ExecveEvent) ToEvent() Event {
-	return Event{
-		Kind:      EventKindProcess,
-		PID:       e.PID,
-		UID:       e.UID,
-		GID:       e.GID,
-		Comm:      nullTerminatedString(e.Comm[:]),
-		Filename:  nullTerminatedString(e.Filename[:]),
-		Timestamp: bootTimeToWallClock(e.Timestamp),
-		CgroupID:  e.CgroupID,
+	ev := Event{
+		Kind:       EventKindProcess,
+		PID:        e.PID,
+		UID:        e.UID,
+		GID:        e.GID,
+		Comm:       nullTerminatedString(e.Comm[:]),
+		Filename:   nullTerminatedString(e.Filename[:]),
+		Timestamp:  bootTimeToWallClock(e.Timestamp),
+		CgroupID:   e.CgroupID,
+		PPID:       e.PPID,
+		ParentComm: nullTerminatedString(e.ParentComm[:]),
 	}
+	ev.Args = execveArgs(e.Args)
+	return ev
+}
+
+// execveArgs decodes the fixed argv block: each slot is a NUL-padded
+// string, and the first all-zero slot ends the list.
+func execveArgs(raw [ExecveArgsMax][ExecveArgLen]byte) []string {
+	args := make([]string, 0, ExecveArgsMax)
+	for _, a := range raw {
+		if a[0] == 0 {
+			break
+		}
+		args = append(args, nullTerminatedString(a[:]))
+	}
+	return args
 }
 
 type OpenatEvent struct {
@@ -135,6 +162,13 @@ type Event struct {
 	Family     uint16
 	Timestamp  time.Time
 	CgroupID   uint64
+
+	// Process events (exec tracepoint): the parent's PID and comm and the
+	// executed command's argv (bounded; see ExecveArgsMax). Zero values
+	// mean the sensor could not capture them.
+	PPID       uint32
+	ParentComm string
+	Args       []string
 
 	// LSM ring buffer events only: the raw hook event type
 	// (EventTypeExec, ...) and the kernel's decision (1 = policy_map deny

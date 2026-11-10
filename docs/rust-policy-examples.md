@@ -1,6 +1,6 @@
 # Rust WASM Policy Examples
 
-> **Status:** all 10 crates build and are checked against the real host in CI (`TestPolicyCrates`). The host sends only the fields listed under [Host contract](#host-contract); rules on other fields (`args`, `parent_comm`, `cgroup_id`) never fire yet. Time context is sent only to modules that declare `abi_version() -> 3` (of the crates, only `temporal-access`).
+> **Status:** all 10 crates build and are checked against the real host in CI (`TestPolicyCrates`). All crates declare `abi_version() -> 4`, so they receive the process context (`args`, `parent_comm`, `cgroup_id`, `direction`; see [Host contract](#host-contract)) as well as the time context. `bytes_sent`/`bytes_recv` are not sent (no sensor produces them yet).
 >
 > See [Feature Status](STATUS.md).
 
@@ -37,7 +37,7 @@ module's export *signatures* and rejects a module it cannot call at load time:
 | `evaluate_event` | `(ptr: i32) -> i32` | Binary ABI: `ptr` is a fixed 256-byte struct (used by YAML-compiled policies) |
 | `malloc` | `(size: i32) -> i32` | Required for both ABIs |
 | `free` | `(ptr: i32, size: i32)` | Optional |
-| `abi_version` | `() -> i32` | Optional; the host accepts 1, 2 and 3 and refuses anything else. 3 opts in to temporal context (below) |
+| `abi_version` | `() -> i32` | Optional; the host accepts 1, 2, 3 and 4 and refuses anything else. 3 opts in to temporal context, 4 additionally to process context (below) |
 
 A JSON policy must name its entry point `evaluate_syscall`. Exporting
 `evaluate_event(ptr, len)` is an error: `evaluate_event` is reserved for the
@@ -53,6 +53,9 @@ listed type):
 | `FILE` | `operation`, `path`, `flags` (`filename` is empty) |
 | `NETWORK` | `operation`, `protocol`, `remote_addr`, `remote_port`, `local_port` (`filename` is empty) |
 | all, only if `abi_version() >= 3` | `wall_clock_unix` (the event's time, UTC Unix seconds), `container_age_ms` (age of the event's container at that time, in ms). Each is `0` when unknown |
+| all, only if `abi_version() >= 4` | `cgroup_id` (the event's cgroup, `0` when unknown) |
+| `PROCESS`, only if `abi_version() >= 4` | `parent_comm` (the parent's comm, `""` when unknown), `args` (argv as an array; `[]` when not captured — the Linux sensor sends at most 16 arguments, each truncated to 63 bytes) |
+| `NETWORK`, only if `abi_version() >= 4` | `direction` (`"egress"` for connect/sendto, `"ingress"` for recvfrom) |
 
 The binary ABI carries the same two values at offsets 245 (`u32` seconds) and
 249 (`u48` little-endian milliseconds) of the 256-byte struct; they are zero
@@ -123,7 +126,7 @@ Internally the rules build a `Decision` (action + reason) that `evaluate_syscall
 
 ### ABI Version
 
-The host accepts `abi_version()` returning `1`, `2` or `3` and refuses anything else. Most crates return `2` (multi-event format and extended fields); `cross-platform` returns `1` and `temporal-access` returns `3` to opt in to the temporal context (`wall_clock_unix`, `container_age_ms`; see the host contract above). YAML-compiled policies declare `3`.
+The host accepts `abi_version()` returning `1`, `2`, `3` or `4` and refuses anything else. All crates return `4`, opting in to the temporal context (`wall_clock_unix`, `container_age_ms`; version 3) and the process context (`cgroup_id`, `parent_comm`, `args`, `direction`; version 4 — see the host contract above and [the design](design/abi-v4-process-context.md)). YAML-compiled policies declare `3`.
 
 ## Policy Descriptions
 
@@ -267,6 +270,6 @@ All policies use the same action constants:
 2. Set `crate-type = ["cdylib"]` in `Cargo.toml`
 3. Add `serde`, `serde_json` dependencies
 4. Export `malloc`, `free`, and `evaluate_syscall(ptr, len) -> i32`; mark event structs `#[serde(default)]`
-5. Optionally export `abi_version() -> u32` — the host accepts 1, 2 and 3; 3 additionally opts in to temporal context
+5. Optionally export `abi_version() -> u32` — the host accepts 1 through 4; 3 additionally opts in to temporal context, 4 to process context (`args`, `parent_comm`, `cgroup_id`, `direction`)
 6. Build with `cargo build --release --target wasm32-unknown-unknown`
 7. Load with `warmor-daemon --policy path/to/policy.wasm`

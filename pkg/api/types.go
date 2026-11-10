@@ -123,6 +123,12 @@ type Event struct {
 	// Phase 3 fields
 	Type     EventType `json:"type,omitempty"`
 	CgroupID uint64    `json:"cgroup_id,omitempty"`
+	// PPID is the parent's PID and ParentComm its comm, as captured by the
+	// sensor (Linux exec tracepoint; other sensors may leave them unset).
+	// Zero/"" = unknown. ParentComm rides the JSON ABI (version 4); PPID
+	// feeds the lineage tracker.
+	PPID       uint32 `json:"ppid,omitempty"`
+	ParentComm string `json:"parent_comm,omitempty"`
 	// ContainerStart is when the container the event came from started
 	// (zero: unknown, or not a container). The enforcer fills it from the
 	// cgroup for policies that read container age; the policy host sends
