@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -153,6 +154,54 @@ var (
 		},
 		[]string{"event_type"},
 	)
+
+	// AttackGraph reports the MITRE attack graph built from correlated
+	// events (--attack-graph). Updated by the enforcer's metrics loop.
+	AttackGraphContainers = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "warmor",
+			Subsystem: "attack_graph",
+			Name:      "containers",
+			Help:      "Containers with correlated attack behavior.",
+		},
+	)
+	AttackGraphTechniques = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "warmor",
+			Subsystem: "attack_graph",
+			Name:      "techniques",
+			Help:      "Distinct MITRE techniques observed across containers.",
+		},
+	)
+	AttackGraphTacticCoverage = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "warmor",
+			Subsystem: "attack_graph",
+			Name:      "tactic_coverage",
+			Help:      "Technique nodes observed per MITRE tactic.",
+		},
+		[]string{"tactic"},
+	)
+	AttackGraphProgression = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "warmor",
+			Subsystem: "attack_graph",
+			Name:      "progression",
+			Help:      "Deepest kill-chain stage reached by any container (0-6, initial-access to exfiltration).",
+		},
+	)
+
+	// BlastRadiusReachable is the number of containers reachable from a
+	// given cgroup in the container-relationship graph.
+	BlastRadiusReachable = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "warmor",
+			Subsystem: "blast_radius",
+			Name:      "reachable",
+			Help:      "Containers reachable from the labeled cgroup in the relationship graph (network/mount edges).",
+		},
+		[]string{"cgroup"},
+	)
 )
 
 // Status label values.
@@ -303,7 +352,45 @@ func init() {
 		PolicyMapSyncs,
 		LSMEventsDropped,
 		DefaultDeny,
+		AttackGraphContainers,
+		AttackGraphTechniques,
+		AttackGraphTacticCoverage,
+		AttackGraphProgression,
+		BlastRadiusReachable,
 	)
+}
+
+// lastTacticSeries remembers which tactic series were set last, so a
+// tactic whose count dropped to zero can be deleted instead of sticking
+// at its old value.
+var lastTacticSeries = map[string]bool{}
+
+// SetAttackGraph publishes the attack graph summary gauges.
+func SetAttackGraph(containers, techniques, progression int, tacticCoverage map[string]int) {
+	AttackGraphContainers.Set(float64(containers))
+	AttackGraphTechniques.Set(float64(techniques))
+	AttackGraphProgression.Set(float64(progression))
+	for tactic := range lastTacticSeries {
+		if _, ok := tacticCoverage[tactic]; !ok {
+			AttackGraphTacticCoverage.DeleteLabelValues(tactic)
+			delete(lastTacticSeries, tactic)
+		}
+	}
+	for tactic, n := range tacticCoverage {
+		AttackGraphTacticCoverage.WithLabelValues(tactic).Set(float64(n))
+		lastTacticSeries[tactic] = true
+	}
+}
+
+// SetBlastRadius sets the reachable-container count for one cgroup.
+func SetBlastRadius(cgroupID uint64, reachable int) {
+	BlastRadiusReachable.WithLabelValues(strconv.FormatUint(cgroupID, 10)).Set(float64(reachable))
+}
+
+// ResetBlastRadius clears every blast-radius series (e.g. when the graph
+// was rebuilt empty).
+func ResetBlastRadius() {
+	BlastRadiusReachable.Reset()
 }
 
 func Handler() http.Handler {

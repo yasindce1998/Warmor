@@ -74,6 +74,11 @@ type Options struct {
 	// docs/design/kernel-default-deny.md.
 	DefaultDeny bool
 
+	// AttackGraph enables the node-side intelligence chain: MITRE
+	// correlation, the per-container attack graph and blast-radius
+	// metrics (see docs/design/intelligence-chain.md).
+	AttackGraph bool
+
 	// Streaming pipeline configuration
 	StreamSinks []streaming.Sink
 	Labels      map[string]string
@@ -118,9 +123,12 @@ type Enforcer struct {
 	policyGen      atomic.Uint64
 	pipeline       *streaming.Pipeline
 	lineageTracker *lineage.Tracker
-	netFilter      *NetFilter
-	sandbox        *SandboxManager
-	escape         *escape.Detector
+	// intelligence is non-nil when --attack-graph is set (MITRE attack
+	// graph + blast radius).
+	intelligence *intelligence
+	netFilter    *NetFilter
+	sandbox      *SandboxManager
+	escape       *escape.Detector
 	// containerStarts dates the container of an event's cgroup for
 	// policies that read container age (nil: always unknown).
 	containerStarts containerStarter
@@ -318,10 +326,16 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 
 	// Initialize streaming pipeline if sinks configured
 	var pipeline *streaming.Pipeline
-	if len(opts.StreamSinks) > 0 {
+	var intel *intelligence
+	if len(opts.StreamSinks) > 0 || opts.AttackGraph {
 		enrichers := []streaming.Enricher{lineage.NewEnricher(tracker)}
 		if escapeDetector != nil {
 			enrichers = append(enrichers, escapeDetector)
+		}
+		if opts.AttackGraph {
+			var intelEnrichers []streaming.Enricher
+			intel, intelEnrichers = newIntelligence()
+			enrichers = append(enrichers, intelEnrichers...)
 		}
 		pipeline = streaming.NewPipeline(streaming.PipelineConfig{
 			Sinks:     opts.StreamSinks,
@@ -329,6 +343,9 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 			Enrichers: enrichers,
 		})
 		logger.LogInfo(fmt.Sprintf("✓ Streaming pipeline active (%d sinks)", len(opts.StreamSinks)))
+		if intel != nil {
+			logger.LogInfo("✓ Attack graph active (MITRE correlation, blast radius)")
+		}
 	}
 
 	// Initialize sandbox manager
@@ -353,6 +370,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		policyMap:       policyMapSyncer,
 		pipeline:        pipeline,
 		lineageTracker:  tracker,
+		intelligence:    intel,
 		netFilter:       netFilter,
 		sandbox:         sandboxMgr,
 		escape:          escapeDetector,
@@ -398,6 +416,11 @@ func (e *Enforcer) Start() error {
 	if _, ok := e.policyMap.(policyMapCounter); ok {
 		e.wg.Add(1)
 		go e.mapEntriesLoop(mapEntriesInterval)
+	}
+
+	if e.intelligence != nil {
+		e.wg.Add(1)
+		go e.attackGraphMetricsLoop(attackGraphMetricsInterval)
 	}
 
 	e.logger.LogInfo("Enforcer started, processing events...")
@@ -663,6 +686,24 @@ func (e *Enforcer) mapEntriesLoop(interval time.Duration) {
 			return
 		case <-t.C:
 			e.updateMapEntries()
+		}
+	}
+}
+
+// attackGraphMetricsLoop periodically exports the attack-graph summary and
+// blast-radius gauges while the enforcer runs.
+func (e *Enforcer) attackGraphMetricsLoop(interval time.Duration) {
+	defer e.wg.Done()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-t.C:
+			if e.intelligence != nil {
+				e.intelligence.publishMetrics()
+			}
 		}
 	}
 }

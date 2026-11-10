@@ -129,7 +129,7 @@ no Rust crate under `policies/` does yet.
 
 ## Security Intelligence
 
-Warmor goes beyond static policy enforcement. On `main`, **learning and simulation ship as CLI tools**. The other features in this section are **experimental Go libraries with unit tests that are not yet wired into the daemon or server**: no flag or binary reaches them. See [Feature Status](docs/STATUS.md).
+Warmor goes beyond static policy enforcement. On `main`, **learning and simulation ship as CLI tools**, and the attack graph, blast-radius metrics, web dashboard and SIEM syslog sink are wired into the daemon behind flags. Drift detection and automatic canary rollback remain library-only. See [Feature Status](docs/STATUS.md).
 
 ### Live Policy Synthesis — Shipped (offline)
 
@@ -164,13 +164,21 @@ See [Supply Chain Integrity](docs/supply-chain-integrity.md).
 
 `--escape-detect=alert|deny` matches events from container cgroups against breakout techniques: `nsenter`, block-device and cgroup v1 mounts, cross-cgroup ptrace, container runtime socket connects, `/proc/*/ns/*` access, and escape tools. Matches are logged, counted and labelled; `deny` also terminates the process. See [Escape Detection](docs/escape-detection.md).
 
-### Attack Graph — Experimental (library only, not yet wired into the daemon)
+### Attack Graph — Shipped (`--attack-graph`)
 
-Maps events to **MITRE ATT&CK** techniques and builds per-container kill-chain graphs (`internal/attackgraph`).
+Correlates the event stream to **MITRE ATT&CK** techniques and builds per-container kill-chain graphs. Every streamed event is labeled with `mitre_techniques`/`mitre_tactic` (so SIEM and webhook sinks carry them), and `warmor_attack_graph_*` gauges export container/technique counts, per-tactic coverage and the deepest kill-chain stage reached. See [the intelligence-chain design](docs/design/intelligence-chain.md).
 
-### Blast Radius Analysis — Experimental (library only, not yet wired into the daemon)
+### Blast Radius Analysis — Shipped (metrics; `--attack-graph`)
 
-Container relationship graph (network connections, shared volumes, shared namespaces) with BFS reachability queries (`internal/blastradius`).
+Maintains a container relationship graph (network connections, shared volumes, shared namespaces) and exports `warmor_blast_radius_reachable{cgroup}` — how many containers an attacker in that container could reach. Remote/volume resolution is not implemented yet, so edges mostly appear only for shared namespaces; the metric is 0 until container runtime integration lands.
+
+### Web Dashboard — Shipped (`--dashboard-port`)
+
+Serves a live SSE view of policy evaluations (comm, PID, decision, reason) at `/dashboard` on its own HTTP server. It has **no authentication and listens on all interfaces** — bind it to localhost or keep it behind a firewall.
+
+### SIEM / Syslog Sink — Shipped (`--event-sink syslog:`)
+
+Streams CEF-formatted events to a syslog collector over UDP or TCP: `--event-sink syslog:siem.example.com:514` (UDP) or `syslog:tcp://siem.example.com:514`. Combine with `--attack-graph` to attach MITRE technique labels.
 
 ### Drift Detection — Experimental (library only, not yet wired into the server)
 
@@ -215,7 +223,7 @@ A rule's `temporal:` block (`max_container_age`, `min_container_age`, UTC `time_
 | `warmor-policy-bundle` | Package policies into signed OCI bundles; sign/verify detached `<policy>.sig` |
 | `warmor-oci-hook` | **Experimental.** OCI runtime hook that reports container start/stop to `warmor-server`. It has no auth or TLS, so it only works against `warmor-server --insecure`, and the server does not use the bindings yet. |
 
-There is no `warmor-dashboard` binary on `main`. The SSE dashboard in `internal/dashboard` is library-only.
+There is no `warmor-dashboard` binary on `main`; the SSE dashboard is served by the daemon itself with `--dashboard-port`.
 
 ---
 
@@ -291,11 +299,11 @@ internal/                                      (status on main)
   container/      — Cgroup→container resolver, container start times     Shipped (escape, temporal); containerd monitor library-only
   escape/         — Container escape pattern correlator                  Shipped (--escape-detect)
   drift/          — Behavioral fingerprint + z-score detection           Library-only
-  attackgraph/    — MITRE ATT&CK correlation + kill-chain DAG            Library-only
-  blastradius/    — Container relationship graph + BFS reachability      Library-only
+  attackgraph/    — MITRE ATT&CK correlation + kill-chain DAG            Shipped (--attack-graph)
+  blastradius/    — Container relationship graph + BFS reachability      Shipped (--attack-graph metrics)
   temporal/       — Temporal constraint types + reference semantics      Shipped (compiled into YAML policies)
   patterns/       — Glob/regex matcher helpers                           Library-only
-  dashboard/      — SSE dashboard (ring buffer, embedded HTML)           Library-only
+  dashboard/      — SSE dashboard (ring buffer, embedded HTML)           Shipped (--dashboard-port)
 ```
 
 See [Architecture Deep Dive](docs/architecture.md) for data flow diagrams.
