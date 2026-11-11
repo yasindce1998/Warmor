@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/dashboard"
+	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/enforcer"
 	"github.com/yasindce1998/warmor/internal/policyserver"
 	"github.com/yasindce1998/warmor/internal/streaming"
@@ -35,6 +36,8 @@ var (
 	eventLabels   = flag.String("event-labels", "", "Labels to attach to streamed events and report to the policy server (format: k=v,k2=v2)")
 	attackGraph   = flag.Bool("attack-graph", false, "Build the MITRE attack graph and blast-radius metrics from observed events (labels streamed events with technique IDs)")
 	dashboardPort = flag.Int("dashboard-port", 0, "Serve the web dashboard (SSE) on this port (0 = off)")
+	driftEnabled  = flag.Bool("drift", false, "Fingerprint observed behavior (event-type+comm rates) and ship it in policy server heartbeats for fleet drift detection (requires --server)")
+	driftImageKey = flag.String("drift-image-key", "", "Grouping key for the fleet drift comparison: agents reporting the same key are compared (default: SHA-256 of the policy file)")
 	showVersion   = flag.Bool("version", false, "Show version and exit")
 	evalTimeout   = flag.Duration("eval-timeout", 50*time.Millisecond, "Deadline for one WASM policy evaluation; a policy exceeding it is denied (fail closed)")
 
@@ -224,25 +227,6 @@ func runDaemon(stop <-chan struct{}) {
 	// Policy updates from the server and file changes both trigger a reload.
 	reloadCh := make(chan struct{}, 1)
 
-	var policyClient *policyserver.Client
-	if *serverURL != "" {
-		var err error
-		policyClient, err = newPolicyClient(policyClientConfig{
-			ServerURL: *serverURL,
-			Token:     *serverToken,
-			CAFile:    *tlsCA,
-			CertFile:  *tlsCert,
-			KeyFile:   *tlsKey,
-			AgentID:   *agentID,
-			Labels:    labels,
-			Verify:    verifyDownload(pub),
-		}, policyUpdateHandler(*policyPath, reloadCh))
-		if err != nil {
-			log.Fatalf("❌ Policy server: %v", err)
-		}
-		log.Printf("Policy Server: %s", *serverURL)
-	}
-
 	ringSize, err := parseByteSize(*lsmRingSize)
 	if err != nil {
 		log.Fatalf("❌ --lsm-ringbuf-size: %v", err)
@@ -278,11 +262,50 @@ func runDaemon(stop <-chan struct{}) {
 		OnEventLoss:       *onEventLoss,
 		DefaultDeny:       *defaultDeny,
 		AttackGraph:       *attackGraph,
+		Drift:             *driftEnabled,
 	})
 	if err != nil {
 		log.Fatalf("❌ Failed to create enforcer: %v", err)
 	}
 	defer enf.Close()
+
+	// The policy server client is created after the enforcer so that,
+	// with --drift, each heartbeat can attach the enforcer's current
+	// behavioral fingerprint.
+	var policyClient *policyserver.Client
+	if *serverURL != "" {
+		clientCfg := policyClientConfig{
+			ServerURL: *serverURL,
+			Token:     *serverToken,
+			CAFile:    *tlsCA,
+			CertFile:  *tlsCert,
+			KeyFile:   *tlsKey,
+			AgentID:   *agentID,
+			Labels:    labels,
+			Verify:    verifyDownload(pub),
+		}
+		if *driftEnabled {
+			clientCfg.Fingerprint = func() *drift.BehaviorFingerprint {
+				fp := enf.DriftFingerprint()
+				if fp == nil {
+					return nil
+				}
+				fp.ImageHash = resolveDriftImageKey(*policyPath, *driftImageKey)
+				return fp
+			}
+		}
+		var err error
+		policyClient, err = newPolicyClient(clientCfg, policyUpdateHandler(*policyPath, reloadCh))
+		if err != nil {
+			log.Fatalf("❌ Policy server: %v", err)
+		}
+		log.Printf("Policy Server: %s", *serverURL)
+		if *driftEnabled {
+			log.Printf("Drift Detection: fingerprints shipped in heartbeats (image key: %s)", resolveDriftImageKey(*policyPath, *driftImageKey))
+		}
+	} else if *driftEnabled {
+		log.Printf("⚠️  --drift requires --server; fingerprints are only shipped in policy server heartbeats")
+	}
 
 	log.Println("")
 	log.Println("✓ warmor enforcer initialized successfully")

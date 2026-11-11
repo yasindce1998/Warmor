@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/metrics"
 )
 
@@ -29,6 +30,7 @@ type Client struct {
 	mu            sync.Mutex
 	onUpdate      func(assignment *PolicyAssignment, wasmData []byte)
 	verify        func(assignment *PolicyAssignment, wasmData []byte) error
+	fingerprint   func() *drift.BehaviorFingerprint
 }
 
 // MaxWASMDownloadSize bounds a policy module download.
@@ -52,6 +54,11 @@ type ClientConfig struct {
 	// client keeps reporting its previous version, so the policy is
 	// fetched and checked again on the next poll.
 	Verify func(assignment *PolicyAssignment, wasmData []byte) error
+	// Fingerprint, if set, is called before each heartbeat to attach a
+	// behavioral fingerprint for fleet drift detection. A nil return sends
+	// a plain heartbeat. The returned fingerprint's AgentID is overwritten
+	// with the client's own agent ID.
+	Fingerprint func() *drift.BehaviorFingerprint
 }
 
 // NewClient creates a policy server client.
@@ -69,9 +76,10 @@ func NewClient(cfg ClientConfig) *Client {
 			Timeout:   30 * time.Second,
 			Transport: transport,
 		},
-		token:    cfg.Token,
-		onUpdate: cfg.OnUpdate,
-		verify:   cfg.Verify,
+		token:       cfg.Token,
+		onUpdate:    cfg.OnUpdate,
+		verify:      cfg.Verify,
+		fingerprint: cfg.Fingerprint,
 	}
 }
 
@@ -232,6 +240,14 @@ func (c *Client) SendHeartbeat(ctx context.Context) (err error) {
 	req := HeartbeatRequest{
 		AgentID:       c.agentID,
 		PolicyVersion: version,
+	}
+	if c.fingerprint != nil {
+		if fp := c.fingerprint(); fp != nil {
+			// The server keys the fleet comparison by agent; report this
+			// client's own ID rather than whatever the source produced.
+			fp.AgentID = c.agentID
+			req.Fingerprint = fp
+		}
 	}
 
 	body, _ := json.Marshal(req)

@@ -129,7 +129,7 @@ no Rust crate under `policies/` does yet.
 
 ## Security Intelligence
 
-Warmor goes beyond static policy enforcement. On `main`, **learning and simulation ship as CLI tools**, and the attack graph, blast-radius metrics, web dashboard and SIEM syslog sink are wired into the daemon behind flags. Drift detection and automatic canary rollback remain library-only. See [Feature Status](docs/STATUS.md).
+Warmor goes beyond static policy enforcement. On `main`, **learning and simulation ship as CLI tools**, and the attack graph, blast-radius metrics, web dashboard, SIEM syslog sink and fleet drift detection are wired in behind flags. Automatic canary rollback remains library-only. See [Feature Status](docs/STATUS.md).
 
 ### Live Policy Synthesis — Shipped (offline)
 
@@ -180,9 +180,9 @@ Serves a live SSE view of policy evaluations (comm, PID, decision, reason) at `/
 
 Streams CEF-formatted events to a syslog collector over UDP or TCP: `--event-sink syslog:siem.example.com:514` (UDP) or `syslog:tcp://siem.example.com:514`. Combine with `--attack-graph` to attach MITRE technique labels.
 
-### Drift Detection — Experimental (library only, not yet wired into the server)
+### Drift Detection — Shipped (`--drift` on agents, `--drift-threshold` on the server)
 
-Z-score outlier detection over behavioural fingerprints of containers running the same image (`internal/drift`).
+Agents with `--drift` fingerprint observed behavior (event-type+comm rate vectors) and ship a fingerprint in every policy-server heartbeat. The server compares agents reporting the same grouping key (default: the policy-file hash; override with `--drift-image-key`) and flags z-score outliers and unique patterns as drift anomalies — view them at `/api/v1/admin/drift` or alert on `warmor_drift_anomalies` (server `--metrics-port`). See [the fleet-drift design](docs/design/fleet-drift.md).
 
 ### Canary Rollout — Partial (manual ramp; auto-rollback is library only)
 
@@ -298,7 +298,7 @@ internal/                                      (status on main)
   policygen/ sbompolicy/ policydiff/ policymerge/ policybundle/          Shipped (CLI tools)
   container/      — Cgroup→container resolver, container start times     Shipped (escape, temporal); containerd monitor library-only
   escape/         — Container escape pattern correlator                  Shipped (--escape-detect)
-  drift/          — Behavioral fingerprint + z-score detection           Library-only
+  drift/          — Behavioral fingerprint + z-score detection           Shipped (--drift + server)
   attackgraph/    — MITRE ATT&CK correlation + kill-chain DAG            Shipped (--attack-graph)
   blastradius/    — Container relationship graph + BFS reachability      Shipped (--attack-graph metrics)
   temporal/       — Temporal constraint types + reference semantics      Shipped (compiled into YAML policies)

@@ -202,6 +202,28 @@ var (
 		},
 		[]string{"cgroup"},
 	)
+
+	// Fleet drift, computed by the policy server from fingerprints in
+	// agent heartbeats. Unlabeled totals on purpose: the per-image (and
+	// per-agent) breakdown is agent-influenced data and belongs behind the
+	// authenticated admin API (/api/v1/admin/drift), not on a metrics
+	// endpoint where it would invite label-cardinality abuse.
+	DriftTrackedImages = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "warmor",
+			Subsystem: "drift",
+			Name:      "tracked_images",
+			Help:      "Image groups with live agent fingerprints (fleet drift detection).",
+		},
+	)
+	DriftAnomalies = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "warmor",
+			Subsystem: "drift",
+			Name:      "anomalies",
+			Help:      "Behavioral drift anomalies currently detected across the fleet (z-score outliers and unique patterns).",
+		},
+	)
 )
 
 // Status label values.
@@ -357,6 +379,8 @@ func init() {
 		AttackGraphTacticCoverage,
 		AttackGraphProgression,
 		BlastRadiusReachable,
+		DriftTrackedImages,
+		DriftAnomalies,
 	)
 }
 
@@ -391,6 +415,12 @@ func SetBlastRadius(cgroupID uint64, reachable int) {
 // was rebuilt empty).
 func ResetBlastRadius() {
 	BlastRadiusReachable.Reset()
+}
+
+// SetDrift publishes the fleet drift totals (policy server side).
+func SetDrift(trackedImages, anomalies int) {
+	DriftTrackedImages.Set(float64(trackedImages))
+	DriftAnomalies.Set(float64(anomalies))
 }
 
 func Handler() http.Handler {

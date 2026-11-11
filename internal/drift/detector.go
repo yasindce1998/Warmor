@@ -178,6 +178,29 @@ func (d *Detector) Clear(imageHash string) {
 	d.mu.Unlock()
 }
 
+// PruneStale removes fingerprints whose last update is older than cutoff,
+// so agents that stop reporting drop out of the fleet comparison instead
+// of skewing it (or lingering forever). Images left with no fingerprints
+// are removed too.
+func (d *Detector) PruneStale(cutoff time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for img, fps := range d.fingerprints {
+		kept := make([]*BehaviorFingerprint, 0, len(fps))
+		for _, fp := range fps {
+			if fp.Timestamp.After(cutoff) {
+				kept = append(kept, fp)
+			}
+		}
+		if len(kept) == 0 {
+			delete(d.fingerprints, img)
+		} else {
+			d.fingerprints[img] = kept
+		}
+	}
+}
+
 // SubmitFromCollector is a convenience that takes a snapshot from a collector and submits it.
 func (d *Detector) SubmitFromCollector(fc *FingerprintCollector, agentID string) {
 	fp := fc.Snapshot(agentID)
