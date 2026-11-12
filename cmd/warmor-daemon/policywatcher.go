@@ -9,9 +9,8 @@ import (
 
 // policyWatchInterval is how often the policy file's mtime is checked.
 // Polling (rather than inotify/fsnotify) keeps this dependency-free and
-// behaves identically on every platform. A variable so tests can shorten
-// it.
-var policyWatchInterval = 2 * time.Second
+// behaves identically on every platform.
+const policyWatchInterval = 2 * time.Second
 
 // startPolicyWatcher monitors the policy file for changes and sends on
 // reloadCh when a modification is detected. Returns a stop function.
@@ -20,6 +19,13 @@ var policyWatchInterval = 2 * time.Second
 // where a ConfigMap update lands as a file swap that only a watcher sees.
 // On Windows it has always been the only reload trigger.
 func startPolicyWatcher(policyPath string, reloadCh chan<- struct{}) func() {
+	return watchPolicyFile(policyPath, reloadCh, policyWatchInterval)
+}
+
+// watchPolicyFile is startPolicyWatcher with an explicit poll interval;
+// tests pass a short one. The interval is a parameter, not shared state,
+// so shortening it in tests cannot race a running watcher.
+func watchPolicyFile(policyPath string, reloadCh chan<- struct{}, interval time.Duration) func() {
 	var once sync.Once
 	stopCh := make(chan struct{})
 
@@ -30,7 +36,7 @@ func startPolicyWatcher(policyPath string, reloadCh chan<- struct{}) func() {
 			lastMod = info.ModTime()
 		}
 
-		ticker := time.NewTicker(policyWatchInterval)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		for {

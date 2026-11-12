@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// testWatchInterval is the shortened poll interval for watcher tests.
+const testWatchInterval = 10 * time.Millisecond
+
 // touchFuture sets the file's mtime strictly in the future so a change is
 // detected regardless of filesystem timestamp granularity.
 func touchFuture(t *testing.T, path string) {
@@ -18,17 +21,13 @@ func touchFuture(t *testing.T, path string) {
 }
 
 func TestPolicyWatcher_ReloadsOnChange(t *testing.T) {
-	old := policyWatchInterval
-	policyWatchInterval = 10 * time.Millisecond
-	t.Cleanup(func() { policyWatchInterval = old })
-
 	path := filepath.Join(t.TempDir(), "policy.wasm")
 	if err := os.WriteFile(path, []byte("v1"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	reloadCh := make(chan struct{}, 1)
-	stop := startPolicyWatcher(path, reloadCh)
+	stop := watchPolicyFile(path, reloadCh, testWatchInterval)
 	defer stop()
 
 	// Give the watcher goroutine time to record the initial mtime before
@@ -43,16 +42,12 @@ func TestPolicyWatcher_ReloadsOnChange(t *testing.T) {
 }
 
 func TestPolicyWatcher_FileAppearingLater(t *testing.T) {
-	old := policyWatchInterval
-	policyWatchInterval = 10 * time.Millisecond
-	t.Cleanup(func() { policyWatchInterval = old })
-
 	// The watched path does not exist yet (e.g. the policy has not been
 	// downloaded); the watcher must tolerate that and pick the file up
 	// once it appears.
 	path := filepath.Join(t.TempDir(), "policy.wasm")
 	reloadCh := make(chan struct{}, 1)
-	stop := startPolicyWatcher(path, reloadCh)
+	stop := watchPolicyFile(path, reloadCh, testWatchInterval)
 	defer stop()
 
 	// Wait for the watcher's initial (failing) stat before creating the
@@ -70,15 +65,11 @@ func TestPolicyWatcher_FileAppearingLater(t *testing.T) {
 }
 
 func TestPolicyWatcher_StopIsIdempotent(t *testing.T) {
-	old := policyWatchInterval
-	policyWatchInterval = 10 * time.Millisecond
-	t.Cleanup(func() { policyWatchInterval = old })
-
 	path := filepath.Join(t.TempDir(), "policy.wasm")
 	if err := os.WriteFile(path, []byte("v1"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stop := startPolicyWatcher(path, make(chan struct{}, 1))
+	stop := watchPolicyFile(path, make(chan struct{}, 1), testWatchInterval)
 	stop()
 	stop() // must not panic or block
 }
