@@ -22,7 +22,12 @@ webhooks:
       {{- if and (not .Values.webhook.certManager.enabled) .Values.webhook.caBundle }}
       caBundle: {{ .Values.webhook.caBundle }}
       {{- end }}
-    failurePolicy: Fail
+    # No webhook handler is deployed by this chart yet (the WarmorPolicy
+    # controller is not implemented). Ignore, not Fail: a fail-closed
+    # webhook with nothing behind it would brick WarmorPolicy CRUD for the
+    # whole cluster the moment this template is enabled. Flip to Fail when
+    # a handler ships.
+    failurePolicy: Ignore
     matchPolicy: Equivalent
     rules:
       - apiGroups:
