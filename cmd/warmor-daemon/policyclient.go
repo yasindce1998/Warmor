@@ -6,7 +6,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -162,4 +164,38 @@ func writePolicyFile(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// seedPolicyFile bootstraps server-managed deployments: when the policy
+// path does not exist yet (a fresh node whose policy comes from
+// --server) but a fallback does (e.g. the policy baked into the container
+// image, --policy-fallback), the fallback is copied to the policy path so
+// the daemon can start, register and receive the real policy. Later
+// downloads overwrite the seed; the seed never overrides an existing
+// policy. Signature verification is incompatible with seeding (the copy
+// carries no detached signature), so that combination is refused.
+func seedPolicyFile(policyPath, fallbackPath string, requireSignature bool) error {
+	if fallbackPath == "" {
+		return nil
+	}
+	if _, err := os.Stat(policyPath); err == nil {
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("check policy path: %w", err)
+	}
+	if requireSignature {
+		return errors.New("--policy-fallback cannot be combined with --verify-key: the seeded copy carries no signature")
+	}
+	data, err := os.ReadFile(fallbackPath)
+	if err != nil {
+		return fmt.Errorf("read policy fallback: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(policyPath), 0o755); err != nil {
+		return fmt.Errorf("seed policy: %w", err)
+	}
+	if err := writePolicyFile(policyPath, data); err != nil {
+		return fmt.Errorf("seed policy from %s: %w", fallbackPath, err)
+	}
+	log.Printf("✓ Policy seeded from fallback %s (nothing was at %s)", fallbackPath, policyPath)
+	return nil
 }

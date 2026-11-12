@@ -20,26 +20,27 @@ import (
 )
 
 var (
-	policyPath    = flag.String("policy", "policies/example/policy.wasm", "Path to WASM policy file")
-	statsInterval = flag.Duration("stats-interval", 30*time.Second, "Statistics reporting interval")
-	logLevel      = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
-	metricsPort   = flag.Int("metrics-port", 9090, "Prometheus metrics port")
-	auditMode     = flag.Bool("audit", false, "Audit mode: log deny decisions without enforcing")
-	cgroupFilter  = flag.String("cgroup-filter", "", "Cgroup paths to filter (comma-separated, or 'auto' for K8s pod discovery)")
-	lsmEnforce    = flag.Bool("lsm-enforce", false, "Enable LSM-BPF kernel-level blocking (requires CONFIG_BPF_LSM)")
-	requireLSM    = flag.Bool("require-lsm", false, "Fail to start unless BPF-LSM kernel enforcement can be loaded (fail-closed; default is to degrade to observe-only)")
-	noLSM         = flag.Bool("no-lsm", false, "Skip LSM-BPF loading entirely (tracepoint-only observe mode)")
-	defaultDeny   = flag.Bool("default-deny", false, "Refuse in-kernel (EPERM) what the policy does not allow: preload the policy's static allow rules and deny policy-map misses (requires --lsm-enforce and an allowlist policy: default_action deny + exact eq rules; see docs/design/kernel-default-deny.md)")
-	eventSink     = flag.String("event-sink", "", "Event sinks: stdout, file:<path>, webhook:<url>, syslog:[udp|tcp://]host:port (comma-separated)")
-	eventFileMax  = flag.Int64("event-file-max", 100*1024*1024, "Max event file size before rotation (bytes)")
-	webhookHeader = flag.String("webhook-header", "", "Webhook auth header (format: Key:Value)")
-	eventLabels   = flag.String("event-labels", "", "Labels to attach to streamed events and report to the policy server (format: k=v,k2=v2)")
-	attackGraph   = flag.Bool("attack-graph", false, "Build the MITRE attack graph and blast-radius metrics from observed events (labels streamed events with technique IDs)")
-	dashboardPort = flag.Int("dashboard-port", 0, "Serve the web dashboard (SSE) on this port (0 = off)")
-	driftEnabled  = flag.Bool("drift", false, "Fingerprint observed behavior (event-type+comm rates) and ship it in policy server heartbeats for fleet drift detection (requires --server)")
-	driftImageKey = flag.String("drift-image-key", "", "Grouping key for the fleet drift comparison: agents reporting the same key are compared (default: SHA-256 of the policy file)")
-	showVersion   = flag.Bool("version", false, "Show version and exit")
-	evalTimeout   = flag.Duration("eval-timeout", 50*time.Millisecond, "Deadline for one WASM policy evaluation; a policy exceeding it is denied (fail closed)")
+	policyPath     = flag.String("policy", "policies/example/policy.wasm", "Path to WASM policy file")
+	policyFallback = flag.String("policy-fallback", "", "If --policy does not exist at startup, seed it from this file (e.g. the policy baked into the container image) so server-managed deployments can bootstrap before the first download; cannot be combined with --verify-key")
+	statsInterval  = flag.Duration("stats-interval", 30*time.Second, "Statistics reporting interval")
+	logLevel       = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+	metricsPort    = flag.Int("metrics-port", 9090, "Prometheus metrics port")
+	auditMode      = flag.Bool("audit", false, "Audit mode: log deny decisions without enforcing")
+	cgroupFilter   = flag.String("cgroup-filter", "", "Cgroup paths to filter (comma-separated, or 'auto' for K8s pod discovery)")
+	lsmEnforce     = flag.Bool("lsm-enforce", false, "Enable LSM-BPF kernel-level blocking (requires CONFIG_BPF_LSM)")
+	requireLSM     = flag.Bool("require-lsm", false, "Fail to start unless BPF-LSM kernel enforcement can be loaded (fail-closed; default is to degrade to observe-only)")
+	noLSM          = flag.Bool("no-lsm", false, "Skip LSM-BPF loading entirely (tracepoint-only observe mode)")
+	defaultDeny    = flag.Bool("default-deny", false, "Refuse in-kernel (EPERM) what the policy does not allow: preload the policy's static allow rules and deny policy-map misses (requires --lsm-enforce and an allowlist policy: default_action deny + exact eq rules; see docs/design/kernel-default-deny.md)")
+	eventSink      = flag.String("event-sink", "", "Event sinks: stdout, file:<path>, webhook:<url>, syslog:[udp|tcp://]host:port (comma-separated)")
+	eventFileMax   = flag.Int64("event-file-max", 100*1024*1024, "Max event file size before rotation (bytes)")
+	webhookHeader  = flag.String("webhook-header", "", "Webhook auth header (format: Key:Value)")
+	eventLabels    = flag.String("event-labels", "", "Labels to attach to streamed events and report to the policy server (format: k=v,k2=v2)")
+	attackGraph    = flag.Bool("attack-graph", false, "Build the MITRE attack graph and blast-radius metrics from observed events (labels streamed events with technique IDs)")
+	dashboardPort  = flag.Int("dashboard-port", 0, "Serve the web dashboard (SSE) on this port (0 = off)")
+	driftEnabled   = flag.Bool("drift", false, "Fingerprint observed behavior (event-type+comm rates) and ship it in policy server heartbeats for fleet drift detection (requires --server)")
+	driftImageKey  = flag.String("drift-image-key", "", "Grouping key for the fleet drift comparison: agents reporting the same key are compared (default: SHA-256 of the policy file)")
+	showVersion    = flag.Bool("version", false, "Show version and exit")
+	evalTimeout    = flag.Duration("eval-timeout", 50*time.Millisecond, "Deadline for one WASM policy evaluation; a policy exceeding it is denied (fail closed)")
 
 	integrityDB   = flag.String("integrity-db", "", "Integrity database from warmor-integrity-scan; its SHA-256 digests become the kernel exec allowlist")
 	lsmRingSize   = flag.String("lsm-ringbuf-size", "4MiB", "LSM event ring buffer size (power of two, e.g. 1MiB, 4MiB, 16MiB); a larger ring absorbs bigger bursts before events are dropped")
@@ -237,6 +238,12 @@ func runDaemon(stop <-chan struct{}) {
 
 	digests, err := loadIntegrityDigests(*integrityMode, *integrityDB)
 	if err != nil {
+		log.Fatalf("❌ %v", err)
+	}
+
+	// Bootstrap server-managed deployments: seed the policy path from the
+	// fallback if nothing is there yet (see seedPolicyFile).
+	if err := seedPolicyFile(*policyPath, *policyFallback, pub != nil); err != nil {
 		log.Fatalf("❌ %v", err)
 	}
 

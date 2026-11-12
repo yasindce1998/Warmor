@@ -47,10 +47,14 @@ spec:
             - "9090"
             # Policies downloaded from the server are written here and
             # hot-reloaded; the directory persists on the node so a restart
-            # starts from the last assigned policy. The daemon loads this
-            # file at startup, so it must exist before the first start.
+            # starts from the last assigned policy. On a fresh node nothing
+            # is there yet, so the daemon seeds it from the policy baked
+            # into the image at startup and the first server download
+            # replaces the seed.
             - "--policy"
             - "/var/lib/warmor/policy.wasm"
+            - "--policy-fallback"
+            - "/etc/warmor/policy.wasm"
           securityContext:
             privileged: true
             capabilities:

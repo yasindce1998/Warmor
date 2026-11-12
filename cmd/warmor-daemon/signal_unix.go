@@ -20,8 +20,3 @@ func isReloadSignal(sig os.Signal) bool {
 func isShutdownSignal(sig os.Signal) bool {
 	return sig == os.Interrupt || sig == syscall.SIGTERM
 }
-
-// startPolicyWatcher is a no-op on Unix; SIGHUP handles reload.
-func startPolicyWatcher(_ string, _ chan<- struct{}) func() {
-	return func() {}
-}
