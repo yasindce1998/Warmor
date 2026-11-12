@@ -1,0 +1,143 @@
+{{- if .Values.controller.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "warmor.fullname" . }}-controller
+  labels:
+    {{- include "warmor.labels" . | nindent 4 }}
+---
+# Namespaced RBAC for the default mode: WarmorPolicies in the release
+# namespace, and the ConfigMap the effective policy is published to.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "warmor.fullname" . }}-controller
+  labels:
+    {{- include "warmor.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["warmor.io"]
+    resources: ["warmorpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["warmor.io"]
+    resources: ["warmorpolicies/status"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "warmor.fullname" . }}-controller
+  labels:
+    {{- include "warmor.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "warmor.fullname" . }}-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "warmor.fullname" . }}-controller
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.controller.watchAllNamespaces }}
+---
+# Cluster-wide WarmorPolicy watch for --all-namespaces mode. The
+# ConfigMap stays namespaced (the Role above still covers it).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "warmor.fullname" . }}-controller
+  labels:
+    {{- include "warmor.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["warmor.io"]
+    resources: ["warmorpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["warmor.io"]
+    resources: ["warmorpolicies/status"]
+    verbs: ["update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "warmor.fullname" . }}-controller
+  labels:
+    {{- include "warmor.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "warmor.fullname" . }}-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "warmor.fullname" . }}-controller
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "warmor.fullname" . }}-controller
+  labels:
+    {{- include "warmor.labels" . | nindent 4 }}
+    component: controller
+spec:
+  replicas: 1
+  # One writer for the effective-policy ConfigMap; a second replica
+  # would fight over it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "warmor.selectorLabels" . | nindent 6 }}
+      component: controller
+  template:
+    metadata:
+      labels:
+        {{- include "warmor.selectorLabels" . | nindent 8 }}
+        component: controller
+    spec:
+      serviceAccountName: {{ include "warmor.fullname" . }}-controller
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: controller
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          env:
+            # cargo wants a writable package-cache lock even for a
+            # dependency-free build, and /usr/local/cargo in the image is
+            # root-owned. The cache dir (not /tmp): a WarmorPolicy denying
+            # /tmp/** execution would otherwise kill the controller's own
+            # compiles, since the daemon enforces node-wide.
+            - name: CARGO_HOME
+              value: /var/lib/warmor-controller/cache/cargo-home
+          args:
+            - "--configmap-name"
+            - "{{ include "warmor.fullname" . }}-effective-policy"
+            - "--configmap-namespace"
+            - {{ .Release.Namespace | quote }}
+            {{- if .Values.controller.watchAllNamespaces }}
+            - "--all-namespaces"
+            {{- end }}
+            - "--resync-period"
+            - {{ .Values.controller.resyncPeriod | quote }}
+          {{- if .Values.controller.extraArgs }}
+          {{- toYaml .Values.controller.extraArgs | nindent 12 }}
+          {{- end }}
+          {{- with .Values.controller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: cache
+              mountPath: /var/lib/warmor-controller/cache
+      volumes:
+        - name: cache
+          emptyDir: {}
+{{- end }}

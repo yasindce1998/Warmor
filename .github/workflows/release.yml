@@ -60,6 +60,35 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The WarmorPolicy controller image: same Dockerfile, controller
+      # target (Rust toolchain + baked default policy). The chart's
+      # controller.image default references this tag set.
+      - name: Extract controller metadata
+        id: meta-controller
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}-controller
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+
+      - name: Build and push controller
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: controller
+          push: true
+          tags: ${{ steps.meta-controller.outputs.tags }}
+          labels: ${{ steps.meta-controller.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta-controller.outputs.version }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   helm:
     runs-on: ubuntu-latest
     permissions:

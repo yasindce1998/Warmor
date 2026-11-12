@@ -25,6 +25,7 @@ spec:
         {{- end }}
       labels:
         {{- include "warmor.selectorLabels" . | nindent 8 }}
+        component: daemon
     spec:
       serviceAccountName: {{ include "warmor.serviceAccountName" . }}
       {{- if .Values.priorityClass.enabled }}
@@ -38,6 +39,11 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if not .Values.controller.enabled }}
+      # The init container re-validates a user-supplied policy before the
+      # daemon starts. In controller mode it is redundant: the controller
+      # only publishes policies that compiled, so a policy reaching this
+      # mount is valid by construction.
       initContainers:
         - name: validate-policy
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -62,6 +68,7 @@ spec:
               mountPath: /etc/warmor
               readOnly: true
             {{- end }}
+      {{- end }}
       containers:
         - name: warmor
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -74,7 +81,14 @@ spec:
               value: /tmp/.cache
           args:
             - "-policy"
+            {{- if .Values.controller.enabled }}
+            # Controller mode: the effective policy the controller
+            # publishes. The mount is optional so agents can start before
+            # the first sync; they crash-loop briefly until it lands.
+            - "/etc/warmor/policy.d/policy.wasm"
+            {{- else }}
             - "/etc/warmor/policy.wasm"
+            {{- end }}
             - "-metrics-port"
             - {{ .Values.daemon.metricsPort | quote }}
             - "-log-level"
@@ -131,7 +145,11 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
-            {{- if .Values.policy.existingConfigMap }}
+            {{- if .Values.controller.enabled }}
+            - name: effective-policy
+              mountPath: /etc/warmor/policy.d
+              readOnly: true
+            {{- else if .Values.policy.existingConfigMap }}
             - name: policy
               mountPath: /etc/warmor
               readOnly: true
@@ -154,7 +172,15 @@ spec:
               readOnly: true
             {{- end }}
       volumes:
-        {{- if .Values.policy.existingConfigMap }}
+        {{- if .Values.controller.enabled }}
+        # optional: on a fresh install the controller may not have
+        # published the first policy yet; the mount fills in within
+        # seconds and the agents pick it up on their next start.
+        - name: effective-policy
+          configMap:
+            name: {{ include "warmor.fullname" . }}-effective-policy
+            optional: true
+        {{- else if .Values.policy.existingConfigMap }}
         - name: policy
           configMap:
             name: {{ .Values.policy.existingConfigMap }}
