@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/crypto"
+	"github.com/yasindce1998/warmor/internal/drift"
+	"github.com/yasindce1998/warmor/internal/metrics"
 )
 
 // Server is the central policy management HTTP server.
@@ -26,6 +28,7 @@ type Server struct {
 	store      *Store
 	rollouts   *RolloutManager
 	containers *containerStore
+	drift      *drift.Detector
 	httpServer *http.Server
 	addr       string
 	staleCheck time.Duration
@@ -63,6 +66,9 @@ type ServerConfig struct {
 	// detached signature that verifies against it. Signatures are always
 	// served to agents when present; agents verify them independently.
 	VerifyKey ed25519.PublicKey
+	// DriftThreshold is the z-score threshold for fleet drift anomalies
+	// computed from fingerprints in agent heartbeats (0 = library default).
+	DriftThreshold float64
 }
 
 // NewServer creates a policy management server.
@@ -84,6 +90,7 @@ func NewServer(cfg ServerConfig) *Server {
 		addr:       cfg.Addr,
 		staleCheck: cfg.StaleThreshold,
 		containers: newContainerStore(),
+		drift:      drift.NewDetector(drift.DetectorConfig{Threshold: cfg.DriftThreshold}),
 		tlsConfig:  cfg.TLSConfig,
 		jwtSecret:  cfg.JWTSecret,
 		insecure:   cfg.Insecure,
@@ -114,6 +121,7 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("/api/v1/admin/agents", s.requireJWT(s.handleAdminAgents))
 	mux.HandleFunc("/api/v1/admin/rollouts", s.requireJWT(s.handleAdminRollouts))
 	mux.HandleFunc("/api/v1/admin/rollouts/", s.requireJWT(s.handleAdminRollout))
+	mux.HandleFunc("/api/v1/admin/drift", s.requireJWT(s.handleAdminDrift))
 
 	s.httpServer = &http.Server{
 		Addr:         cfg.Addr,
@@ -207,8 +215,25 @@ func (s *Server) staleLoop() {
 			return
 		case <-ticker.C:
 			s.store.MarkStaleAgents(s.staleCheck)
+			// Fingerprints of agents that stopped reporting expire twice as
+			// slowly as the agent itself goes stale, so a briefly flaky
+			// agent is not dropped from the fleet comparison.
+			s.drift.PruneStale(time.Now().Add(-2 * s.staleCheck))
+			s.updateDriftMetrics()
 		}
 	}
+}
+
+// updateDriftMetrics republishes the drift gauges from the detector's
+// current state. Called from the stale loop, not per heartbeat, so the
+// cost is bounded regardless of fleet size or heartbeat rate.
+func (s *Server) updateDriftMetrics() {
+	status := s.drift.Status()
+	anomalies := 0
+	for _, st := range status {
+		anomalies += st.Anomalies
+	}
+	metrics.SetDrift(len(status), anomalies)
 }
 
 // --- Agent endpoints ---
@@ -245,9 +270,25 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The fingerprint (if any) is validated before the heartbeat is
+	// recorded, so a malformed one fails loudly instead of poisoning the
+	// fleet comparison.
+	if req.Fingerprint != nil {
+		if err := validateFingerprint(req.Fingerprint); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Trust the authenticated request identity, not the body.
+		req.Fingerprint.AgentID = req.AgentID
+	}
+
 	if err := s.store.Heartbeat(req.AgentID, req.PolicyVersion); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
+	}
+
+	if req.Fingerprint != nil {
+		s.drift.Submit(req.Fingerprint)
 	}
 
 	// Return the agent's current policy assignment via rollout-aware resolution

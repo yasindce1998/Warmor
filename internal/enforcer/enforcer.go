@@ -17,6 +17,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/cache"
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/container"
+	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/escape"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/lineage"
@@ -79,6 +80,12 @@ type Options struct {
 	// metrics (see docs/design/intelligence-chain.md).
 	AttackGraph bool
 
+	// Drift enables behavioral fingerprinting for fleet drift detection:
+	// event-type+comm rates are counted in the streaming pipeline and
+	// shipped to the policy server in heartbeats (see
+	// docs/design/fleet-drift.md). Requires --server to reach anyone.
+	Drift bool
+
 	// Streaming pipeline configuration
 	StreamSinks []streaming.Sink
 	Labels      map[string]string
@@ -126,9 +133,12 @@ type Enforcer struct {
 	// intelligence is non-nil when --attack-graph is set (MITRE attack
 	// graph + blast radius).
 	intelligence *intelligence
-	netFilter    *NetFilter
-	sandbox      *SandboxManager
-	escape       *escape.Detector
+	// driftCollector is non-nil when --drift is set (fleet drift
+	// fingerprinting; snapshots ship in policy server heartbeats).
+	driftCollector *drift.FingerprintCollector
+	netFilter      *NetFilter
+	sandbox        *SandboxManager
+	escape         *escape.Detector
 	// containerStarts dates the container of an event's cgroup for
 	// policies that read container age (nil: always unknown).
 	containerStarts containerStarter
@@ -327,7 +337,8 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	// Initialize streaming pipeline if sinks configured
 	var pipeline *streaming.Pipeline
 	var intel *intelligence
-	if len(opts.StreamSinks) > 0 || opts.AttackGraph {
+	var driftCollector *drift.FingerprintCollector
+	if len(opts.StreamSinks) > 0 || opts.AttackGraph || opts.Drift {
 		enrichers := []streaming.Enricher{lineage.NewEnricher(tracker)}
 		if escapeDetector != nil {
 			enrichers = append(enrichers, escapeDetector)
@@ -337,6 +348,11 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 			intel, intelEnrichers = newIntelligence()
 			enrichers = append(enrichers, intelEnrichers...)
 		}
+		if opts.Drift {
+			var driftEnricher streaming.Enricher
+			driftCollector, driftEnricher = newDriftCollector()
+			enrichers = append(enrichers, driftEnricher)
+		}
 		pipeline = streaming.NewPipeline(streaming.PipelineConfig{
 			Sinks:     opts.StreamSinks,
 			Labels:    opts.Labels,
@@ -345,6 +361,9 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		logger.LogInfo(fmt.Sprintf("✓ Streaming pipeline active (%d sinks)", len(opts.StreamSinks)))
 		if intel != nil {
 			logger.LogInfo("✓ Attack graph active (MITRE correlation, blast radius)")
+		}
+		if driftCollector != nil {
+			logger.LogInfo("✓ Drift fingerprinting active (shipped in policy server heartbeats)")
 		}
 	}
 
@@ -371,6 +390,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		pipeline:        pipeline,
 		lineageTracker:  tracker,
 		intelligence:    intel,
+		driftCollector:  driftCollector,
 		netFilter:       netFilter,
 		sandbox:         sandboxMgr,
 		escape:          escapeDetector,

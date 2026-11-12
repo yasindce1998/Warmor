@@ -1,6 +1,10 @@
 package policyserver
 
-import "time"
+import (
+	"time"
+
+	"github.com/yasindce1998/warmor/internal/drift"
+)
 
 // Policy represents a versioned WASM policy with targeting rules.
 type Policy struct {
@@ -52,6 +56,11 @@ type RegisterRequest struct {
 type HeartbeatRequest struct {
 	AgentID       string `json:"agent_id"`
 	PolicyVersion int64  `json:"policy_version"`
+	// Fingerprint is the agent's behavioral fingerprint for fleet drift
+	// detection (see internal/drift). Optional: agents without --drift
+	// keep sending plain heartbeats. The server trusts the authenticated
+	// request identity, not Fingerprint.AgentID.
+	Fingerprint *drift.BehaviorFingerprint `json:"fingerprint,omitempty"`
 }
 
 // PolicyAssignment is returned to an agent with its applicable policy.

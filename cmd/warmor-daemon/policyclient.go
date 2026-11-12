@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/policyserver"
 )
 
@@ -30,6 +33,9 @@ type policyClientConfig struct {
 	// Verify, if set, vets each download before onUpdate (see
 	// policyserver.ClientConfig.Verify).
 	Verify func(*policyserver.PolicyAssignment, []byte) error
+	// Fingerprint, if set, attaches the daemon's behavioral fingerprint
+	// to each heartbeat for fleet drift detection (--drift).
+	Fingerprint func() *drift.BehaviorFingerprint
 }
 
 // newPolicyClient builds a policy server client. The agent authenticates
@@ -90,15 +96,33 @@ func newPolicyClient(cfg policyClientConfig, onUpdate func(*policyserver.PolicyA
 	hostname, _ := os.Hostname()
 
 	return policyserver.NewClient(policyserver.ClientConfig{
-		ServerURL: strings.TrimRight(cfg.ServerURL, "/"),
-		AgentID:   cfg.AgentID,
-		Hostname:  hostname,
-		Labels:    cfg.Labels,
-		TLSConfig: tlsCfg,
-		Token:     cfg.Token,
-		OnUpdate:  onUpdate,
-		Verify:    cfg.Verify,
+		ServerURL:   strings.TrimRight(cfg.ServerURL, "/"),
+		AgentID:     cfg.AgentID,
+		Hostname:    hostname,
+		Labels:      cfg.Labels,
+		TLSConfig:   tlsCfg,
+		Token:       cfg.Token,
+		OnUpdate:    onUpdate,
+		Verify:      cfg.Verify,
+		Fingerprint: cfg.Fingerprint,
 	}), nil
+}
+
+// resolveDriftImageKey returns the fleet grouping key for this daemon's
+// drift fingerprint: the --drift-image-key override if set, else the
+// SHA-256 of the current policy file. It is recomputed on every heartbeat
+// (the policy file is small), so a policy change re-groups the agent on
+// the next heartbeat instead of comparing against its old group forever.
+func resolveDriftImageKey(policyPath, override string) string {
+	if override != "" {
+		return override
+	}
+	data, err := os.ReadFile(policyPath)
+	if err != nil {
+		return "unknown"
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // runPolicyClient registers with the policy server (retrying until it

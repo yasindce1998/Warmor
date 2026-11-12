@@ -4,33 +4,38 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/yasindce1998/warmor/internal/crypto"
+	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/internal/policyserver"
 )
 
 var (
-	addr      = flag.String("addr", ":8443", "Server listen address")
-	caCert    = flag.String("ca-cert", "", "CA certificate PEM path used to verify agent client certificates (enables mTLS; requires --tls-cert and --tls-key)")
-	tlsCert   = flag.String("tls-cert", "", "Server TLS certificate PEM path")
-	tlsKey    = flag.String("tls-key", "", "Server TLS private key PEM path")
-	jwtSecret = flag.String("jwt-secret", "", "JWT secret for bearer-token auth (env WARMOR_JWT_SECRET); required for the admin API")
-	policyDir = flag.String("policy-dir", "", "Directory admin requests may load policy WASM files from")
-	insecure  = flag.Bool("insecure", false, "Allow serving without any authentication (development only)")
-	verifyKey = flag.String("verify-key", "", "ed25519 public key PEM (PKIX); refuse policy uploads without a detached signature (<wasm>.sig or the request's \"signature\") that verifies against it")
+	addr              = flag.String("addr", ":8443", "Server listen address")
+	caCert            = flag.String("ca-cert", "", "CA certificate PEM path used to verify agent client certificates (enables mTLS; requires --tls-cert and --tls-key)")
+	tlsCert           = flag.String("tls-cert", "", "Server TLS certificate PEM path")
+	tlsKey            = flag.String("tls-key", "", "Server TLS private key PEM path")
+	jwtSecret         = flag.String("jwt-secret", "", "JWT secret for bearer-token auth (env WARMOR_JWT_SECRET); required for the admin API")
+	policyDir         = flag.String("policy-dir", "", "Directory admin requests may load policy WASM files from")
+	insecure          = flag.Bool("insecure", false, "Allow serving without any authentication (development only)")
+	verifyKey         = flag.String("verify-key", "", "ed25519 public key PEM (PKIX); refuse policy uploads without a detached signature (<wasm>.sig or the request's \"signature\") that verifies against it")
+	driftThreshold    = flag.Float64("drift-threshold", 3.0, "Z-score threshold for fleet drift anomalies computed from fingerprints in agent heartbeats")
+	serverMetricsPort = flag.Int("metrics-port", 0, "Prometheus metrics port for the server itself, e.g. fleet drift gauges (0 = off)")
 )
 
 func main() {
 	flag.Parse()
 
 	cfg := policyserver.ServerConfig{
-		Addr:      *addr,
-		PolicyDir: *policyDir,
-		Insecure:  *insecure,
+		Addr:           *addr,
+		PolicyDir:      *policyDir,
+		Insecure:       *insecure,
+		DriftThreshold: *driftThreshold,
 	}
 
 	if *jwtSecret == "" {
@@ -97,6 +102,19 @@ func main() {
 	}
 
 	srv := policyserver.NewServer(cfg)
+
+	// The server's own metrics (fleet drift gauges) are served on a
+	// separate, unauthenticated port, like the daemon's; bind it to
+	// localhost or a protected network if that matters.
+	if *serverMetricsPort > 0 {
+		go func() {
+			addr := fmt.Sprintf(":%d", *serverMetricsPort)
+			log.Printf("metrics listening on %s", addr)
+			if err := metrics.ListenAndServe(addr); err != nil {
+				log.Fatalf("metrics server: %v", err)
+			}
+		}()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

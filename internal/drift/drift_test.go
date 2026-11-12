@@ -415,6 +415,29 @@ func TestSubmitFromCollectorNonexistent(t *testing.T) {
 	}
 }
 
+func TestPruneStale(t *testing.T) {
+	d := NewDetector(DetectorConfig{Threshold: 3.0})
+	now := time.Now()
+
+	d.Submit(&BehaviorFingerprint{AgentID: "a1", ImageHash: "img", Timestamp: now.Add(-time.Hour)})
+	d.Submit(&BehaviorFingerprint{AgentID: "a2", ImageHash: "img", Timestamp: now})
+	d.Submit(&BehaviorFingerprint{AgentID: "a3", ImageHash: "gone", Timestamp: now.Add(-time.Hour)})
+
+	d.PruneStale(now.Add(-time.Minute))
+
+	if got := d.AgentCount("img"); got != 1 {
+		t.Errorf("img agent count = %d, want 1 (only the fresh fingerprint)", got)
+	}
+	for _, img := range d.Images() {
+		if img == "gone" {
+			t.Error("image with only stale fingerprints was not removed")
+		}
+	}
+	if got := d.AgentCount("gone"); got != 0 {
+		t.Errorf("gone agent count = %d, want 0", got)
+	}
+}
+
 func agentID(i int) string {
 	return "agent-" + string(rune('0'+i))
 }
