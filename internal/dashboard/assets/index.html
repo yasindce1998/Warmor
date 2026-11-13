@@ -61,7 +61,12 @@ tr:hover { background: #1e272e; }
       else { logged++; document.getElementById('cnt-log').textContent = logged; }
       var row = document.createElement('tr');
       var cls = d.action === 'ALLOW' ? 'action-allow' : d.action === 'DENY' ? 'action-deny' : 'action-log';
-      row.innerHTML = '<td>' + new Date(d.time).toLocaleTimeString() + '</td><td>' + (d.pid||'') + '</td><td>' + (d.comm||'') + '</td><td class="' + cls + '">' + d.action + '</td><td>' + (d.reason||'') + '</td>';
+      [new Date(d.time).toLocaleTimeString(), d.pid || '', d.comm || '', d.action, d.reason || ''].forEach(function(value, index) {
+        var cell = document.createElement('td');
+        cell.textContent = value;
+        if (index === 3) { cell.className = cls; }
+        row.appendChild(cell);
+      });
       tbody.insertBefore(row, tbody.firstChild);
       while (tbody.children.length > maxRows) { tbody.removeChild(tbody.lastChild); }
     });
