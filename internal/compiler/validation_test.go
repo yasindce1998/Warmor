@@ -74,7 +74,10 @@ rules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	items := p.Rules[0].Conditions.All[0].Value.([]interface{})
+	items, ok := p.Rules[0].Conditions.All[0].Value.([]interface{})
+	if !ok {
+		t.Fatalf("resolved value has type %T, want a list", p.Rules[0].Conditions.All[0].Value)
+	}
 	if fmt.Sprint(items) != "[/bin/tool $literal]" {
 		t.Fatalf("resolved values = %v", items)
 	}

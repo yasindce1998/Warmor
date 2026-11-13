@@ -84,7 +84,11 @@ func TestAuditConfigDisablesKernelBlocking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := p.(*LinuxPlatform).config
+	lp, ok := p.(*LinuxPlatform)
+	if !ok {
+		t.Fatalf("platform has type %T, want *LinuxPlatform", p)
+	}
+	cfg := lp.config
 	if cfg.LSMEnforce || cfg.IntegrityMode != "audit" || !cfg.RequireLSM {
 		t.Fatalf("audit config = %+v", cfg)
 	}
