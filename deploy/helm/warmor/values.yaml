@@ -36,6 +36,43 @@ policy:
   # "policy.wasm" key. The ConfigMap is mounted over /etc/warmor.
   existingConfigMap: ""
 
+# The WarmorPolicy controller turns warmorpolicies.warmor.io custom
+# resources into the policy the agents run: it validates and compiles
+# them (the controller image carries the Rust toolchain for this) and
+# publishes the result in a ConfigMap the DaemonSet mounts. Agents pick
+# changes up through their policy-file watcher, so updating a
+# WarmorPolicy rolls out to every node without restarting anything.
+#
+# With controller.enabled the policy is managed exclusively through
+# WarmorPolicy resources in the release namespace: the CRs fully define
+# the effective policy (they replace, not extend, the baked default),
+# and with no CRs at all the controller syncs the baked default from
+# deploy/default-policy.yaml. policy.existingConfigMap is ignored in
+# this mode.
+controller:
+  enabled: false
+  image:
+    # The controller image is separate from the agent image because it
+    # needs cargo at runtime to compile policies.
+    repository: ghcr.io/yasindce1998/warmor-controller
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  # Watch WarmorPolicies in every namespace instead of just the release
+  # namespace. Single-tenant clusters only: any namespace could then
+  # affect every node's policy.
+  watchAllNamespaces: false
+  # Re-reconcile this often even without events, healing out-of-band
+  # edits to the policy ConfigMap.
+  resyncPeriod: 10m
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+
 resources:
   limits:
     cpu: 500m

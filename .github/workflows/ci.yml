@@ -167,5 +167,5 @@ jobs:
 
       - uses: azure/setup-helm@v4
 
-      - name: kind e2e (build image, install chart, verify daemon)
+      - name: kind e2e (build images, install chart, verify daemon and WarmorPolicy controller)
         run: ./scripts/kind-e2e.sh warmor:ci-e2e

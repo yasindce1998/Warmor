@@ -1,13 +1,32 @@
 # WarmorPolicy CRD Usage
 
-> **Status: Missing on `main`, schema only.** The chart installs the `WarmorPolicy` CRD, but **there is no controller**. Resources are stored in etcd and never applied to any node, and `status` is never populated. The chart's `ValidatingWebhookConfiguration` has **no handler behind it**, and with `failurePolicy: Fail` enabling it would reject `WarmorPolicy` writes. `policySync.source` is unused. The rest of this page describes the intended design. See [Feature Status](STATUS.md).
+The `WarmorPolicy` custom resource manages security policies as native
+Kubernetes objects. With the controller enabled (`controller.enabled=true`
+in the Helm chart), applying a `WarmorPolicy` compiles it and rolls it out
+to every node — without restarting any agent. See
+[the controller design](design/warmorpolicy-controller.md) for the
+architecture.
 
-The `WarmorPolicy` Custom Resource Definition lets you manage security policies as native Kubernetes objects, scoped per namespace.
+> Without `controller.enabled` the CRD is schema only: resources are
+> stored and never applied. The chart's `ValidatingWebhookConfiguration`
+> still has no handler behind it (it is disabled by default with
+> `failurePolicy: Ignore`) — do not rely on it for validation; the
+> controller validates on reconcile and reports on `status`.
 
 ## Prerequisites
 
-- Warmor Helm chart installed (CRD is auto-installed from `crds/`)
-- Optional: Enable the admission webhook for policy validation (`webhook.enabled=true`)
+- Warmor Helm chart installed (the CRD installs automatically from
+  `crds/`)
+- Enable the controller:
+
+```bash
+helm upgrade warmor deploy/helm/warmor --set controller.enabled=true
+```
+
+By default the controller watches `WarmorPolicy` resources in the
+chart's own namespace. `controller.watchAllNamespaces=true` merges CRs
+from every namespace instead — single-tenant clusters only, since any
+namespace can then affect every node's policy.
 
 ## Create a Policy
 
@@ -16,14 +35,10 @@ apiVersion: warmor.io/v1alpha1
 kind: WarmorPolicy
 metadata:
   name: block-miners
-  namespace: production
 spec:
   name: block-crypto-miners
   version: 1
-  description: "Block cryptocurrency miners in production namespace"
-  selector:
-    matchLabels:
-      team: backend
+  description: "Block cryptocurrency miners"
   rules:
     - name: block-known-miners
       event: process
@@ -46,92 +61,79 @@ spec:
 kubectl apply -f policy.yaml
 ```
 
+The controller validates the CR with the same parser the daemon uses at
+load time, compiles it, publishes the module in a ConfigMap the DaemonSet
+mounts, and agents hot-reload it through their policy-file watcher.
+Agents must not run `--verify-key` in this mode: controller-compiled
+policies are unsigned (the same stance as `--policy-fallback`).
+
 ## Check Status
 
 ```bash
-# List all policies
-kubectl get warmorpolicies -A
+# List all policies (the Status column is the phase)
+kubectl get warmorpolicies
 # or shorthand:
-kubectl get wp -A
+kubectl get wp
 
 # Describe a specific policy
-kubectl describe wp block-miners -n production
+kubectl describe wp block-miners
 ```
-
-The status section shows:
 
 | Field | Description |
 |-------|-------------|
-| `phase` | `Pending`, `Active`, or `Error` |
-| `nodesApplied` | Number of nodes enforcing this policy |
-| `lastApplied` | When the policy was last pushed to nodes |
-| `conditions` | Detailed status conditions |
+| `phase` | `Active` (compiled and published), `Error` (invalid — see the `Ready` condition's message) or `Pending` (held back, e.g. it carries a selector) |
+| `observedGeneration` | The generation the status describes |
+| `lastApplied` | When this CR last contributed to a newly published policy |
+| `conditions` | A `Ready` condition with the reason (`Compiled`, `InvalidPolicy`, `SelectorNotSupported`) |
 
-## Scope with Selectors
+An invalid CR is reported on itself and **excluded** from the effective
+policy; the remaining CRs keep syncing. One bad policy never blocks the
+fleet.
 
-Use `spec.selector` to target specific pods:
+## Multiple Policies
 
-```yaml
-spec:
-  selector:
-    matchLabels:
-      app: payment-service
-    matchExpressions:
-      - key: environment
-        operator: In
-        values: ["production", "staging"]
-```
+All `Active` CRs merge into one effective policy per node:
 
-Pods without matching labels are not affected by the policy.
+- **Rule order**: most-restrictive-first (`deny`, then `audit`, then
+  `allow`), because the compiled module is first-match-wins — an `allow`
+  from one policy can never shadow another policy's `deny`. A single CR
+  keeps its own rule order exactly as written.
+- **Default action**: the strictest across the merged CRs
+  (`deny` > `audit` > `allow`).
+- **Variables** are namespaced per CR, so identical variable names in
+  two policies never bleed into each other.
+- **Rule names** are prefixed with the CR name, so deny reasons stay
+  attributable.
+
+CRs fully define the effective policy: applying your first CR *replaces*
+the baked cluster default (`deploy/default-policy.yaml`), it does not
+extend it. With no CRs at all, the controller syncs the baked default.
+
+## Selectors (not yet honored)
+
+`spec.selector` is accepted by the schema but cannot be enforced yet:
+the daemon enforces node-wide, and applying a pod-scoped policy beyond
+its intended scope would be wrong in both directions. A CR carrying a
+selector is held `Pending` with a `SelectorNotSupported` condition
+instead of being silently mis-applied. Selectors become meaningful when
+per-workload policies land.
 
 ## Update a Policy
 
-Increment the `spec.version` field when updating:
-
-```yaml
-spec:
-  version: 2  # was 1
-  rules:
-    # updated rules...
-```
+Edit the resource and apply. Every spec change (whether or not you bump
+`spec.version`) triggers a recompile and rollout; the agents pick it up
+within seconds through their policy-file watcher.
 
 ```bash
 kubectl apply -f policy.yaml
 ```
 
-*(Planned.)* The daemon would detect the version change and reload without a restart.
-
 ## Delete a Policy
 
 ```bash
-kubectl delete wp block-miners -n production
+kubectl delete wp block-miners
 ```
 
-*(Planned.)* The daemon would revert to the ConfigMap-based default policy for affected pods.
-
-## Enable Admission Webhook (do not enable on main)
-
-The webhook validates policies before they're stored in etcd:
-
-```bash
-helm upgrade warmor deploy/helm/warmor \
-  --set webhook.enabled=true \
-  --set webhook.certManager.enabled=true \
-  --set webhook.certManager.issuerRef.name=cluster-issuer \
-  --set webhook.certManager.issuerRef.kind=ClusterIssuer
-```
-
-*(Planned.)* On `main` there is no webhook server, so enabling this blocks `WarmorPolicy` writes instead of validating them.
-
-## Multiple Policies per Namespace
-
-You can apply multiple `WarmorPolicy` objects in the same namespace. Rules are merged in order of `spec.version` (lowest first). If rules conflict, the policy with the higher version wins.
-
-## Migration from ConfigMap
-
-To move from the Helm values-based policy to CRD-based:
-
-1. Deploy the CRD (automatic with chart install)
-2. Create a `WarmorPolicy` resource matching your current ConfigMap policy
-3. Set `policySync.source: crd` in values
-4. The daemon will prefer CRD policies over the ConfigMap when both exist
+The effective policy is recomputed from the remaining CRs — or reverts to
+the baked cluster default when the last CR is deleted. Deletion never
+leaves nodes without a policy.

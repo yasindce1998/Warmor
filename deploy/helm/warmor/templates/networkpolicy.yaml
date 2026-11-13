@@ -6,9 +6,13 @@ metadata:
   labels:
     {{- include "warmor.labels" . | nindent 4 }}
 spec:
+  # Daemon pods only. The controller (when enabled) gets its own policy
+  # below: it needs different egress (the API server, not HTTPS at large)
+  # and serves no ports at all.
   podSelector:
     matchLabels:
       {{- include "warmor.selectorLabels" . | nindent 6 }}
+      component: daemon
   policyTypes:
     - Ingress
     - Egress
@@ -28,4 +32,37 @@ spec:
     {{- with .Values.networkPolicy.extraEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+---
+{{- if .Values.controller.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "warmor.fullname" . }}-controller
+  labels:
+    {{- include "warmor.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "warmor.selectorLabels" . | nindent 6 }}
+      component: controller
+  policyTypes:
+    - Ingress
+    - Egress
+  # The controller only ever talks to the API server (and DNS).
+  # 443 covers real clusters, where policy engines evaluate the service
+  # ClusterIP before DNAT; 6443 covers kindnet (kind), which evaluates
+  # the post-DNAT node port. Without 6443 the controller's watches are
+  # silently dropped on kind and it can never see a WarmorPolicy.
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+{{- end }}
 {{- end }}

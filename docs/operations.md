@@ -174,9 +174,22 @@ Caveats on `main`:
 - Most hosted clusters and kind nodes lack `CONFIG_BPF_LSM`, so in-cluster
   the daemon runs tracepoint-only observe mode. Kernel enforcement needs
   `daemon.lsmEnforce: true` **and** nodes with BPF-LSM enabled.
-- The `ValidatingWebhookConfiguration` has no handler, and the `WarmorPolicy`
-  CRD has no controller (see [CRD usage](crd-usage.md)). Leave
+- The `ValidatingWebhookConfiguration` has no handler. Leave
   `webhook.enabled` off.
-- `deploy/kubernetes/warmor-daemonset.yaml` (the static manifests) still
-  configures the daemon through environment variables it does not read —
-  prefer the chart.
+- `deploy/kubernetes/warmor-daemonset.yaml` (the static manifests) targets
+  server-managed agents and expects mTLS secrets and a reachable
+  `warmor-server`; prefer the chart.
+
+### Manage policies as Kubernetes objects
+
+Instead of compiling policies out of band, enable the WarmorPolicy
+controller and `kubectl apply` policies directly — the controller
+compiles them and every agent hot-reloads (see
+[CRD usage](crd-usage.md)):
+
+```bash
+helm upgrade warmor oci://ghcr.io/yasindce1998/warmor/charts/warmor \
+  --set controller.enabled=true
+kubectl apply -f my-policy.yaml   # kind: WarmorPolicy
+kubectl get wp                    # watch the phase go Active
+```
