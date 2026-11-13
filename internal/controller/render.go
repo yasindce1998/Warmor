@@ -95,7 +95,11 @@ func renderPolicy(cr *WarmorPolicy) (*policymerge.PolicyYAML, error) {
 	prefix := variablePrefix(cr)
 	variables := make(map[string]any, len(cr.Spec.Variables))
 	for name, value := range cr.Spec.Variables {
-		variables[prefix+name] = value
+		rewritten, err := rewriteValue(value, prefix, cr.Spec.Variables)
+		if err != nil {
+			return nil, fmt.Errorf("variable %q: %w", name, err)
+		}
+		variables[prefix+name] = rewritten
 	}
 
 	rendered := &policymerge.PolicyYAML{
@@ -139,9 +143,8 @@ func renderPolicy(cr *WarmorPolicy) (*policymerge.PolicyYAML, error) {
 }
 
 // rewriteConditions rewrites $variable references in raw condition maps
-// to their namespaced names. Values that do not reference a variable the
-// policy defines pass through unchanged (the compiler keeps unknown
-// $-prefixed strings literal, and so does this rewrite).
+// to their namespaced names. Unknown references pass through for the
+// compiler to reject; $$ escapes a literal leading dollar.
 func rewriteConditions(conditions []map[string]any, prefix string, variables map[string]any) ([]map[string]any, error) {
 	if len(conditions) == 0 {
 		return nil, nil

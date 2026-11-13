@@ -32,6 +32,17 @@ func TestEventFromContext_NoEvent(t *testing.T) {
 	}
 }
 
+func TestHostStringLengthQueryAndArgs(t *testing.T) {
+	ev := &api.Event{Process: &api.ProcessEvent{Args: []string{"tool", "--flag", "two words"}}}
+	ctx := contextWithEvent(context.Background(), ev)
+	if got := hostGetFieldStr(ctx, nil, FieldArgs, 0, 0); got != uint32(len("tool --flag two words")) {
+		t.Fatalf("argv length = %d", got)
+	}
+	if got := hostGetFieldStr(ctx, nil, FieldOperation, 0, 0); got != 0 {
+		t.Fatalf("missing operation length = %d", got)
+	}
+}
+
 // ---- hostGetFieldU32 ----
 
 func TestHostGetFieldU32_PID(t *testing.T) {

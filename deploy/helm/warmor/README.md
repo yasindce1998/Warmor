@@ -7,8 +7,9 @@ Deploys the warmor daemon as a DaemonSet with an optional monitoring stack
 > verified end-to-end by a kind test in CI (`scripts/kind-e2e.sh`): install →
 > pods Ready → policy loaded → metrics serving. The image bakes in a
 > compiled default policy, so no Rust toolchain is needed on the nodes.
-> Caveats: on nodes without `CONFIG_BPF_LSM` (kind, most hosted clusters)
-> the daemon runs tracepoint-only **observe mode** — see
+> The default is **audit-only**: denies are reported, nothing is killed or blocked.
+> On nodes without `CONFIG_BPF_LSM` (including many kind/hosted setups), kernel
+> blocking is unavailable even when explicitly requested — see
 > [Known issues](#known-issues).
 
 ## Install
@@ -52,7 +53,7 @@ no `cargo`.
 | `daemon.logLevel` | `info` | `--log-level` |
 | `daemon.statsInterval` | `30s` | `--stats-interval` |
 | `daemon.metricsPort` | `9090` | `--metrics-port`; also the scrape port |
-| `daemon.auditMode` | `false` | Pass `--audit`: log deny decisions without enforcing |
+| `daemon.auditMode` | `true` | Pass `--audit`: no process termination or kernel blocking, even if enforcement flags are also enabled |
 | `daemon.lsmEnforce` | `false` | Pass `--lsm-enforce`: kernel-level blocking (EPERM) for cached exec/connect denies. Requires `CONFIG_BPF_LSM=y` and `bpf` in `/sys/kernel/security/lsm` on the nodes |
 | `daemon.requireLSM` | `false` | Pass `--require-lsm`: fail to start unless BPF-LSM enforcement can be loaded |
 | `daemon.defaultDeny` | `false` | Pass `--default-deny`: preload the policy's static allow rules and refuse (EPERM) exec/connect the policy does not allow. Requires `daemon.lsmEnforce` and an allowlist policy (`default_action: deny` + exact `eq` rules); misses stay allowed when the policy is not eligible. See [the design](https://github.com/yasindce1998/warmor/blob/main/docs/design/kernel-default-deny.md) |
@@ -87,13 +88,19 @@ no `cargo`.
 
 ## Known issues
 
+To opt into enforcement after validating policy and scope, explicitly set
+`daemon.auditMode=false`. Kernel blocking additionally needs
+`daemon.lsmEnforce=true` and suitable nodes; `daemon.requireLSM=true` refuses an
+unsupported node. Policies remain node-wide unless cgroup filtering restricts
+them; disabling audit can affect host processes as well as pods.
+
 Everything below is open on `main`; see
 [Feature Status](https://github.com/yasindce1998/warmor/blob/main/docs/STATUS.md)
 for the tracked items.
 
 1. **No kernel enforcement on most clusters.** Kind nodes and typical
    hosted clusters lack `CONFIG_BPF_LSM`, so the daemon degrades to
-   tracepoint-only observe mode (detect, then `SIGKILL`). Set
+   tracepoint-only monitoring (or detect-then-`SIGKILL` if audit is explicitly disabled). Set
    `daemon.lsmEnforce: true` on BPF-LSM nodes for kernel blocking;
    `daemon.requireLSM: true` makes the daemon refuse to start without it.
 2. **The `WarmorPolicy` CRD has no controller.** Resources are stored but

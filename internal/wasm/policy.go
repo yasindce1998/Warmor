@@ -88,7 +88,7 @@ func (p *Policy) evaluateBinary(ctx context.Context, event *api.Event) (api.Acti
 		return api.ActionDeny, fmt.Errorf("evaluate_event failed: %w", err)
 	}
 
-	return api.Action(results[0]), nil
+	return decodePolicyAction(results[0])
 }
 
 func (p *Policy) evaluateJSON(ctx context.Context, event *api.Event) (api.Action, error) {
@@ -128,7 +128,19 @@ func (p *Policy) evaluateJSON(ctx context.Context, event *api.Event) (api.Action
 		return api.ActionDeny, fmt.Errorf("evaluate_syscall failed: %w", err)
 	}
 
-	return api.Action(results[0]), nil
+	return decodePolicyAction(results[0])
+}
+
+// Both ABIs return an i32. Never let an unknown verdict become an allow
+// when synchronizing to a kernel map or bypassing the action handler.
+func decodePolicyAction(raw uint64) (api.Action, error) {
+	action := api.Action(uint32(raw))
+	switch action {
+	case api.ActionAllow, api.ActionDeny, api.ActionLog, ActionAuditDeny:
+		return action, nil
+	default:
+		return api.ActionDeny, fmt.Errorf("invalid policy action %d", int32(action))
+	}
 }
 
 // GetMatchedRule reads the last matched rule reason from the WASM module.

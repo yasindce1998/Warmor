@@ -42,7 +42,18 @@ See [Temporal Policies](temporal-policies.md) for the `temporal:` block.
 | `file` | File system access | `pid`, `uid`, `gid`, `comm`, `path`, `operation`, `flags` |
 | `network` | Network connections | `pid`, `uid`, `gid`, `comm`, `operation`, `protocol`, `remote_addr`, `remote_port`, `local_port` |
 
-\* `args` is accepted by the schema but the host does not send it to WASM yet, so rules on it never fire.
+\* YAML `args` is the captured argv joined with single spaces, including argv[0].
+It is not shell parsing; `eq`/`any_of` compare the complete joined string, while
+`contains` searches for a substring. Missing argv is an empty string. The Linux
+exec tracepoint captures at most 16 arguments of 63 bytes each; LSM exec events
+do not carry argv yet. Rules cannot inspect arguments the sensor did not capture.
+The compiled policy refuses inputs longer than 16 KiB at evaluation time (DENY), rather
+than silently truncating them again.
+
+Policies using YAML `args` or network `operation` declare **ABI 5**, which adds
+argv host callbacks and string-length queries; older agents reject them. Upgrade
+agents before distributing those newly compiled policies. Other generated
+policies retain ABI 3 compatibility.
 
 ## Condition Operators
 
@@ -68,6 +79,9 @@ See [Temporal Policies](temporal-policies.md) for the `temporal:` block.
 ## Variables
 
 Variables let you reuse lists across rules. Reference them with `$variable_name`:
+
+References must resolve, including references inside lists and other variables;
+cycles are errors. Use `$$name` to match the literal string `$name`.
 
 ```yaml
 variables:
@@ -178,7 +192,14 @@ warmor-compile --validate path/to/policy.yaml
 
 `warmor-daemon --validate-policy <path>` loads the policy the way the daemon would (and checks its signature with `--verify-key`) without root or BPF, and exits 0 or 1. For a `.yaml` file it checks the schema and, if a precompiled `.wasm` with the same base name exists next to it, loads that in the WASM runtime — it does not compile the YAML, because that needs `cargo`. For a `.wasm` file it compiles and instantiates the module in the WASM runtime. Add `--verify-key signing.pub` to also check the policy's detached signature (see [Policy toolchain](policy-toolchain.md#detached-signatures-daemon-and-policy-server)).
 
-> **Note:** the compiler silently ignores rule keys it does not know (a misspelt `temporal:` key included; the `temporal:` block itself is checked strictly). Run `warmor-compile --rust-only path/to/policy.yaml` to see exactly which conditions were compiled.
+Validation is strict: unknown keys (including misspelled `default_action` or
+`temporal`), extra YAML documents, duplicate rule names, unresolved variables,
+invalid field/operator/value combinations, empty membership lists, and numeric
+overflow are rejected. Numeric fields require nonnegative integers (`pid`,
+`uid`, `gid`, `flags`: 32-bit; ports: 16-bit); string operators require string
+operands. Existing policies relying on ignored keys or scalar `any_of` values
+must be corrected before they can load. Run `--rust-only` to inspect generated
+conditions, not as a substitute for behavioral tests.
 
 ---
 

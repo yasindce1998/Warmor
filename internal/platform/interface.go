@@ -55,6 +55,9 @@ type Config struct {
 	// SkipLSM disables LSM-BPF program loading entirely, running in
 	// tracepoint-only observe mode regardless of kernel capabilities.
 	SkipLSM bool
+	// AuditMode makes every backend observe-only, including backends whose
+	// kernel hooks have no separate enforcement toggle (Windows).
+	AuditMode bool
 	// IntegrityMode is "off", "audit" or "enforce". Anything but off loads
 	// the content-hash exec check with IntegrityDigests (hex SHA-256) as
 	// the allowlist; failing to load it is fatal, since the operator asked

@@ -223,7 +223,8 @@ func TestLoadPolicy_ABIVersion(t *testing.T) {
 		{2, true},
 		{3, true},
 		{4, true},
-		{5, false},
+		{5, true},
+		{6, false},
 		{-1, false},
 	}
 	for _, tc := range tests {

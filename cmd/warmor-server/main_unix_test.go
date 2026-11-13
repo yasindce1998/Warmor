@@ -243,7 +243,7 @@ func TestServer_MTLS(t *testing.T) {
 			t.Fatal(err)
 		}
 		client := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}, Timeout: 5 * time.Second}
-		resp, err := client.Post("https://"+addr+"/api/v1/register", "application/json", strings.NewReader(`{"id":"a1"}`))
+		resp, err := client.Post("https://"+addr+"/api/v1/register", "application/json", strings.NewReader(`{"id":"client"}`))
 		if err != nil {
 			t.Fatalf("mTLS register: %v", err)
 		}

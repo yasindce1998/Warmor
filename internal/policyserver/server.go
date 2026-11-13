@@ -253,6 +253,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
+	if !authorizeAgent(w, r, req.ID) {
+		return
+	}
 
 	agent := s.store.RegisterAgent(&req)
 	writeJSON(w, http.StatusOK, agent)
@@ -267,6 +270,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var req HeartbeatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if !authorizeAgent(w, r, req.AgentID) {
 		return
 	}
 
@@ -310,6 +316,9 @@ func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request) {
 	agentID := r.URL.Query().Get("agent_id")
 	if agentID == "" {
 		http.Error(w, "agent_id required", http.StatusBadRequest)
+		return
+	}
+	if !authorizeAgent(w, r, agentID) {
 		return
 	}
 
@@ -362,6 +371,26 @@ func (s *Server) handleGetWASM(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		version = v
+	}
+	// An agent may only download its current assignment. Admins and
+	// explicit insecure development servers retain revision inspection.
+	p, authenticated := r.Context().Value(principalKey{}).(authenticatedPrincipal)
+	if !authenticated {
+		unauthorized(w, "authenticated agent identity required")
+		return
+	}
+	if !p.admin {
+		agent, found := s.store.GetAgent(p.subject)
+		if !found {
+			http.Error(w, "agent not registered", http.StatusForbidden)
+			return
+		}
+		a := s.rollouts.ResolvePolicy(p.subject, agent.Labels)
+		if a == nil || a.PolicyID != policyID || (version != 0 && version != a.Version) {
+			http.Error(w, "policy revision is not assigned to this agent", http.StatusForbidden)
+			return
+		}
+		version = a.Version
 	}
 	data, sig, ok := s.store.GetSignedWASM(policyID, version)
 	if !ok {

@@ -22,6 +22,7 @@ type LinuxConfig struct {
 	LSMEnforce   bool
 	RequireLSM   bool
 	SkipLSM      bool
+	AuditMode    bool
 
 	IntegrityMode    string
 	IntegrityDigests []string
@@ -43,6 +44,12 @@ type LinuxPlatform struct {
 }
 
 func NewLinuxPlatform(config LinuxConfig) (Platform, error) {
+	if config.AuditMode {
+		config.LSMEnforce = false
+		if config.IntegrityMode == "enforce" {
+			config.IntegrityMode = "audit"
+		}
+	}
 	return &LinuxPlatform{
 		stopChan: make(chan struct{}),
 		config:   config,

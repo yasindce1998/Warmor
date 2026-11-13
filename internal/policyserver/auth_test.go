@@ -157,7 +157,7 @@ func TestAdminAcceptsAdminToken(t *testing.T) {
 var agentRoutes = []route{
 	{http.MethodPost, "/api/v1/register"},
 	{http.MethodPost, "/api/v1/heartbeat"},
-	{http.MethodGet, "/api/v1/policy?agent_id=a"},
+	{http.MethodGet, "/api/v1/policy?agent_id=tester"},
 	{http.MethodGet, "/api/v1/policy/wasm?policy_id=p"},
 }
 
@@ -255,7 +255,11 @@ func TestAgentAndContainerRoutesRejectUnauthenticated(t *testing.T) {
 }
 
 func TestAgentAndContainerRouteRoles(t *testing.T) {
-	_, ts := setupAuthServer(t)
+	srv, ts := setupAuthServer(t)
+	srv.Store().RegisterAgent(&RegisterRequest{ID: "tester"})
+	if err := srv.Store().CreatePolicy(&Policy{ID: "p"}, writeWASM(t, t.TempDir(), "p.wasm", "wasm")); err != nil {
+		t.Fatal(err)
+	}
 	authorized := func(code int) bool { return code != http.StatusUnauthorized && code != http.StatusForbidden }
 
 	for _, tc := range []struct {
@@ -297,7 +301,7 @@ func TestClientSendsAgentToken(t *testing.T) {
 	rec := newUpdateRecorder()
 	ctx := context.Background()
 	c := NewClient(ClientConfig{
-		ServerURL: ts.URL, AgentID: "a1", Token: issueToken(t, testJWTSecret, "agent", time.Hour), OnUpdate: rec.onUpdate,
+		ServerURL: ts.URL, AgentID: "tester", Token: issueToken(t, testJWTSecret, "agent", time.Hour), OnUpdate: rec.onUpdate,
 	})
 	if err := c.Register(ctx); err != nil {
 		t.Fatalf("register with agent token: %v", err)
@@ -377,6 +381,11 @@ func TestMTLSClientWithValidCert(t *testing.T) {
 	}
 	if _, ok := srv.Store().GetAgent("agent-1"); !ok {
 		t.Error("agent not registered after mTLS register")
+	}
+	// A real TLS handshake must not let this certificate register another node.
+	other := NewClient(ClientConfig{ServerURL: ts.URL, AgentID: "agent-2", TLSConfig: clientTLS})
+	if err := other.Register(context.Background()); err == nil || !strings.Contains(err.Error(), "403") {
+		t.Fatalf("cross-agent mTLS register: %v, want 403", err)
 	}
 }
 
@@ -461,7 +470,7 @@ func TestMTLSCertAuthenticatesAgentAndRuntimeRoutes(t *testing.T) {
 		return resp.StatusCode
 	}
 
-	if code := do(http.MethodPost, "/api/v1/register", `{"id":"a1"}`); code != http.StatusOK {
+	if code := do(http.MethodPost, "/api/v1/register", `{"id":"agent-1"}`); code != http.StatusOK {
 		t.Errorf("register over mTLS: %d", code)
 	}
 	if code := do(http.MethodPost, "/api/v1/containers/bind", `{"container_id":"c","policy_id":"p"}`); code != http.StatusOK {

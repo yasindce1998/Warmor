@@ -62,6 +62,15 @@ linear memory, and each evaluation has a deadline (`--eval-timeout`, default
 The daemon prints a one-line **Security posture** summary at startup so the
 active mode is unambiguous in logs.
 
+`--audit` takes precedence over `--lsm-enforce` and
+`--integrity-mode=enforce`: kernel blocking is disabled, integrity becomes
+audit-only, and preloaded rules are audit-flagged. Learning mode has the same
+no-block/no-kill invariant. `--require-lsm` still requires the backend to load;
+it does not override audit. Windows audit uses ETW instead of loading eBPF hooks
+that lack a global audit toggle (so audit plus `--require-lsm` cannot start there).
+The Helm chart defaults to audit; the standalone CLI still requires `--audit`
+explicitly for a dry run.
+
 ## Startup fail-safety: `--require-lsm`
 
 By default, if BPF-LSM cannot be established (unsupported kernel, missing BTF,

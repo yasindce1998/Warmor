@@ -10,7 +10,9 @@ daemon:
   logLevel: info
   statsInterval: 30s
   metricsPort: 9090
-  auditMode: false
+  # Start safely: no kernel blocking or process termination. Explicitly
+  # set false only after validating policies and workload scope.
+  auditMode: true
   # Pass --lsm-enforce to the daemon: kernel-level blocking (EPERM) for
   # cached exec/connect denies. Requires CONFIG_BPF_LSM=y and "bpf" in
   # /sys/kernel/security/lsm on the nodes; without it the daemon degrades
