@@ -1131,7 +1131,7 @@ func TestPrintStats_WithEvents(t *testing.T) {
 	// This tests decision/cache statistics, not the production 50ms latency
 	// bound. Keep evaluation bounded without letting hosted-runner scheduling
 	// turn successful policy decisions into uncached timeout failures.
-	e.evaluator.SetTimeout(5 * time.Second)
+	inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 
 	allow := &api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"}
 	e.handleEvent(allow)
