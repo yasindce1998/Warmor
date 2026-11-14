@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,8 +84,15 @@ func NewFileSink(path string, maxBytes int64) (*FileSink, error) {
 		return nil, err
 	}
 	for _, entry := range archives {
+		name := entry.Name()
 		prefix := filepath.Base(path) + "."
-		if !strings.HasPrefix(entry.Name(), prefix) || !recordingArchiveSuffix(strings.TrimPrefix(entry.Name(), prefix)) {
+		if runtime.GOOS == "windows" {
+			// Discovery must not skip legacy archives merely because the
+			// configured active name differs in case from the directory entry.
+			// Normalize only for matching; checked opens use the actual name.
+			name, prefix = strings.ToUpper(name), strings.ToUpper(prefix)
+		}
+		if !strings.HasPrefix(name, prefix) || !recordingArchiveSuffix(strings.TrimPrefix(name, prefix)) {
 			continue
 		}
 		archive := filepath.Join(filepath.Dir(path), entry.Name())

@@ -136,3 +136,87 @@ func TestWindowsFileSinkRejectsUnsafeArchivesAndReopen(t *testing.T) {
 		t.Fatalf("unsafe target changed: %q %v", data, err)
 	}
 }
+
+func permissiveWindowsArchiveFixture(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("legacy secret\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ownRecordingFixture(t, path)
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;OW)(A;;FR;;;WD)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
+	}
+	return windowsArchiveSecurity(t, path)
+}
+
+func windowsArchiveSecurity(t *testing.T, path string) string {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sd.String()
+}
+
+func TestWindowsFileSinkSecuresCaseVariantLegacyArchives(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, "Events.ndjson")
+	permissiveWindowsArchiveFixture(t, active)
+	archives := []string{"Events.ndjson.1234", "EVENTS.NDJSON.2345.1", "eVeNtS.NdJsOn.3456"}
+	recordings := []string{active}
+	for _, name := range archives {
+		path := filepath.Join(dir, name)
+		permissiveWindowsArchiveFixture(t, path)
+		recordings = append(recordings, path)
+	}
+	unrelated := filepath.Join(dir, "EVENTS.NDJSON.notes")
+	before := permissiveWindowsArchiveFixture(t, unrelated)
+	sink, err := NewFileSink(filepath.Join(dir, "events.ndjson"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range recordings {
+		assertWindowsOwnerDACL(t, path)
+		if data, err := os.ReadFile(path); err != nil || string(data) != "legacy secret\n" {
+			t.Fatalf("legacy recording changed: %q %v", data, err)
+		}
+	}
+	if after := windowsArchiveSecurity(t, unrelated); after != before {
+		t.Fatalf("changed unrelated sibling ACL: before %s, after %s", before, after)
+	}
+}
+
+func TestWindowsFileSinkRejectsCaseVariantLinkedArchives(t *testing.T) {
+	for name, link := range map[string]func(string, string) error{"symlink": os.Symlink, "hardlink": os.Link} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			target := filepath.Join(dir, "target")
+			before := permissiveWindowsArchiveFixture(t, target)
+			if err := link(target, filepath.Join(dir, "EVENTS.NDJSON.1234")); err != nil {
+				t.Fatal(err)
+			}
+			if sink, err := NewFileSink(filepath.Join(dir, "events.ndjson"), 0); err == nil {
+				_ = sink.Close()
+				t.Fatal("accepted case-variant linked archive")
+			}
+			if after := windowsArchiveSecurity(t, target); after != before {
+				t.Fatalf("changed linked target ACL: before %s, after %s", before, after)
+			}
+			if data, err := os.ReadFile(target); err != nil || string(data) != "legacy secret\n" {
+				t.Fatalf("linked target changed: %q %v", data, err)
+			}
+		})
+	}
+}

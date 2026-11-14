@@ -131,3 +131,107 @@ func TestWindowsEventStorePrivateRecordings(t *testing.T) {
 		t.Fatalf("symlink target changed: %q %v", data, err)
 	}
 }
+
+func permissiveWindowsDailyFixture(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("legacy secret\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	u, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, u.User.Sid, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;OW)(A;;FR;;;WD)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
+	}
+	return windowsDailySecurity(t, path)
+}
+
+func windowsDailySecurity(t *testing.T, path string) string {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sd.String()
+}
+
+func TestWindowsEventStoreSecuresCaseVariantLegacyDays(t *testing.T) {
+	dir := recordingTempDir(t)
+	recordings := []string{
+		"Events-2001-01-01.ndjson", "EVENTS-2001-01-02.NDJSON", "eVeNtS-2001-01-03.NdJsOn",
+		"EVENTS-" + time.Now().UTC().Format("2006-01-02") + ".NDJSON",
+	}
+	for _, name := range recordings {
+		permissiveWindowsDailyFixture(t, filepath.Join(dir, name))
+	}
+	// Neither invalid dates nor unrelated files are recording migrations.
+	unrelated := map[string]string{}
+	for _, name := range []string{"EVENTS-2001-02-30.NDJSON", "EVENTS-not-a-date.NDJSON", "notes.NDJSON"} {
+		path := filepath.Join(dir, name)
+		unrelated[path] = permissiveWindowsDailyFixture(t, path)
+	}
+	store, err := NewEventStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertWindowsRecordingPrivate(t, dir)
+	for _, name := range recordings {
+		path := filepath.Join(dir, name)
+		assertWindowsRecordingPrivate(t, path)
+		if data, err := os.ReadFile(path); err != nil || string(data) != "legacy secret\n" {
+			t.Fatalf("legacy daily recording changed: %q %v", data, err)
+		}
+	}
+	for path, before := range unrelated {
+		if after := windowsDailySecurity(t, path); after != before {
+			t.Fatalf("changed unrelated child ACL: before %s, after %s", before, after)
+		}
+	}
+}
+
+func TestWindowsEventStoreRejectsCaseVariantLinkedDays(t *testing.T) {
+	for name, link := range map[string]func(string, string) error{"symlink": os.Symlink, "hardlink": os.Link} {
+		t.Run(name, func(t *testing.T) {
+			root := recordingTempDir(t)
+			dir := filepath.Join(root, "store")
+			store, err := NewEventStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(root, "target")
+			before := permissiveWindowsDailyFixture(t, target)
+			if err := link(target, filepath.Join(dir, "EVENTS-2001-01-01.NDJSON")); err != nil {
+				t.Fatal(err)
+			}
+			if reopened, err := NewEventStore(dir); err == nil {
+				_ = reopened.Close()
+				t.Fatal("accepted case-variant linked daily recording")
+			}
+			if after := windowsDailySecurity(t, target); after != before {
+				t.Fatalf("changed linked target ACL: before %s, after %s", before, after)
+			}
+			if data, err := os.ReadFile(target); err != nil || string(data) != "legacy secret\n" {
+				t.Fatalf("linked target changed: %q %v", data, err)
+			}
+		})
+	}
+}

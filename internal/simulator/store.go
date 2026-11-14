@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -44,10 +45,16 @@ func NewEventStore(dir string) (*EventStore, error) {
 		return nil, err
 	}
 	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), "events-") || !strings.HasSuffix(entry.Name(), ".ndjson") {
+		name := entry.Name()
+		if runtime.GOOS == "windows" {
+			// Match the case-insensitive Windows recording opens, but retain
+			// the actual entry name for the ownership/no-follow checked open.
+			name = strings.ToLower(name)
+		}
+		if !strings.HasPrefix(name, "events-") || !strings.HasSuffix(name, ".ndjson") {
 			continue
 		}
-		if _, err := time.Parse("2006-01-02", strings.TrimSuffix(strings.TrimPrefix(entry.Name(), "events-"), ".ndjson")); err != nil {
+		if _, err := time.Parse("2006-01-02", strings.TrimSuffix(strings.TrimPrefix(name, "events-"), ".ndjson")); err != nil {
 			continue
 		}
 		f, err := privatefile.OpenAppend(filepath.Join(dir, entry.Name()), true, false)
