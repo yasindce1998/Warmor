@@ -219,6 +219,17 @@ publication. This fix does not require the unrelated newer-main timing or
 supervised-host descriptor changes. Native Windows execution of the fix must
 still be confirmed by CI; cross-compilation is not native runtime evidence.
 
+The subsequent PR #47 refresh merges main `09fdce9` (PR #40) into `f06e0ce`
+as `7a09fcf`. Dynamic cgroup scope, local readiness, controller last-known-good
+publication, and periodic lineage/drift maintenance are retained unchanged from
+main. Telemetry acknowledgement/session fencing, report-only quality and
+single-snapshot persistence/poison behavior are retained from PR #47. No daemon
+collector flags, sensor-loss completeness claim, or automatic actions are added.
+Repeated race validation exposed scheduler-sensitive telemetry counting tests
+using the production 50 ms evaluation deadline; those counting tests now use a
+bounded test-only 5 s deadline. Production deadlines and deterministic
+evaluation-failure quality assertions remain unchanged.
+
 ## Original integration proposal and acceptance checklist
 
 The original analyzer-only hardening described below added no heartbeat field,
