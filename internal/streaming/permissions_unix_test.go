@@ -100,6 +100,33 @@ func TestFileRecordingPermissionsUmask022(t *testing.T) {
 		s.Close()
 		t.Fatal("followed symlink directory")
 	}
+	shared := filepath.Join(dir, "shared")
+	if err := os.Mkdir(shared, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := NewFileSink(filepath.Join(shared, "new"), 0); err == nil {
+		s.Close()
+		t.Fatal("accepted other-user-writable parent")
+	}
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := NewFileSink(fifo, 0); err == nil {
+		s.Close()
+		t.Fatal("accepted nonregular recording")
+	}
+	archiveLog := filepath.Join(dir, "archive-log")
+	if err := os.Symlink(target, archiveLog+".1234"); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := NewFileSink(archiveLog, 0); err == nil {
+		s.Close()
+		t.Fatal("followed legacy archive symlink")
+	}
 	// A swapped active path must not redirect rotation/reopening into a target.
 	rotating, err := NewFileSink(filepath.Join(dir, "rotate"), 1)
 	if err != nil {

@@ -57,8 +57,9 @@ On supported Unix platforms, file recordings are created as **0600** regardless
 of a permissive umask. Existing owned, singly-linked regular files (including
 recognized numeric rotation archives) are tightened before recording continues.
 The event store creates directories **0700** and tightens an existing owned store
-directory on initial open and daily reopen. Existing higher-level directories
-are not chmodded; newly created ancestors are 0700. FileSink requires an existing
+directory on initial open and daily reopen. Older daily recordings are checked
+at startup and owned daily files are also tightened to 0600. Higher-level
+directories are not chmodded; newly created ancestors are 0700. FileSink requires an existing
 trusted parent directory; it never chmods a shared `/var/log` directory.
 Untrusted/writable parent directories, symlink components/files, hard-linked
 files, nonregular files, and files owned by another user are rejected. Reopening
