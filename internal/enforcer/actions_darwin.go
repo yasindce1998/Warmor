@@ -4,8 +4,8 @@ package enforcer
 
 import (
 	"fmt"
+	"github.com/yasindce1998/warmor/pkg/api"
 	"syscall"
-	"time"
 )
 
 // terminateProcess forcefully kills a process by PID using SIGKILL.
@@ -16,8 +16,7 @@ func terminateProcess(pid uint32) error {
 	return nil
 }
 
-// terminateEventProcess kills the process an event came from. PIDs are not
-// reused fast enough on Unix for the event time to matter.
-func terminateEventProcess(pid uint32, _ time.Time) error {
-	return terminateProcess(pid)
+// The verified Linux pidfd path does not apply to this experimental backend.
+func terminateEventProcess(event *api.Event) (bool, error) {
+	return true, terminateProcess(event.PID)
 }
