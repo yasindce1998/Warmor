@@ -82,7 +82,7 @@ func TestValidateInvalidField(t *testing.T) {
 		Conditions: ConditionsYAML{All: []map[string]any{{"bogus_field": map[string]any{"eq": "x"}}}},
 	}}}
 	err := Validate(p)
-	if err == nil || !strings.Contains(err.Error(), "not valid for this event type") {
+	if err == nil || !strings.Contains(err.Error(), "not valid for event type") {
 		t.Errorf("expected invalid field error, got: %v", err)
 	}
 }

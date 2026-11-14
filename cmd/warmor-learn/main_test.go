@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/policymerge"
 )
 
@@ -41,6 +42,9 @@ func TestLearn_FileReplayToFile(t *testing.T) {
 		t.Errorf("name=%q default=%q", p.Name, p.DefaultAction)
 	}
 	data, _ := os.ReadFile(outPath)
+	if _, err := compiler.Parse(data); err != nil {
+		t.Fatalf("learned output rejected by compiler: %v\n%s", err, data)
+	}
 	assertContains(t, "policy", string(data), "/usr/sbin/nginx", "/etc/nginx/nginx.conf")
 	if strings.Contains(string(data), "sh-not-wanted") {
 		t.Error("event from a filtered-out cgroup was learned")
@@ -51,6 +55,16 @@ func TestLearn_StdinAllCgroups(t *testing.T) {
 	stdout, stderr := runMain(t, evExec123+"\n"+evExec789+"\n", "-events", "-")
 	assertContains(t, "stderr", stderr, "cgroups: []", "learned 2 containers")
 	assertContains(t, "stdout", stdout, "/usr/sbin/nginx", "/bin/sh-not-wanted")
+}
+
+func TestLearn_UnsupportedHookFailsWithoutOutput(t *testing.T) {
+	for _, hook := range []string{"mount", "ptrace", "connect_unix"} {
+		path := writeFile(t, filepath.Join(t.TempDir(), "events.ndjson"), `{"event_type":"`+hook+`","mount_type":"tmpfs","ptrace_target_comm":"tool"}`+"\n")
+		r := runChild(t, nil, "-events", path)
+		if r.code != 1 || r.stdout != "" {
+			t.Fatalf("hook %s exit=%d stdout=%s stderr=%s", hook, r.code, r.stdout, r.stderr)
+		}
+	}
 }
 
 func TestLearn_EventStoreDirectory(t *testing.T) {

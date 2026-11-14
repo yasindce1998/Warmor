@@ -228,7 +228,7 @@ func TestMerge_Errors(t *testing.T) {
 		{"bad dir", []string{"-dir", filepath.Join(dir, "missing")}, "read directory"},
 		{"empty dir", []string{"-dir", emptyDir}, "no .yaml/.yml policy files"},
 		{"bad strategy", []string{"-strategy", "chaos", a, b}, "unknown strategy"},
-		{"validate fails", []string{"-validate", a, invalid}, "validation error"},
+		{"validate fails", []string{"-validate", a, invalid}, "invalid event type"},
 		{"unwritable output", []string{"-o", filepath.Join(dir, "no", "dir", "x.yaml"), a, b}, "error: write"},
 	}
 	for _, tt := range tests {

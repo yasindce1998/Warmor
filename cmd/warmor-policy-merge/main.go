@@ -19,7 +19,7 @@ func main() {
 	strategy := flag.String("strategy", "union", "Merge strategy: union, intersection, deny-wins")
 	annotate := flag.Bool("annotate", true, "Add provenance annotations to rule reasons")
 	dedup := flag.Bool("dedup", true, "Deduplicate identical rules and variables")
-	validate := flag.Bool("validate", false, "Validate merged policy against compiler schema")
+	validate := flag.Bool("validate", false, "Print validation confirmation (compiler validation is always required)")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 
 	flag.Usage = func() {
@@ -86,11 +86,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	fmt.Fprintln(os.Stderr, "warning: merge strategies edit rule fingerprints, not decision composition; review defaults, overlapping rules, variables and first-match order before deployment")
+	if err := policymerge.Validate(result.Policy); err != nil {
+		fmt.Fprintf(os.Stderr, "validation error: %v\n", err)
+		os.Exit(1)
+	}
 	if *validate {
-		if err := policymerge.Validate(result.Policy); err != nil {
-			fmt.Fprintf(os.Stderr, "validation error: %v\n", err)
-			os.Exit(1)
-		}
 		fmt.Fprintf(os.Stderr, "Validation passed\n")
 	}
 
