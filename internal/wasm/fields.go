@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	wazeroapi "github.com/tetratelabs/wazero/api"
+
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -31,7 +33,7 @@ func readFieldsDeclaration(ctx context.Context, p *Policy) [numEventTypes]uint32
 		return out
 	}
 	def := fn.Definition()
-	if len(def.ParamTypes()) != 1 || len(def.ResultTypes()) != 1 {
+	if !hasSignature(def, []wazeroapi.ValueType{i32}, []wazeroapi.ValueType{i32}) {
 		return out
 	}
 	ctx, cancel := context.WithTimeout(ctx, fieldsReadTimeout)
@@ -39,6 +41,9 @@ func readFieldsDeclaration(ctx context.Context, p *Policy) [numEventTypes]uint32
 	for i := range out {
 		res, err := fn.Call(ctx, uint64(i))
 		if err != nil {
+			// A trap can mutate guest state without closing it. The pool must
+			// not reuse a partially initialized instance after a failed call.
+			_ = p.instance.Close(ctx)
 			for j := range out {
 				out[j] = FieldsUnknown
 			}
