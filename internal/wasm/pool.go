@@ -24,7 +24,8 @@ type Pool struct {
 	// read once from the first instance.
 	fields [numEventTypes]uint32
 	// temporal: the module is sent temporal context (ABI >= 3).
-	temporal bool
+	temporal   bool
+	abiVersion uint32
 	// staticProcess/staticNetwork are the kernel default-deny declarations
 	// (compiler.StaticRulesExport), read once from the first instance.
 	staticProcess StaticDomain
@@ -64,6 +65,7 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 			return nil, fmt.Errorf("instantiate pool member %d: %w", i, err)
 		}
 		if i == 0 {
+			p.abiVersion = policy.abiVersion
 			p.fields = readFieldsDeclaration(ctx, policy)
 			p.temporal = policy.temporal()
 			p.staticProcess = readStaticDomain(ctx, policy, 0)
@@ -73,6 +75,11 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 			policy.Close(ctx)
 			p.Close(ctx)
 			return nil, fmt.Errorf("initialize pool member %d: guest closed or initialization deadline exceeded", i)
+		}
+		if policy.abiVersion != p.abiVersion {
+			policy.Close(ctx)
+			p.Close(ctx)
+			return nil, fmt.Errorf("inconsistent policy ABI declarations")
 		}
 		p.instances <- policy
 	}
