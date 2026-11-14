@@ -47,6 +47,7 @@ type LinuxPlatform struct {
 	wg            sync.WaitGroup
 	config        LinuxConfig
 	lsmEnabled    bool
+	lsmBlocking   bool                  // true only after successful enforce-toggle initialization
 	capture       func(*api.Event) bool // installed before Start; never changed afterward
 	drainMu       sync.Mutex
 	drainPending  chan struct{}
@@ -102,6 +103,7 @@ func (p *LinuxPlatform) Load(ctx context.Context) (loadErr error) {
 			p.ebpfLoader = nil
 			p.lsmLoader = nil
 			p.lsmEnabled = false
+			p.lsmBlocking = false
 		}
 	}()
 	loader, err := ebpf.Load()
@@ -173,15 +175,8 @@ func (p *LinuxPlatform) Load(ctx context.Context) (loadErr error) {
 		p.lsmEvents = lsmLoader
 		p.lsmEnabled = true
 
-		// Scope MUST be established before enabling blocking. Optional LSM
-		// does not make filter failures optional: never expand to the host.
-		if len(p.config.CgroupFilter) > 0 {
-			if err := lsmLoader.ReplaceCgroupFilter(cgroupIDs); err != nil {
-				return fmt.Errorf("set LSM cgroup filter: %w", err)
-			}
-		}
-		if err := lsmLoader.SetEnforceMode(p.config.LSMEnforce); err != nil {
-			return fmt.Errorf("set LSM enforce mode: %w", err)
+		if err := p.initializeLSMPosture(cgroupIDs, lsmLoader.ReplaceCgroupFilter, lsmLoader.SetEnforceMode); err != nil {
+			return err
 		}
 	}
 
@@ -198,6 +193,29 @@ func (p *LinuxPlatform) Load(ctx context.Context) (loadErr error) {
 	p.logSecurityPosture()
 	return nil
 }
+
+// initializeLSMPosture publishes blocking status only after both scope and the
+// kernel toggle have been written successfully. Injection tests this boundary
+// without loading BPF or installing hooks.
+func (p *LinuxPlatform) initializeLSMPosture(ids []uint64, replaceScope func([]uint64) error, setEnforce func(bool) error) error {
+	p.lsmBlocking = false
+	// Scope MUST be established before enabling blocking. Optional LSM does
+	// not make filter failures optional: never expand to the host.
+	if len(p.config.CgroupFilter) > 0 {
+		if err := replaceScope(ids); err != nil {
+			return fmt.Errorf("set LSM cgroup filter: %w", err)
+		}
+	}
+	if err := setEnforce(p.config.LSMEnforce); err != nil {
+		return fmt.Errorf("set LSM enforce mode: %w", err)
+	}
+	p.lsmBlocking = p.config.LSMEnforce
+	return nil
+}
+
+// LSMBlocking reports initialized blocking posture, not merely loaded hooks.
+// The posture is fixed after Load and is never modified by policy activation.
+func (p *LinuxPlatform) LSMBlocking() bool { return p.lsmEnabled && p.lsmBlocking }
 
 // loadIntegrity enables the content-hash exec check when configured. It needs
 // the LSM programs, so asking for it without them is an error rather than a
@@ -233,7 +251,7 @@ func (p *LinuxPlatform) loadIntegrity() error {
 // blocking, merely auditing, or absent.
 func (p *LinuxPlatform) logSecurityPosture() {
 	switch {
-	case p.lsmEnabled && p.config.LSMEnforce:
+	case p.LSMBlocking():
 		fmt.Println("Security posture: LSM-BPF kernel enforcement ACTIVE (deny rules blocked in-kernel)")
 	case p.lsmEnabled:
 		fmt.Println("Security posture: LSM-BPF loaded in AUDIT-ONLY mode (deny rules logged, not blocked); pass --lsm-enforce to block")

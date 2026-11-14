@@ -54,7 +54,14 @@ type Capabilities struct {
 	FileMonitoring    bool // Can monitor file operations
 	NetworkMonitoring bool // Can monitor network operations
 	Enforcement       bool // Can actually block, not just log
-	LSMEnforcement    bool // Kernel-level blocking via LSM-BPF
+	LSMEnforcement    bool // LSM-BPF hooks loaded; not proof blocking was enabled
+}
+
+// LSMBlocking is an optional Linux posture query implemented by LinuxPlatform.
+// Consumers requiring kernel denial must check the requested effective mode AND
+// this initialized status, never infer blocking from Capabilities alone.
+type LSMBlocking interface {
+	LSMBlocking() bool
 }
 
 // Config holds platform-agnostic configuration passed to New().

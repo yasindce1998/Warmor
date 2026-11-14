@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -64,7 +65,7 @@ func startSupervisedBackend(ctx context.Context, s *policyhost.Supervisor, path 
 	}
 	// Resolve the revision once and stage the verified immutable bytes. No WASM
 	// header, custom section, ABI, or export is decoded in this process.
-	resolved, err := resolvePolicyRevisionPath(path)
+	resolved, err := resolveSupervisedPolicyPath(path)
 	if err != nil {
 		return nil, err
 	}
@@ -77,6 +78,16 @@ func startSupervisedBackend(ctx context.Context, s *policyhost.Supervisor, path 
 		return nil, err
 	}
 	return &policyBackend{evaluator: &hostEvaluator{h}}, nil
+}
+
+func resolveSupervisedPolicyPath(path string) (string, error) {
+	// EvalSymlinks preserves relative paths. StageFile deliberately requires
+	// clean absolute paths for its descriptor-relative no-follow walk.
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return resolvePolicyRevisionPath(abs)
 }
 
 func inProcessBackend(ctx context.Context, rt *wasm.Runtime, timeout time.Duration) (*policyBackend, error) {
@@ -94,7 +105,7 @@ func inProcessBackend(ctx context.Context, rt *wasm.Runtime, timeout time.Durati
 func (e *Enforcer) candidateBackend(path string, data []byte) (*policyBackend, error) {
 	if e.supervisor != nil {
 		if data != nil {
-			resolved, err := resolvePolicyRevisionPath(path)
+			resolved, err := resolveSupervisedPolicyPath(path)
 			if err != nil {
 				return nil, err
 			}

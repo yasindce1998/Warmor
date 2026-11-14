@@ -333,6 +333,12 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	logger.LogInfo(fmt.Sprintf("✓ %s platform loaded", plat.Name()))
 
 	caps := plat.Capabilities()
+	// Loaded LSM hooks are not proof that their blocking toggle was enabled.
+	// Require an explicit initialized status for signed default-deny claims.
+	kernelBlocking := false
+	if status, ok := plat.(platform.LSMBlocking); ok {
+		kernelBlocking = opts.LSMEnforce && caps.LSMEnforcement && status.LSMBlocking()
+	}
 	// Degraded if kernel LSM enforcement was asked for but is not active
 	// (RequireLSM already failed Load in that case).
 	metrics.SetEBPFLoaderStatus(caps.LSMEnforcement || !opts.LSMEnforce)
@@ -466,7 +472,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		backend:          backend,
 		supervisor:       supervisor,
 		signedAssignment: opts.ExpectedAssignment != nil,
-		kernelEnforce:    caps.LSMEnforcement,
+		kernelEnforce:    kernelBlocking,
 		cache:            decisionCache,
 		actionHandler:    actionHandler,
 		logger:           logger,

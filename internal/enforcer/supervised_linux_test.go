@@ -412,3 +412,139 @@ func TestSupervisedAssignmentUsesChildObservedBuildAndRejectsAtomicCombination(t
 		t.Fatal("unsupported signed+atomic+host mode accepted")
 	}
 }
+
+type supervisedPosturePlatform struct {
+	fakePlatform
+	policyMap        *fakePolicyMap
+	loaded, blocking bool
+}
+
+func (p *supervisedPosturePlatform) Capabilities() platform.Capabilities {
+	return platform.Capabilities{LSMEnforcement: p.loaded}
+}
+func (p *supervisedPosturePlatform) PolicyMap() any    { return p.policyMap }
+func (p *supervisedPosturePlatform) LSMBlocking() bool { return p.blocking }
+
+func TestSupervisedRequiredDefaultDenyRejectsLoadedAuditOnlyLSM(t *testing.T) {
+	module, err := policybuild.Append(wasmtest.DeclaredPolicy(1), policybuild.Metadata{Compiler: "reviewed-build", DefaultAction: "deny"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := supervisedConfig(t)
+	c.TrustedDeclarationDigests = []string{assignment.Digest(module)}
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := signedCandidate(t, key, module)
+	want := assignment.Policy{SHA256: assignment.Digest(module), ABI: 5, Compiler: "reviewed-build",
+		Posture: assignment.Posture{Mode: "enforce", DefaultAction: "deny", RequireDefaultDeny: true}}
+	for _, tc := range []struct {
+		name                   string
+		requested, initialized bool
+		loadErr                error
+		accept                 bool
+	}{
+		{name: "loaded audit-only, require-lsm is not enforce"},
+		{name: "requested but not initialized", requested: true},
+		{name: "status without operator request", initialized: true},
+		{name: "toggle write failure", requested: true, loadErr: errors.New("set LSM enforce mode: injected write failure")},
+		{name: "verified blocking", requested: true, initialized: true, accept: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pm := &fakePolicyMap{}
+			p := &supervisedPosturePlatform{policyMap: pm, loaded: true, blocking: tc.initialized}
+			p.loadErr = tc.loadErr
+			old := newPlatform
+			newPlatform = func(platform.Config) (platform.Platform, error) { return p, nil }
+			t.Cleanup(func() { newPlatform = old })
+			e, err := New(context.Background(), path, &Options{PolicyVerifyKey: pub, SupervisedBackend: &c,
+				ExpectedAssignment: &want, DefaultDeny: true, RequireLSM: true, LSMEnforce: tc.requested})
+			if e != nil {
+				defer e.Close()
+			}
+			if tc.accept {
+				if err != nil || e == nil || !e.kernelEnforce || len(pm.ddMarks) != 2 {
+					t.Fatal("verified required default-deny did not initialize", err)
+				}
+				if e.pool != nil || e.wasmRuntime != nil || e.evaluator.Metadata().ABIVersion != 5 {
+					t.Fatal("required-default-deny bypassed real child metadata")
+				}
+			} else {
+				if err == nil || e != nil || len(pm.ddMarks) != 0 || pm.ddClears != 0 {
+					t.Fatal("nonblocking startup claimed required default-deny", err)
+				}
+				if tc.loadErr == nil && !errors.Is(err, assignment.ErrCompatibility) {
+					t.Fatal("missing explicit posture incompatibility", err)
+				}
+			}
+		})
+	}
+}
+
+func TestSupervisedRelativePolicyAndRevisionAliasPaths(t *testing.T) {
+	c := supervisedConfig(t) // build command before changing the process cwd
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.Mkdir("revision", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	module := wasmtest.ConstPolicy(0, nil)
+	if err := os.WriteFile("revision/module.wasm", module, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("revision/module.wasm.sig", ed25519.Sign(key, module), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("revision", "current"); err != nil {
+		t.Fatal(err)
+	}
+	old := newPlatform
+	newPlatform = func(platform.Config) (platform.Platform, error) { return &fakePlatform{}, nil }
+	t.Cleanup(func() { newPlatform = old })
+	for _, path := range []string{"revision/module.wasm", "current/module.wasm"} {
+		t.Run(path, func(t *testing.T) {
+			e, err := New(context.Background(), path, &Options{AuditMode: true, PolicyVerifyKey: pub, SupervisedBackend: &c})
+			if err != nil {
+				t.Fatal("supported relative policy path rejected", err)
+			}
+			defer e.Close()
+			if err := e.ReloadPolicy(); err != nil {
+				t.Fatal("relative reload rejected", err)
+			}
+			if r, err := e.evaluator.Evaluate(context.Background(), &api.Event{}); err != nil || r.Action != api.ActionAllow {
+				t.Fatal("wrong relative artifact loaded", err)
+			}
+		})
+	}
+	resolved, err := resolveSupervisedPolicyPath("current/module.wasm")
+	if err != nil || resolved != filepath.Join(root, "revision", "module.wasm") {
+		t.Fatal("relative revision did not resolve to an absolute identity", resolved, err)
+	}
+	// Changing a parent after resolution must not make strict StageFile follow
+	// the new symlink, even if the substituted artifact also has a valid key.
+	if err := os.Rename("revision", "retained"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("retained", "revision"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := policyhost.StageFile(resolved, pub); err == nil {
+		t.Fatal("staging followed a parent alias introduced after resolution")
+	}
+	// Resolving the alias afresh is explicit; detached signature paths still
+	// may not be symlinks at the strict staging boundary.
+	if err := os.Rename("retained/module.wasm.sig", "retained/signature"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("signature", "retained/module.wasm.sig"); err != nil {
+		t.Fatal(err)
+	}
+	if e, err := New(context.Background(), "current/module.wasm", &Options{PolicyVerifyKey: pub, SupervisedBackend: &c}); err == nil || e != nil {
+		t.Fatal("relative alias bypassed no-follow signature staging", err)
+	}
+}

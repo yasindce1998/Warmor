@@ -99,6 +99,9 @@ func (p *LinuxPlatform) Ready() error {
 	if (p.config.LSMEnforce || p.config.RequireLSM) && !p.lsmEnabled {
 		return fmt.Errorf("requested LSM enforcement is inactive")
 	}
+	if p.config.LSMEnforce && !p.LSMBlocking() {
+		return fmt.Errorf("requested LSM blocking toggle is not initialized")
+	}
 	p.scope.RLock()
 	defer p.scope.RUnlock()
 	if p.scope.readerErr != nil {
