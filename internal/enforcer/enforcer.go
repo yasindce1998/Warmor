@@ -5,9 +5,11 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,12 +35,15 @@ import (
 
 // Options configures the enforcer at startup
 type Options struct {
-	AuditMode    bool
-	LearningMode bool
-	CgroupFilter []string
-	MetricsPort  int
-	LogLevel     string
-	LSMEnforce   bool
+	AuditMode               bool
+	LearningMode            bool
+	CgroupFilter            []string
+	CgroupRoot              string
+	CgroupReconcileInterval time.Duration
+	MetricsBindAddress      string
+	MetricsPort             int
+	LogLevel                string
+	LSMEnforce              bool
 	// RequireLSM refuses to start unless BPF-LSM kernel enforcement can be
 	// established (fail-closed startup). Without it, an unsupported kernel
 	// degrades to tracepoint-only observation.
@@ -163,6 +168,7 @@ type Enforcer struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
+	processing      atomic.Bool
 }
 
 // newPlatform constructs the platform monitor. It is a variable so tests can
@@ -239,7 +245,11 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	// (which only applies to container cgroups) and dates containers for
 	// temporal policies. The detector is built before the platform so a bad
 	// mode can't leak it.
-	cgroups := container.NewCgroupResolver("/sys/fs/cgroup")
+	cgroupRoot := opts.CgroupRoot
+	if cgroupRoot == "" {
+		cgroupRoot = "/sys/fs/cgroup"
+	}
+	cgroups := container.NewCgroupResolver(cgroupRoot)
 	escapeDetector, err := newEscapeDetector(opts.EscapeDetect, cgroups.IsContainer)
 	if err != nil {
 		return nil, err
@@ -252,11 +262,13 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	// Initialize the platform-specific monitor (eBPF on Linux, ETW on
 	// Windows, ESF on macOS).
 	plat, err := newPlatform(platform.Config{
-		CgroupFilter: opts.CgroupFilter,
-		LSMEnforce:   opts.LSMEnforce,
-		RequireLSM:   opts.RequireLSM,
-		SkipLSM:      opts.SkipLSM,
-		AuditMode:    opts.AuditMode || opts.LearningMode,
+		CgroupFilter:            opts.CgroupFilter,
+		CgroupRoot:              cgroupRoot,
+		CgroupReconcileInterval: opts.CgroupReconcileInterval,
+		LSMEnforce:              opts.LSMEnforce,
+		RequireLSM:              opts.RequireLSM,
+		SkipLSM:                 opts.SkipLSM,
+		AuditMode:               opts.AuditMode || opts.LearningMode,
 
 		IntegrityMode:    opts.IntegrityMode,
 		IntegrityDigests: opts.IntegrityDigests,
@@ -353,6 +365,9 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 
 	// Initialize metrics server
 	metricsServer := metrics.NewServer(port)
+	if opts.MetricsBindAddress != "" {
+		metricsServer = metrics.NewServerAddress(net.JoinHostPort(opts.MetricsBindAddress, strconv.Itoa(port)))
+	}
 	metrics.SetPolicyInfo(policyPath, version.Version)
 	logger.LogInfo(fmt.Sprintf("✓ Metrics server initialized on :%d", port))
 
@@ -432,6 +447,8 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		cancel:          cancel,
 	}
 
+	metricsServer.SetReadinessCheck(e.Ready)
+
 	// Preload the kernel default-deny domains from the policy's static
 	// rules. No events flow yet; decisionMu is uncontended but held for
 	// symmetry with the reload path.
@@ -482,6 +499,8 @@ func (e *Enforcer) Start() error {
 // them with the WASM policy.
 func (e *Enforcer) eventLoop() {
 	defer e.wg.Done()
+	e.processing.Store(true)
+	defer e.processing.Store(false)
 
 	for {
 		select {

@@ -24,8 +24,10 @@ type fakeAPI struct {
 	configMaps map[string]*ConfigMap    // "ns/name" -> object
 	rv         int
 
-	statusPUTs    map[string]int
-	configMapPUTs int
+	statusPUTs          map[string]int
+	configMapPUTs       int
+	configMapWriteError int
+	conflicts           int
 }
 
 func newFakeAPI() *fakeAPI {
@@ -50,6 +52,15 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(v)
 	}
+	mux.HandleFunc("/apis/warmor.io/v1alpha1/warmorpolicies", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		list := WarmorPolicyList{Metadata: ListMeta{ResourceVersion: fmt.Sprint(f.rv)}}
+		for _, cr := range f.policies {
+			list.Items = append(list.Items, *cr)
+		}
+		writeJSON(w, list)
+	})
 	mux.HandleFunc("/apis/warmor.io/v1alpha1/namespaces/", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -114,6 +125,16 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 	mux.HandleFunc("/api/v1/namespaces/", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if r.Method != http.MethodGet && (f.configMapWriteError != 0 || f.conflicts > 0) {
+			code := f.configMapWriteError
+			if f.conflicts > 0 {
+				f.conflicts--
+				code = http.StatusConflict
+			}
+			w.WriteHeader(code)
+			writeJSON(w, map[string]any{"code": code, "message": "injected publication failure"})
+			return
+		}
 		rest := strings.TrimPrefix(r.URL.Path, "/api/v1/namespaces/")
 		parts := strings.Split(rest, "/")
 		ns, resource := parts[0], parts[1]
@@ -148,6 +169,10 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Errorf("decode configmap: %v", err)
 				}
+				if body.Metadata.ResourceVersion != cm.Metadata.ResourceVersion {
+					w.WriteHeader(http.StatusConflict)
+					return
+				}
 				f.configMapPUTs++
 				body.Metadata.ResourceVersion = cm.Metadata.ResourceVersion
 				f.configMaps[key] = &body
@@ -170,7 +195,7 @@ func stubCompile(t *testing.T) (*[]string, func()) {
 	t.Helper()
 	original := compilePolicy
 	var seen []string
-	compilePolicy = func(policy *compiler.Policy, yamlBytes []byte, cacheDir string) ([]byte, error) {
+	compilePolicy = func(_ context.Context, policy *compiler.Policy, yamlBytes []byte, cacheDir string) ([]byte, error) {
 		seen = append(seen, string(yamlBytes))
 		return []byte("wasm(" + policy.Name + ")"), nil
 	}
@@ -224,11 +249,11 @@ func TestReconcile_SyncsActivePolicyAndStatus(t *testing.T) {
 	}
 
 	cr := api.policies["warmor-system/alpha"]
-	if cr.Status == nil || cr.Status.Phase != PhaseActive {
-		t.Fatalf("status = %+v, want Active", cr.Status)
+	if cr.Status == nil || cr.Status.Phase != PhasePublished {
+		t.Fatalf("status = %+v, want Published", cr.Status)
 	}
-	if cr.Status.LastApplied == "" {
-		t.Error("lastApplied not set on a syncing reconcile")
+	if cr.Status.LastPublished == "" || cr.Status.LastApplied != "" || cr.Status.NodesApplied != 0 {
+		t.Error("publication must not claim node application")
 	}
 }
 
@@ -312,12 +337,12 @@ func TestReconcile_InvalidPolicyIsErrorOthersStillSync(t *testing.T) {
 	if bad.Status.Phase != PhaseError {
 		t.Errorf("bad status = %+v, want Error", bad.Status)
 	}
-	if !strings.Contains(bad.Status.Conditions[0].Message, "syscall") {
-		t.Errorf("error message = %q, want the parse error", bad.Status.Conditions[0].Message)
+	if bad.Status.Conditions[0].Reason != "InvalidPolicy" {
+		t.Errorf("condition = %+v, want validation failure", bad.Status.Conditions[0])
 	}
 	good := api.policies["warmor-system/good"]
-	if good.Status.Phase != PhaseActive {
-		t.Errorf("good status = %+v, want Active (one bad CR must not block the fleet)", good.Status)
+	if good.Status.Phase != PhasePublished {
+		t.Errorf("good status = %+v, want Published (one bad CR must not block the fleet)", good.Status)
 	}
 	cm := api.configMaps["warmor-system/warmor-effective-policy"]
 	if cm == nil || !strings.Contains(cm.Metadata.Annotations[AnnotationSources], "warmor-system/good") {
@@ -398,7 +423,6 @@ func TestReconcile_OverwritesDriftedConfigMap(t *testing.T) {
 
 	cm := api.configMaps["warmor-system/warmor-effective-policy"]
 	cm.BinaryData[PolicyDataKey] = []byte("tampered")
-	cm.Metadata.Annotations[AnnotationPolicySHA] = "wrong"
 
 	if _, err := ctl.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)

@@ -7,8 +7,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -29,6 +32,8 @@ var (
 	defaultPolicyPath = flag.String("default-policy", "/etc/warmor-controller/default-policy.wasm", "Compiled policy synced while no WarmorPolicy exists (the cluster's baked default)")
 	cacheDir          = flag.String("cache-dir", "/var/lib/warmor-controller/cache", "Directory caching compiled policies across restarts (empty: no cache)")
 	resyncPeriod      = flag.Duration("resync-period", 10*time.Minute, "Re-reconcile this often even without events, healing out-of-band edits to the policy ConfigMap (0 disables)")
+	compileTimeout    = flag.Duration("compile-timeout", 2*time.Minute, "Maximum time allowed for one policy compilation (must be positive)")
+	metricsAddress    = flag.String("metrics-address", ":9091", "Controller metrics/probes listener; readiness means recent local reconciliation, not node application")
 	showVersion       = flag.Bool("version", false, "Print version and exit")
 )
 
@@ -40,6 +45,9 @@ func main() {
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	if *compileTimeout <= 0 {
+		log.Fatal("--compile-timeout must be positive")
+	}
 	defer stop()
 
 	cfg := loadConfig()
@@ -69,8 +77,30 @@ func main() {
 		DefaultPolicyPath:  *defaultPolicyPath,
 		CacheDir:           *cacheDir,
 		ResyncPeriod:       *resyncPeriod,
+		CompileTimeout:     *compileTimeout,
 	}
 	ctl := controller.New(kube.New(cfg), opts)
+	listener, err := net.Listen("tcp", *metricsAddress)
+	if err != nil {
+		log.Fatalf("controller probes: %v", err)
+	}
+	server := &http.Server{
+		Handler: ctl.Handler(), ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: time.Minute,
+	}
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("controller probes failed: %v", err)
+			stop()
+		}
+	}()
+	defer func() {
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdown); err != nil {
+			log.Printf("controller probes shutdown: %v", err)
+		}
+	}()
 
 	log.Printf("WarmorPolicy controller starting: watching %s, publishing %s/%s",
 		namespaceLabel(targetNamespace), cmNamespace, *configMapName)

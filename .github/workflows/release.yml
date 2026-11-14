@@ -2,130 +2,446 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
-      - "release-*"
-    tags: ["v*"]
+    tags: ['v*']
+  # Scan every PR, including Go/Rust source changes that leave manifests alone.
+  pull_request: {}
+  # Refresh vulnerability findings against the default branch without publishing.
+  schedule:
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  GOTOOLCHAIN: local
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  docker:
-    runs-on: ubuntu-latest
+  metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      repository: ${{ steps.meta.outputs.repository }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate version and exact commit
+        id: meta
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+            test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
+            bash scripts/release-check-ref.sh branch
+            bash scripts/release-check-ref.sh tag
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-ci.${GITHUB_SHA}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "repository=${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.11'
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: '1.100.0'
+          targets: wasm32-unknown-unknown
+      - name: Release regression tests and dependency integrity
+        run: |
+          python3 -m unittest discover -s tests/release -v
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= \
+            .github/workflows/release.yml .github/workflows/binaries.yml .github/workflows/release-image.yml .github/workflows/macos-ci.yml
+          go mod download
+          go mod verify
+      - name: Build Rust policies
+        run: bash scripts/build-rust-policies.sh
+      - name: Race tests including required Rust/WASM contracts
+        env:
+          WARMOR_REQUIRE_CARGO: '1'
+          WARMOR_REQUIRE_POLICY_CRATES: '1'
+        run: go test -mod=readonly -race -count=1 ./...
+      - name: Go vulnerability gate (reachable vulnerabilities)
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: Install pinned scanner
+        run: bash scripts/release-install-trivy.sh
+      - name: Rust lockfile vulnerability gate
+        # The build above resolves Cargo.lock for the example crates. These
+        # source examples are not compiled payloads in the release archives.
+        run: |
+          trivy fs --scanners vuln --pkg-types library --severity HIGH,CRITICAL \
+            --ignore-unfixed --exit-code 1 --timeout 10m policies/
+
+  binary-linux-amd64:
+    needs: metadata
+    uses: ./.github/workflows/binaries.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: ubuntu-24.04
+      goos: linux
+      goarch: amd64
+
+  binary-linux-arm64:
+    needs: metadata
+    uses: ./.github/workflows/binaries.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: ubuntu-24.04-arm
+      goos: linux
+      goarch: arm64
+
+  binary-windows-amd64:
+    needs: metadata
+    uses: ./.github/workflows/binaries.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: windows-2025
+      goos: windows
+      goarch: amd64
+
+  binary-darwin-amd64:
+    needs: metadata
+    uses: ./.github/workflows/binaries.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: macos-15-intel
+      goos: darwin
+      goarch: amd64
+
+  binary-darwin-arm64:
+    needs: metadata
+    uses: ./.github/workflows/binaries.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: macos-15
+      goos: darwin
+      goarch: arm64
+
+  # Explicit producer jobs avoid matrix outputs overwriting one another.
+  binaries:
+    needs: [binary-linux-amd64, binary-linux-arm64, binary-windows-amd64, binary-darwin-amd64, binary-darwin-arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      receipts: ${{ steps.receipts.outputs.receipts }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: receipts
+        env:
+          PRODUCERS: ${{ toJSON(needs) }}
+        run: python3 scripts/release-receipts.py
+
+  chart:
+    needs: metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      name: chart
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
+        with:
+          version: v3.22.1
+      - name: Package and test exact versioned chart
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          IMAGE_REPOSITORY: ghcr.io/${{ needs.metadata.outputs.repository }}
+        run: bash scripts/release-chart.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
+        with:
+          name: chart
+          path: dist/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  image-daemon-amd64:
+    needs: metadata
+    uses: ./.github/workflows/release-image.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: ubuntu-24.04
+      target: daemon
+
+  image-daemon-arm64:
+    needs: metadata
+    uses: ./.github/workflows/release-image.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: ubuntu-24.04-arm
+      target: daemon
+
+  image-controller-amd64:
+    needs: metadata
+    uses: ./.github/workflows/release-image.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: ubuntu-24.04
+      target: controller
+
+  image-controller-arm64:
+    needs: metadata
+    uses: ./.github/workflows/release-image.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: ubuntu-24.04-arm
+      target: controller
+
+  images:
+    needs: [image-daemon-amd64, image-daemon-arm64, image-controller-amd64, image-controller-arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      receipts: ${{ steps.receipts.outputs.receipts }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: receipts
+        env:
+          PRODUCERS: ${{ toJSON(needs) }}
+        run: python3 scripts/release-receipts.py
+
+  # No registry/release writes until every exact-commit gate passes.
+  # PRs and scheduled validation stop here; only a tag push can publish.
+  publish-images:
+    needs: [metadata, tests, binaries, chart, images]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
+      actions: read
       packages: write
-
+    outputs:
+      name: promotion
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Lowercase image name
-        run: echo "IMAGE_NAME_LC=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
-        env:
-          IMAGE_NAME: ${{ github.repository }}
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          registry: ${{ env.REGISTRY }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Enforce producer artifact IDs and ZIP digests before image use
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT_RECEIPTS: ${{ needs.images.outputs.receipts }}
+        run: python3 scripts/release-artifacts.py verified-images
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # The WarmorPolicy controller image: same Dockerfile, controller
-      # target (Rust toolchain + baked default policy). The chart's
-      # controller.image default references this tag set.
-      - name: Extract controller metadata
-        id: meta-controller
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}-controller
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=
-
-      - name: Build and push controller
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/Dockerfile
-          target: controller
-          push: true
-          tags: ${{ steps.meta-controller.outputs.tags }}
-          labels: ${{ steps.meta-controller.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.meta-controller.outputs.version }}
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  helm:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: azure/setup-helm@v4
-
-      - name: Lowercase repo name
-        run: echo "REPO_LC=${REPO,,}" >> "$GITHUB_ENV"
+      - name: Push tested image without rebuilding
         env:
-          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          REPOSITORY: ${{ needs.metadata.outputs.repository }}
+        run: |
+          mkdir promotion
+          for target in daemon controller; do
+            for arch in amd64 arm64; do
+              payload="verified-images/image-${target}-${arch}"
+              (cd "$payload" && sha256sum -c IMAGE_SHA256SUMS)
+              docker load -i "$payload/${target}-${arch}.tar"
+              source="warmor-${target}:${VERSION}-${arch}"
+              test "$(docker image inspect "$source" --format '{{.Id}}')" = "$(cat "$payload/${target}-${arch}.image-id")"
+              suffix=""
+              if [[ "$target" == controller ]]; then suffix=-controller; fi
+              image="ghcr.io/${REPOSITORY}${suffix}:build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arch}"
+              docker tag "$source" "$image"
+              bash scripts/release-check-ref.sh tag
+              docker push "$image"
+              docker image inspect "$image" --format '{{join .RepoDigests "\n"}}' \
+                | grep -E "^ghcr.io/${REPOSITORY}${suffix}@sha256:[a-f0-9]{64}$" \
+                > "promotion/${target}-${arch}.reference"
+              test "$(wc -l < "promotion/${target}-${arch}.reference")" -eq 1
+              cp "$payload/${target}-${arch}.spdx.json" promotion/
+            done
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
+        with:
+          name: promotion
+          path: promotion/
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Login to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
-
-      - name: Package Helm chart
-        run: helm package deploy/helm/warmor/ --destination /tmp/helm-pkg
-
-      - name: Push chart to GHCR
-        run: helm push /tmp/helm-pkg/warmor-*.tgz oci://${{ env.REGISTRY }}/${{ env.REPO_LC }}/charts
-
-  release:
-    needs: [docker, helm]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+  publish:
+    needs: [metadata, tests, binaries, chart, images, publish-images]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: write
-
+      actions: read
+      packages: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Enforce producer artifact IDs and ZIP digests before signing/promotion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BINARY_RECEIPTS: ${{ needs.binaries.outputs.receipts }}
+          CHART_RECEIPT: ${{ toJSON(needs.chart.outputs) }}
+          PROMOTION_RECEIPT: ${{ toJSON(needs.publish-images.outputs) }}
+        run: |
+          export ARTIFACT_RECEIPTS
+          ARTIFACT_RECEIPTS=$(python3 -c 'import json,os; print(json.dumps(json.loads(os.environ["BINARY_RECEIPTS"]) + [json.loads(os.environ["CHART_RECEIPT"]),json.loads(os.environ["PROMOTION_RECEIPT"])]))')
+          python3 scripts/release-artifacts.py verified-downloads
+          mkdir release references
+          cp verified-downloads/binaries-*/* verified-downloads/chart/* release/
+          cp verified-downloads/promotion/*.spdx.json release/
+          cp verified-downloads/promotion/*.reference references/
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.39.0
+          driver-opts: image=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
+        with:
+          version: v3.22.1
+      - name: Reject existing release/image/chart versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          REPOSITORY: ${{ needs.metadata.outputs.repository }}
+        run: |
+          status=$(gh api -i "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" 2>&1 || true)
+          grep -q 'HTTP/[^ ]* 404' <<< "$status"
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for image in "ghcr.io/$REPOSITORY" "ghcr.io/$REPOSITORY-controller"; do
+            if docker buildx imagetools inspect "$image:$VERSION" > /dev/null 2> inspect-error; then
+              echo "::error::Refusing to overwrite $image:$VERSION"; exit 1
+            fi
+            grep -Eqi 'not found|manifest unknown' inspect-error
+          done
+          if helm show chart "oci://ghcr.io/$REPOSITORY/charts/warmor" --version "$VERSION" > /dev/null 2> inspect-error; then
+            echo '::error::Refusing to overwrite chart'; exit 1
+          fi
+          grep -Eqi 'not found|manifest unknown' inspect-error
+      - name: Promote tested architectures and record immutable digests
+        id: promote
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          REPOSITORY: ${{ needs.metadata.outputs.repository }}
+        run: |
+          for target in daemon controller; do
+            suffix=""
+            if [[ "$target" == controller ]]; then suffix=-controller; fi
+            image="ghcr.io/${REPOSITORY}${suffix}"
+            bash scripts/release-check-ref.sh tag
+            docker buildx imagetools create -t "$image:$VERSION" \
+              "$(cat "references/${target}-amd64.reference")" \
+              "$(cat "references/${target}-arm64.reference")"
+            digest=$(docker buildx imagetools inspect "$image:$VERSION" --format '{{.Manifest.Digest}}')
+            echo "$target=$digest" >> "$GITHUB_OUTPUT"
+            echo "$image@$digest" >> release/IMAGES.txt
+          done
+      - name: Revalidate remote tag immediately before image attestations
+        run: bash scripts/release-check-ref.sh tag
+      - name: Attest daemon image
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ghcr.io/${{ needs.metadata.outputs.repository }}
+          subject-digest: ${{ steps.promote.outputs.daemon }}
+          push-to-registry: true
+      - name: Attest controller image
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ghcr.io/${{ needs.metadata.outputs.repository }}-controller
+          subject-digest: ${{ steps.promote.outputs.controller }}
+          push-to-registry: true
+      - name: Verify image provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          while read -r image; do
+            gh attestation verify "oci://$image" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF" --deny-self-hosted-runners
+          done < release/IMAGES.txt
+      - name: Install pinned scanner
+        run: bash scripts/release-install-trivy.sh
+      - name: SBOM for exact archives (image SBOMs retained from native tests)
+        run: |
+          python3 scripts/release-extract.py release payloads
+          trivy rootfs --format spdx-json --output release/binaries.spdx.json --timeout 10m payloads/
+          cp docs/RELEASE_SUPPORT.md release/
+          (cd release && sha256sum ./* > SHA256SUMS)
+      - name: Revalidate remote tag immediately before signing
+        run: bash scripts/release-check-ref.sh tag
+      - name: Sign archives, SBOMs, chart and checksum manifest
+        id: provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release/*
+      - name: Attest binary archive SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            release/*.tar.gz
+            release/*.zip
+          sbom-path: release/binaries.spdx.json
+      - name: Verify signatures/checksums before publishing chart/downloads
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          (cd release && sha256sum -c SHA256SUMS)
+          for artifact in release/*; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" --bundle "$BUNDLE" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF" --deny-self-hosted-runners
+          done
+          cp "$BUNDLE" release/provenance.sigstore.json
+      - name: Publish checked chart and release assets (no deployment)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          REPOSITORY: ${{ needs.metadata.outputs.repository }}
+        run: |
+          bash scripts/release-check-ref.sh tag
+          helm push "release/warmor-${VERSION}.tgz" "oci://ghcr.io/$REPOSITORY/charts"
+          args=(--verify-tag --title "$GITHUB_REF_NAME" --generate-notes --notes-file docs/RELEASE_SUPPORT.md)
+          if [[ "$VERSION" == *-* ]]; then args+=(--prerelease); fi
+          bash scripts/release-check-ref.sh tag
+          gh release create "$GITHUB_REF_NAME" release/* "${args[@]}"

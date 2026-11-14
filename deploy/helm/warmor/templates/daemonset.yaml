@@ -1,3 +1,4 @@
+{{- include "warmor.validate" . }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -28,6 +29,7 @@ spec:
         component: daemon
     spec:
       serviceAccountName: {{ include "warmor.serviceAccountName" . }}
+      automountServiceAccountToken: false
       {{- if .Values.priorityClass.enabled }}
       priorityClassName: {{ include "warmor.priorityClassName" . }}
       {{- end }}
@@ -46,7 +48,7 @@ spec:
       # mount is valid by construction.
       initContainers:
         - name: validate-policy
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "warmor.image" (dict "image" .Values.image "version" .Chart.AppVersion) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/warmor-daemon"]
           args: ["--validate-policy", "/etc/warmor/policy.wasm"]
@@ -71,7 +73,7 @@ spec:
       {{- end }}
       containers:
         - name: warmor
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "warmor.image" (dict "image" .Values.image "version" .Chart.AppVersion) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             # The WASM runtime keeps its compile cache under os.UserCacheDir()
@@ -91,6 +93,12 @@ spec:
             {{- end }}
             - "-metrics-port"
             - {{ .Values.daemon.metricsPort | quote }}
+            - "-metrics-bind-address"
+            - {{ .Values.daemon.metricsBindAddress | quote }}
+            - "-cgroup-root"
+            - {{ .Values.hostPaths.cgroupMount | quote }}
+            - "-cgroup-reconcile-interval"
+            - {{ .Values.daemon.cgroupReconcileInterval | quote }}
             - "-log-level"
             - {{ .Values.daemon.logLevel | quote }}
             - "-stats-interval"
@@ -119,7 +127,15 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-              add: ["SYS_ADMIN", "BPF", "PERFMON", "NET_ADMIN"]
+              # SYS_ADMIN remains a legacy-kernel compatibility fallback;
+              # validate the isolated capability matrix before reducing it.
+              add:
+                - SYS_ADMIN
+                - BPF
+                - PERFMON
+                {{- if not .Values.daemon.auditMode }}
+                - KILL
+                {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.daemon.metricsPort }}
@@ -154,23 +170,16 @@ spec:
               mountPath: /etc/warmor
               readOnly: true
             {{- end }}
-            - name: host-proc
-              mountPath: /host/proc
+            - name: host-kernel
+              mountPath: /sys/kernel
               readOnly: true
-            - name: host-sys
-              mountPath: /host/sys
-              readOnly: true
-            - name: bpf
-              mountPath: /sys/fs/bpf
             - name: tmp
               mountPath: /tmp
             - name: run
               mountPath: /run
-            {{- if .Values.daemon.cgroupFilter }}
             - name: host-cgroup
-              mountPath: /host/sys/fs/cgroup
+              mountPath: {{ .Values.hostPaths.cgroupMount | quote }}
               readOnly: true
-            {{- end }}
       volumes:
         {{- if .Values.controller.enabled }}
         # optional: on a fresh install the controller may not have
@@ -180,31 +189,28 @@ spec:
           configMap:
             name: {{ include "warmor.fullname" . }}-effective-policy
             optional: true
+            items:
+              - key: policy.wasm
+                path: policy.wasm
         {{- else if .Values.policy.existingConfigMap }}
         - name: policy
           configMap:
             name: {{ .Values.policy.existingConfigMap }}
         {{- end }}
-        - name: host-proc
+        - name: host-kernel
           hostPath:
-            path: /proc
-        - name: host-sys
-          hostPath:
-            path: /sys
-        - name: bpf
-          hostPath:
-            path: /sys/fs/bpf
+            path: {{ .Values.hostPaths.kernel | quote }}
+            type: Directory
         - name: tmp
           emptyDir:
             sizeLimit: 64Mi
         - name: run
           emptyDir:
             sizeLimit: 16Mi
-        {{- if .Values.daemon.cgroupFilter }}
         - name: host-cgroup
           hostPath:
-            path: /sys/fs/cgroup
-        {{- end }}
+            path: {{ .Values.hostPaths.cgroup | quote }}
+            type: Directory
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
