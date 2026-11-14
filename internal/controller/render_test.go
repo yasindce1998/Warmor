@@ -25,7 +25,7 @@ func testCR(name string, mutate func(*WarmorPolicySpec)) *WarmorPolicy {
 	if mutate != nil {
 		mutate(&spec)
 	}
-	return &WarmorPolicy{Metadata: ObjectMeta{Name: name, Namespace: "warmor-system"}, Spec: spec}
+	return &WarmorPolicy{Metadata: ObjectMeta{Name: name, Namespace: "warmor-system", UID: "uid-" + name, Generation: 1}, Spec: spec}
 }
 
 func TestRenderPolicy_TranslatesVocabulary(t *testing.T) {
@@ -67,7 +67,7 @@ func TestRenderPolicy_NamespacesVariables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := rendered.Variables["alpha__blocked_bins"]; !ok {
+	if _, ok := rendered.Variables[variablePrefix(cr)+"blocked_bins"]; !ok {
 		t.Fatalf("variables = %v, want the namespaced name", rendered.Variables)
 	}
 	if _, ok := rendered.Variables["blocked_bins"]; ok {
@@ -78,7 +78,7 @@ func TestRenderPolicy_NamespacesVariables(t *testing.T) {
 	if !ok {
 		t.Fatalf("path condition = %T, want a map", rendered.Rules[0].Conditions.All[0]["path"])
 	}
-	if glob["any_of"] != "$alpha__alias" {
+	if glob["any_of"] != "$"+variablePrefix(cr)+"alias" {
 		t.Errorf("any_of = %v, want the namespaced reference", glob["any_of"])
 	}
 	comm := rendered.Rules[0].Conditions.All[1]["comm"]
@@ -102,7 +102,7 @@ func TestRenderPolicy_PrefixesRuleNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rendered.Rules[0].Name != "alpha/block-tmp" {
+	if rendered.Rules[0].Name != "warmor-system/alpha/uid-alpha/block-tmp" {
 		t.Errorf("rule name = %q, want the policy-prefixed name", rendered.Rules[0].Name)
 	}
 }
@@ -140,7 +140,7 @@ func TestEffectivePolicy_OrdersMostRestrictiveFirst(t *testing.T) {
 	}
 }
 
-func TestEffectivePolicy_SinglePolicyPassesThrough(t *testing.T) {
+func TestEffectivePolicy_SinglePolicyUsesSameDenyPrecedence(t *testing.T) {
 	only := &policymerge.PolicyYAML{Name: "solo", Version: 7, DefaultAction: "deny", Rules: []policymerge.RuleYAML{
 		{Name: "solo/allow-nginx", Event: "process", Action: "allow",
 			Conditions: policymerge.ConditionsYAML{All: []map[string]any{{"path": "/usr/bin/nginx"}}}},
@@ -154,10 +154,9 @@ func TestEffectivePolicy_SinglePolicyPassesThrough(t *testing.T) {
 	if effective.Name != "merged" {
 		t.Errorf("name = %q, want the effective policy name", effective.Name)
 	}
-	// The author's rule order IS their precedence (first-match-wins): a
-	// lone policy must not have its rules re-ordered by action.
-	if effective.Rules[0].Name != "solo/allow-nginx" || effective.Rules[1].Name != "solo/deny-broad" {
-		t.Errorf("rule order = [%s, %s], want the author's order preserved for a single policy",
+	// Adding another CR must not change precedence in the first CR.
+	if effective.Rules[0].Name != "solo/deny-broad" || effective.Rules[1].Name != "solo/allow-nginx" {
+		t.Errorf("rule order = [%s, %s], want deny-first for single policies too",
 			effective.Rules[0].Name, effective.Rules[1].Name)
 	}
 }
@@ -212,7 +211,7 @@ func TestRenderPolicy_VariableInListIsRewritten(t *testing.T) {
 	if !ok {
 		t.Fatalf("any_of = %T, want a list", glob["any_of"])
 	}
-	if list[0] != "$alpha__bins" || list[1] != "/bin/sh" {
+	if list[0] != "$"+variablePrefix(cr)+"bins" || list[1] != "/bin/sh" {
 		t.Errorf("rewritten list = %v", list)
 	}
 }

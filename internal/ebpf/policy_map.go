@@ -467,30 +467,7 @@ func SetEnforce(enforceMap *ebpf.Map, enabled bool) error {
 
 // SetLSMCgroupFilter populates the LSM cgroup filter map.
 func SetLSMCgroupFilter(filterMap *ebpf.Map, ids []uint64) error {
-	// Clear existing
-	var key uint64
-	iter := filterMap.Iterate()
-	for iter.Next(&key, new(uint8)) {
-		_ = filterMap.Delete(key)
-	}
-
-	if len(ids) == 0 {
-		return nil
-	}
-
-	// Insert sentinel
-	var sentinel uint64
-	val := uint8(1)
-	if err := filterMap.Put(sentinel, val); err != nil {
-		return fmt.Errorf("set lsm cgroup filter sentinel: %w", err)
-	}
-
-	for _, id := range ids {
-		if err := filterMap.Put(id, val); err != nil {
-			return fmt.Errorf("set lsm cgroup filter id %d: %w", id, err)
-		}
-	}
-	return nil
+	return replaceCgroupFilter(kernelCgroupFilter{filterMap}, ids, len(ids) > 0)
 }
 
 // Ensure PolicyKey is serialized correctly for BPF map operations

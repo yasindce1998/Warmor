@@ -92,6 +92,10 @@ spec:
       component: controller
   template:
     metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
       labels:
         {{- include "warmor.selectorLabels" . | nindent 8 }}
         component: controller
@@ -107,8 +111,13 @@ spec:
         fsGroup: 1000
       containers:
         - name: controller
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "warmor.image" (dict "image" .Values.controller.image "version" .Chart.AppVersion) | quote }}
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           env:
             # cargo wants a writable package-cache lock even for a
             # dependency-free build, and /usr/local/cargo in the image is
@@ -127,9 +136,32 @@ spec:
             {{- end }}
             - "--resync-period"
             - {{ .Values.controller.resyncPeriod | quote }}
+            - "--metrics-address"
+            - ":9091"
           {{- if .Values.controller.extraArgs }}
           {{- toYaml .Values.controller.extraArgs | nindent 12 }}
           {{- end }}
+          ports:
+            - name: controller-http
+              containerPort: 9091
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: controller-http
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: controller-http
+            periodSeconds: 30
+          # Reconciliation/publication only, never a node-applied signal.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: controller-http
+            periodSeconds: 10
           {{- with .Values.controller.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -137,7 +169,15 @@ spec:
           volumeMounts:
             - name: cache
               mountPath: /var/lib/warmor-controller/cache
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: cache
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ .Values.controller.cacheSizeLimit }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
 {{- end }}
