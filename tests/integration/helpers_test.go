@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -88,15 +87,6 @@ func verifyVM(optIn, initExe string, ports []string) error {
 		return fmt.Errorf("vimto private virtio control/stdio ports missing")
 	}
 	return nil
-}
-
-func helperEnv(marker, file string, delay time.Duration) []string {
-	// Explicit environment: no recursion or inherited preparation/VM controls.
-	return []string{
-		"WARMOR_OUTCOME_HELPER=1", "WARMOR_OUTCOME_MARKER=" + marker,
-		"WARMOR_OUTCOME_FILE=" + file, "WARMOR_OUTCOME_DELAY=" + delay.String(),
-		"GOMAXPROCS=" + strconv.Itoa(1),
-	}
 }
 
 func TestVMGuard(t *testing.T) {

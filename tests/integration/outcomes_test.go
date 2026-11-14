@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -278,6 +279,15 @@ func newFixture(t *testing.T) *outcomeFixture {
 	return f
 }
 
+func helperEnv(marker, file string, delay time.Duration) []string {
+	// Explicit environment: no recursion or inherited preparation/VM controls.
+	return []string{
+		"WARMOR_OUTCOME_HELPER=1", "WARMOR_OUTCOME_MARKER=" + marker,
+		"WARMOR_OUTCOME_FILE=" + file, "WARMOR_OUTCOME_DELAY=" + delay.String(),
+		"GOMAXPROCS=" + strconv.Itoa(1),
+	}
+}
+
 func (f *outcomeFixture) helper(t *testing.T, binary, marker, file string, delay time.Duration) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(filepath.Join(f.work, binary))
@@ -386,9 +396,9 @@ func waitCommand(cmd *exec.Cmd, timeout time.Duration) error {
 		return err
 	case <-time.After(timeout):
 		_ = cmd.Process.Kill()
-		_ = <-done // Reap cleanup only; its signal is never outcome evidence.
+		cleanupErr := <-done
 		// Never return the cleanup SIGKILL as the daemon's termination proof.
-		return fmt.Errorf("timed out after %s (harness killed the child for cleanup)", timeout)
+		return fmt.Errorf("timed out after %s (harness killed the child for cleanup): %v", timeout, cleanupErr)
 	}
 }
 
@@ -454,8 +464,8 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 			}
 		case <-time.After(outcomeTimeout):
 			_ = d.cmd.Process.Kill()
-			_ = <-d.done // Reap after timeout; the timeout remains a failure.
-			t.Errorf("daemon shutdown timed out (log %s)", d.log)
+			cleanupErr := <-d.done
+			t.Errorf("daemon shutdown timed out (cleanup result %v; log %s)", cleanupErr, d.log)
 		}
 		if err := log.Close(); err != nil {
 			t.Errorf("close daemon log: %v", err)
