@@ -10,30 +10,62 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/privatefile"
 	"github.com/yasindce1998/warmor/internal/streaming"
 )
 
 // EventStore is an append-only ndjson event store that implements streaming.Sink.
 // Events are stored in daily-rotated files for replay.
 type EventStore struct {
-	dir     string
-	file    *os.File
-	enc     *json.Encoder
-	mu      sync.Mutex
-	curDate string
+	dir        string
+	file       *os.File
+	enc        *json.Encoder
+	mu         sync.Mutex
+	curDate    string
+	createDirs bool // only initial setup may create directories; rotation must not recreate a removed store
 }
 
 // NewEventStore creates or opens an event store in the given directory.
 func NewEventStore(dir string) (*EventStore, error) {
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("create event store dir: %w", err)
-	}
-	s := &EventStore{dir: dir}
+	s := &EventStore{dir: dir, createDirs: true}
 	if err := s.rotateIfNeeded(); err != nil {
 		return nil, err
+	}
+	s.createDirs = false
+	// Secure older daily recordings too; protecting only today's file would
+	// leave previously captured credentials exposed after an upgrade.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		_ = s.file.Close()
+		return nil, err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if runtime.GOOS == "windows" {
+			// Match the case-insensitive Windows recording opens, but retain
+			// the actual entry name for the ownership/no-follow checked open.
+			name = strings.ToLower(name)
+		}
+		if !strings.HasPrefix(name, "events-") || !strings.HasSuffix(name, ".ndjson") {
+			continue
+		}
+		if _, err := time.Parse("2006-01-02", strings.TrimSuffix(strings.TrimPrefix(name, "events-"), ".ndjson")); err != nil {
+			continue
+		}
+		f, err := privatefile.OpenAppend(filepath.Join(dir, entry.Name()), true, false)
+		if err != nil {
+			_ = s.file.Close()
+			return nil, fmt.Errorf("secure existing event recording: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			_ = s.file.Close()
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -46,10 +78,12 @@ func (s *EventStore) rotateIfNeeded() error {
 
 	if s.file != nil {
 		_ = s.file.Close()
+		s.file = nil
+		s.enc = nil
 	}
 
 	path := filepath.Join(s.dir, fmt.Sprintf("events-%s.ndjson", today))
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	f, err := privatefile.OpenAppend(path, true, s.createDirs)
 	if err != nil {
 		return fmt.Errorf("open event file: %w", err)
 	}

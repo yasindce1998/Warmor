@@ -19,25 +19,27 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/crypto"
+	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/metrics"
 )
 
 // Server is the central policy management HTTP server.
 type Server struct {
-	store      *Store
-	rollouts   *RolloutManager
-	containers *containerStore
-	drift      *drift.Detector
-	telemetry  *TelemetryStore
-	httpServer *http.Server
-	addr       string
-	staleCheck time.Duration
-	tlsConfig  *tls.Config
-	jwtSecret  []byte
-	jwt        *jwtIssuer
-	insecure   bool
-	policyDir  string
+	store           *Store
+	rollouts        *RolloutManager
+	containers      *containerStore
+	drift           *drift.Detector
+	httpServer      *http.Server
+	addr            string
+	staleCheck      time.Duration
+	tlsConfig       *tls.Config
+	jwtSecret       []byte
+	jwt             *jwtIssuer
+	insecure        bool
+	policyDir       string
+	assignmentTrust assignment.Trust
+	telemetry       *TelemetryStore
 
 	// Background loop lifecycle; stopped by Shutdown.
 	staleInterval time.Duration
@@ -49,8 +51,11 @@ type Server struct {
 
 // ServerConfig configures the policy management server.
 type ServerConfig struct {
-	Addr           string
-	StaleThreshold time.Duration
+	// AssignmentTrust enables the externally signed deployment relay/upload
+	// API. Only PUBLIC assignment grants are configured, separate from VerifyKey.
+	AssignmentTrust assignment.Trust
+	Addr            string
+	StaleThreshold  time.Duration
 	// TLSConfig enables TLS. If it verifies client certificates (mTLS), a
 	// verified certificate authenticates agent and container runtime calls.
 	TLSConfig *tls.Config
@@ -74,6 +79,8 @@ type ServerConfig struct {
 	Store *Store
 	// Telemetry enables opt-in, report-only acknowledged aggregate collection.
 	// The caller owns its lifecycle; nil leaves the existing protocol unchanged.
+	// AssignmentTrust disables telemetry attribution/report verdicts: the legacy
+	// assignment domain does not prove authorization for signed deployments.
 	Telemetry *TelemetryStore
 }
 
@@ -94,17 +101,18 @@ func NewServer(cfg ServerConfig) *Server {
 		store.SetVerifyKey(cfg.VerifyKey)
 	}
 	s := &Server{
-		store:      store,
-		telemetry:  cfg.Telemetry,
-		rollouts:   NewRolloutManager(store),
-		addr:       cfg.Addr,
-		staleCheck: cfg.StaleThreshold,
-		containers: newContainerStore(store),
-		drift:      drift.NewDetector(drift.DetectorConfig{Threshold: cfg.DriftThreshold}),
-		tlsConfig:  cfg.TLSConfig,
-		jwtSecret:  cfg.JWTSecret,
-		insecure:   cfg.Insecure,
-		policyDir:  cfg.PolicyDir,
+		store:           store,
+		telemetry:       cfg.Telemetry,
+		rollouts:        NewRolloutManager(store),
+		addr:            cfg.Addr,
+		staleCheck:      cfg.StaleThreshold,
+		containers:      newContainerStore(store),
+		drift:           drift.NewDetector(drift.DetectorConfig{Threshold: cfg.DriftThreshold}),
+		tlsConfig:       cfg.TLSConfig,
+		jwtSecret:       cfg.JWTSecret,
+		insecure:        cfg.Insecure,
+		policyDir:       cfg.PolicyDir,
+		assignmentTrust: cloneAssignmentTrust(cfg.AssignmentTrust),
 
 		staleInterval: 30 * time.Second,
 		stop:          make(chan struct{}),
@@ -122,6 +130,7 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("/api/v1/policy/wasm", s.requireAgent(s.handleGetWASM))
 	mux.HandleFunc("/api/v1/telemetry/session", s.requireAgent(s.handleTelemetrySession))
 	mux.HandleFunc("/api/v1/admin/telemetry", s.requireJWT(s.handleTelemetryReport))
+	mux.HandleFunc("/api/v1/deployment", s.requireAgent(s.handleGetDeployment))
 
 	// Container runtime endpoints (mTLS client cert or runtime token)
 	mux.HandleFunc("/api/v1/containers/bind", s.requireRuntime(s.handleContainerBind))
@@ -129,6 +138,7 @@ func NewServer(cfg ServerConfig) *Server {
 
 	// Admin endpoints (admin token)
 	mux.HandleFunc("/api/v1/admin/policies", s.requireJWT(s.handleAdminPolicies))
+	mux.HandleFunc("/api/v1/admin/deployments", s.requireJWT(s.handleAdminDeployment))
 	mux.HandleFunc("/api/v1/admin/policies/", s.requireJWT(s.handleAdminPolicy))
 	mux.HandleFunc("/api/v1/admin/agents", s.requireJWT(s.handleAdminAgents))
 	mux.HandleFunc("/api/v1/admin/rollouts", s.requireJWT(s.handleAdminRollouts))

@@ -11,7 +11,7 @@ import (
 )
 
 func TestEventStoreWriteAndRead(t *testing.T) {
-	dir := t.TempDir()
+	dir := recordingTempDir(t)
 	store, err := NewEventStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +43,7 @@ func TestEventStoreWriteAndRead(t *testing.T) {
 }
 
 func TestReadEventsSinceFilter(t *testing.T) {
-	dir := t.TempDir()
+	dir := recordingTempDir(t)
 	store, err := NewEventStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +75,7 @@ func TestReadEventsSinceFilter(t *testing.T) {
 }
 
 func TestReadEventsEmptyDir(t *testing.T) {
-	dir := t.TempDir()
+	dir := recordingTempDir(t)
 	events, err := ReadEvents(dir, time.Time{})
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func TestReadEventsEmptyDir(t *testing.T) {
 }
 
 func TestEventStoreRotation(t *testing.T) {
-	dir := t.TempDir()
+	dir := recordingTempDir(t)
 	store, err := NewEventStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestSecurityEventToAPIEvent(t *testing.T) {
 }
 
 func TestEventStoreNameContainsDir(t *testing.T) {
-	dir := t.TempDir()
+	dir := recordingTempDir(t)
 	store, err := NewEventStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +149,7 @@ func TestEventStoreNameContainsDir(t *testing.T) {
 }
 
 func TestEventStoreFlush(t *testing.T) {
-	dir := t.TempDir()
+	dir := recordingTempDir(t)
 	store, err := NewEventStore(dir)
 	if err != nil {
 		t.Fatal(err)

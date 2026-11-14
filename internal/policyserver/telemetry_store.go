@@ -416,7 +416,7 @@ func (t *TelemetryStore) observeAcknowledgement(req HeartbeatRequest) error {
 		return nil
 	}
 	r := src.Active.Revision
-	if req.ActivationError == "" && req.PolicyID == r.PolicyID && req.PolicyVersion == r.PolicyVersion && req.PolicyHash == r.PolicyHash {
+	if req.DeploymentSequence == 0 && req.EnvelopeHash == "" && req.ActivationError == "" && req.PolicyID == r.PolicyID && req.PolicyVersion == r.PolicyVersion && req.PolicyHash == r.PolicyHash {
 		return nil
 	}
 	err := t.mutate(func(s *telemetryState) error {
@@ -437,7 +437,7 @@ func (t *TelemetryStore) ingest(agent string, ack *Agent, report telemetry.Snaps
 	if err := report.Validate(); err != nil {
 		return TelemetryIngestResult{}, err
 	}
-	if ack == nil || ack.ID != agent || ack.ActivationError != "" || ack.PolicyID != report.Revision.PolicyID || ack.PolicyVersion != report.Revision.PolicyVersion || ack.PolicyHash != report.Revision.PolicyHash {
+	if ack == nil || ack.ID != agent || ack.DeploymentSequence != 0 || ack.EnvelopeHash != "" || ack.ActivationError != "" || ack.PolicyID != report.Revision.PolicyID || ack.PolicyVersion != report.Revision.PolicyVersion || ack.PolicyHash != report.Revision.PolicyHash {
 		return TelemetryIngestResult{}, ErrTelemetryFence
 	}
 	t.mu.Lock()

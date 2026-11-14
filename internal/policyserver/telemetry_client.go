@@ -17,6 +17,9 @@ import (
 func (c *Client) AuthorizeTelemetry(ctx context.Context) error {
 	c.pollMu.Lock()
 	defer c.pollMu.Unlock()
+	if c.signed {
+		return fmt.Errorf("signed deployment telemetry is unsupported")
+	}
 	if c.telemetry == nil {
 		return fmt.Errorf("no telemetry collector configured")
 	}
@@ -40,7 +43,7 @@ func (c *Client) AuthorizeTelemetry(ctx context.Context) error {
 }
 
 func (c *Client) setTelemetryHeaders(req *http.Request) {
-	if c.telemetry == nil {
+	if c.signed || c.telemetry == nil {
 		return
 	}
 	session := c.telemetry.Session()

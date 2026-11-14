@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	signed "github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/internal/telemetry"
@@ -23,23 +24,26 @@ import (
 
 // Client connects to the policy management server for policy distribution.
 type Client struct {
-	baseURL           string
-	agentID           string
-	hostname          string
-	labels            map[string]string
-	httpClient        *http.Client
-	token             string
-	policyVersion     int64
-	policyID          string
-	policyHash        string
-	activationError   string
-	mu                sync.Mutex
-	pollMu            sync.Mutex
-	onUpdate          func(assignment *PolicyAssignment, wasmData []byte) error
-	verify            func(assignment *PolicyAssignment, wasmData []byte) error
-	fingerprint       func() *drift.BehaviorFingerprint
-	telemetry         *telemetry.Collector
-	telemetryRevision telemetry.Revision // published only after OnUpdate succeeds
+	baseURL            string
+	agentID            string
+	hostname           string
+	labels             map[string]string
+	httpClient         *http.Client
+	token              string
+	policyVersion      int64
+	policyID           string
+	policyHash         string
+	activationError    string
+	mu                 sync.Mutex
+	pollMu             sync.Mutex
+	onUpdate           func(assignment *PolicyAssignment, wasmData []byte) error
+	verify             func(assignment *PolicyAssignment, wasmData []byte) error
+	fingerprint        func() *drift.BehaviorFingerprint
+	signed             bool
+	deploymentSequence uint64
+	envelopeHash       string
+	telemetry          *telemetry.Collector
+	telemetryRevision  telemetry.Revision // published only after OnUpdate succeeds
 }
 
 // MaxWASMDownloadSize bounds a policy module download.
@@ -47,10 +51,14 @@ const MaxWASMDownloadSize = 64 * 1024 * 1024
 
 // ClientConfig configures the policy server client.
 type ClientConfig struct {
-	ServerURL string
-	AgentID   string
-	Hostname  string
-	Labels    map[string]string
+	SignedAssignments bool
+	// InitialAssignment must describe the successfully restored/loaded durable
+	// record, not merely a received deployment. Signed mode requires it on boot.
+	InitialAssignment *PolicyAssignment
+	ServerURL         string
+	AgentID           string
+	Hostname          string
+	Labels            map[string]string
 	// TLSConfig configures TLS to the server; include a client certificate
 	// to authenticate with mTLS.
 	TLSConfig *tls.Config
@@ -73,16 +81,22 @@ type ClientConfig struct {
 	Fingerprint func() *drift.BehaviorFingerprint
 	// Telemetry is opt-in. OnUpdate must use the same collector at the drained
 	// enforcer activation boundary. Call AuthorizeTelemetry after registration.
+	// SignedAssignments disables/seals this collector: schema 1 does not bind
+	// signed deployment sequences, envelope authorization or cohort evidence.
 	Telemetry *telemetry.Collector
 }
 
 // NewClient creates a policy server client.
 func NewClient(cfg ClientConfig) *Client {
+	if cfg.SignedAssignments && cfg.Telemetry != nil {
+		cfg.Telemetry.Seal()
+		cfg.Telemetry = nil
+	}
 	transport := &http.Transport{}
 	if cfg.TLSConfig != nil {
 		transport.TLSClientConfig = cfg.TLSConfig
 	}
-	return &Client{
+	c := &Client{
 		baseURL:  cfg.ServerURL,
 		agentID:  cfg.AgentID,
 		hostname: cfg.Hostname,
@@ -96,7 +110,14 @@ func NewClient(cfg ClientConfig) *Client {
 		verify:      cfg.Verify,
 		fingerprint: cfg.Fingerprint,
 		telemetry:   cfg.Telemetry,
+		signed:      cfg.SignedAssignments,
 	}
+	if cfg.InitialAssignment != nil {
+		a := cfg.InitialAssignment
+		c.policyID, c.policyVersion, c.policyHash = a.PolicyID, a.Version, a.WASMHash
+		c.deploymentSequence, c.envelopeHash = a.DeploymentSequence, signed.Digest(a.Envelope)
+	}
+	return c
 }
 
 // do sends req with the agent's credentials attached.
@@ -152,6 +173,11 @@ func (c *Client) PollLoop(ctx context.Context, interval time.Duration) {
 }
 
 func (c *Client) poll(ctx context.Context) {
+	_ = c.Poll(ctx)
+}
+
+// Poll performs one serialized fetch/verify/activation and reports errors.
+func (c *Client) Poll(ctx context.Context) error {
 	c.pollMu.Lock()
 	defer c.pollMu.Unlock()
 	err := c.pollOnce(ctx)
@@ -162,9 +188,13 @@ func (c *Client) poll(ctx context.Context) {
 	} else {
 		c.activationError = ""
 	}
+	return err
 }
 
 func (c *Client) pollOnce(ctx context.Context) error {
+	if c.signed {
+		return c.pollSigned(ctx)
+	}
 	c.mu.Lock()
 	version := c.policyVersion
 	id, digest := c.policyID, c.policyHash
@@ -221,6 +251,12 @@ func (c *Client) pollOnce(ctx context.Context) error {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&assignment); err != nil {
 		return err
 	}
+	if len(assignment.Envelope) != 0 || assignment.DeploymentSequence != 0 {
+		if c.telemetry != nil {
+			c.telemetry.Seal()
+		}
+		return fmt.Errorf("signed deployment cannot use legacy assignment/telemetry activation")
+	}
 
 	// A different version (newer, or older after a rollback) is applied.
 	telemetryCurrent := assignment.Telemetry == nil || (c.telemetry != nil && c.telemetry.Matches(*assignment.Telemetry, assignment.PolicyID, assignment.Version, assignment.WASMHash))
@@ -276,6 +312,9 @@ func (c *Client) InvalidateActiveRevision() {
 	defer c.pollMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.signed {
+		return
+	} // signed mode has no out-of-band reload path
 	c.policyID, c.policyHash, c.policyVersion = "", "", 0
 	c.telemetryRevision = telemetry.Revision{}
 	if c.telemetry != nil {
@@ -330,16 +369,19 @@ func (c *Client) SendHeartbeat(ctx context.Context) (err error) {
 	version := c.policyVersion
 	id, digest, activationError := c.policyID, c.policyHash, c.activationError
 	activeTelemetry := c.telemetryRevision
+	sequence, envelopeHash := c.deploymentSequence, c.envelopeHash
 	c.mu.Unlock()
 
 	req := HeartbeatRequest{
-		AgentID:         c.agentID,
-		PolicyVersion:   version,
-		PolicyID:        id,
-		PolicyHash:      digest,
-		ActivationError: activationError,
+		AgentID:            c.agentID,
+		PolicyVersion:      version,
+		PolicyID:           id,
+		PolicyHash:         digest,
+		ActivationError:    activationError,
+		DeploymentSequence: sequence,
+		EnvelopeHash:       envelopeHash,
 	}
-	if c.telemetry != nil && activationError == "" {
+	if !c.signed && c.telemetry != nil && activationError == "" {
 		snapshot := c.telemetry.Snapshot()
 		if snapshot != nil && snapshot.Revision == activeTelemetry && snapshot.Revision.PolicyID == id && snapshot.Revision.PolicyVersion == version && snapshot.Revision.PolicyHash == digest {
 			req.Telemetry = snapshot

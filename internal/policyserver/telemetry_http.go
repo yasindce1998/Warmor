@@ -14,6 +14,8 @@ import (
 const telemetryEpochHeader = "X-Warmor-Telemetry-Epoch"
 const telemetrySessionHeader = "X-Warmor-Telemetry-Session"
 
+const signedTelemetryUnsupported = "signed-deployment-telemetry-unsupported"
+
 // Strict telemetry authentication has no admin/insecure impersonation bypass.
 // Administrators may inspect reports but cannot submit another node's totals.
 func telemetryPrincipal(r *http.Request) (string, error) {
@@ -42,6 +44,12 @@ func (s *Server) handleTelemetrySession(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "agent not registered", http.StatusNotFound)
 		return
 	}
+	s.store.mu.RLock()
+	defer s.store.mu.RUnlock()
+	if s.signedTelemetryDisabledLocked() || s.signedTelemetrySourceLocked(agent) {
+		http.Error(w, signedTelemetryUnsupported, http.StatusConflict)
+		return
+	}
 	lease, err := s.telemetry.AuthorizeSession(agent)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -60,8 +68,19 @@ func (s *Server) handleTelemetryReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.URL.Query().Get("rollout_id")
-	// Refresh before exposing any verdict, including when every agent is offline.
 	s.store.mu.RLock()
+	defer s.store.mu.RUnlock()
+	if s.signedTelemetryDisabledLocked() {
+		// Schema 1 has no signed deployment/cohort authorization binding. Never
+		// expose a retained legacy health verdict on a signed relay server.
+		report := s.telemetry.Report(id)
+		report.Verdict, report.Reason = "pending", signedTelemetryUnsupported
+		report.Baseline, report.Canary = TelemetryCohortReport{}, TelemetryCohortReport{}
+		report.ObservedFor = 0
+		writeJSON(w, http.StatusOK, report)
+		return
+	}
+	// Refresh before exposing any verdict, including when every agent is offline.
 	active := false
 	var refreshErr error
 	for agent := range s.store.agents {
@@ -75,7 +94,6 @@ func (s *Server) handleTelemetryReport(w http.ResponseWriter, r *http.Request) {
 	if !active {
 		refreshErr = s.telemetry.RemoveRollout(id)
 	}
-	s.store.mu.RUnlock()
 	if refreshErr != nil {
 		http.Error(w, refreshErr.Error(), http.StatusServiceUnavailable)
 		return
@@ -104,6 +122,9 @@ func (s *Server) refreshTelemetryDomainLocked(b telemetryBinding) (string, error
 // produce a new generation; offline old assignments cannot move their counts.
 // Caller holds store.mu. No cohort field comes from the wire.
 func (s *Server) telemetryAssignmentLocked(agentID string) (*PolicyAssignment, telemetryBinding, error) {
+	if s.signedTelemetryDisabledLocked() || s.signedTelemetrySourceLocked(agentID) {
+		return nil, telemetryBinding{}, ErrTelemetryFence
+	}
 	a := s.store.agents[agentID]
 	if a == nil {
 		return nil, telemetryBinding{}, ErrTelemetryFence
@@ -152,7 +173,23 @@ func (s *Server) telemetryAssignmentLocked(agentID string) (*PolicyAssignment, t
 	return nil, telemetryBinding{}, ErrTelemetryFence
 }
 
+// Caller holds store.mu. A signed deployment is not a legacy rollout domain,
+// even if its policy ID/version/hash happen to collide with one.
+func (s *Server) signedTelemetrySourceLocked(agentID string) bool {
+	a := s.store.agents[agentID]
+	return len(s.store.deployments[agentID]) != 0 || (a != nil && (a.DeploymentSequence != 0 || a.EnvelopeHash != ""))
+}
+
+// Relay state remains signed even when public trust is temporarily removed.
+// Caller holds store.mu. Mixed legacy/signed relay telemetry is unsupported.
+func (s *Server) signedTelemetryDisabledLocked() bool {
+	return len(s.assignmentTrust) != 0 || len(s.store.deployments) != 0
+}
+
 func (s *Server) attachTelemetryAssignment(r *http.Request, agent string, assignment *PolicyAssignment) error {
+	if len(s.assignmentTrust) != 0 {
+		return nil // legacy delivery remains available, but supplies no evidence
+	}
 	lease := telemetry.Session{Epoch: r.Header.Get(telemetryEpochHeader), SessionID: r.Header.Get(telemetrySessionHeader)}
 	if lease.Epoch == "" && lease.SessionID == "" {
 		return nil
@@ -186,6 +223,9 @@ func (s *Server) attachTelemetryAssignment(r *http.Request, agent string, assign
 }
 
 func (s *Server) ingestHeartbeatTelemetry(r *http.Request, req HeartbeatRequest) error {
+	if len(s.assignmentTrust) != 0 || req.DeploymentSequence != 0 || req.EnvelopeHash != "" {
+		return errors.New(signedTelemetryUnsupported)
+	}
 	if s.telemetry == nil {
 		return errors.New("server telemetry is disabled")
 	}

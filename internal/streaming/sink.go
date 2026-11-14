@@ -10,10 +10,15 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/yasindce1998/warmor/internal/privatefile"
 )
 
 // Sink consumes SecurityEvents. Implementations must be safe for concurrent use,
@@ -29,8 +34,11 @@ type Sink interface {
 
 // StdoutSink writes newline-delimited JSON to stdout.
 type StdoutSink struct {
-	enc *json.Encoder
-	mu  sync.Mutex
+	// IncludePolicyInput explicitly opts in to exporting sensitive argv/context.
+	// Configure before the first Write; default exports only the SIEM summary.
+	IncludePolicyInput bool
+	enc                *json.Encoder
+	mu                 sync.Mutex
 }
 
 func NewStdoutSink() *StdoutSink {
@@ -40,6 +48,9 @@ func NewStdoutSink() *StdoutSink {
 func (s *StdoutSink) Write(_ context.Context, event *SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.IncludePolicyInput {
+		event = event.SummaryForExport()
+	}
 	return s.enc.Encode(event)
 }
 
@@ -65,7 +76,50 @@ func NewFileSink(path string, maxBytes int64) (*FileSink, error) {
 	if err := s.open(); err != nil {
 		return nil, fmt.Errorf("open event log: %w", err)
 	}
+	// Old versions created archives as 0644 too. Tighten recognized recording
+	// archives on startup; do not follow links or chmod unrelated sibling files.
+	archives, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		_ = s.file.Close()
+		return nil, err
+	}
+	for _, entry := range archives {
+		name := entry.Name()
+		prefix := filepath.Base(path) + "."
+		if runtime.GOOS == "windows" {
+			// Discovery must not skip legacy archives merely because the
+			// configured active name differs in case from the directory entry.
+			// Normalize only for matching; checked opens use the actual name.
+			name, prefix = strings.ToUpper(name), strings.ToUpper(prefix)
+		}
+		if !strings.HasPrefix(name, prefix) || !recordingArchiveSuffix(strings.TrimPrefix(name, prefix)) {
+			continue
+		}
+		archive := filepath.Join(filepath.Dir(path), entry.Name())
+		f, err := privatefile.OpenAppend(archive, false, false)
+		if err != nil {
+			_ = s.file.Close()
+			return nil, fmt.Errorf("secure existing event archive: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			_ = s.file.Close()
+			return nil, err
+		}
+	}
 	return s, nil
+}
+
+func recordingArchiveSuffix(suffix string) bool {
+	parts := strings.Split(suffix, ".")
+	if len(parts) > 2 {
+		return false
+	}
+	for _, part := range parts {
+		if _, err := strconv.ParseUint(part, 10, 64); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *FileSink) Write(_ context.Context, event *SecurityEvent) error {
@@ -96,9 +150,9 @@ func (s *FileSink) Write(_ context.Context, event *SecurityEvent) error {
 }
 
 func (s *FileSink) rotate() error {
+	renameErr := privatefile.Rotate(s.path, s.rotatedName(), s.file)
 	_ = s.file.Close()
 	s.file = nil
-	renameErr := os.Rename(s.path, s.rotatedName())
 	if err := s.open(); err != nil {
 		return fmt.Errorf("reopen event log after rotation: %w", err)
 	}
@@ -129,7 +183,7 @@ func (s *FileSink) rotatedName() string {
 // open (re)opens the active log for appending and resets the size counter
 // from the file's current size.
 func (s *FileSink) open() error {
-	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	f, err := privatefile.OpenAppend(s.path, false, false)
 	if err != nil {
 		return err
 	}
@@ -168,35 +222,38 @@ func (s *FileSink) Name() string { return "file:" + s.path }
 // Delivery is best effort, with possible duplicates after ambiguous transport
 // errors; it is not durable or exactly-once delivery.
 type WebhookSink struct {
-	url         string
-	client      *http.Client
-	headers     map[string]string
-	batch       []*SecurityEvent
-	attempts    []int
-	queuedAt    []time.Time
-	batchSize   int
-	maxPending  int
-	flushEvery  time.Duration
-	mu          sync.Mutex
-	lastFlush   time.Time
-	failing     bool // last flush failed; Write waits for flushEvery before retrying
-	dropped     atomic.Uint64
-	maxAttempts int
-	maxAge      time.Duration
-	flushGate   chan struct{}
-	lifetime    context.Context
-	cancel      context.CancelFunc
-	closed      bool
-	closeDone   chan struct{}
-	closeErr    error // published by closeDone
+	includePolicyInput bool
+	url                string
+	client             *http.Client
+	headers            map[string]string
+	batch              []*SecurityEvent
+	attempts           []int
+	queuedAt           []time.Time
+	batchSize          int
+	maxPending         int
+	flushEvery         time.Duration
+	mu                 sync.Mutex
+	lastFlush          time.Time
+	failing            bool // last flush failed; Write waits for flushEvery before retrying
+	dropped            atomic.Uint64
+	maxAttempts        int
+	maxAge             time.Duration
+	flushGate          chan struct{}
+	lifetime           context.Context
+	cancel             context.CancelFunc
+	closed             bool
+	closeDone          chan struct{}
+	closeErr           error // published by closeDone
 }
 
 type WebhookConfig struct {
-	URL        string
-	Headers    map[string]string
-	BatchSize  int
-	FlushEvery time.Duration
-	Timeout    time.Duration
+	// IncludePolicyInput opts in to sending sensitive evaluator inputs (argv).
+	IncludePolicyInput bool
+	URL                string
+	Headers            map[string]string
+	BatchSize          int
+	FlushEvery         time.Duration
+	Timeout            time.Duration
 	// MaxPending bounds how many events are retained for retry while the
 	// endpoint is failing (default 10 * BatchSize), plus at most BatchSize
 	// detached events in an in-flight request.
@@ -233,14 +290,15 @@ func NewWebhookSink(cfg WebhookConfig) *WebhookSink {
 		transport = defaults.Clone()
 	}
 	return &WebhookSink{
-		url:         cfg.URL,
-		client:      &http.Client{Timeout: cfg.Timeout, Transport: transport},
-		headers:     maps.Clone(cfg.Headers),
-		batchSize:   cfg.BatchSize,
-		maxPending:  cfg.MaxPending,
-		flushEvery:  cfg.FlushEvery,
-		lastFlush:   time.Now(),
-		maxAttempts: cfg.MaxAttempts, maxAge: cfg.MaxAge,
+		includePolicyInput: cfg.IncludePolicyInput,
+		url:                cfg.URL,
+		client:             &http.Client{Timeout: cfg.Timeout, Transport: transport},
+		headers:            maps.Clone(cfg.Headers),
+		batchSize:          cfg.BatchSize,
+		maxPending:         cfg.MaxPending,
+		flushEvery:         cfg.FlushEvery,
+		lastFlush:          time.Now(),
+		maxAttempts:        cfg.MaxAttempts, maxAge: cfg.MaxAge,
 		flushGate: make(chan struct{}, 1), lifetime: lifetime, cancel: cancel,
 		closeDone: make(chan struct{}),
 	}
@@ -250,6 +308,9 @@ func (s *WebhookSink) Write(ctx context.Context, event *SecurityEvent) error {
 	if err := ctx.Err(); err != nil {
 		s.drop("webhook_canceled", 1)
 		return err
+	}
+	if !s.includePolicyInput {
+		event = event.SummaryForExport()
 	}
 	s.mu.Lock()
 	if s.closed {

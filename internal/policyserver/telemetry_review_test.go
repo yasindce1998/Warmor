@@ -37,8 +37,11 @@ func TestTelemetryFailedAcknowledgementInvalidationFailsReportsClosed(t *testing
 				t.Fatal(err)
 			}
 			defer store.Close()
-			now := time.Now().Add(time.Second)
-			store.clock = func() time.Time { return now }
+			// Fleet acknowledgements use real receipt time. Follow that clock
+			// plus explicit warm-up advances instead of a fixed future anchor
+			// that synced writes/race CI can overtake during fixture setup.
+			advance := time.Duration(0)
+			store.clock = func() time.Time { return time.Now().Add(advance) }
 			server := NewServer(ServerConfig{Store: fleet, JWTSecret: testJWTSecret, Telemetry: store})
 			ids := map[bool]string{}
 			for i := 0; len(ids) < 2; i++ {
@@ -89,7 +92,7 @@ func TestTelemetryFailedAcknowledgementInvalidationFailsReportsClosed(t *testing
 				}
 				requests[canary] = req
 			}
-			now = now.Add(time.Second)
+			advance += time.Second
 			for _, req := range requests {
 				req.Telemetry.Sequence++
 				req.Telemetry.Total = 10
@@ -97,7 +100,7 @@ func TestTelemetryFailedAcknowledgementInvalidationFailsReportsClosed(t *testing
 					t.Fatalf("samples: %d %s", w.Code, w.Body.String())
 				}
 			}
-			now = now.Add(time.Second)
+			advance += time.Second
 			if report := store.Report("r"); report.Verdict != "healthy" {
 				t.Fatalf("fixture not healthy: %+v", report)
 			}

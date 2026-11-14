@@ -30,15 +30,17 @@ type Policy struct {
 
 // Agent represents a registered warmor agent with its labels and status.
 type Agent struct {
-	ID              string            `json:"id"`
-	Hostname        string            `json:"hostname"`
-	Labels          map[string]string `json:"labels"`
-	PolicyVersion   int64             `json:"policy_version"`
-	PolicyID        string            `json:"policy_id,omitempty"`
-	PolicyHash      string            `json:"policy_hash,omitempty"`
-	ActivationError string            `json:"activation_error,omitempty"`
-	LastHeartbeat   time.Time         `json:"last_heartbeat"`
-	Status          AgentStatus       `json:"status"`
+	ID                 string            `json:"id"`
+	Hostname           string            `json:"hostname"`
+	Labels             map[string]string `json:"labels"`
+	PolicyVersion      int64             `json:"policy_version"`
+	PolicyID           string            `json:"policy_id,omitempty"`
+	PolicyHash         string            `json:"policy_hash,omitempty"`
+	ActivationError    string            `json:"activation_error,omitempty"`
+	DeploymentSequence uint64            `json:"deployment_sequence,omitempty"`
+	EnvelopeHash       string            `json:"envelope_hash,omitempty"`
+	LastHeartbeat      time.Time         `json:"last_heartbeat"`
+	Status             AgentStatus       `json:"status"`
 }
 
 type AgentStatus string
@@ -58,11 +60,13 @@ type RegisterRequest struct {
 
 // HeartbeatRequest is sent periodically by agents.
 type HeartbeatRequest struct {
-	AgentID         string `json:"agent_id"`
-	PolicyVersion   int64  `json:"policy_version"`
-	PolicyID        string `json:"policy_id,omitempty"`
-	PolicyHash      string `json:"policy_hash,omitempty"`
-	ActivationError string `json:"activation_error,omitempty"`
+	AgentID            string `json:"agent_id"`
+	PolicyVersion      int64  `json:"policy_version"`
+	PolicyID           string `json:"policy_id,omitempty"`
+	PolicyHash         string `json:"policy_hash,omitempty"`
+	ActivationError    string `json:"activation_error,omitempty"`
+	DeploymentSequence uint64 `json:"deployment_sequence,omitempty"`
+	EnvelopeHash       string `json:"envelope_hash,omitempty"`
 	// Fingerprint is the agent's behavioral fingerprint for fleet drift
 	// detection (see internal/drift). Optional: agents without --drift
 	// keep sending plain heartbeats. The server trusts the authenticated
@@ -75,11 +79,13 @@ type HeartbeatRequest struct {
 
 // PolicyAssignment is returned to an agent with its applicable policy.
 type PolicyAssignment struct {
-	PolicyID string `json:"policy_id"`
-	Version  int64  `json:"version"`
-	WASMHash string `json:"wasm_hash"`
-	WASMPath string `json:"wasm_path"`
-	WASMData []byte `json:"wasm_data,omitempty"`
+	Envelope           []byte `json:"envelope,omitempty"`
+	DeploymentSequence uint64 `json:"deployment_sequence,omitempty"`
+	PolicyID           string `json:"policy_id"`
+	Version            int64  `json:"version"`
+	WASMHash           string `json:"wasm_hash"`
+	WASMPath           string `json:"wasm_path"`
+	WASMData           []byte `json:"wasm_data,omitempty"`
 	// Signature is the raw ed25519 signature over the WASM bytes, filled in
 	// by Client from the SignatureHeader of the WASM download. Empty when
 	// the policy is unsigned.

@@ -3,13 +3,14 @@ package learner
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/yasindce1998/warmor/internal/policymerge"
 )
 
-// Synthesize converts a ContainerProfile into a PolicyYAML that allows all
-// observed behavior and denies everything else.
+// Synthesize proposes path/endpoint allows, not an exact behavioral model.
+// Session.MarshalPolicy rejects unsupported observations and validates output.
 func Synthesize(profile *ContainerProfile, name string) *policymerge.PolicyYAML {
 	if name == "" {
 		name = fmt.Sprintf("learned-policy-cgroup-%d", profile.CgroupID)
@@ -22,8 +23,15 @@ func Synthesize(profile *ContainerProfile, name string) *policymerge.PolicyYAML 
 	rules = append(rules, synthesizeNetworkRules(profile.Networks)...)
 	rules = append(rules, synthesizeBindRules(profile.Binds)...)
 	rules = append(rules, synthesizeListenRules(profile.Listens)...)
-	rules = append(rules, synthesizeMountRules(profile.Mounts)...)
-	rules = append(rules, synthesizePtraceRules(profile.Ptrace)...)
+	// Sanitization and truncation are not injective: preserve unique rule names.
+	seen := make(map[string]bool)
+	for i := range rules {
+		base := rules[i].Name
+		for n := 2; seen[rules[i].Name]; n++ {
+			rules[i].Name = fmt.Sprintf("%s-%d", base, n)
+		}
+		seen[rules[i].Name] = true
+	}
 
 	return &policymerge.PolicyYAML{
 		Name:          name,
@@ -76,7 +84,7 @@ func synthesizeExecRules(execs map[string]int) []policymerge.RuleYAML {
 			Name:  fmt.Sprintf("allow-exec-%s", sanitizeName(path)),
 			Event: "process",
 			Conditions: policymerge.ConditionsYAML{
-				All: []map[string]any{{"filename": path}},
+				All: []map[string]any{{"path": literal(path)}},
 			},
 			Action: "allow",
 			Reason: fmt.Sprintf("observed %d times during learning", execs[path]),
@@ -93,7 +101,7 @@ func synthesizeFileRules(files map[string]int) []policymerge.RuleYAML {
 			Name:  fmt.Sprintf("allow-file-%s", sanitizeName(path)),
 			Event: "file",
 			Conditions: policymerge.ConditionsYAML{
-				All: []map[string]any{{"filename": path}},
+				All: []map[string]any{{"path": literal(path)}},
 			},
 			Action: "allow",
 			Reason: fmt.Sprintf("observed %d times during learning", files[path]),
@@ -106,14 +114,26 @@ func synthesizeNetworkRules(networks map[string]int) []policymerge.RuleYAML {
 	keys := sortedKeys(networks)
 	rules := make([]policymerge.RuleYAML, 0, len(keys))
 	for _, key := range keys {
-		parts := strings.SplitN(key, ":", 3)
-		if len(parts) != 3 {
+		operation, endpoint := splitOperation(key, "connect")
+		parts := strings.SplitN(endpoint, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		// Accept both new bracketed IPv6 and historical unbracketed keys.
+		last := strings.LastIndex(parts[1], ":")
+		if last < 0 {
+			continue
+		}
+		addr := strings.Trim(parts[1][:last], "[]")
+		port, err := strconv.ParseUint(parts[1][last+1:], 10, 16)
+		if err != nil {
 			continue
 		}
 		conds := []map[string]any{
-			{"protocol": parts[0]},
-			{"remote_addr": parts[1]},
-			{"remote_port": parts[2]},
+			{"operation": literal(operation)},
+			{"protocol": literal(parts[0])},
+			{"remote_addr": literal(addr)},
+			{"remote_port": int(port)},
 		}
 		rules = append(rules, policymerge.RuleYAML{
 			Name:  fmt.Sprintf("allow-connect-%s", sanitizeName(key)),
@@ -132,17 +152,23 @@ func synthesizeBindRules(binds map[string]int) []policymerge.RuleYAML {
 	keys := sortedKeys(binds)
 	rules := make([]policymerge.RuleYAML, 0, len(keys))
 	for _, key := range keys {
-		parts := strings.SplitN(key, ":", 2)
+		operation, endpoint := splitOperation(key, "connect") // historical bind evaluator operation
+		parts := strings.SplitN(endpoint, ":", 2)
 		if len(parts) != 2 {
 			continue
 		}
+		port, err := strconv.ParseUint(parts[1], 10, 16)
+		if err != nil {
+			continue
+		}
 		conds := []map[string]any{
-			{"protocol": parts[0]},
-			{"local_port": parts[1]},
+			{"operation": literal(operation)},
+			{"protocol": literal(parts[0])},
+			{"local_port": int(port)},
 		}
 		rules = append(rules, policymerge.RuleYAML{
 			Name:  fmt.Sprintf("allow-bind-%s", sanitizeName(key)),
-			Event: "bind",
+			Event: "network",
 			Conditions: policymerge.ConditionsYAML{
 				All: conds,
 			},
@@ -157,17 +183,23 @@ func synthesizeListenRules(listens map[string]int) []policymerge.RuleYAML {
 	keys := sortedKeys(listens)
 	rules := make([]policymerge.RuleYAML, 0, len(keys))
 	for _, key := range keys {
-		parts := strings.SplitN(key, ":", 2)
+		operation, endpoint := splitOperation(key, "connect") // historical listen evaluator operation
+		parts := strings.SplitN(endpoint, ":", 2)
 		if len(parts) != 2 {
 			continue
 		}
+		port, err := strconv.ParseUint(parts[1], 10, 16)
+		if err != nil {
+			continue
+		}
 		conds := []map[string]any{
-			{"protocol": parts[0]},
-			{"local_port": parts[1]},
+			{"operation": literal(operation)},
+			{"protocol": literal(parts[0])},
+			{"local_port": int(port)},
 		}
 		rules = append(rules, policymerge.RuleYAML{
 			Name:  fmt.Sprintf("allow-listen-%s", sanitizeName(key)),
-			Event: "listen",
+			Event: "network",
 			Conditions: policymerge.ConditionsYAML{
 				All: conds,
 			},
@@ -178,38 +210,18 @@ func synthesizeListenRules(listens map[string]int) []policymerge.RuleYAML {
 	return rules
 }
 
-func synthesizeMountRules(mounts map[string]int) []policymerge.RuleYAML {
-	keys := sortedKeys(mounts)
-	rules := make([]policymerge.RuleYAML, 0, len(keys))
-	for _, key := range keys {
-		rules = append(rules, policymerge.RuleYAML{
-			Name:  fmt.Sprintf("allow-mount-%s", sanitizeName(key)),
-			Event: "mount",
-			Conditions: policymerge.ConditionsYAML{
-				All: []map[string]any{{"mount_type": key}},
-			},
-			Action: "allow",
-			Reason: fmt.Sprintf("observed %d times during learning", mounts[key]),
-		})
+func splitOperation(key, fallback string) (string, string) {
+	if op, endpoint, ok := strings.Cut(key, "|"); ok {
+		return op, endpoint
 	}
-	return rules
+	return fallback, key
 }
 
-func synthesizePtraceRules(ptrace map[string]int) []policymerge.RuleYAML {
-	keys := sortedKeys(ptrace)
-	rules := make([]policymerge.RuleYAML, 0, len(keys))
-	for _, key := range keys {
-		rules = append(rules, policymerge.RuleYAML{
-			Name:  fmt.Sprintf("allow-ptrace-%s", sanitizeName(key)),
-			Event: "ptrace",
-			Conditions: policymerge.ConditionsYAML{
-				All: []map[string]any{{"ptrace_target_comm": key}},
-			},
-			Action: "allow",
-			Reason: fmt.Sprintf("observed %d times during learning", ptrace[key]),
-		})
+func literal(value string) string {
+	if strings.HasPrefix(value, "$") {
+		return "$" + value
 	}
-	return rules
+	return value
 }
 
 func sortedKeys(m map[string]int) []string {

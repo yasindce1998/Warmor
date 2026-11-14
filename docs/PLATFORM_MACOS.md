@@ -63,6 +63,44 @@ System Settings; the daemon logs warnings if either is missing. Events are
 evaluated by the same WASM policies as on Linux, but every decision is
 effectively ALLOW (see the status note above).
 
+### Private recording paths and migration
+
+Recording intentionally rejects **all symlink parent components**, including
+macOS's standard `/var` → `/private/var` and `/tmp` → `/private/tmp` aliases.
+Use an explicit physical path such as `/private/var/log/warmor/events.ndjson`,
+not `/var/log/warmor/events.ndjson`. File recordings require an existing trusted
+parent; do not write directly into the shared `/private/tmp` directory.
+
+For a root-owned recording (after building/configuring the daemon as above):
+
+```bash
+sudo install -d -o root -g wheel -m 0700 /private/var/log/warmor
+sudo ./warmor-daemon --policy policy.wasm \
+  --event-sink file:/private/var/log/warmor/events.ndjson
+# Read the same private log with an appropriately authorized account:
+sudo ./warmor-learn --events /private/var/log/warmor/events.ndjson -o learned.yaml
+```
+
+**Upgrade existing configuration:** replace the known system-alias prefix in
+`--event-sink file:<path>` or an embedded `simulator.NewEventStore` directory with
+its physical spelling. `/var/...` and `/private/var/...` normally refer to the
+same existing files, so this prefix change alone does not require moving logs.
+Inspect ownership, permissions and remaining components first; do not blindly
+resolve arbitrary symlinks or relax directory permissions to bypass a refusal.
+A missing directory or unsafe owner/mode still needs correction separately.
+
+The daemon reports the rejected component and an actionable hint, for example:
+
+```text
+open event log: open recording parent "/var": configure a physical directory path without symlink components; recording does not follow symlink parents (macOS: use /private/var instead of /var, or /private/tmp instead of /tmp): not a directory
+```
+
+The recorder does not automatically canonicalize CLI paths or `$TMPDIR`.
+Only test-owned temporary fixture roots are resolved for native tests. The
+descriptor-relative no-follow checks, 0600 files, private store directories,
+rotation protections and default export redaction remain unchanged. See
+[policy tooling and recording contracts](POLICY_TOOL_CONTRACTS.md).
+
 ## ESF Event Types
 
 **AUTH (could block; always answered ALLOW on `main`):**

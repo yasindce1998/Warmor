@@ -2,6 +2,12 @@
 
 **Status: opt-in report-only foundations implemented; not a shipped rollout gate.**
 
+**Signed-deployment compatibility:** schema-1 telemetry is deliberately disabled
+for signed assignment clients/enforcers and for servers configured as signed
+deployment relays (or retaining signed deployment bundles). Reports remain
+`pending` with `signed-deployment-telemetry-unsupported`; no legacy cohort is
+inferred from a signed policy ID, artifact hash, deployment sequence or envelope.
+
 ## Implemented foundations (schema 1)
 
 `internal/telemetry` now supplies a bounded one-active-revision collector and
@@ -229,6 +235,68 @@ Repeated race validation exposed scheduler-sensitive telemetry counting tests
 using the production 50 ms evaluation deadline; those counting tests now use a
 bounded test-only 5 s deadline. Production deadlines and deterministic
 evaluation-failure quality assertions remain unchanged.
+
+### Signed assignment / manifest main refresh
+
+The merge of main `98d2b90` retains PR #49 signed deployment polling, monotonic
+deployment sequences, envelope acknowledgements, failed-update/withdrawal error
+reporting, verified durable activation, and PR #46 selection-manifest behavior.
+Schema 1 does **not** authenticate a signed deployment's telemetry authorization,
+cohort, renewal or rollback history. Signed telemetry is unsupported, not healthy
+by default, and an unsigned `PolicyAssignment.telemetry` is never sufficient to
+activate a signed assignment:
+
+- `SignedAssignments` clients seal/disconnect any supplied legacy collector,
+  reject `AuthorizeTelemetry` locally, keep polling `/api/v1/deployment` without
+  legacy lease headers, and send sequence/envelope acknowledgements without
+  telemetry. Legacy clients reject assignments carrying signed fields rather
+  than route them through unsigned activation. Signed verification and durable
+  callbacks remain mandatory; no fallback route is added.
+- Signed enforcer startup seals/disconnects legacy collection. Generic reload
+  and `ActivatePolicyTelemetry` cannot bypass signed mode; `ActivateAssignment`
+  retains actual-artifact checks and the same drain/kernel/durable-commit/swap
+  boundary, sealing rather than constructing a legacy telemetry activation.
+- Signed relay servers issue no telemetry sessions/assignments or admitted
+  intervals, even when a signed policy exactly matches a legacy rollout ID/hash.
+  Retained signed bundles keep this restriction if relay trust is removed.
+  Admin reports return zero evidence, pending, report-only, with the explicit
+  unsupported reason. Admin/insecure identities do not gain source authority.
+- A signed acknowledgement invalidates any previous legacy source segment,
+  even for an identical artifact. Failure to persist that invalidation still
+  poisons telemetry reports after the ordinary acknowledgement commits. Signed
+  sequence/envelope fields never satisfy legacy ingestion eligibility. Existing
+  epoch/session fences, atomic deduplication, quality checks, reporting-gap
+  clearing and persistence poison remain unchanged for legacy telemetry.
+
+Regressions cover signed same-artifact renewal, conditional polls, approved
+rollback, failed activation and retry, missing/withdrawn deployment, durable
+sequence/envelope acknowledgements, cross-agent submission, explicit unsupported
+reports, signed/legacy domain collisions, trust removal and invalidation poison.
+Existing daemon tests still exercise real verified signed activation/restart and
+rollback. This is **not signed collector-to-report support**, complete sensor-loss
+coverage, or permission for automatic actions. A future integration needs a
+separately reviewed signed telemetry/cohort authorization contract.
+
+Validation caveat for this exact main snapshot: `98d2b90` itself pins
+`manifest.SupportedCompilerVersion` to `"6"` while `compiler.Version` is `"7"`.
+`TestCanonicalContentAndCopies` fails identically from a clean archive of that
+main commit, before telemetry changes. Full-suite validation must not be reported
+green until the manifest/compiler owner reviews that compatibility boundary;
+this merge does not silently advance or remove its fail-closed pin. A slow-disk
+telemetry invalidation test now uses real receipt time plus explicit warm-up
+offsets instead of a fixed one-second future anchor; production freshness, gap,
+and invalidation checks are unchanged.
+
+Handoff validation on Go 1.26.11 (`-p 2`): affected policyserver/enforcer/daemon
+package tests pass; signed/telemetry race checks pass, including five repeated
+signed fences and invalidation-poison checks; full vet/lint and Windows/Darwin
+cross-compilation pass. Full-suite attempts were not green: besides the confirmed
+main manifest pin mismatch, concurrent resource pressure triggered unrelated
+evaluation/CPU-limit/publication timing failures. Redundant full-suite drivers
+were stopped rather than repeatedly testing that known baseline failure. Rerun
+one full race suite after the separately owned manifest/compiler compatibility
+fix is merged and resources are available. No native-platform runtime or full
+sensor-loss support is claimed by these checks.
 
 ## Original integration proposal and acceptance checklist
 

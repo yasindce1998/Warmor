@@ -13,6 +13,9 @@ import (
 // The caller passes the server-issued assignment and already verified artifact
 // identity; this method does not relax artifact/signature verification.
 func (e *Enforcer) ActivatePolicyTelemetry(path string, commit func() error, assignment telemetry.Assignment, revision telemetry.Revision) error {
+	if e.signedAssignment {
+		return fmt.Errorf("signed assignment mode refuses legacy telemetry activation")
+	}
 	if e.telemetry == nil {
 		return fmt.Errorf("enforcer telemetry is not configured")
 	}
@@ -20,11 +23,11 @@ func (e *Enforcer) ActivatePolicyTelemetry(path string, commit func() error, ass
 	if err != nil {
 		return err
 	}
-	return e.activatePolicy(path, commit, &snapshot)
+	return e.activatePolicy(path, nil, commit, &snapshot)
 }
 
 func (e *Enforcer) recordTelemetryDecision(result *api.ActionResult, evaluationError error) {
-	if e.telemetry == nil {
+	if e.telemetry == nil || e.signedAssignment {
 		return
 	}
 	excluded := result == nil || e.auditMode || e.learningMode

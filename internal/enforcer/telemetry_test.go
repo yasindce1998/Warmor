@@ -141,3 +141,21 @@ func TestTelemetryEvaluationFailuresAreQualityNotPolicyDenials(t *testing.T) {
 		t.Fatal("telemetry changed fail-closed enforcement or persisted error-derived decisions")
 	}
 }
+
+func TestTelemetryActivationCannotBypassSignedAssignment(t *testing.T) {
+	e, _ := newTestEnforcer(t, testEnforcerOpts{})
+	a, r := attachTestTelemetry(t, e)
+	e.signedAssignment = true
+	old := e.evaluator
+	committed := false
+	if err := e.ActivatePolicyTelemetry("missing.wasm", func() error { committed = true; return nil }, a, r); err == nil {
+		t.Fatal("legacy telemetry activation bypassed signed authorization")
+	}
+	if committed || e.evaluator != old {
+		t.Fatal("refused telemetry activation changed signed state")
+	}
+	e.recordTelemetryDecision(&api.ActionResult{Action: api.ActionAllow}, nil)
+	if s := e.telemetry.Snapshot(); s.Total != 0 || s.Errors != 0 || s.Excluded != 0 {
+		t.Fatalf("signed decisions entered legacy telemetry: %+v", s)
+	}
+}
