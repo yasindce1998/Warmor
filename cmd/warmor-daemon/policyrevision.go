@@ -103,6 +103,9 @@ func stagePolicyRevision(path string, a *policyserver.PolicyAssignment, data []b
 }
 
 func (s policyRevisionStager) stage(path string, a *policyserver.PolicyAssignment, data []byte) (*stagedPolicyRevision, error) {
+	if err := checkPolicyRevisionSupport(); err != nil {
+		return nil, err
+	}
 	if wasm.IsYAMLPolicy(path) {
 		return nil, errors.New("server-managed policy path must not use .yaml/.yml: downloaded WASM must remain loadable on restart")
 	}

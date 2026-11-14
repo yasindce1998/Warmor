@@ -172,3 +172,38 @@ Follow-up validation (`GOMAXPROCS=2`, `-p 2`): full `go test ./...`, full
 `-asserts` reports only the existing cleanup/print exclusions, with no unchecked
 assertions or new persistence-error findings. Changed files pass gofmt and diff
 whitespace checks. Follow-up logs are `/tmp/opencode/fleet-blockers-*.log`.
+
+## Native Windows CI correction
+
+Windows run `43607531593`, job `132485312235`, failed on directory fsync
+(`Access is denied`) in the POSIX publication tests and a POSIX mode-bit
+assertion against the server snapshot. It did not establish a Windows atomic
+module/signature publication backend. The correction does not ignore sync errors
+or substitute two unrelated file replacements:
+
+- Windows `--server` fails explicitly before fallback seeding, monitor setup or
+  client registration. Direct publication/staging also fails before any mutation,
+  even if a test stager supplies a successful sync hook.
+- POSIX durable-publication success/recovery tests are build-constrained to that
+  backend. Windows instead runs explicit tests for repeated failure, unchanged
+  signed local startup files, no revision-directory creation, no activation
+  callback and no active ID/version/hash acknowledgement in error heartbeats.
+  CLI, signature verification, local policy load, watcher, generic client and
+  server recovery tests remain enabled; this is not a blanket package skip.
+- Server snapshot storage remains supported by its separate Windows write-through
+  replacement. The restart/cohort/signature test now uses a platform permission
+  assertion: POSIX keeps the mode-0600 check, Windows sets a private inheritable
+  DACL fixture and checks each inherited ACE through repeated snapshot replacement.
+  Production Windows deployments must provide that private parent DACL.
+
+Validation: Linux full tests and full race tests passed; Windows daemon/server
+test binaries cross-compile, Windows vet passes, and the Darwin daemon test binary
+cross-compiles. Windows publication rejection tests also pass repeatedly under
+race using a Linux source overlay selecting only the Windows rejection backend;
+this is **not native Windows execution** or validation of Windows DACL behavior.
+Windows native rerun is still required. Current standalone staticcheck passes for
+the changed Linux packages; its Windows analysis reports only the pre-existing
+`startPolicyWatcher` helper used by Unix tests. Errcheck with assertion checking
+reports only existing cleanup/print exclusions. No CI threshold, durability
+barrier, permission boundary or supported-backend recovery assertion was weakened.
+See [PLATFORM_WINDOWS.md](../PLATFORM_WINDOWS.md#policy-distribution-and-durable-activation).

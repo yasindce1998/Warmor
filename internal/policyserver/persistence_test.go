@@ -33,6 +33,7 @@ func openTestStore(t *testing.T, path string, opts StoreOptions) *Store {
 
 func TestDurableStoreRestartPreservesRevisionsCohortsAndAudit(t *testing.T) {
 	dir := t.TempDir()
+	preparePrivateSnapshotDir(t, dir)
 	path := filepath.Join(dir, "state.json")
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -92,9 +93,7 @@ func TestDurableStoreRestartPreservesRevisionsCohortsAndAudit(t *testing.T) {
 			t.Fatalf("revision %d not restored", n)
 		}
 	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm()&0077 != 0 {
-		t.Fatalf("snapshot permissions not private: %v %v", info, err)
-	}
+	assertPrivateSnapshot(t, path)
 }
 
 func TestDurableStoreRestoreBackup(t *testing.T) {

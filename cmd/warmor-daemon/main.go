@@ -96,6 +96,13 @@ func main() {
 // runDaemon runs the enforcer until a shutdown signal arrives or stop is
 // closed (the Windows service manager's stop request).
 func runDaemon(stop <-chan struct{}) {
+	// Reject an unsupported fleet publication mode before loading monitors,
+	// seeding a fallback, creating aliases, or starting any network client.
+	if *serverURL != "" {
+		if err := checkPolicyRevisionSupport(); err != nil {
+			log.Fatal(err)
+		}
+	}
 	// Print banner
 	printBanner()
 

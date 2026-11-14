@@ -22,8 +22,8 @@ applies in that mode.
   rollouts, container bindings/owners, and bounded management history. Uploaded
   source files are not needed afterward. Opening with `--verify-key` re-verifies
   every retained revision.
-- Every successful mutation writes a mode-0600 temporary file, syncs it, replaces
-  the snapshot atomically, and syncs the directory. Windows uses write-through
+- Every successful mutation writes a temporary file (mode 0600 on POSIX), syncs
+  it, replaces the snapshot atomically, and syncs the directory. Windows uses write-through
   replacement. Promotion/abort and rollout state changes share one transaction.
   Failures before replacement restore in-memory state. A post-replacement sync
   failure has an indeterminate crash outcome: the request fails and subsequent
@@ -32,6 +32,10 @@ applies in that mode.
   parent directory private on a local filesystem with reliable rename, sync, and
   advisory-lock semantics. Never unlink/replace the lock file while a server is
   running. This backend is not replicated/high-availability storage.
+  On Windows, files inherit the parent directory's DACL; configure it to grant
+  access only to the service identity, SYSTEM and administrators. POSIX mode bits
+  are not a substitute for Windows ACLs. Native tests verify private DACL
+  inheritance through snapshot replacement rather than interpreting mode bits.
 - Corrupt/unsupported state fails startup, without resetting state. Checksums
   detect accidental corruption, not administrator modification or backup replay.
   Assignment authentication and anti-replay are separate protocol concerns. Drift
@@ -67,8 +71,8 @@ Stop the server and copy `state.json` to protected backup storage. Atomic
 replacement also allows a consistent read from a running server, but may omit
 mutations committed after the file was opened. Do not copy temporary/lock files
 as state. To restore, stop all writers, copy the backup to the state path with
-mode 0600, and restart. Restore deliberately restores that backup's active
-versions and rollout cohorts; it is not monotonic anti-replay. Corrupt state is
+mode 0600 on POSIX (a private DACL on Windows), and restart. Restore deliberately
+restores that backup's active versions and rollout cohorts; it is not monotonic anti-replay. Corrupt state is
 never automatically replaced by backup or empty state.
 
 ## Embedded API compatibility

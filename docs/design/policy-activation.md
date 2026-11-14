@@ -63,6 +63,13 @@ directory. Successfully published and crash-orphaned revisions are retained;
 automatic bounded garbage collection is not implemented. Symlink and directory
 fsync support are required. Unsupported filesystems/platforms fail activation
 explicitly rather than falling back to two unrelated file replacements.
+Windows daemon fleet publication is explicitly unsupported: `--server` fails
+before startup side effects, and publication calls fail before migration or
+activation. Native tests assert the old local signed pair remains loadable and
+the client reports failure without active ID/version/hash acknowledgement.
+Windows local signed-policy validation/reload and the server's independent
+write-through snapshot backend remain available; see
+[PLATFORM_WINDOWS.md](../PLATFORM_WINDOWS.md#policy-distribution-and-durable-activation).
 
 Fleet mode does not run a competing file watcher. A successful explicit SIGHUP
 reload invalidates the client's remembered identity so the next poll reconciles
