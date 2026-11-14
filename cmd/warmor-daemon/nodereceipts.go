@@ -22,6 +22,9 @@ var (
 )
 
 func newNodeReceiptClient(enf *enforcer.Enforcer) (*nodereceipt.Client, error) {
+	if err := validateNodeReceiptMode(); err != nil {
+		return nil, err
+	}
 	if *receiptURL == "" {
 		return nil, nil
 	}
@@ -37,6 +40,16 @@ func newNodeReceiptClient(enf *enforcer.Enforcer) (*nodereceipt.Client, error) {
 		return nil, fmt.Errorf("invalid receipt controller CA")
 	}
 	return nodereceipt.NewClient(nodereceipt.ClientConfig{URL: *receiptURL, TokenPath: *receiptToken, ManifestPath: *receiptManifest, TLS: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}, Active: enf.ActiveReceipt})
+}
+
+// Run before opening trust stores, TLS clients/listeners, or capture. Controller
+// ConfigMap intent and fleet assignment intent are separate protocols; neither
+// signed nor legacy fleet downloads are controller-generation evidence.
+func validateNodeReceiptMode() error {
+	if *receiptURL != "" && (*signedAssignments || *serverURL != "") {
+		return fmt.Errorf("controller node receipts cannot be combined with --server or --signed-assignments")
+	}
+	return nil
 }
 
 func runNodeReceipts(ctx context.Context, client *nodereceipt.Client) {

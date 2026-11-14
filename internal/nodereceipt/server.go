@@ -169,7 +169,7 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, "no eligible desired publication; previous evidence withdrawn", http.StatusServiceUnavailable)
 			return
 		}
-		if v.challenge.Manifest.ID() != m.ID() || receipt.Manifest.ID() != m.ID() || receipt.Active.ActivatedAt.IsZero() || receipt.Active.ActivatedAt.After(receipt.MeasuredAt) || receipt.Active.Digest != m.Digest || receipt.Active.ABI != m.ABI || receipt.Active.Posture != m.Posture {
+		if v.challenge.Manifest.ID() != m.ID() || receipt.Manifest.ID() != m.ID() || receipt.Active.ActivatedAt.IsZero() || receipt.Active.ActivatedAt.After(receipt.MeasuredAt) || receipt.Active.Digest != m.Digest || receipt.Active.ABI != m.ABI || receipt.Active.ArtifactCompiler != m.ArtifactCompiler || receipt.Active.DefaultAction != m.DefaultAction || receipt.Active.Posture != m.Posture {
 			http.Error(w, "receipt does not prove current registered activation", http.StatusConflict)
 			return
 		}

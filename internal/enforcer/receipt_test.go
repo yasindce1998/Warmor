@@ -7,12 +7,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/crypto"
 	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/internal/nodereceipt"
 	"github.com/yasindce1998/warmor/internal/nodereceipt/receipttest"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 )
 
@@ -24,12 +27,22 @@ func TestActualActivationReceiptHTTPS(t *testing.T) {
 	isolateCacheDir(t)
 	pm := &fakePolicyMap{}
 	stubPlatform(t, &activationBootPlatform{pm: pm}, nil)
-	data := wasmtest.ConstPolicyABI(0, 3)
+	data, err := policybuild.Append(wasmtest.VersionedConstPolicy(0, 3), policybuild.Metadata{Compiler: "test-compiler", DefaultAction: "allow"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(t.TempDir(), "policy.wasm")
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	e, err := New(context.Background(), path, &Options{AuditMode: true, MetricsPort: -1})
+	key, err := crypto.GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".sig", key.SignPolicyFile(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e, err := New(context.Background(), path, &Options{AuditMode: true, MetricsPort: -1, PolicyVerifyKey: key.Public})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +72,7 @@ func TestActualActivationReceiptHTTPS(t *testing.T) {
 		t.Fatal("active identity is not exact runtime bytes")
 	}
 	k := receipttest.NewKube(t)
-	m := nodereceipt.Manifest{Version: 1, PublicationEpoch: nodereceipt.Digest([]byte("publication-a")), Revision: "effective:actual", Digest: active.Digest, SnapshotDigest: nodereceipt.Digest([]byte("snapshot")), Compiler: "test-compiler", ABI: active.ABI, Posture: active.Posture, Sources: []nodereceipt.Source{{Namespace: "security", Name: "p", UID: "policy-uid", Generation: 1}}}
+	m := nodereceipt.Manifest{Version: 1, PublicationEpoch: nodereceipt.Digest([]byte("publication-a")), Revision: "effective:actual", Digest: active.Digest, SnapshotDigest: nodereceipt.Digest([]byte("snapshot")), Compiler: "controller/test", ArtifactCompiler: active.ArtifactCompiler, DefaultAction: active.DefaultAction, ABI: active.ABI, Posture: active.Posture, Sources: []nodereceipt.Source{{Namespace: "security", Name: "p", UID: "policy-uid", Generation: 1}}}
 	if active.ABI == 0 {
 		t.Fatal("fixture must declare an ABI for real receipt test")
 	}
@@ -91,8 +104,26 @@ func TestActualActivationReceiptHTTPS(t *testing.T) {
 	originalManifest := m
 	originalManifest.Sources = append([]nodereceipt.Source(nil), m.Sources...)
 	validPath := filepath.Join(t.TempDir(), "valid.wasm")
-	candidate := wasmtest.ConstPolicyABI(1, 3)
+	candidate, err := policybuild.Append(wasmtest.VersionedConstPolicy(1, 3), policybuild.Metadata{Compiler: "test-compiler-next", DefaultAction: "deny"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(validPath, candidate, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Detached artifact signatures are compatible with controller mode. They
+	// authenticate pool build declarations; a failed signature cannot advance
+	// the receipt identity. Fleet signed-intent mode is separately rejected.
+	if err := os.WriteFile(validPath+".sig", key.SignPolicyFile(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ActivatePolicy(validPath, nil); !errors.Is(err, crypto.ErrPolicySignatureInvalid) {
+		t.Fatalf("candidate signature bypassed: %v", err)
+	}
+	if current, err := e.ActiveReceipt(); err != nil || current != active {
+		t.Fatal("failed signature changed receipt identity", err)
+	}
+	if err := os.WriteFile(validPath+".sig", key.SignPolicyFile(candidate), 0600); err != nil {
 		t.Fatal(err)
 	}
 	// The real runtime moves A->B while desired publication remains A. The
@@ -150,6 +181,7 @@ func TestActualActivationReceiptHTTPS(t *testing.T) {
 	// Even a valid module must not advance the activation timestamp/digest
 	// before the durable publication callback succeeds.
 	m.Digest = nodereceipt.Digest(candidate)
+	m.ArtifactCompiler, m.DefaultAction = "test-compiler-next", "deny"
 	m.PublicationEpoch = nodereceipt.Digest([]byte("publication-b"))
 	m.Revision = "effective:next"
 	m.Sources[0].Generation++
@@ -174,7 +206,7 @@ func TestActualActivationReceiptHTTPS(t *testing.T) {
 		t.Fatal(err)
 	}
 	next, err := e.ActiveReceipt()
-	if err != nil || !next.ActivatedAt.After(active.ActivatedAt) || next.Digest != m.Digest {
+	if err != nil || !next.ActivatedAt.After(active.ActivatedAt) || next.Digest != m.Digest || next.ArtifactCompiler != m.ArtifactCompiler || next.DefaultAction != m.DefaultAction {
 		t.Fatalf("successful activation not recorded: %+v %v", next, err)
 	}
 	if err := c.Report(context.Background()); err != nil {
@@ -213,6 +245,14 @@ func TestActualActivationReceiptHTTPS(t *testing.T) {
 	}
 	if result, err := s.Aggregate(context.Background(), m); err != nil || !result.All {
 		t.Fatalf("fresh A activation missing: %+v %v", result, err)
+	}
+}
+
+func TestControllerReceiptRefusesSignedAssignmentEnforcer(t *testing.T) {
+	e, _ := newTestEnforcer(t, testEnforcerOpts{})
+	e.signedAssignment = true
+	if _, err := e.ActiveReceipt(); err == nil || !strings.Contains(err.Error(), "unsupported in signed fleet") {
+		t.Fatalf("signed fleet runtime exposed controller receipt: %v", err)
 	}
 }
 

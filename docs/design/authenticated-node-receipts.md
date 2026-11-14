@@ -44,6 +44,15 @@ bearer credentials: theft across nodes defeats isolation for the stolen identity
 bytes and the accepted-source journal. It binds source namespace/name/UID and
 **accepted generation**, snapshot SHA-256, desired revision, artifact SHA-256,
 compiler identity, generated ABI and expected actual audit/learning/LSM posture.
+`compiler` is the controller composition/cache profile (currently based on
+compiler 7), not an assertion that the runtime compiled the module. The separate
+`artifactCompiler` and `defaultAction` match the module's `warmor.build.v1`
+declarations, emitted by the current compiler (`warmor-yaml/7`). Receipt mode
+requires those declarations and compares them with the **same captured pool
+identity used by signed assignment validation**, alongside digest and ABI. Missing
+or contradictory artifact declarations cannot qualify. These are author-approved
+build claims, authenticated only if an artifact signature was verified; they are
+not independent proof of compiler provenance or arbitrary WASM semantics.
 Even byte-identical output for a new source generation invalidates old receipts.
 It also includes a **nonreusable random `publicationEpoch`**, persisted atomically
 with each changed publication. No-op reconciliation preserves the committed
@@ -57,8 +66,9 @@ writers. Legacy manifests without an epoch are ineligible and must be republishe
 The node must have the matching mounted manifest, not merely copy a challenge's
 revision into a generic heartbeat.
 
-The WASM runtime hashes the actual accepted bytes. The enforcer exposes that
-identity and instantiated ABI only from its committed evaluator, after kernel
+The WASM runtime hashes the actual accepted bytes and the pool captures that
+digest, instantiated ABI and build declarations with its compiled module. The
+enforcer exposes that canonical pool identity only from its committed evaluator, after kernel
 preparation and publication callback succeed. Startup must also have a running
 event loop and local platform readiness. Failed load/commit retains the previous
 identity; failed kernel rollback invalidates acknowledgement until recovery.
@@ -164,6 +174,20 @@ Direct binary deployments can use `warmor-controller --node-receipts` with the
 --receipt-manifest=…`. No identity is taken from `--agent-id` or event labels.
 Bare defaults/no CR sources and legacy ABI-0 artifacts do not qualify for desired-
 generation acknowledgement. No fleet policy-server download claim is reused.
+
+Controller receipts and fleet assignment intent are **separate, incompatible
+deployment modes** in this integration. Combining `--receipt-controller` with
+either `--server` or `--signed-assignments` is rejected at daemon entry, before
+trust stores, TLS clients/listeners, policy loading or platform capture. Library
+`ActiveReceipt` also refuses signed-assignment enforcers. The signed fleet's
+bootstrap, clock/trust rechecks, durable state, compatibility validation and
+generic-reload refusal are unchanged; no fleet assignment claims become controller
+generation evidence. Detached `--verify-key` **artifact verification**, without
+fleet mode, remains compatible and is tested through actual startup/activation
+and HTTPS receipts. The chart does not provision detached policy signatures;
+operators using artifact verification must provision a matching signed module
+pair. The mounted controller ConfigMap remains the trusted desired-publication
+channel, not a signed fleet-intent envelope.
 
 ## Evidence and limitations
 

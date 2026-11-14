@@ -100,8 +100,13 @@ func TestReplay_DecisionBreakdown(t *testing.T) {
 	if a.EventType != "file" || a.Comm != "cat" || a.Target != "/etc/hosts" || a.Count != 2 {
 		t.Errorf("unexpected allow detail: %+v", a)
 	}
-	if res.Duration <= 0 {
-		t.Errorf("Duration = %v, want > 0", res.Duration)
+	if res.EvaluationErrors != 0 {
+		t.Errorf("EvaluationErrors = %d, want 0", res.EvaluationErrors)
+	}
+	// A fast replay can complete within one clock tick on hosted runners.
+	// Elapsed time must be nonnegative, but need not be strictly positive.
+	if res.Duration < 0 {
+		t.Errorf("Duration = %v, want >= 0", res.Duration)
 	}
 }
 
@@ -184,7 +189,7 @@ func TestSecurityEventToAPIEvent_Types(t *testing.T) {
 
 	t.Run("unknown", func(t *testing.T) {
 		se := base
-		se.EventType = "ptrace"
+		se.EventType = "unknown"
 		e := securityEventToAPIEvent(&se)
 		if e.Process != nil || e.File != nil || e.Network != nil {
 			t.Error("expected no typed payload for unknown event type")
@@ -396,7 +401,7 @@ func TestContainerStartRoundTrip(t *testing.T) {
 	}
 	// Unknown stays unknown and is not written at all.
 	data, _ = json.Marshal(streaming.FromAPIEvent(&api.Event{Comm: "x"}, nil))
-	if bytes.Contains(data, []byte("container_start")) {
+	if bytes.Contains(data, []byte(`"container_start":`)) {
 		t.Errorf("zero ContainerStart serialized: %s", data)
 	}
 }

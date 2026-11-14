@@ -127,7 +127,7 @@ func (c *Client) Report(ctx context.Context) (err error) {
 		return err
 	}
 	m := c.challenge.Manifest
-	if mounted.ID() != m.ID() || active.Digest != m.Digest || active.ABI != m.ABI || active.Posture != m.Posture {
+	if mounted.ID() != m.ID() || active.Digest != m.Digest || active.ABI != m.ABI || active.ArtifactCompiler != m.ArtifactCompiler || active.DefaultAction != m.DefaultAction || active.Posture != m.Posture {
 		return fmt.Errorf("mounted desired manifest is not the active evaluator identity")
 	}
 	c.sequence++

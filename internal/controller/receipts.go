@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/nodereceipt"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 )
 
 // EnableReceipts must be explicitly called before Run or serving any handlers.
@@ -50,6 +52,10 @@ func (c *Controller) publishedManifest(ctx context.Context) (nodereceipt.Manifes
 	}
 	if err := m.Validate(); err != nil {
 		return m, err
+	}
+	metadata, err := policybuild.Read(cm.BinaryData[PolicyDataKey])
+	if err != nil || metadata == nil || metadata.Compiler != compiler.Identity || metadata.Compiler != m.ArtifactCompiler || metadata.DefaultAction != m.DefaultAction {
+		return m, fmt.Errorf("artifact build metadata mismatch")
 	}
 	if m.Posture != c.receiptPosture || m.Compiler != compilerIdentity || m.Compiler != cm.Metadata.Annotations[AnnotationCompiler] || m.Revision != cm.Metadata.Annotations[AnnotationPolicySHA] || m.Digest != digest(cm.BinaryData[PolicyDataKey]) || m.Digest != cm.Metadata.Annotations[AnnotationArtifactSHA] || m.SnapshotDigest != digest([]byte(cm.Data[SnapshotDataKey])) || m.SnapshotDigest != cm.Metadata.Annotations[AnnotationSnapshotSHA] {
 		return m, fmt.Errorf("publication identity mismatch")

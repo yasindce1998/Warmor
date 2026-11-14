@@ -178,6 +178,19 @@ The service:
 
 Event-log lines are written at the zerolog severity (error, warning or info).
 
+## Private event recordings
+
+The file sink and simulator event store retain sensitive replay inputs, including
+argv. Use a physical path on a fixed local **NTFS** volume, owned by the service
+identity (LocalSystem for the installed service). New recordings use protected
+owner-only DACLs; existing singly-linked recordings and private store directories
+are tightened by handle only when owned by the current token user. No ownership
+takeover, PowerShell commands, or privilege changes are performed. Junctions,
+symlinks and other reparse points, unsafe/writable ancestors, hardlinks, alternate
+streams, device/UNC paths and unsupported filesystems fail closed. Rotation never
+overwrites an existing archive. See [recording contracts](POLICY_TOOL_CONTRACTS.md)
+for the security boundary and upgrade/disclosure caveats.
+
 ## Limitations
 
 - **Files are detect-then-terminate only.** eBPF-for-Windows has no file

@@ -11,16 +11,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/kube"
 	"github.com/yasindce1998/warmor/internal/nodereceipt"
 	"github.com/yasindce1998/warmor/internal/nodereceipt/receipttest"
+	"github.com/yasindce1998/warmor/internal/policybuild"
+	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 )
 
 // Real HTTPS receipt client/endpoint and real Kubernetes REST calls against
 // owned fakes; compilation is stubbed, so this is not kernel enforcement proof.
 func TestAuthenticatedReceiptStatusExactAcceptedGeneration(t *testing.T) {
-	_, restore := stubCompile(t)
-	defer restore()
+	stubReceiptCompile(t)
 	api := newFakeAPI()
 	cr := testCR("alpha", nil)
 	api.addCR(cr)
@@ -86,7 +88,7 @@ func TestAuthenticatedReceiptStatusExactAcceptedGeneration(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte("bound-token-a"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	active := nodereceipt.Activation{Digest: m.Digest, ABI: m.ABI, Posture: posture, ActivatedAt: time.Now().Add(-time.Second)}
+	active := nodereceipt.Activation{Digest: m.Digest, ABI: m.ABI, ArtifactCompiler: m.ArtifactCompiler, DefaultAction: m.DefaultAction, Posture: posture, ActivatedAt: time.Now().Add(-time.Second)}
 	var activeErr error
 	client, err := nodereceipt.NewClient(nodereceipt.ClientConfig{URL: server.URL, TLS: receipttest.Trust(server), TokenPath: tokenPath, ManifestPath: manifestPath, Active: func() (nodereceipt.Activation, error) { return active, activeErr }})
 	if err != nil {
@@ -179,5 +181,16 @@ func TestAuthenticatedReceiptStatusExactAcceptedGeneration(t *testing.T) {
 	ctl.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/node-receipts", nil))
 	if w.Code != 404 {
 		t.Fatal("receipt endpoint exposed on metrics listener")
+	}
+}
+
+// Keep receipt publications real, compiler-7 metadata-bearing WASM while
+// avoiding cargo. The unrelated publication tests retain their byte stub.
+func stubReceiptCompile(t *testing.T) {
+	t.Helper()
+	original := compilePolicy
+	t.Cleanup(func() { compilePolicy = original })
+	compilePolicy = func(_ context.Context, p *compiler.Policy, _ []byte, _ string) ([]byte, error) {
+		return policybuild.Append(wasmtest.VersionedConstPolicy(0, uint32(compiler.PolicyABIVersion(p))), policybuild.Metadata{Compiler: compiler.Identity, DefaultAction: p.DefaultAction})
 	}
 }

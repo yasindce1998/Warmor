@@ -20,7 +20,7 @@ import (
 )
 
 func manifest() nodereceipt.Manifest {
-	return nodereceipt.Manifest{Version: 1, PublicationEpoch: nodereceipt.Digest([]byte("publication-a")), Revision: "effective:test", Digest: nodereceipt.Digest([]byte("active")), SnapshotDigest: nodereceipt.Digest([]byte("snapshot")), Compiler: "compiler/test", ABI: 3, Posture: nodereceipt.Posture{Audit: true}, Sources: []nodereceipt.Source{{Namespace: "security", Name: "policy", UID: "policy-uid", Generation: 1}}}
+	return nodereceipt.Manifest{Version: 1, PublicationEpoch: nodereceipt.Digest([]byte("publication-a")), Revision: "effective:test", Digest: nodereceipt.Digest([]byte("active")), SnapshotDigest: nodereceipt.Digest([]byte("snapshot")), Compiler: "controller/test", ArtifactCompiler: "warmor-yaml/7", DefaultAction: "allow", ABI: 3, Posture: nodereceipt.Posture{Audit: true}, Sources: []nodereceipt.Source{{Namespace: "security", Name: "policy", UID: "policy-uid", Generation: 1}}}
 }
 
 type fixture struct {
@@ -74,7 +74,7 @@ func (f *fixture) register(t *testing.T, epoch string) nodereceipt.Receipt {
 		t.Fatalf("register HTTP %d", code)
 	}
 	now := time.Now().UTC()
-	return nodereceipt.Receipt{Challenge: challenge.Nonce, BootEpoch: epoch, Sequence: 1, MeasuredAt: now, Manifest: challenge.Manifest, Active: nodereceipt.Activation{Digest: f.m.Digest, ABI: f.m.ABI, Posture: f.m.Posture, ActivatedAt: now.Add(-time.Second)}}
+	return nodereceipt.Receipt{Challenge: challenge.Nonce, BootEpoch: epoch, Sequence: 1, MeasuredAt: now, Manifest: challenge.Manifest, Active: nodereceipt.Activation{Digest: f.m.Digest, ABI: f.m.ABI, ArtifactCompiler: f.m.ArtifactCompiler, DefaultAction: f.m.DefaultAction, Posture: f.m.Posture, ActivatedAt: now.Add(-time.Second)}}
 }
 
 func (f *fixture) all(t *testing.T, want bool) {
@@ -261,7 +261,7 @@ func TestClientHTTPSManifestActiveBindingAndTokenRotation(t *testing.T) {
 	write(token, []byte("bound-token-a"))
 	b, _ := json.Marshal(f.m)
 	write(path, b)
-	active := nodereceipt.Activation{Digest: f.m.Digest, ABI: f.m.ABI, Posture: f.m.Posture, ActivatedAt: time.Now().Add(-time.Second)}
+	active := nodereceipt.Activation{Digest: f.m.Digest, ABI: f.m.ABI, ArtifactCompiler: f.m.ArtifactCompiler, DefaultAction: f.m.DefaultAction, Posture: f.m.Posture, ActivatedAt: time.Now().Add(-time.Second)}
 	cfg := nodereceipt.ClientConfig{URL: f.http.URL, TokenPath: token, ManifestPath: path, TLS: receipttest.Trust(f.http), Active: func() (nodereceipt.Activation, error) { return active, nil }}
 	c, err := nodereceipt.NewClient(cfg)
 	if err != nil {

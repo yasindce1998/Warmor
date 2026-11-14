@@ -23,6 +23,8 @@ func TestCurrentContradictionWithdrawsOnlyAfterSessionSequenceAndFreshness(t *te
 	}{
 		{"different-digest", func(r *nodereceipt.Receipt) { r.Active.Digest = nodereceipt.Digest([]byte("other")) }},
 		{"different-abi", func(r *nodereceipt.Receipt) { r.Active.ABI++ }},
+		{"different-artifact-compiler", func(r *nodereceipt.Receipt) { r.Active.ArtifactCompiler = "other" }},
+		{"different-default-action", func(r *nodereceipt.Receipt) { r.Active.DefaultAction = "deny" }},
 		{"different-posture", func(r *nodereceipt.Receipt) { r.Active.Posture.Audit = !r.Active.Posture.Audit }},
 		{"unacknowledged", func(r *nodereceipt.Receipt) { r.Active = nodereceipt.Activation{} }},
 		{"different-manifest", func(r *nodereceipt.Receipt) { r.Manifest.PublicationEpoch = nodereceipt.Digest([]byte("other")) }},
@@ -177,7 +179,7 @@ func TestPublicationEpochPreventsReceiptResurrectionWithoutIntermediateAggregati
 }
 
 func TestClientWithdrawsOnLocalActivationOrManifestFailures(t *testing.T) {
-	for _, failure := range []string{"active-error", "active-drift", "manifest-missing", "manifest-invalid", "manifest-mismatch"} {
+	for _, failure := range []string{"active-error", "active-drift", "active-compiler", "active-default-action", "manifest-missing", "manifest-invalid", "manifest-mismatch"} {
 		t.Run(failure, func(t *testing.T) {
 			f := setup(t)
 			dir := t.TempDir()
@@ -191,7 +193,7 @@ func TestClientWithdrawsOnLocalActivationOrManifestFailures(t *testing.T) {
 			b, _ := json.Marshal(f.m)
 			write(path, b)
 			write(token, []byte("bound-token-a"))
-			active := nodereceipt.Activation{Digest: f.m.Digest, ABI: f.m.ABI, Posture: f.m.Posture, ActivatedAt: time.Now().Add(-time.Second)}
+			active := nodereceipt.Activation{Digest: f.m.Digest, ABI: f.m.ABI, ArtifactCompiler: f.m.ArtifactCompiler, DefaultAction: f.m.DefaultAction, Posture: f.m.Posture, ActivatedAt: time.Now().Add(-time.Second)}
 			var activeErr error
 			c, err := nodereceipt.NewClient(nodereceipt.ClientConfig{URL: f.http.URL, TLS: receipttest.Trust(f.http), TokenPath: token, ManifestPath: path, Active: func() (nodereceipt.Activation, error) { return active, activeErr }})
 			if err != nil {
@@ -206,6 +208,10 @@ func TestClientWithdrawsOnLocalActivationOrManifestFailures(t *testing.T) {
 				activeErr = errors.New("local activation not acknowledged")
 			case "active-drift":
 				active.Digest = nodereceipt.Digest([]byte("active-b"))
+			case "active-compiler":
+				active.ArtifactCompiler = "other-build"
+			case "active-default-action":
+				active.DefaultAction = "deny"
 			case "manifest-missing":
 				if err := os.Remove(path); err != nil {
 					t.Fatal(err)
@@ -224,6 +230,7 @@ func TestClientWithdrawsOnLocalActivationOrManifestFailures(t *testing.T) {
 			f.all(t, false)
 			activeErr = nil
 			active.Digest = f.m.Digest
+			active.ArtifactCompiler, active.DefaultAction = f.m.ArtifactCompiler, f.m.DefaultAction
 			write(path, b)
 			if err := c.Report(context.Background()); err != nil {
 				t.Fatal(err)

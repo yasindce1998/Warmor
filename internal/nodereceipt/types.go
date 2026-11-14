@@ -39,6 +39,8 @@ type Manifest struct {
 	Digest           string   `json:"digest"`
 	SnapshotDigest   string   `json:"snapshotDigest"`
 	Compiler         string   `json:"compiler"`
+	ArtifactCompiler string   `json:"artifactCompiler"`
+	DefaultAction    string   `json:"defaultAction"`
 	ABI              uint32   `json:"abi"`
 	Posture          Posture  `json:"posture"`
 	Sources          []Source `json:"sources"`
@@ -59,7 +61,7 @@ func (m Manifest) Validate() error {
 		b, err := hex.DecodeString(s)
 		return err == nil && len(b) == 32 && hex.EncodeToString(b) == s
 	}
-	if m.Version != 1 || !validDigest(m.PublicationEpoch) || m.Revision == "" || m.Compiler == "" || !validDigest(m.Digest) || !validDigest(m.SnapshotDigest) || len(m.Sources) == 0 || m.ABI == 0 {
+	if m.Version != 1 || !validDigest(m.PublicationEpoch) || m.Revision == "" || m.Compiler == "" || m.ArtifactCompiler == "" || (m.DefaultAction != "allow" && m.DefaultAction != "deny" && m.DefaultAction != "log") || !validDigest(m.Digest) || !validDigest(m.SnapshotDigest) || len(m.Sources) == 0 || m.ABI == 0 {
 		return fmt.Errorf("no eligible desired manifest")
 	}
 	seen := map[string]bool{}
@@ -86,10 +88,12 @@ type Challenge struct {
 // Activation is captured from the active evaluator, not a downloaded/prepared
 // candidate or a second read of the policy pathname.
 type Activation struct {
-	Digest      string    `json:"digest"`
-	ABI         uint32    `json:"abi"`
-	Posture     Posture   `json:"posture"`
-	ActivatedAt time.Time `json:"activatedAt"`
+	Digest           string    `json:"digest"`
+	ABI              uint32    `json:"abi"`
+	ArtifactCompiler string    `json:"artifactCompiler"`
+	DefaultAction    string    `json:"defaultAction"`
+	Posture          Posture   `json:"posture"`
+	ActivatedAt      time.Time `json:"activatedAt"`
 }
 
 type Receipt struct {

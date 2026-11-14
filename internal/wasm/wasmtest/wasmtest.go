@@ -66,7 +66,8 @@ type fn struct {
 	export string
 	body   []byte // instructions, without the trailing end
 	// noArg makes the function () -> i32 instead of (i32) -> i32.
-	noArg bool
+	noArg     bool
+	threeArgs bool
 }
 
 // assemble builds a module with one page of memory (exported as "memory")
@@ -75,14 +76,18 @@ type fn struct {
 func assemble(fns ...fn) []byte {
 	mod := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
 	mod = append(mod, section(1, vec(
-		[]byte{0x60, 0x01, typeI32, 0x01, typeI32}, // type 0: (i32) -> i32
-		[]byte{0x60, 0x00, 0x01, typeI32},          // type 1: () -> i32
+		[]byte{0x60, 0x01, typeI32, 0x01, typeI32},                   // type 0: (i32) -> i32
+		[]byte{0x60, 0x00, 0x01, typeI32},                            // type 1: () -> i32
+		[]byte{0x60, 0x03, typeI32, typeI32, typeI32, 0x01, typeI32}, // type 2: (i32,i32,i32) -> i32
 	))...)
 	typeIdx := make([][]byte, len(fns))
 	for i, f := range fns {
 		typeIdx[i] = uleb(0)
 		if f.noArg {
 			typeIdx[i] = uleb(1)
+		}
+		if f.threeArgs {
+			typeIdx[i] = uleb(2)
 		}
 	}
 	mod = append(mod, section(3, vec(typeIdx...))...)
@@ -137,9 +142,24 @@ func ConstPolicy(action int32, masks *[3]uint32) []byte {
 	return withFields(fn{export: "evaluate_event", body: i32Const(action)}, masks)
 }
 
-// ConstPolicyABI explicitly declares the ABI used in activation receipt tests.
-func ConstPolicyABI(action int32, abi uint32) []byte {
-	return assemble(mallocFn, fn{export: "evaluate_event", body: i32Const(action)}, fn{export: "abi_version", body: i32Const(int32(abi)), noArg: true})
+// VersionedConstPolicy explicitly declares ABI for signed deployment tests.
+func VersionedConstPolicy(action int32, version uint32) []byte {
+	return assemble(mallocFn, fn{export: "evaluate_event", body: i32Const(action)}, fn{export: "abi_version", body: i32Const(int32(version)), noArg: true})
+}
+
+// DefaultDenyPolicy declares eligible empty process/network allowlists and
+// denies every event. It permits strict kernel-posture tests without Rust/BPF.
+func DefaultDenyPolicy() []byte {
+	// Store the one-byte eligible table at the requested pointer and return
+	// its size. Query calls use pointer zero, harmless in this test module.
+	table := []byte{opLocalGet, 1, opI32Const, 1, 0x3a, 0, 0, opI32Const, 1}
+	// Main's allocator contract forbids transient declarations from aliasing
+	// the persistent 256-byte event buffer. Use a separate static-table region.
+	alloc := append(i32Const(1024), i32Const(2048)...)
+	alloc = append(alloc, opLocalGet, 0)
+	alloc = append(alloc, i32Const(256)...)
+	alloc = append(alloc, opI32Eq, opSelect)
+	return assemble(fn{export: "malloc", body: alloc}, fn{export: "evaluate_event", body: i32Const(1)}, fn{export: "abi_version", body: i32Const(1), noArg: true}, fn{export: "warmor_static_rules", body: table, threeArgs: true})
 }
 
 // UIDPolicy denies (1) events with uid 0 and allows (0) everything else.

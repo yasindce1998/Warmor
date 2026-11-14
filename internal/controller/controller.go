@@ -19,6 +19,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/kube"
 	"github.com/yasindce1998/warmor/internal/nodereceipt"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 	"github.com/yasindce1998/warmor/internal/policymerge"
 )
 
@@ -65,11 +66,12 @@ type Controller struct {
 	kube *kube.Client
 	opts Options
 	// now is stubbed in tests.
-	now            func() time.Time
-	operations     operations
-	receipts       *nodereceipt.Server // enabled once before Run/serving
-	receiptPosture nodereceipt.Posture
-	publicationABI uint32 // reconcile-owned
+	now                      func() time.Time
+	operations               operations
+	receipts                 *nodereceipt.Server // enabled once before Run/serving
+	receiptPosture           nodereceipt.Posture
+	publicationABI           uint32 // reconcile-owned
+	publicationDefaultAction string // expected compiler-7 build declaration
 }
 
 // New builds a controller.
@@ -373,6 +375,7 @@ func (c *Controller) reconcilePublication(ctx context.Context, items []*WarmorPo
 	}
 	var revision string
 	c.publicationABI = 0 // baked defaults are not desired-generation receipts
+	c.publicationDefaultAction = ""
 	var compile func() ([]byte, error)
 	if len(rendered) == 0 {
 		data, readErr := os.ReadFile(c.opts.DefaultPolicyPath)
@@ -391,6 +394,7 @@ func (c *Controller) reconcilePublication(ctx context.Context, items []*WarmorPo
 			return fmt.Errorf("validate effective policy: %w", parseErr)
 		}
 		c.publicationABI = uint32(compiler.PolicyABIVersion(parsed))
+		c.publicationDefaultAction = parsed.DefaultAction
 		key, keyErr := policyCacheKey(yamlBytes, parsed)
 		if keyErr != nil {
 			return keyErr
@@ -618,6 +622,13 @@ func (c *Controller) syncConfigMap(ctx context.Context, existing *ConfigMap, was
 			return false, err
 		}
 		manifest := nodereceipt.Manifest{Version: 1, Revision: hash, Digest: digest(wasm), SnapshotDigest: digest([]byte(snapshot)), Compiler: compilerIdentity, ABI: c.publicationABI, Posture: c.receiptPosture}
+		metadata, metadataErr := policybuild.Read(wasm)
+		if len(accepted.Sources) > 0 && (metadataErr != nil || metadata == nil || metadata.Compiler != compiler.Identity || metadata.DefaultAction != c.publicationDefaultAction) {
+			return false, fmt.Errorf("receipt publication requires current artifact build metadata")
+		}
+		if metadata != nil {
+			manifest.ArtifactCompiler, manifest.DefaultAction = metadata.Compiler, metadata.DefaultAction
+		}
 		for _, source := range accepted.Sources {
 			manifest.Sources = append(manifest.Sources, nodereceipt.Source{Namespace: source.Namespace, Name: source.Name, UID: source.UID, Generation: source.Generation})
 		}

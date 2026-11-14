@@ -10,14 +10,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/kube"
 	"github.com/yasindce1998/warmor/internal/nodereceipt"
 	"github.com/yasindce1998/warmor/internal/nodereceipt/receipttest"
+	"github.com/yasindce1998/warmor/internal/policybuild"
+	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 )
 
 func TestDurablePublicationEpochFencesABAEvenWithoutIntermediateAggregate(t *testing.T) {
-	_, restore := stubCompile(t)
-	defer restore()
+	stubReceiptCompile(t)
 	api := newFakeAPI()
 	cr := testCR("alpha", nil)
 	api.addCR(cr)
@@ -58,7 +60,7 @@ func TestDurablePublicationEpochFencesABAEvenWithoutIntermediateAggregate(t *tes
 	if err := os.WriteFile(token, []byte("bound-token-a"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	active := nodereceipt.Activation{Digest: a.Digest, ABI: a.ABI, Posture: a.Posture, ActivatedAt: time.Now().Add(-time.Second)}
+	active := nodereceipt.Activation{Digest: a.Digest, ABI: a.ABI, ArtifactCompiler: a.ArtifactCompiler, DefaultAction: a.DefaultAction, Posture: a.Posture, ActivatedAt: time.Now().Add(-time.Second)}
 	c, err := nodereceipt.NewClient(nodereceipt.ClientConfig{URL: server.URL, TLS: receipttest.Trust(server), TokenPath: token, ManifestPath: path, Active: func() (nodereceipt.Activation, error) { return active, nil }})
 	if err != nil {
 		t.Fatal(err)
@@ -99,13 +101,41 @@ func TestDurablePublicationEpochFencesABAEvenWithoutIntermediateAggregate(t *tes
 		t.Fatal("restart lost durable epoch", err)
 	}
 	assertAll(true) // the original server's receipt is still current A
+	// Missing/old/contradictory build claims must fail before publication;
+	// treating them as another receipt identity would contradict compiler-7.
+	for _, claims := range []*policybuild.Metadata{
+		nil,
+		{Compiler: "warmor-yaml/6", DefaultAction: a.DefaultAction},
+		{Compiler: compiler.Identity, DefaultAction: "deny"},
+	} {
+		module := wasmtest.VersionedConstPolicy(1, a.ABI)
+		if claims != nil {
+			var err error
+			module, err = policybuild.Append(module, *claims)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if synced, err := ctl.syncConfigMap(ctx, cmA, module, "effective:bad-build", []string{"warmor-system/alpha"}, cmA.Data[SnapshotDataKey]); err == nil || synced {
+			t.Fatal("unsupported metadata published")
+		}
+		assertAll(true)
+		stable, err := ctl.publishedManifest(ctx)
+		if err != nil || stable.ID() != a.ID() {
+			t.Fatal("rejected build changed committed epoch", err)
+		}
+	}
 	// Failed publication attempts (including optimistic conflicts) cannot
 	// commit an epoch or revoke A as if a transition had succeeded.
+	bModule, err := policybuild.Append(wasmtest.VersionedConstPolicy(1, a.ABI), policybuild.Metadata{Compiler: compiler.Identity, DefaultAction: a.DefaultAction})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, code := range []int{http.StatusConflict, http.StatusServiceUnavailable} {
 		api.mu.Lock()
 		api.configMapWriteError = code
 		api.mu.Unlock()
-		if synced, err := ctl.syncConfigMap(ctx, cmA, []byte("B"), "effective:b", []string{"warmor-system/alpha"}, cmA.Data[SnapshotDataKey]); err == nil || synced {
+		if synced, err := ctl.syncConfigMap(ctx, cmA, bModule, "effective:b", []string{"warmor-system/alpha"}, cmA.Data[SnapshotDataKey]); err == nil || synced {
 			t.Fatal("failed publication acknowledged")
 		}
 		api.mu.Lock()
@@ -119,7 +149,7 @@ func TestDurablePublicationEpochFencesABAEvenWithoutIntermediateAggregate(t *tes
 	}
 	// Call publication directly so neither server.Aggregate nor Reconcile sees
 	// B. This models two successful transitions between aggregation ticks.
-	if synced, err := ctl.syncConfigMap(ctx, cmA, []byte("B"), "effective:b", []string{"warmor-system/alpha"}, cmA.Data[SnapshotDataKey]); err != nil || !synced {
+	if synced, err := ctl.syncConfigMap(ctx, cmA, bModule, "effective:b", []string{"warmor-system/alpha"}, cmA.Data[SnapshotDataKey]); err != nil || !synced {
 		t.Fatalf("publish B: %t %v", synced, err)
 	}
 	cmB, err := ctl.readConfigMap(ctx)
