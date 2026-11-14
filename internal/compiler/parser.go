@@ -19,14 +19,18 @@ func ParseFile(path string) (*Policy, error) {
 }
 
 func Parse(data []byte) (*Policy, error) {
+	// Establish framing before decoding interface-valued operands. Decoding a
+	// rejected trailing document into any expands its aliases first, allowing
+	// invalid input to allocate well beyond its syntactic size. yaml.Node keeps
+	// aliases as references; KnownFields still applies to the typed decode below.
+	if err := validateDocumentFraming(data); err != nil {
+		return nil, err
+	}
 	var raw rawPolicy
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse YAML: %w", err)
-	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		return nil, fmt.Errorf("parse YAML: expected exactly one YAML document")
 	}
 
 	policy := &Policy{
@@ -50,6 +54,19 @@ func Parse(data []byte) (*Policy, error) {
 	}
 
 	return policy, nil
+}
+
+func validateDocumentFraming(data []byte) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return fmt.Errorf("parse YAML: %w", err)
+	}
+	var trailing yaml.Node
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("parse YAML: expected exactly one YAML document")
+	}
+	return nil
 }
 
 type rawPolicy struct {
