@@ -228,10 +228,11 @@ func requireOutcomeVM(t *testing.T) {
 }
 
 type outcomeFixture struct {
-	dir    string
-	work   string
-	cgroup string
-	fd     *os.File
+	dir        string
+	work       string
+	recordings string
+	cgroup     string
+	fd         *os.File
 }
 
 func newFixture(t *testing.T) *outcomeFixture {
@@ -239,6 +240,13 @@ func newFixture(t *testing.T) *outcomeFixture {
 	f := &outcomeFixture{dir: artifactDir(t), work: guestFixtureDir, cgroup: filepath.Join("/sys/fs/cgroup", fmt.Sprintf("warmor-outcomes-%d", os.Getpid()))}
 	if err := os.Mkdir(f.work, 0755); err != nil {
 		t.Fatalf("create VM-local fixture directory: %v", err)
+	}
+	// The shared checkout is host-user-owned, but the daemon is guest root.
+	// Keep sensitive recordings on the guest filesystem, outside markers.
+	var err error
+	f.recordings, err = createOutcomeRecordings(f.work)
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, name := range []string{"allowed", "first-denied", "reload-denied", "rule-audit", "global-audit", "file-victim"} {
 		copyExecutable(t, filepath.Join(f.dir, name), filepath.Join(f.work, name))
@@ -439,7 +447,7 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 	}
 	d := &daemonProcess{
 		metrics: fmt.Sprintf("http://127.0.0.1:%d/metrics", port),
-		events:  filepath.Join(f.dir, name+".ndjson"), log: filepath.Join(f.dir, name+".log"),
+		events:  filepath.Join(f.recordings, name+".ndjson"), log: filepath.Join(f.dir, name+".log"),
 		done: make(chan error, 1),
 	}
 	log, err := os.Create(d.log)
@@ -466,6 +474,11 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 			_ = d.cmd.Process.Kill()
 			cleanupErr := <-d.done
 			t.Errorf("daemon shutdown timed out (cleanup result %v; log %s)", cleanupErr, d.log)
+		}
+		// Wait has completed (also after forced cleanup), so the recording is
+		// closed. Retain partial evidence even when the subtest already failed.
+		if err := exportOutcomeRecording(d.events, filepath.Join(f.dir, name+".ndjson")); err != nil {
+			t.Errorf("export daemon recording: %v", err)
 		}
 		if err := log.Close(); err != nil {
 			t.Errorf("close daemon log: %v", err)

@@ -25,7 +25,11 @@ and stale-policy retirement must be fenced by controller/identity snapshots;
 this package does not invent Namespace UID evidence.
 
 The manifest pins compiler `7`, composition `deny-first/v1`, and posture
-`per-rule/v1`. A compiler version change fails closed until reviewed, rather
+`per-rule/v1`. Compiler 7 tightens static declarations to complete 127-byte paths
+and canonical network endpoints without changing ABI 3/5 selection or deny-first
+composition. Real compiled-WASM regression tests cover those boundaries and
+namespace/audit/temporal behavior. Compiler-6 manifests must be regenerated;
+future compiler changes still fail closed until explicitly reviewed, rather
 than automatically accepting new code generation. `New` deep copies inputs;
 `Decode` additionally rejects non-exact schema field names (including case
 variants), unknown/duplicate JSON fields, excess depth,

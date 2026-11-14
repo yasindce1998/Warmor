@@ -14,6 +14,92 @@ import (
 	"time"
 )
 
+// createOutcomeRecordings is called only with the freshly created guest-local
+// fixture directory by the VM harness. Never repair ownership on the shared
+// checkout: private recording opens intentionally reject those ancestors.
+func createOutcomeRecordings(work string) (string, error) {
+	dir := filepath.Join(work, "recordings")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		return "", fmt.Errorf("create guest-local recordings directory: %w", err)
+	}
+	return dir, nil
+}
+
+// exportOutcomeRecording runs after the daemon has exited, including when its
+// subtest failed. The shared evidence directory is not a live recording sink.
+// Missing recordings and failed exports must remain visible as test failures.
+func exportOutcomeRecording(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("read guest recording %s: %w", src, err)
+	}
+	file, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return fmt.Errorf("create recording evidence %s: %w", dst, err)
+	}
+	_, writeErr := file.Write(data)
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		return fmt.Errorf("write recording evidence %s: %w", dst, err)
+	}
+	return nil
+}
+
+func TestOutcomeRecordingEvidence(t *testing.T) {
+	work, artifacts := t.TempDir(), t.TempDir()
+	dir, err := createOutcomeRecordings(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir != filepath.Join(work, "recordings") {
+		t.Fatalf("recordings outside guest fixture: %s", dir)
+	}
+	info, err := os.Stat(dir)
+	if err != nil || info.Mode().Perm() != 0700 {
+		t.Fatalf("recordings directory must be private: %v %v", info, err)
+	}
+	src, dst := filepath.Join(dir, "partial.ndjson"), filepath.Join(artifacts, "partial.ndjson")
+	data := []byte("{\"partial\":true}\n")
+	if err := os.WriteFile(src, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := exportOutcomeRecording(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{src, dst} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != string(data) {
+			t.Fatalf("recording lost at %s: %q %v", path, got, err)
+		}
+	}
+	info, err = os.Stat(dst)
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("exported recording must be private: %v %v", info, err)
+	}
+	if err := exportOutcomeRecording(src, dst); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("export overwrote existing evidence: %v", err)
+	}
+	if err := exportOutcomeRecording(filepath.Join(dir, "missing"), filepath.Join(artifacts, "missing.ndjson")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing recording error lost: %v", err)
+	}
+	if err := exportOutcomeRecording(src, filepath.Join(artifacts, "missing-parent", "events.ndjson")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("evidence destination error lost: %v", err)
+	}
+}
+
+func TestOutcomeRecordingDirectoryRejectsExistingSymlink(t *testing.T) {
+	work, target := t.TempDir(), t.TempDir()
+	if err := os.Symlink(target, filepath.Join(work, "recordings")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createOutcomeRecordings(work); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("recordings must be newly created, not follow a preexisting entry: %v", err)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("symlink target modified: %v %v", entries, err)
+	}
+}
+
 // A copy of this test binary is the controlled executable. No shell, optional
 // system utility, DNS server, network timeout or deny counter is an oracle.
 func TestMain(m *testing.M) {

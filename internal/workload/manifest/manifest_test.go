@@ -103,6 +103,8 @@ func TestManifestValidation(t *testing.T) {
 		{"version", func(d *Document) { d.Version = "future" }},
 		{"generation", func(d *Document) { d.Generation = 0 }},
 		{"compiler", func(d *Document) { d.Compiler = "5" }},
+		{"previous compiler", func(d *Document) { d.Compiler = "6" }},
+		{"future compiler", func(d *Document) { d.Compiler = "8" }},
 		{"composition", func(d *Document) { d.Composition = "merge-verdicts" }},
 		{"posture", func(d *Document) { d.Posture = "enforce-everything" }},
 		{"namespace", func(d *Document) { d.Additions[0].Source.Namespace = "" }},
