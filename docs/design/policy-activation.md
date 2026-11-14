@@ -14,6 +14,14 @@ Conditional assignment requests include `if_policy_id`, `if_version`, and
 instead of an ambiguous 304, but must still upgrade their client-side comparison.
 New clients retry legacy-server 304 responses with an unconditional request.
 
+`revisionstore.go` integrates with the fleet store's `RegisterAgentChecked` and
+`mutateLocked` transaction APIs when that branch is present; on the foundation
+alone it uses an explicitly ephemeral fallback. The combined integration tests
+are behind `fleetintegration` (run after integrating fleet commits `5874b6e` and
+`3e39f07`). They verify acknowledgement restart recovery and persistence-failure
+rollback, including registration errors. The activation branch itself does not
+make `NewStore` or `NewServer` durable; deploy the fleet persistent-store wiring.
+
 ## Server-managed disk layout
 
 The daemon owns a writable policy path in fleet mode. Do not simultaneously
@@ -25,6 +33,8 @@ revision pointer, switched by atomic rename. Enforcer signature readers resolve
 the module pointer **once**, then read that immutable revision's sibling
 signature. Independently opening the two public aliases is not a consistent
 snapshot API while switching revisions.
+For any symlinked policy path, the signature must live next to the resolved
+module; an unrelated `<alias>.sig` alongside a module-only symlink is not used.
 
 An existing legacy pair is first copied without changing its bytes, then
 migrated to this layout. A fresh runtime/pool loads the staged candidate before
