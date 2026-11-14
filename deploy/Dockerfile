@@ -51,12 +51,15 @@ RUN mkdir -p /work && cd /work \
 # Build with: docker build --target controller -f deploy/Dockerfile .
 FROM rust-base AS controller
 COPY --from=builder /warmor-controller /warmor-controller
-COPY --from=policy /work/policy.wasm /etc/warmor-controller/default-policy.wasm
+# The baked default is public image content. Compiler outputs intentionally
+# default to 0600; grant the image's non-root runtime explicit read access here,
+# not through a broader compiler publication mode.
+COPY --chmod=0644 --from=policy /work/policy.wasm /etc/warmor-controller/default-policy.wasm
 EXPOSE 9090
 ENTRYPOINT ["/warmor-controller"]
 
 FROM gcr.io/distroless/static-debian12:latest@sha256:d75cdd72874d4790092fcb1b058493ecf6bb5bf2b2b897045b00ff01d91843f2 AS daemon
 COPY --from=builder /warmor-daemon /warmor-daemon
-COPY --from=policy /work/policy.wasm /etc/warmor/policy.wasm
+COPY --chmod=0644 --from=policy /work/policy.wasm /etc/warmor/policy.wasm
 EXPOSE 9090
 ENTRYPOINT ["/warmor-daemon"]

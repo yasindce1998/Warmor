@@ -147,3 +147,15 @@ deleting shared caches or another session's files.
 The validated code merge is `c216cd3` (parents `5cf6db5` and `971471e`). The
 follow-up integration commit changes only these validation notes; the source
 branch remains frozen. No push or PR creation is part of this local handoff.
+
+## Image consumers of private compiler output
+
+The first PR60 Kind run failed before application: the compiler correctly made
+its new output 0600, but Docker preserved that root-owned mode for the baked
+default, making it unreadable by the chart's non-root controller and daemon.
+The image copies now explicitly use `COPY --chmod=0644` for this public default
+policy in both targets. This is a packaging decision for bytes already shipped
+inside the image, not a compiler-wide permission relaxation. General outputs
+remain private and umask-filtered; source/signature/recording permissions are
+unchanged. Deployment contract and compiler publication race tests pass locally;
+actual image/Kind CI must confirm non-root startup on the new head.
