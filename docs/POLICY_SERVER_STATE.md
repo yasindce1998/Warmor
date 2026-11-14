@@ -50,6 +50,8 @@ Defaults: 256 MiB snapshot, 128 MiB retained WASM, 16 MiB/module, 1,024 policies
 10,000 management audit entries. Labels allow 64 pairs (256-byte keys, 4,096-byte
 values). A conservative metadata-encoding bound may reject state before the
 snapshot reaches its exact byte limit. Runtime bind bodies are limited to 64 KiB.
+Agent-reported active policy IDs, digests and activation errors are bounded to
+256, 64 and 4,096 bytes respectively and included in snapshot-size accounting.
 Retention limits reject mutations; they never silently evict revisions. Durable
 heartbeats do not consume management-history entries.
 

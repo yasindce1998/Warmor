@@ -9,6 +9,7 @@ import (
 
 	"github.com/yasindce1998/warmor/internal/crypto"
 	"github.com/yasindce1998/warmor/internal/policyserver"
+	"github.com/yasindce1998/warmor/internal/wasm"
 )
 
 // A revision is never modified after staging. Public module/signature aliases
@@ -80,6 +81,9 @@ func createPolicyRevision(root string, a *policyserver.PolicyAssignment, data, s
 }
 
 func stagePolicyRevision(path string, a *policyserver.PolicyAssignment, data []byte) (*stagedPolicyRevision, error) {
+	if wasm.IsYAMLPolicy(path) {
+		return nil, errors.New("server-managed policy path must not use .yaml/.yml: downloaded WASM must remain loadable on restart")
+	}
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err

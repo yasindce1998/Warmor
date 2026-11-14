@@ -24,8 +24,10 @@ described in [POLICY_SERVER_STATE.md](../POLICY_SERVER_STATE.md).
 
 ## Server-managed disk layout
 
-The daemon owns a writable policy path in fleet mode. Do not simultaneously
-mount a read-only ConfigMap there or use another writer. Downloads are staged in
+The daemon owns a writable compiled-WASM policy path in fleet mode. A `.yaml` or
+`.yml` path is rejected before staging: restart would otherwise try to compile
+downloaded WASM bytes as YAML. Do not simultaneously mount a read-only ConfigMap
+there or use another writer. Downloads are staged in
 `<policy>.revisions/revision-*/` with `module.wasm`, optional `module.wasm.sig`,
 and assignment `metadata.json`. Files and directories are synced before
 publication. `<policy>` and `<policy>.sig` become aliases through one `current`
@@ -72,6 +74,10 @@ and runtimes close after their events finish. Neither old cache-hit actions nor
 old evaluated actions can cross a successful userspace activation; old events
 cannot repopulate the new cache/map. Slow synchronous actions/sinks can delay
 draining; this is not a new bounded-shutdown guarantee.
+The process action keeps the original event identity and actual attempted,
+succeeded, or refused outcome from the pidfd safety path; activation does not
+reinterpret a deny decision as successful termination. Asynchronous sink delivery
+may finish later; the barrier covers outcome creation and pipeline submission.
 
 The kernel map is **not double-buffered or generation-addressed**. Default-deny
 domains are unmarked before clearing/rebuilding, so kernel misses can allow

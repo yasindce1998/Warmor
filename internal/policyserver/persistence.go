@@ -432,10 +432,12 @@ func (s *Store) validateLocked(integrity bool) error {
 		}
 	}
 	for id, a := range s.agents {
-		if a == nil || !validStateID(id) || a.ID != id || !validLabels(a.Labels) || len(a.Hostname) > 4096 || !utf8.ValidString(a.Hostname) {
+		if a == nil || !validStateID(id) || a.ID != id || !validLabels(a.Labels) || len(a.Hostname) > 4096 || !utf8.ValidString(a.Hostname) ||
+			(a.PolicyID != "" && !validStateID(a.PolicyID)) || a.PolicyVersion < 0 ||
+			len(a.PolicyHash) > 64 || !utf8.ValidString(a.PolicyHash) || len(a.ActivationError) > 4096 || !utf8.ValidString(a.ActivationError) {
 			return errors.New("invalid agent")
 		}
-		estimated += 1024 + int64(6*(len(id)+len(a.ID)+len(a.Hostname))) + labelsSizeBound(a.Labels)
+		estimated += 1024 + int64(6*(len(id)+len(a.ID)+len(a.Hostname)+len(a.PolicyID)+len(a.PolicyHash)+len(a.ActivationError))) + labelsSizeBound(a.Labels)
 	}
 	active := make(map[string]bool)
 	for id, r := range s.rollouts {

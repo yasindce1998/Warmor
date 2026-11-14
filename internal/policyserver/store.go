@@ -212,27 +212,7 @@ func (s *Store) HasVersion(id string, version int64) bool {
 	return ok
 }
 
-// previousVersion returns the newest stored version of a policy older than
-// version, or 0 if there is none.
-func (s *Store) previousVersion(id string, version int64) int64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var prev int64
-	for v := range s.versions[id] {
-		if v < version && v > prev {
-			prev = v
-		}
-	}
-	return prev
-}
-
-// assignment builds the agent-facing assignment for a stored policy version.
-func (s *Store) assignment(id string, version int64) (*PolicyAssignment, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.assignmentLocked(id, version)
-}
-
+// assignmentLocked builds the agent-facing assignment under the store lock.
 func (s *Store) assignmentLocked(id string, version int64) (*PolicyAssignment, bool) {
 	v, ok := s.versions[id][version]
 	if !ok {
