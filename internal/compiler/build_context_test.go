@@ -18,6 +18,10 @@ func TestBuildContextBoundsToolchainAndCleansFailedCrates(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			bin := t.TempDir()
 			work := t.TempDir()
+			out := filepath.Join(t.TempDir(), "policy.wasm")
+			if err := os.WriteFile(out, []byte("last known good"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			t.Setenv("PATH", bin)
 			t.Setenv("TMPDIR", work)
 			for _, tool := range []string{"rustup", "cargo"} {
@@ -35,7 +39,7 @@ func TestBuildContextBoundsToolchainAndCleansFailedCrates(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 			start := time.Now()
-			result, err := Build(policy, BuildOptions{Context: ctx, OutputPath: filepath.Join(work, "policy.wasm")})
+			result, err := Build(policy, BuildOptions{Context: ctx, OutputPath: out})
 			defer Cleanup(result)
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("error = %v, want context deadline", err)
@@ -50,6 +54,8 @@ func TestBuildContextBoundsToolchainAndCleansFailedCrates(t *testing.T) {
 			if len(files) != 0 {
 				t.Fatalf("failed compile leaked sources or output: %v", files)
 			}
+			assertArtifactContents(t, out, []byte("last known good"))
+			assertOnlyOutput(t, filepath.Dir(out), "policy.wasm")
 		})
 	}
 }

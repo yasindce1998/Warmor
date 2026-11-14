@@ -16,7 +16,10 @@ import (
 type BuildOptions struct {
 	// Context bounds toolchain checks and compilation. Nil preserves the
 	// historical unbounded CLI behavior for existing callers.
-	Context    context.Context
+	Context context.Context
+
+	// OutputPath defaults to policy.wasm. Build replaces a regular file only
+	// after metadata validation; symlinks and special files are rejected.
 	OutputPath string
 	RustOnly   bool
 	Verbose    bool
@@ -28,6 +31,10 @@ type BuildResult struct {
 	CratePath  string
 }
 
+// Build compiles privately, appends build metadata, then publishes one complete
+// artifact. Errors before replacement preserve an existing output. An error
+// matching ErrArtifactPublicationIndeterminate means the destination may already
+// contain the new artifact; callers must not assume the old output survived.
 func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 	if opts.Context == nil {
 		opts.Context = context.Background()
@@ -75,25 +82,26 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 		return nil, fmt.Errorf("write lib.rs: %w", err)
 	}
 
-	wasmPath, err := cargoBuild(crateDir, policy.Name, opts)
+	builtPath, err := cargoBuild(crateDir, policy.Name, opts)
 	if err != nil {
 		return nil, fmt.Errorf("cargo build: %w", err)
 	}
 	if err := opts.Context.Err(); err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(wasmPath)
+	data, err := readBuiltArtifact(builtPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read built wasm: %w", err)
 	}
 	data, err = policybuild.Append(data, policybuild.Metadata{Compiler: Identity, DefaultAction: policy.DefaultAction})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("append build metadata: %w", err)
 	}
-	if err := opts.Context.Err(); err != nil {
-		return nil, err
+	if len(data) > maxCompiledArtifactBytes {
+		return nil, fmt.Errorf("final wasm exceeds %d bytes", maxCompiledArtifactBytes)
 	}
-	if err := os.WriteFile(wasmPath, data, 0o644); err != nil {
+	wasmPath, err := newArtifactPublisher().publish(opts.Context, opts.OutputPath, data)
+	if err != nil {
 		return nil, err
 	}
 
@@ -162,32 +170,9 @@ func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) 
 	wasmFile := fmt.Sprintf("warmor_policy_%s.wasm", safeName)
 	builtPath := filepath.Join(crateDir, "target", "wasm32-unknown-unknown", "release", wasmFile)
 
-	if _, err := os.Stat(builtPath); err != nil {
-		return "", fmt.Errorf("expected wasm output not found at %s", builtPath)
-	}
-
-	outputPath := opts.OutputPath
-	if outputPath == "" {
-		outputPath = "policy.wasm"
-	}
-
-	if !filepath.IsAbs(outputPath) {
-		wd, err := os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("get working directory: %w", err)
-		}
-		outputPath = filepath.Join(wd, outputPath)
-	}
-
-	data, err := os.ReadFile(builtPath)
-	if err != nil {
-		return "", fmt.Errorf("read built wasm: %w", err)
-	}
-	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
-		return "", fmt.Errorf("write output wasm: %w", err)
-	}
-
-	return outputPath, nil
+	// Cargo never receives or writes the caller's destination. Build reads this
+	// private artifact with a size bound and validates metadata before publishing.
+	return builtPath, nil
 }
 
 func Cleanup(result *BuildResult) {
