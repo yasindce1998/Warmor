@@ -79,12 +79,23 @@ func TestHandleEvent_TemporalPolicy(t *testing.T) {
 // cached as before and no container lookups happen.
 func TestHandleEvent_PreTemporalPolicyStillCached(t *testing.T) {
 	e, _ := newTestEnforcer(t, testEnforcerOpts{})
+	// This tests legacy cache semantics, not the production latency budget.
+	// Contended native Darwin runners can spend >50ms in WASM malloc; such a
+	// timeout correctly produces an uncacheable denial. Keep this fixture's
+	// evaluation bounded without changing timeout/fail-closed tests or defaults.
+	e.evaluator.SetTimeout(5 * time.Second)
 	setCacheDependencies(e.cache, e.evaluator)
 	starts := &fakeStarts{}
 	e.containerStarts = starts
 	ev := func() *api.Event { return &api.Event{PID: 0, UID: 1000, Filename: "/usr/bin/ls", CgroupID: 7} }
 	e.handleEvent(ev())
+	if stats := e.GetStats(); stats.Allowed != 1 || stats.Denied != 0 || e.cache.Stats().Size != 1 {
+		t.Fatalf("first successful legacy evaluation must seed one cached ALLOW: stats=%+v cache=%+v", stats, e.cache.Stats())
+	}
 	e.handleEvent(ev())
+	if stats := e.GetStats(); stats.Allowed != 2 || stats.Denied != 0 {
+		t.Errorf("cached legacy evaluation must remain ALLOW: %+v", stats)
+	}
 	if hits := e.GetStats().CacheHits; hits != 1 {
 		t.Errorf("CacheHits = %d, want 1", hits)
 	}
