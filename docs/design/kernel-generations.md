@@ -198,3 +198,52 @@ go generate ./internal/ebpf
 
 A successful local compilation is not a claim that VM CI ran, nor that daemon
 reload, userspace evaluation and kernel publication form an atomic transaction.
+
+### Strict VM evidence gate
+
+The broad LSM suites can skip on incompatible BTF or missing optional features;
+their successful exit is **not** generation verifier/outcome proof. The separate
+`kernel-generations-strict` job in `.github/workflows/lsm-test.yml` uses the built
+IMA kernels **6.1.188 and 6.18.53**, regenerates BPF, and runs
+`tests/integration/run-kernel-generations.sh`. No matrix entry allows failure.
+The runner requires `WARMOR_REQUIRE_BPF_LSM=1`, `WARMOR_REQUIRE_IMA=1`, a guest
+fixture verifying those flags and the actual requested kernel minor, and exactly
+one top-level PASS for **every** named fixture in its manifest. Any skip (including
+a child skip), failure, missing/duplicate PASS, missing final PASS, or nonzero
+vimto/test exit invalidates the gate. The manifest's offline tests ensure every
+`TestLSM_Generation*` fixture is selected and exercise false-green log cases.
+
+In addition to the sequential fixtures, the strict gate requires:
+
+* Four independently paced UDP-connect producers running through five policy
+  pointer replacements, each alternating audited exact allow with default-deny
+  miss. UDP supplies an unambiguous syscall success/EPERM oracle without a peer
+  server or connection timeout. Per-producer order pairs **every syscall** with
+  its emitted generation/verdict. The fixture rejects event loss/duplication,
+  mixed generation/verdict pairs, unknown scope/ID, lack of syscall/activation
+  interval overlap, and old IDs arriving after flush. Old FDs are retained before
+  acknowledgement and verified closed while producers continue making progress
+  across retirement. Bounded rates, buffers and waits turn starvation into a
+  failure, not a passing sample with no concurrent coverage.
+* Seven audited-allow events explicitly queued without a reader, below the
+  kernel's 64KiB wakeup threshold (`BPF_RB_NO_WAKEUP`). After switching the pointer,
+  `FlushLSMEvents` must deliver **all seven with the old ID and unchanged verdict**
+  before `ErrFlushed`; only then is that generation acknowledged.
+* Legacy exact/default-deny behavior and sleepable IMA integrity coexistence.
+  The latter uses real tmpfs binaries: allowlisted content succeeds until the
+  generation policy denies it; unlisted content remains refused despite an
+  exact generation allow. It requires both generation-tagged policy events and
+  unversioned integrity denial events, real SHA-256 hashing, and zero hash errors.
+  Existing legacy collision/audit and integrity-enforcement fixtures must also
+  produce non-skipped PASS evidence in the same gate.
+
+The runner executes a prebuilt, hashed test binary **only in the disposable
+vimto VM**, with the existing PID-1/private-virtio-port guard before generation
+attachments. It retains revision/build information, kernel/binary/BPF input
+SHA256s, the required-test manifest and VM output on success or failure. Run
+`bash tests/integration/run-kernel-generations.sh --build-only` for local compile
+and input-manifest validation without starting a VM or attaching any program.
+
+These are required CI assertions, not a report that CI has already passed. They
+do not supply the still-missing combined daemon evaluator/activation/recovery
+protocol or authorize enabling the opt-in generation API.

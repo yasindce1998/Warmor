@@ -15,6 +15,8 @@ on:
       - ".github/workflows/lsm-test.yml"
       - "ci/kernel/**"
       - "scripts/build-ci-kernel.sh"
+      - "tests/integration/run-kernel-generations.sh"
+      - "tests/integration/kernel_generations_gate_test.go"
   pull_request:
     branches: [main]
     paths:
@@ -29,6 +31,8 @@ on:
       - ".github/workflows/lsm-test.yml"
       - "ci/kernel/**"
       - "scripts/build-ci-kernel.sh"
+      - "tests/integration/run-kernel-generations.sh"
+      - "tests/integration/kernel_generations_gate_test.go"
   workflow_dispatch:
 
 jobs:
@@ -269,3 +273,61 @@ jobs:
           CGO_ENABLED=0 $(go env GOPATH)/bin/vimto \
             -kernel "$GITHUB_WORKSPACE/kernel-out/vmlinuz" -- \
             go test -v -count 1 -tags integration -timeout 300s ./internal/ebpf/
+
+  kernel-generations-strict:
+    name: Required generation verifier/outcomes (${{ matrix.version }})
+    runs-on: ubuntu-24.04
+    needs: [unit-tests, bpf-compile, ima-kernel]
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "6.1.188"
+            minor: "6.1"
+          - version: "6.18.53"
+            minor: "6.18"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: ima-kernel-${{ matrix.version }}
+          path: kernel-out
+      - name: Install VM and BPF dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 clang llvm libbpf-dev gcc-multilib
+          if [ -e /dev/kvm ]; then
+            sudo chmod a+rw /dev/kvm
+          else
+            echo VIMTO_DISABLE_KVM=1 >> "$GITHUB_ENV"
+          fi
+          CGO_ENABLED=0 go install lmb.io/vimto@v0.4.0
+      - name: Regenerate exact embedded BPF inputs
+        env:
+          BPF2GO_CFLAGS: -D__TARGET_ARCH_x86 -mcpu=v1
+        run: go generate ./internal/ebpf
+      - name: Validate strict gate oracles without enforcement
+        run: |
+          bash -n tests/integration/run-kernel-generations.sh
+          go test -race -count=1 -run '^TestGenerationGate' ./tests/integration
+      - name: Require actual non-skipped generation, legacy and integrity outcomes in VM
+        env:
+          KERNEL: ${{ github.workspace }}/kernel-out/vmlinuz
+          EXPECT_KERNEL_MINOR: ${{ matrix.minor }}
+        run: bash tests/integration/run-kernel-generations.sh
+      - name: Retain exact inputs and VM verdict evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-generations-${{ matrix.version }}
+          path: |
+            tests/integration/artifacts/generations.*/build-info.txt
+            tests/integration/artifacts/generations.*/required-tests.txt
+            tests/integration/artifacts/generations.*/SHA256SUMS
+            tests/integration/artifacts/generations.*/*.log
+          if-no-files-found: error
+          retention-days: 14
