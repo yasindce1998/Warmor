@@ -46,12 +46,22 @@ func NewBundle(m *Manifest, artifacts map[digest.Digest][]byte) (*Bundle, error)
 		return nil, errors.New("bundle must contain exactly referenced artifacts")
 	}
 	b := &Bundle{manifest: m, policies: map[string]prepared{}}
-	rules, expanded := 0, 0
+	budget := expansionBudget{values: 65536, bytes: MaxBundleBytes}
+	// Preflight EVERY source against one bundle-wide expansion budget before
+	// compiler.Parse can allocate any resolved operands. Post-parse JSON sizes
+	// remain defense in depth, never the first expansion/resource boundary.
 	for _, s := range all {
 		raw, ok := artifacts[s.Artifact.Digest]
 		if !ok || len(raw) != s.Artifact.Size || len(raw) > MaxArtifactBytes || digest.FromBytes(raw) != s.Artifact.Digest {
 			return nil, errors.New("missing source artifact or size/digest mismatch")
 		}
+		if err := preflightSource(raw, &budget); err != nil {
+			return nil, fmt.Errorf("source %s: %w", s, err)
+		}
+	}
+	rules, expanded := 0, 0
+	for _, s := range all {
+		raw := artifacts[s.Artifact.Digest]
 		p, err := parseSource(raw, s)
 		if err != nil {
 			return nil, fmt.Errorf("source %s: %w", s, err)
@@ -84,13 +94,13 @@ func NewBundle(m *Manifest, artifacts map[digest.Digest][]byte) (*Bundle, error)
 	return b, nil
 }
 
-func parseSource(raw []byte, s Source) (*compiler.Policy, error) {
+func preflightSource(raw []byte, budget *expansionBudget) error {
 	// compiler.Parse intentionally supplies an allow default for legacy sources;
 	// this contract requires it to be explicit instead. Do not expose YAML values
 	// or parser diagnostics, which may contain sensitive operands, to callers.
 	var node yaml.Node
 	if yaml.Unmarshal(raw, &node) != nil || len(node.Content) != 1 || node.Content[0].Kind != yaml.MappingNode {
-		return nil, errors.New("invalid accepted policy YAML")
+		return errors.New("invalid accepted policy YAML")
 	}
 	explicit := false
 	for i := 0; i < len(node.Content[0].Content); i += 2 {
@@ -100,11 +110,13 @@ func parseSource(raw []byte, s Source) (*compiler.Policy, error) {
 		}
 	}
 	if !explicit {
-		return nil, errors.New("explicit allow or deny default_action required")
+		return errors.New("explicit allow or deny default_action required")
 	}
-	if err := sourceBudget(node.Content[0]); err != nil {
-		return nil, err
-	}
+	return sourceBudget(node.Content[0], budget)
+}
+
+// Only called after the complete bundle has passed preflightSource.
+func parseSource(raw []byte, s Source) (*compiler.Policy, error) {
 	p, err := compiler.Parse(raw)
 	if err != nil {
 		return nil, errors.New("invalid accepted policy (details withheld)")
@@ -134,10 +146,17 @@ func parseSource(raw []byte, s Source) (*compiler.Policy, error) {
 	return p, nil
 }
 
-// Check BEFORE compiler.Parse expands variables. Reject YAML aliases and budget
+var (
+	errYAMLMerge       = errors.New("YAML merge keys unsupported")
+	errExpansionBudget = errors.New("source expansion budget exceeded or YAML aliases unsupported")
+)
+
+type expansionBudget struct{ values, bytes int }
+
+// Check BEFORE compiler.Parse expands variables. Reject YAML aliases/merges and budget
 // the conservatively expanded syntax tree, including repeated variable uses.
 // Post-parse byte checks alone would allow enormous intermediate allocations.
-func sourceBudget(root *yaml.Node) error {
+func sourceBudget(root *yaml.Node, budget *expansionBudget) error {
 	variables := map[string]*yaml.Node{}
 	for i := 0; i < len(root.Content); i += 2 {
 		key, value := root.Content[i], root.Content[i+1]
@@ -150,15 +169,31 @@ func sourceBudget(root *yaml.Node) error {
 			}
 		}
 	}
-	values, remaining := 65536, MaxBundleBytes
 	var visit func(*yaml.Node, int) error
 	visit = func(n *yaml.Node, depth int) error {
-		values--
-		remaining -= len(n.Value)
-		if values < 0 || remaining < 0 || depth > 32 || n.Kind == yaml.AliasNode {
-			return errors.New("source expansion budget exceeded or YAML aliases unsupported")
+		budget.values--
+		budget.bytes -= len(n.Value)
+		if budget.values < 0 || budget.bytes < 0 || depth > 32 || n.Kind == yaml.AliasNode {
+			return errExpansionBudget
 		}
-		if n.Kind == yaml.ScalarNode && n.Tag == "!!str" && strings.HasPrefix(n.Value, "$") && !strings.HasPrefix(n.Value, "$$") {
+		// Only tags whose scalar spelling matches what the compiler resolves.
+		// In particular !!binary can decode opaque text into a hidden "$list"
+		// reference, and custom tags need not share this preflight's semantics.
+		switch n.ShortTag() {
+		case "!!map", "!!seq", "!!str", "!!int", "!!float", "!!bool", "!!null":
+		default:
+			return errors.New("unsupported YAML tag in accepted policy")
+		}
+		if n.Kind == yaml.MappingNode {
+			for i := 0; i < len(n.Content); i += 2 {
+				// Reject even quoted << keys, at EVERY nesting level. Otherwise
+				// yaml.Decode may materialize variables absent from this map.
+				if n.Content[i].Value == "<<" || n.Content[i].Tag == "!!merge" {
+					return errYAMLMerge
+				}
+			}
+		}
+		if n.Kind == yaml.ScalarNode && strings.HasPrefix(n.Value, "$") && !strings.HasPrefix(n.Value, "$$") {
 			if v := variables[strings.TrimPrefix(n.Value, "$")]; v != nil {
 				return visit(v, depth+1)
 			}

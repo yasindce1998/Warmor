@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -203,7 +204,7 @@ func validateSource(s Source) error {
 	return nil
 }
 
-// Decode rejects unknown fields, duplicate keys, trailing documents and excess
+// Decode rejects non-exact schema fields, duplicate keys, trailing documents and excess
 // bytes before construction. It accepts noncanonical JSON; Bytes is canonical.
 func Decode(data []byte) (*Manifest, error) {
 	if len(data) > MaxManifestBytes {
@@ -213,8 +214,8 @@ func Decode(data []byte) (*Manifest, error) {
 		return nil, errors.New("manifest requires valid UTF-8")
 	}
 	d := json.NewDecoder(bytes.NewReader(data))
-	if err := uniqueJSON(d); err != nil {
-		return nil, errors.New("invalid or duplicate manifest JSON")
+	if err := strictJSON(d, reflect.TypeFor[Document](), 0); err != nil {
+		return nil, errors.New("invalid, duplicate or non-exact manifest JSON fields")
 	}
 	if _, err := d.Token(); err != io.EOF {
 		return nil, errors.New("trailing manifest JSON")
@@ -228,8 +229,10 @@ func Decode(data []byte) (*Manifest, error) {
 	return New(doc)
 }
 
-func uniqueJSON(d *json.Decoder) error { return uniqueJSONDepth(d, 0) }
-func uniqueJSONDepth(d *json.Decoder, depth int) error {
+// Validate the decoded key spelling against exact JSON struct tags before Go's
+// case-insensitive struct decoder runs. Map keys (labels and rule names) are
+// deliberately NOT schema names and retain their case-sensitive semantics.
+func strictJSON(d *json.Decoder, schema reflect.Type, depth int) error {
 	if depth > 32 {
 		return errors.New("JSON depth budget exceeded")
 	}
@@ -241,8 +244,16 @@ func uniqueJSONDepth(d *json.Decoder, depth int) error {
 	if !ok {
 		return nil
 	}
+	for schema.Kind() == reflect.Pointer {
+		schema = schema.Elem()
+	}
+	if delim == '{' && schema.Kind() != reflect.Struct && schema.Kind() != reflect.Map ||
+		delim == '[' && schema.Kind() != reflect.Slice && schema.Kind() != reflect.Array {
+		return errors.New("invalid JSON schema shape")
+	}
 	seen := map[string]bool{}
 	for d.More() {
+		var child reflect.Type
 		if delim == '{' {
 			k, err := d.Token()
 			if err != nil {
@@ -253,8 +264,25 @@ func uniqueJSONDepth(d *json.Decoder, depth int) error {
 				return errors.New("duplicate JSON key")
 			}
 			seen[key] = true
+			if schema.Kind() == reflect.Map {
+				child = schema.Elem()
+			} else {
+				for i := 0; i < schema.NumField(); i++ {
+					field := schema.Field(i)
+					name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+					if name == key {
+						child = field.Type
+						break
+					}
+				}
+				if child == nil {
+					return errors.New("non-exact JSON schema field")
+				}
+			}
+		} else {
+			child = schema.Elem()
 		}
-		if err := uniqueJSONDepth(d, depth+1); err != nil {
+		if err := strictJSON(d, child, depth+1); err != nil {
 			return err
 		}
 	}

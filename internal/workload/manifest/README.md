@@ -27,7 +27,8 @@ this package does not invent Namespace UID evidence.
 The manifest pins compiler `6`, composition `deny-first/v1`, and posture
 `per-rule/v1`. A compiler version change fails closed until reviewed, rather
 than automatically accepting new code generation. `New` deep copies inputs;
-`Decode` additionally rejects unknown/duplicate JSON fields, excess depth,
+`Decode` additionally rejects non-exact schema field names (including case
+variants), unknown/duplicate JSON fields, excess depth,
 invalid UTF-8, trailing JSON and oversized documents. Canonical JSON sorts
 additions and selector set order. Its hash binds the complete document,
 including generation, scope handling, selectors and source-local mode overrides.
@@ -42,8 +43,15 @@ substituted for these accepted-source references.
 
 Limits are 256 KiB manifest JSON, 128 sources (all scopes), 1 MiB per source,
 8 MiB total source/effective typed bytes, and 4096 total rules. Additional syntax
-expansion limits run before compiler variable expansion: depth 32, 65536 visited
-values, 8 MiB expanded scalar bytes. YAML aliases are deliberately unsupported.
+expansion limits preflight **all sources before any compiler parsing**: depth
+32 per source, 65536 visited values and 8 MiB expanded scalar bytes shared across
+the complete bundle, including repeated variable uses. YAML aliases and merge
+keys (`<<`, including quoted/tagged keys) are deliberately unsupported at every
+nesting level; compiler YAML merge semantics must not hide variables from
+preflight. JSON schema keys require exact spelling, but labels and rule-mode
+map keys remain case-sensitive user data (`app` and `App` are distinct).
+Binary, custom and other non-policy YAML tags are rejected as well: decoding
+them must not create variable references invisible to syntax preflight.
 The bundle enforces these limits conservatively, including duplicate content
 referenced by distinct sources. Resource-limited/asynchronous compilation and
 node-local selected-set cache quotas are still integration responsibilities.
@@ -167,3 +175,12 @@ are checked against the declared resulting ABI, not only generated Rust text.
 Default-deny tests also prove that a restrictive addition can deny a baseline
 explicit allow while an unmatched event still receives the baseline default
 deny. No cluster, runtime socket or privileged kernel test was used.
+
+PR #46 security follow-up adds bounded regressions for merged-variable
+amplification, shared pre-compiler expansion budgets, binary-tag references,
+and case-variant JSON scope overrides at every schema layer. Four fuzz targets
+exercise strict JSON, case variants, nested merges and repeated variables;
+each passed a short bounded fuzz run. Full Go 1.26.11 tests, full-repo
+golangci-lint, and workload race tests with required real Cargo also passed.
+The large allocation specimens from review were not executed. These fixes
+require independent re-review; passing tests alone does not close that gate.
