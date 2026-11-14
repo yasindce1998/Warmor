@@ -3,6 +3,7 @@ package wasm
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -116,23 +117,35 @@ func loadDeclarationTestRuntime(t *testing.T, funcs ...testFunc) *Runtime {
 
 func TestMallocRegionsValidated(t *testing.T) {
 	for _, ptr := range []int32{0, -1, 65535} {
-		malloc := fnMalloc
-		malloc.ret = ptr
-		rt := boundedTestRuntime(t)
-		if err := rt.LoadPolicyBytes(context.Background(), buildTestModule([]testFunc{malloc, fnBinaryDeny})); err == nil {
-			t.Errorf("binary pointer %d accepted", ptr)
-		}
-		if err := rt.LoadPolicyBytes(context.Background(), buildTestModule([]testFunc{malloc, fnJSONAllow})); err != nil {
-			t.Fatal(err)
-		}
-		p, err := NewPolicy(context.Background(), rt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if action, err := p.Evaluate(context.Background(), &api.Event{}); err == nil || action != api.ActionDeny {
-			t.Errorf("JSON pointer %d: action %v, error %v", ptr, action, err)
-		}
-		p.Close(context.Background())
+		t.Run(fmt.Sprint(ptr), func(t *testing.T) {
+			malloc := fnMalloc
+			malloc.ret = ptr
+			// Validate allocator regions, not a contended runner's compilation speed.
+			// Looping-guest deadline tests retain their independent 30ms budgets.
+			rt, err := NewRuntime(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = rt.Close(context.Background()) })
+			want := "malloc returned out-of-bounds region"
+			if ptr == 0 {
+				want = "malloc returned null"
+			}
+			if err := rt.LoadPolicyBytes(context.Background(), buildTestModule([]testFunc{malloc, fnBinaryDeny})); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("binary pointer %d: error %v, want %q", ptr, err, want)
+			}
+			if err := rt.LoadPolicyBytes(context.Background(), buildTestModule([]testFunc{malloc, fnJSONAllow})); err != nil {
+				t.Fatal(err)
+			}
+			p, err := NewPolicy(context.Background(), rt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if action, err := p.Evaluate(context.Background(), &api.Event{}); err == nil || action != api.ActionDeny || !strings.Contains(err.Error(), want) {
+				t.Errorf("JSON pointer %d: action %v, error %v, want DENY and %q", ptr, action, err, want)
+			}
+			p.Close(context.Background())
+		})
 	}
 }
 
@@ -176,8 +189,10 @@ func TestMatchedRuleCannotAliasOrOverreadEventBuffer(t *testing.T) {
 
 func TestPoolReplacementPinnedToOriginalModule(t *testing.T) {
 	ctx := context.Background()
-	rt := boundedTestRuntime(t)
-	if err := rt.LoadPolicyBytes(ctx, buildTestModule([]testFunc{fnMalloc, fnBinaryDeny})); err != nil {
+	// Generation pinning uses benign modules and the normal bounded setup
+	// budget. Initialization timeout/trap enforcement is tested separately.
+	rt, err := loadTestModule(t, fnMalloc, fnBinaryDeny)
+	if err != nil {
 		t.Fatal(err)
 	}
 	pool, err := NewPool(ctx, rt, 1)
