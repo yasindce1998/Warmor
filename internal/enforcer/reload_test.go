@@ -58,9 +58,9 @@ func TestReloadPolicy_ClearErrorIsReturned(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "EPERM") {
 		t.Fatalf("ReloadPolicy error = %v, want the Clear failure", err)
 	}
-	// The new policy is still swapped in: userspace must not keep the old one.
-	if e.evaluator == oldEval {
-		t.Error("evaluator not swapped despite successful load")
+	// A prepared module alone is not successful activation.
+	if e.evaluator != oldEval {
+		t.Error("evaluator swapped despite failed kernel preparation")
 	}
 }
 
