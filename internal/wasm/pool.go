@@ -75,6 +75,10 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 				encoding = policymeta.EncodingBinary
 			}
 			p.metadata = policymeta.Observe(runtime.moduleDigest, policy.abiVersion, encoding, p.fields, p.staticProcess, p.staticNetwork)
+			if runtime.buildMetadata != nil {
+				build := *runtime.buildMetadata
+				p.metadata.Build = &build
+			}
 		}
 		if policy.instance.IsClosed() || ctx.Err() != nil {
 			policy.Close(ctx)

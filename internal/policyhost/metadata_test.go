@@ -15,12 +15,18 @@ func TestMetadataTrustDefaultsAndCopies(t *testing.T) {
 	if h.DecisionCacheEligible(0) || h.LinuxKernelCacheEligible(0) || !h.TimeDependent(0) || h.FieldsRead(0) != compiler.FieldsUnknown || h.StaticRulesProcess().Eligible {
 		t.Fatal("guest observations trusted by default")
 	}
+	if !h.ReadsContainerAge(0) {
+		t.Fatal("untrusted mask suppressed age enrichment")
+	}
 	h.declarationsTrusted = true
 	if !h.DecisionCacheEligible(0) || !h.LinuxKernelCacheEligible(0) || h.TimeDependent(0) || h.FieldsRead(0) != compiler.FieldBitPath || !h.StaticRulesProcess().Eligible {
 		t.Fatal("explicit trust lost usable observations")
 	}
 	if h.DecisionCacheEligible(99) || h.FieldsRead(99) != compiler.FieldsUnknown {
 		t.Fatal("unknown event optimized")
+	}
+	if h.ReadsContainerAge(0) {
+		t.Fatal("trusted age-independent mask ignored")
 	}
 	copy := h.Metadata()
 	copy.Events[0].Flags = 0

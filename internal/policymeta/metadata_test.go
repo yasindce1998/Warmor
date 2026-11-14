@@ -1,4 +1,4 @@
-package policymeta
+package policymeta_test
 
 import (
 	"hash/fnv"
@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
+	. "github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -99,8 +100,17 @@ func TestExactKeysCapacityAndDefensiveCopies(t *testing.T) {
 	// would collide. No 32-bit fingerprint crosses this contract.
 	a := compiler.StaticRule{Event: "process", Pattern: "/bin/collision-10848"}
 	b := compiler.StaticRule{Event: "process", Pattern: "/bin/collision-125290"}
-	hash := func(s string) uint32 { h:=fnv.New32a(); _,err:=h.Write([]byte(s));if err!=nil {t.Fatal(err)};return h.Sum32() }
-	if hash(a.Pattern)!=hash(b.Pattern) {t.Fatal("fixture no longer collides in legacy FNV key")}
+	hash := func(s string) uint32 {
+		h := fnv.New32a()
+		_, err := h.Write([]byte(s))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h.Sum32()
+	}
+	if hash(a.Pattern) != hash(b.Pattern) {
+		t.Fatal("fixture no longer collides in legacy FNV key")
+	}
 	ka, err := ValidateRule(0, a)
 	if err != nil {
 		t.Fatal(err)
@@ -109,12 +119,18 @@ func TestExactKeysCapacityAndDefensiveCopies(t *testing.T) {
 	if err != nil || ka == kb {
 		t.Fatal("lost exact identity")
 	}
-	distinct:=Domain{Type:0,StaticDomain:StaticDomain{Eligible:true,Rules:[]compiler.StaticRule{a,b}}}
-	if err:=ValidateDomain(distinct,compiler.FieldBitPath);err!=nil {t.Fatal("full keys collapsed on FNV collision",err)}
-	for _,port:=range []uint16{0,65535} {
-		if _,err:=ValidateRule(api.EventTypeNetwork,compiler.StaticRule{Event:"network",Pattern:"127.0.0.1",Port:port});err!=nil {t.Fatal("finite port endpoint rejected",err)}
+	distinct := Domain{Type: 0, StaticDomain: StaticDomain{Eligible: true, Rules: []compiler.StaticRule{a, b}}}
+	if err := ValidateDomain(distinct, compiler.FieldBitPath); err != nil {
+		t.Fatal("full keys collapsed on FNV collision", err)
 	}
-	if _,err:=ValidateRule(api.EventTypeProcess,compiler.StaticRule{Event:"process",Pattern:strings.Repeat("x",MaxPatternBytes)});err!=nil {t.Fatal("path length endpoint rejected",err)}
+	for _, port := range []uint16{0, 65535} {
+		if _, err := ValidateRule(api.EventTypeNetwork, compiler.StaticRule{Event: "network", Pattern: "127.0.0.1", Port: port}); err != nil {
+			t.Fatal("finite port endpoint rejected", err)
+		}
+	}
+	if _, err := ValidateRule(api.EventTypeProcess, compiler.StaticRule{Event: "process", Pattern: strings.Repeat("x", MaxPatternBytes)}); err != nil {
+		t.Fatal("path length endpoint rejected", err)
+	}
 	m.Domains[1].Rules = append(m.Domains[1].Rules, compiler.StaticRule{Event: "network", Pattern: "2001:db8::1", Port: 444})
 	if err := m.Validate(m.ModuleSHA256); err != nil {
 		t.Fatal("distinct ports collide", err)
@@ -135,5 +151,23 @@ func TestExactKeysCapacityAndDefensiveCopies(t *testing.T) {
 	d.Rules = append(d.Rules, a)
 	if ValidateDomain(d, compiler.FieldBitPath) == nil {
 		t.Fatal("capacity overflow accepted")
+	}
+}
+
+func TestBinaryStaticPathBoundaryDeclinesTruncationAliases(t *testing.T) {
+	for _, encoding := range []string{EncodingBinary, EncodingJSON} {
+		for _, n := range []int{127, 128, 254} {
+			m := goodModule()
+			m.Encoding = encoding
+			m.Domains[0].Rules[0].Pattern = strings.Repeat("x", n)
+			wantValid := encoding == EncodingJSON || n < 128
+			if valid := m.Validate(m.ModuleSHA256) == nil; valid != wantValid {
+				t.Fatalf("encoding=%s length=%d valid=%v", encoding, n, valid)
+			}
+			observed := Observe(m.ModuleSHA256, 5, encoding, [3]uint32{compiler.FieldBitPath, 0, 0}, m.Domains[0].StaticDomain, StaticDomain{})
+			if observed.Domains[0].Eligible != wantValid {
+				t.Fatal("worker did not decline unsafe binary table")
+			}
+		}
 	}
 }

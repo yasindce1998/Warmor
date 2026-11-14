@@ -208,10 +208,8 @@ func (s *Supervisor) Start(ctx context.Context, p *StagedPolicy) (*Host, error) 
 		err = protocol.Receive(h.out, &ready, protocol.MaxMetadata)
 	}
 	if err == nil {
-		reply = ready.Control
-		if reply.Version != protocol.Version || reply.Kind != "ready" || reply.Digest != p.digest || reply.Sequence != 0 || reply.Limits != s.config.Limits || ready.Metadata.Validate(p.digest) != nil {
-			err = protocol.ErrProtocol
-		} else {
+		err = ready.Validate(p.digest, s.config.Limits)
+		if err == nil {
 			h.metadata = ready.Metadata.Clone()
 		}
 	}

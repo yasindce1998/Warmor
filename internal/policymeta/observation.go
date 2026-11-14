@@ -5,11 +5,11 @@ package policymeta
 import (
 	"encoding/hex"
 	"errors"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 	"net/netip"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -18,8 +18,8 @@ const (
 	MaxStaticRules      = 4096 // total across both domains, below kernel map capacity
 	MaxPatternBytes     = 254
 	MaxStaticTableBytes = 1 + MaxStaticRules*(6+MaxPatternBytes)
-	KnownFields         = compiler.FieldBitContainerAge*2 - 1
-	TemporalFields      = compiler.FieldBitTime | compiler.FieldBitContainerAge
+	KnownFields         = FieldBitContainerAge*2 - 1
+	TemporalFields      = FieldBitTime | FieldBitContainerAge
 	EncodingBinary      = "binary"
 	EncodingJSON        = "json"
 )
@@ -37,7 +37,7 @@ var ErrMetadata = errors.New("invalid policy metadata")
 
 type StaticDomain struct {
 	Eligible bool
-	Rules    []compiler.StaticRule
+	Rules    []StaticRule
 }
 
 // Source is the metadata surface available to a future evaluator interface.
@@ -64,6 +64,10 @@ type Module struct {
 	Encoding     string // selected entry point, not a guest-provided string
 	Events       []Event
 	Domains      []Domain
+	// Build is optional artifact-author-approved custom-section content. Its
+	// equality with assignment claims is not compiler provenance or semantic
+	// proof of DefaultAction. Never use its Compiler label to authorize caches.
+	Build *policybuild.Metadata
 }
 type Event struct {
 	Type       api.EventType
@@ -80,14 +84,14 @@ func ValidDigest(s string) bool {
 	return err == nil && len(b) == 32 && hex.EncodeToString(b) == s
 }
 func ValidFields(mask uint32) bool {
-	return mask == compiler.FieldsUnknown || mask & ^uint32(KnownFields) == 0
+	return mask == FieldsUnknown || mask & ^uint32(KnownFields) == 0
 }
 func KernelFields(t api.EventType) uint32 {
 	switch t {
 	case api.EventTypeProcess:
-		return compiler.FieldBitPath
+		return FieldBitPath
 	case api.EventTypeNetwork:
-		return compiler.FieldBitRemoteAddr | compiler.FieldBitRemotePort
+		return FieldBitRemoteAddr | FieldBitRemotePort
 	default:
 		return 0
 	}
@@ -100,10 +104,10 @@ func Flags(abi uint32, t api.EventType, fields uint32) uint32 {
 	if abi >= 3 && fields&TemporalFields != 0 {
 		flags |= FlagTimeDependent
 	}
-	if abi >= 3 && fields&compiler.FieldBitContainerAge != 0 {
+	if abi >= 3 && fields&FieldBitContainerAge != 0 {
 		flags |= FlagContainerAge
 	}
-	if fields != compiler.FieldsUnknown && flags&FlagTimeDependent == 0 {
+	if fields != FieldsUnknown && flags&FlagTimeDependent == 0 {
 		flags |= FlagDecisionCache
 		if key := KernelFields(t); key != 0 && fields & ^key == 0 {
 			flags |= FlagLinuxKernelKey
@@ -122,7 +126,7 @@ type RuleKey struct {
 	Port    uint16
 }
 
-func ValidateRule(t api.EventType, r compiler.StaticRule) (RuleKey, error) {
+func ValidateRule(t api.EventType, r StaticRule) (RuleKey, error) {
 	if r.Action > 1 || r.Pattern == "" || len(r.Pattern) > MaxPatternBytes || !utf8.ValidString(r.Pattern) || strings.IndexByte(r.Pattern, 0) >= 0 {
 		return RuleKey{}, ErrMetadata
 	}
@@ -152,7 +156,7 @@ func ValidateDomain(d Domain, fields uint32) error {
 		}
 		return nil
 	}
-	if fields == compiler.FieldsUnknown || !ValidFields(fields) || fields & ^KernelFields(d.Type) != 0 {
+	if fields == FieldsUnknown || !ValidFields(fields) || fields & ^KernelFields(d.Type) != 0 {
 		return ErrMetadata
 	}
 	seen := make(map[RuleKey]bool, len(d.Rules))
@@ -166,8 +170,25 @@ func ValidateDomain(d Domain, fields uint32) error {
 	return nil
 }
 
+// Binary event paths occupy 128 bytes with no truncation marker. An eq rule
+// of length 128 can also match a longer truncated path; longer rules cannot
+// match their own full input at all. Neither is a complete exact allowlist.
+func validateEncodingDomain(encoding string, d Domain) error {
+	if encoding == EncodingBinary && d.Type == api.EventTypeProcess && d.Eligible {
+		for _, r := range d.Rules {
+			if len(r.Pattern) >= 128 {
+				return ErrMetadata
+			}
+		}
+	}
+	return nil
+}
+
 func (m Module) Validate(expectedDigest string) error {
 	if m.Version != Version || !ValidDigest(m.ModuleSHA256) || m.ModuleSHA256 != expectedDigest || m.ABIVersion > 5 || m.Encoding != EncodingBinary && m.Encoding != EncodingJSON || len(m.Events) != 3 || len(m.Domains) != 2 {
+		return ErrMetadata
+	}
+	if m.Build != nil && policybuild.Validate(*m.Build) != nil {
 		return ErrMetadata
 	}
 	for i, e := range m.Events {
@@ -185,6 +206,9 @@ func (m Module) Validate(expectedDigest string) error {
 		if err := ValidateDomain(d, m.Events[d.Type].FieldsRead); err != nil {
 			return err
 		}
+		if err := validateEncodingDomain(m.Encoding, d); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -193,7 +217,11 @@ func (m Module) Clone() Module {
 	m.Events = append([]Event(nil), m.Events...)
 	m.Domains = append([]Domain(nil), m.Domains...)
 	for i := range m.Domains {
-		m.Domains[i].Rules = append([]compiler.StaticRule(nil), m.Domains[i].Rules...)
+		m.Domains[i].Rules = append([]StaticRule(nil), m.Domains[i].Rules...)
+	}
+	if m.Build != nil {
+		build := *m.Build
+		m.Build = &build
 	}
 	return m
 }
@@ -204,7 +232,7 @@ func Observe(digest string, abi uint32, encoding string, fields [3]uint32, proce
 	m := Module{Version: Version, ModuleSHA256: digest, ABIVersion: abi, Encoding: encoding}
 	for t, f := range fields {
 		if !ValidFields(f) {
-			f = compiler.FieldsUnknown
+			f = FieldsUnknown
 		}
 		typ := api.EventType(t)
 		m.Events = append(m.Events, Event{Type: typ, FieldsRead: f, Flags: Flags(abi, typ, f)})
@@ -215,7 +243,7 @@ func Observe(digest string, abi uint32, encoding string, fields [3]uint32, proce
 			t = api.EventTypeNetwork
 		}
 		domain := Domain{Type: t, StaticDomain: d}
-		if abi == 0 || ValidateDomain(domain, m.Events[t].FieldsRead) != nil {
+		if abi == 0 || ValidateDomain(domain, m.Events[t].FieldsRead) != nil || validateEncodingDomain(encoding, domain) != nil {
 			domain.StaticDomain = StaticDomain{}
 		}
 		m.Domains = append(m.Domains, domain)
@@ -226,4 +254,15 @@ func Observe(digest string, abi uint32, encoding string, fields [3]uint32, proce
 		}
 	}
 	return m.Clone()
+}
+
+// MatchArtifact compares actual digest/ABI and authenticated build declarations
+// with signed assignment claims, without importing the assignment layer. It
+// does not validate assignment signature/target/expiry, effective runtime mode,
+// kernel activation or declaration truthfulness. Those remain caller duties.
+func (m Module) MatchArtifact(digest string, abi uint32, compilerIdentity, defaultAction string) error {
+	if m.Validate(digest) != nil || abi == 0 || m.ABIVersion != abi || m.Build == nil || m.Build.Compiler != compilerIdentity || m.Build.DefaultAction != defaultAction {
+		return ErrMetadata
+	}
+	return nil
 }

@@ -35,6 +35,19 @@ type Ready struct {
 	Metadata policymeta.Module
 }
 
+// Validate checks the complete authenticated readiness envelope. The parent
+// must call this after bounded canonical decoding and before publishing Host.
+func (r Ready) Validate(digest string, limits Limits) error {
+	c := r.Control
+	if c.Version != Version || c.Kind != "ready" || c.Digest != digest || c.Sequence != 0 || c.Limits != limits {
+		return ErrProtocol
+	}
+	if err := r.Metadata.Validate(digest); err != nil {
+		return ErrProtocol
+	}
+	return nil
+}
+
 // Limits are checked independently on both sides, before module upload.
 // AddressSpaceBytes is RLIMIT_AS, not an RSS quota. CPUSeconds is a
 // cumulative process-lifetime budget, rounded to whole seconds.

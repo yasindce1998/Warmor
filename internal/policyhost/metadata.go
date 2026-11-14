@@ -46,7 +46,15 @@ func (h *Host) LinuxKernelCacheEligible(t api.EventType) bool {
 func (h *Host) TimeDependent(t api.EventType) bool { return !h.DecisionCacheEligible(t) }
 func (h *Host) ReadsContainerAge(t api.EventType) bool {
 	e, ok := h.eventMetadata(t)
-	return !ok || e.Flags&policymeta.FlagContainerAge != 0
+	if !ok {
+		return true
+	}
+	// Untrusted guest masks must not suppress context enrichment either.
+	// ABI <3 never receives age; ABI >=3 may read it despite claiming not to.
+	if !h.declarationsTrusted {
+		return h.metadata.ABIVersion >= 3
+	}
+	return e.Flags&policymeta.FlagContainerAge != 0
 }
 func (h *Host) staticDomain(index int) policymeta.StaticDomain {
 	if h == nil || !h.declarationsTrusted || len(h.metadata.Domains) != 2 {
