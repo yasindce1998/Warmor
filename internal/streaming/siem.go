@@ -235,8 +235,8 @@ func (s *SyslogSink) Write(ctx context.Context, event *SecurityEvent) (err error
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetWriteDeadline(time.Now()); close(canceled) })
 	n, err := conn.Write([]byte(msg))
 	if !stop() {
-		<-canceled
-	} // callback cannot affect the next record
+		<-canceled // callback cannot affect the next record
+	}
 	if err == nil && n != len(msg) {
 		err = io.ErrShortWrite
 	}

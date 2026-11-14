@@ -17,7 +17,10 @@ import (
 
 type blockingEnricher struct{ started, release chan struct{} }
 
-func (e *blockingEnricher) Enrich(*SecurityEvent) { e.started <- struct{}{}; <-e.release }
+func (e *blockingEnricher) Enrich(*SecurityEvent) {
+	e.started <- struct{}{}
+	<-e.release
+}
 
 func waitFor(t *testing.T, check func() bool) {
 	t.Helper()
@@ -102,6 +105,29 @@ func TestPipelineSharedShutdownBudgetAndConcurrentClose(t *testing.T) {
 	}
 }
 
+func TestPipelineShutdownIngressLossAccounting(t *testing.T) {
+	enricher := &blockingEnricher{started: make(chan struct{}, 4), release: make(chan struct{})}
+	p := NewPipeline(PipelineConfig{BufferSize: 8, Enrichers: []Enricher{enricher}, ShutdownTimeout: 20 * time.Millisecond})
+	p.Emit(&api.Event{PID: 1}, nil)
+	<-enricher.started
+	for i := 2; i <= 4; i++ {
+		p.Emit(&api.Event{PID: uint32(i)}, nil)
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.Close() }()
+	// Enrichers are synchronous/cooperative; after the current one returns,
+	// all remaining accepted ingress is accounted rather than enriched late.
+	<-p.ctx.Done()
+	close(enricher.release)
+	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("close: %v", err)
+	}
+	s := p.Stats()
+	if s.EventsReceived != 4 || s.EventsEmitted != 1 || s.EventsDropped != 3 || s.ShutdownDropped != 3 {
+		t.Fatalf("ingress accounting = %+v", s)
+	}
+}
+
 type flushBlockingSink struct {
 	mockSink
 	started chan struct{}
@@ -162,6 +188,23 @@ func TestSyslogWriteDeadlineCancellationAndClose(t *testing.T) {
 				t.Errorf("drops = %d", s.Dropped())
 			}
 		})
+	}
+}
+
+type shortWriteConn struct{ net.Conn }
+
+func (c shortWriteConn) Write(data []byte) (int, error) { return len(data) - 1, nil }
+
+func TestSyslogShortWriteCountsLossAndDiscardsConnection(t *testing.T) {
+	writer, reader := net.Pipe()
+	defer reader.Close()
+	s := &SyslogSink{conn: shortWriteConn{writer}}
+	defer s.Close()
+	if err := s.Write(context.Background(), sampleEvent(1)); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("short write: %v", err)
+	}
+	if s.Dropped() != 1 || s.conn != nil {
+		t.Fatalf("short write: dropped=%d conn=%v", s.Dropped(), s.conn)
 	}
 }
 

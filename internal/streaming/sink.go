@@ -217,7 +217,7 @@ func NewWebhookSink(cfg WebhookConfig) *WebhookSink {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
-	if cfg.MaxPending < cfg.BatchSize {
+	if cfg.MaxPending <= 0 {
 		cfg.MaxPending = 10 * cfg.BatchSize
 	}
 	if cfg.MaxAttempts <= 0 {
@@ -303,6 +303,9 @@ func (s *WebhookSink) flush(ctx context.Context, closing bool) error {
 		s.expireLocked(time.Now())
 		n := min(len(s.batch), s.batchSize, remaining)
 		if n == 0 {
+			// Expiry may have removed a previously failing head. Do not
+			// suppress full-batch writes after the backlog has disappeared.
+			s.failing = false
 			s.mu.Unlock()
 			return nil
 		}

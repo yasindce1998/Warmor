@@ -57,6 +57,24 @@ func TestWebhookRetryAttemptAndAgeBudgets(t *testing.T) {
 	}
 }
 
+func TestWebhookExplicitSmallPendingBoundRespected(t *testing.T) {
+	s := NewWebhookSink(WebhookConfig{URL: "http://example.invalid", BatchSize: 10, MaxPending: 2, FlushEvery: time.Hour})
+	for i := 1; i <= 5; i++ {
+		if err := s.Write(context.Background(), sampleEvent(uint32(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(s.batch) != 2 || s.batch[0].PID != 4 || s.batch[1].PID != 5 || s.Dropped() != 3 {
+		t.Fatalf("explicit MaxPending ignored: pending=%d dropped=%d", len(s.batch), s.Dropped())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = s.CloseContext(ctx)
+	if s.Dropped() != 5 {
+		t.Fatalf("shutdown did not count remaining bounded backlog: %d", s.Dropped())
+	}
+}
+
 func TestWebhookConcurrentFlushPreservesRetryOrderingAndBatchLimit(t *testing.T) {
 	firstStarted, release := make(chan struct{}), make(chan struct{})
 	var mu sync.Mutex
@@ -174,6 +192,41 @@ func TestWebhookConcurrentCloseCancelsActiveRequest(t *testing.T) {
 	}
 	if s.Dropped() != 1 {
 		t.Errorf("concurrent close drops = %d", s.Dropped())
+	}
+}
+
+func TestWebhookConcurrentCloseWaitRespectsCallerContext(t *testing.T) {
+	started := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+	s := NewWebhookSink(WebhookConfig{URL: ts.URL, BatchSize: 10, Timeout: time.Hour})
+	if err := s.Write(context.Background(), sampleEvent(1)); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.CloseContext(ctx) }()
+	<-started // first caller is in its final POST, not ordinary Write
+	canceled, stop := context.WithCancel(context.Background())
+	stop()
+	if err := s.CloseContext(canceled); err != context.Canceled {
+		t.Errorf("concurrent close wait: %v", err)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("expected interrupted final POST")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first CloseContext leaked")
+	}
+	if s.Dropped() != 1 {
+		t.Errorf("shutdown drops = %d", s.Dropped())
 	}
 }
 
