@@ -15,9 +15,10 @@ const driftCollectorKey = "local"
 // newDriftCollector returns the behavioral fingerprint collector for
 // fleet drift detection (--drift) and its pipeline enricher. The enricher
 // records one counter per "event_type:comm" pair (e.g. "exec:bash"), the
-// granularity the server-side z-score comparison runs on: bounded
-// cardinality (task comms) but fine enough to notice one node suddenly
-// spawning shells or mining tools.
+// granularity the server-side z-score comparison runs on. Comms are
+// attacker-controlled, so the collector enforces a hard pattern limit and
+// folds excess names into an overflow bucket. No workload/image identity is
+// inferred from comm, cgroup ID, or host metadata.
 func newDriftCollector() (*drift.FingerprintCollector, streaming.Enricher) {
 	fc := drift.NewFingerprintCollector(10 * time.Minute)
 	record := func(ev *streaming.SecurityEvent) {
@@ -30,7 +31,8 @@ func newDriftCollector() (*drift.FingerprintCollector, streaming.Enricher) {
 
 // DriftFingerprint returns this daemon's current behavioral fingerprint,
 // or nil when drift collection is disabled or nothing has been observed.
-// The caller (the policy server client) fills in AgentID and ImageHash.
+// This is a host-level observation, not a per-workload fingerprint. A caller
+// may fill in AgentID, but must not fabricate ImageHash to enable comparison.
 func (e *Enforcer) DriftFingerprint() *drift.BehaviorFingerprint {
 	if e.driftCollector == nil {
 		return nil
