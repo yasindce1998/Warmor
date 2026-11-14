@@ -121,8 +121,13 @@ type Event struct {
 	Timestamp time.Time `json:"timestamp"`
 
 	// Phase 3 fields
-	Type     EventType `json:"type,omitempty"`
-	CgroupID uint64    `json:"cgroup_id,omitempty"`
+	// KernelTimestampNS is the original Linux bpf_ktime_get_ns timestamp.
+	// Nonzero values attest initial-namespace TGID and initial monotonic clock.
+	// Only trusted live kernel sensors may supply this; replay/wall time is not
+	// process identity and must never be promoted into a live sensor event.
+	KernelTimestampNS uint64    `json:"kernel_timestamp_ns,omitempty"`
+	Type              EventType `json:"type,omitempty"`
+	CgroupID          uint64    `json:"cgroup_id,omitempty"`
 	// PPID is the parent's PID and ParentComm its comm, as captured by the
 	// sensor (Linux exec tracepoint; other sensors may leave them unset).
 	// Zero/"" = unknown. ParentComm rides the JSON ABI (version 4); PPID
@@ -277,15 +282,26 @@ type ActionResult struct {
 	Cached    bool          // Was this from cache?
 	Latency   time.Duration // Evaluation latency
 	Audit     bool          // True if this deny was downgraded to log (audit mode)
+	// EnforcementAttempted means a termination syscall was issued. Enforced
+	// means termination was accepted (not observed exit/syscall prevention), or
+	// the kernel already blocked the operation. Outcomes are per-event, not cached.
+	EnforcementAttempted bool
+	Enforced             bool
+	// EnforcementError also describes safety refusals before any syscall.
+	EnforcementError string
 }
 
 // EnforcementStats tracks enforcement metrics
 type EnforcementStats struct {
-	Allowed      uint64
-	Denied       uint64
-	Logged       uint64
-	AuditDenied  uint64
-	CacheHits    uint64
-	CacheMisses  uint64
-	TotalLatency time.Duration
+	Allowed              uint64
+	Denied               uint64
+	Logged               uint64
+	AuditDenied          uint64
+	EnforcementAttempted uint64
+	EnforcementSucceeded uint64
+	EnforcementFailed    uint64
+	EnforcementRefused   uint64
+	CacheHits            uint64
+	CacheMisses          uint64
+	TotalLatency         time.Duration
 }

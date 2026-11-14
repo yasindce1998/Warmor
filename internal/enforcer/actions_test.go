@@ -2,10 +2,13 @@ package enforcer
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -78,8 +81,7 @@ func TestActionHandler_AuditMode_AllowPassesThrough(t *testing.T) {
 func TestActionHandler_NoAudit_DenyNotDowngraded(t *testing.T) {
 	handler := NewActionHandler(false)
 
-	// PID 0 skips terminateProcess; a real PID here would SIGKILL whatever
-	// host process owns it. The kill path is covered in actions_linux_test.go.
+	// Actual termination is tested only with dedicated isolated child processes.
 	event := &api.Event{
 		PID:      0,
 		UID:      1000,
@@ -94,8 +96,8 @@ func TestActionHandler_NoAudit_DenyNotDowngraded(t *testing.T) {
 	}
 
 	err := handler.Enforce(context.Background(), event, result)
-	if err != nil {
-		t.Fatalf("Enforce failed: %v", err)
+	if err == nil || result.EnforcementError == "" || result.Enforced || result.EnforcementAttempted {
+		t.Fatalf("PID zero must report refused enforcement: result=%+v err=%v", result, err)
 	}
 
 	if result.Audit {
@@ -182,9 +184,10 @@ func TestActionHandler_DenyPIDZeroIsNoop(t *testing.T) {
 
 	// PID 0 must never be signalled (kill(0, ...) would target our own
 	// process group).
-	err := handler.Enforce(context.Background(), &api.Event{PID: 0}, &api.ActionResult{Action: api.ActionDeny})
-	if err != nil {
-		t.Fatalf("Enforce failed: %v", err)
+	result := &api.ActionResult{Action: api.ActionDeny}
+	err := handler.Enforce(context.Background(), &api.Event{PID: 0}, result)
+	if err == nil || result.Enforced || result.EnforcementAttempted {
+		t.Fatalf("expected refused enforcement for PID 0: %+v, %v", result, err)
 	}
 	if got := handler.GetStats().Denied; got != 1 {
 		t.Errorf("Denied = %d, want 1", got)
@@ -216,5 +219,91 @@ func TestActionHandler_ConcurrentStats(t *testing.T) {
 	stats := handler.GetStats()
 	if stats.Allowed != 50 || stats.AuditDenied != 50 || stats.Logged != 100 || stats.Denied != 0 {
 		t.Errorf("unexpected concurrent stats: %+v", stats)
+	}
+}
+
+func boolUint(v bool) uint64 {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func TestActionHandler_TruthfulTerminationOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		attempted bool
+		err       error
+		outcome   string
+	}{
+		{"accepted", true, nil, "succeeded"},
+		{"signal failed", true, errors.New("permission denied"), "failed"},
+		{"identity refused", false, errors.New("identity unavailable"), "refused"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewActionHandler(false)
+			h.terminate = func(*api.Event) (bool, error) { return tc.attempted, tc.err }
+			before := testutil.ToFloat64(metrics.TerminationsTotal.WithLabelValues(tc.outcome))
+			beforeAttempt := testutil.ToFloat64(metrics.TerminationsTotal.WithLabelValues("attempted"))
+			r := &api.ActionResult{Action: api.ActionDeny}
+			err := h.Enforce(context.Background(), &api.Event{PID: 42}, r)
+			if !errors.Is(err, tc.err) || r.EnforcementAttempted != tc.attempted || r.Enforced != (tc.err == nil) || (r.EnforcementError != "") != (tc.err != nil) {
+				t.Fatalf("outcome: %+v, %v", r, err)
+			}
+			s := h.GetStats()
+			if s.EnforcementAttempted != boolUint(tc.attempted) || s.EnforcementSucceeded != boolUint(tc.err == nil) || s.EnforcementFailed != boolUint(tc.attempted && tc.err != nil) || s.EnforcementRefused != boolUint(!tc.attempted) {
+				t.Fatalf("stats: %+v", s)
+			}
+			if got := testutil.ToFloat64(metrics.TerminationsTotal.WithLabelValues(tc.outcome)) - before; got != 1 {
+				t.Fatalf("outcome metric delta = %v", got)
+			}
+			if got := testutil.ToFloat64(metrics.TerminationsTotal.WithLabelValues("attempted")) - beforeAttempt; got != float64(boolUint(tc.attempted)) {
+				t.Fatalf("attempt metric delta = %v", got)
+			}
+		})
+	}
+}
+
+func TestActionHandler_ResetsOutcomeAndSuppressesTerminationInAudit(t *testing.T) {
+	for _, audit := range []bool{false, true} {
+		h := NewActionHandler(audit)
+		h.terminate = func(*api.Event) (bool, error) { t.Fatal("must not terminate"); return false, nil }
+		for _, action := range []api.Action{api.ActionAllow, api.ActionLog, api.ActionDeny} {
+			r := &api.ActionResult{Action: action, Audit: true, Enforced: true, EnforcementAttempted: true, EnforcementError: "stale"}
+			if err := h.Enforce(context.Background(), &api.Event{PID: 42}, r); err != nil {
+				t.Fatal(err)
+			}
+			if r.Enforced || r.EnforcementAttempted || r.EnforcementError != "" {
+				t.Fatalf("stale outcome: %+v", r)
+			}
+		}
+	}
+}
+
+func TestActionHandler_CancelledContextRefusesTermination(t *testing.T) {
+	h := NewActionHandler(false)
+	h.terminate = func(*api.Event) (bool, error) { t.Fatal("must not terminate"); return false, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := &api.ActionResult{Action: api.ActionDeny}
+	if err := h.Enforce(ctx, &api.Event{PID: 42}, r); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if r.Enforced || r.EnforcementAttempted || h.GetStats().EnforcementRefused != 1 {
+		t.Fatalf("outcome: %+v", r)
+	}
+}
+
+func TestActionHandler_KernelDeniedIsEnforcedWithoutTermination(t *testing.T) {
+	h := NewActionHandler(false)
+	h.terminate = func(*api.Event) (bool, error) { t.Fatal("must not terminate"); return false, nil }
+	r := &api.ActionResult{Action: api.ActionDeny, EnforcementAttempted: true, EnforcementError: "stale"}
+	h.RecordKernelDenied(&api.Event{PID: 42, KernelDenied: true}, r)
+	if !r.Enforced || r.EnforcementAttempted || r.EnforcementError != "" {
+		t.Fatalf("outcome: %+v", r)
+	}
+	s := h.GetStats()
+	if s.Denied != 1 || s.EnforcementAttempted != 0 || s.EnforcementSucceeded != 0 || s.EnforcementFailed != 0 || s.EnforcementRefused != 0 {
+		t.Fatalf("kernel counted as termination: %+v", s)
 	}
 }
