@@ -7,6 +7,9 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - '.github/workflows/binaries.yml'
+      - 'go.mod'
+      - 'go.sum'
+      - 'deploy/helm/**'
       - 'deploy/Dockerfile'
       - '.dockerignore'
       - 'scripts/release-*'
@@ -14,6 +17,10 @@ on:
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    shell: bash
 
 concurrency:
   group: release-${{ github.ref }}
@@ -59,7 +66,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: '1.100.0'
@@ -67,6 +74,8 @@ jobs:
       - name: Release regression tests and dependency integrity
         run: |
           python3 -m unittest discover -s tests/release -v
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= \
+            .github/workflows/release.yml .github/workflows/binaries.yml .github/workflows/macos-ci.yml
           go mod download
           go mod verify
       - name: Build Rust policies
@@ -194,6 +203,13 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
+      - name: Retain per-architecture SBOMs separately from large image archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom-${{ matrix.target }}-${{ steps.meta.outputs.arch }}
+          path: dist/*.spdx.json
+          if-no-files-found: error
+          retention-days: 7
 
   # No registry/release writes until every exact-commit gate passes. PRs stop here.
   publish-images:
@@ -234,6 +250,17 @@ jobs:
           image="ghcr.io/${REPOSITORY}${suffix}:build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
           docker tag "$source" "$image"
           docker push "$image"
+          mkdir -p references
+          docker image inspect "$image" --format '{{join .RepoDigests "\n"}}' \
+            | grep -E "^ghcr.io/${REPOSITORY}${suffix}@sha256:[a-f0-9]{64}$" \
+            > "references/${TARGET}-${ARCH}.reference"
+          test "$(wc -l < "references/${TARGET}-${ARCH}.reference")" -eq 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reference-${{ matrix.target }}-${{ matrix.arch }}
+          path: references/*.reference
+          if-no-files-found: error
+          retention-days: 7
 
   publish:
     needs: [metadata, tests, binaries, chart, images, publish-images]
@@ -259,6 +286,16 @@ jobs:
         with:
           name: chart
           path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: sbom-*
+          merge-multiple: true
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: reference-*
+          merge-multiple: true
+          path: references
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           version: v0.39.0
@@ -301,8 +338,8 @@ jobs:
             if [[ "$target" == controller ]]; then suffix=-controller; fi
             image="ghcr.io/${REPOSITORY}${suffix}"
             docker buildx imagetools create -t "$image:$VERSION" \
-              "$image:build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-amd64" \
-              "$image:build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-arm64"
+              "$(cat "references/${target}-amd64.reference")" \
+              "$(cat "references/${target}-arm64.reference")"
             digest=$(docker buildx imagetools inspect "$image:$VERSION" --format '{{.Manifest.Digest}}')
             echo "$target=$digest" >> "$GITHUB_OUTPUT"
             echo "$image@$digest" >> release/IMAGES.txt
@@ -330,15 +367,10 @@ jobs:
           done < release/IMAGES.txt
       - name: Install pinned scanner
         run: bash scripts/release-install-trivy.sh
-      - name: SBOMs for exact archives and published images
+      - name: SBOM for exact archives (image SBOMs retained from native tests)
         run: |
           python3 scripts/release-extract.py release payloads
           trivy rootfs --format spdx-json --output release/binaries.spdx.json --timeout 10m payloads/
-          while read -r image; do
-            name=daemon
-            if [[ "$image" == *-controller@* ]]; then name=controller; fi
-            trivy image --format spdx-json --output "release/${name}.spdx.json" --timeout 10m "$image"
-          done < release/IMAGES.txt
           cp docs/RELEASE_SUPPORT.md release/
           (cd release && sha256sum ./* > SHA256SUMS)
       - name: Sign archives, SBOMs, chart and checksum manifest

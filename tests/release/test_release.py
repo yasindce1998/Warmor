@@ -46,6 +46,7 @@ class ArchiveTests(unittest.TestCase):
                 extractor.extract(root, root / "extracted")
                 extracted = root / "extracted" / payload.name
                 self.assertEqual((extracted / name).read_bytes(), b"binary\x00contents")
+                self.assertTrue((extracted / name).stat().st_mode & 0o111)
                 for line in (extracted / "SHA256SUMS").read_text().splitlines():
                     checksum, filename = line.split("  ", 1)
                     self.assertEqual(checksum, hashlib.sha256((extracted / filename).read_bytes()).hexdigest())
@@ -109,6 +110,17 @@ class WorkflowTests(unittest.TestCase):
         macos = (ROOT / ".github/workflows/macos-ci.yml").read_text()
         self.assertNotIn("go test -race", macos)
         self.assertIn("**No — tools only**", (ROOT / "docs/RELEASE_SUPPORT.md").read_text())
+
+    def test_rebuild_refuses_stale_payload_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "dist/warmor-1.2.3-darwin-arm64"
+            output.mkdir(parents=True)
+            (output / "warmor-daemon").write_text("old nonfunctional daemon")
+            env = dict(os.environ, VERSION="1.2.3", GOOS="darwin", GOARCH="arm64")
+            result = subprocess.run(["bash", str(ROOT / "scripts/release-build.sh")], cwd=root, env=env, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"release output already exists", result.stderr)
 
     def test_pinned_multiplatform_base_images_and_reproducible_flags(self):
         dockerfile = (ROOT / "deploy/Dockerfile").read_text()

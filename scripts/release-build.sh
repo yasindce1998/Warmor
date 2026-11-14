@@ -4,8 +4,15 @@ set -euo pipefail
 : "${VERSION:?set VERSION}"
 : "${GOOS:?set GOOS}"
 : "${GOARCH:?set GOARCH}"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || exit 1
+case "$GOOS/$GOARCH" in
+  linux/amd64|linux/arm64|windows/amd64|darwin/amd64|darwin/arm64) ;;
+  *) echo "unsupported release target: $GOOS/$GOARCH" >&2; exit 1 ;;
+esac
 export CGO_ENABLED=0
 out="dist/warmor-${VERSION}-${GOOS}-${GOARCH}"
+# Never package stale binaries (particularly an old macOS daemon) on reruns.
+test ! -e "$out" || { echo "release output already exists: $out" >&2; exit 1; }
 mkdir -p "$out"
 ext=""
 if [[ "$GOOS" == windows ]]; then ext=.exe; fi
@@ -21,6 +28,25 @@ for tool in "${tools[@]}"; do
 done
 cp LICENSE "$out/"
 cp docs/RELEASE_SUPPORT.md "$out/RELEASE_SUPPORT.md"
+# Test the extracted bytes of the final archive, not just build-directory files.
+archive="$(python3 scripts/release-package.py "$out" "${SOURCE_DATE_EPOCH:?set SOURCE_DATE_EPOCH}" "$GOOS")"
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+mkdir "$stage/archives"
+cp "$archive" "$stage/archives/"
+python3 scripts/release-extract.py "$stage/archives" "$stage/extracted"
+out="$stage/extracted/$(basename "$out")"
+python3 - "$out" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+for line in (root / "SHA256SUMS").read_text().splitlines():
+    checksum, name = line.split("  ", 1)
+    if hashlib.sha256((root / name).read_bytes()).hexdigest() != checksum:
+        raise SystemExit(f"release checksum mismatch: {name}")
+PY
 # No root, drivers, entitlements or production cluster needed.
 "$out/warmor-compile$ext" --version | grep -F -- "$VERSION"
 "$out/warmor-compile$ext" --validate deploy/default-policy.yaml
@@ -29,4 +55,4 @@ if [[ "$GOOS" != darwin ]]; then
 else
   test ! -e "$out/warmor-daemon"
 fi
-python3 scripts/release-package.py "$out" "${SOURCE_DATE_EPOCH:?set SOURCE_DATE_EPOCH}" "$GOOS"
+echo "$archive"

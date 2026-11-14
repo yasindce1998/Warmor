@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build-test:
     # Portable tooling only; this is deliberately not an ESF backend gate.
@@ -21,7 +25,7 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
 
       - name: Build portable tools/stubs (not the cgo ESF backend)
         run: CGO_ENABLED=0 go build ./...

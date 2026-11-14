@@ -23,13 +23,17 @@ def extract(source: Path, root: Path) -> None:
                 for member in stream:
                     if not member.isfile():
                         raise ValueError(f"non-regular release member: {member.name}")
-                    destination(root, member.name).write_bytes(stream.extractfile(member).read())
+                    out = destination(root, member.name)
+                    out.write_bytes(stream.extractfile(member).read())
+                    out.chmod(member.mode & 0o777)
         elif archive.suffix == ".zip":
             with zipfile.ZipFile(archive) as stream:
                 for member in stream.infolist():
                     if member.is_dir() or (member.external_attr >> 16) & 0o170000 != 0o100000:
                         raise ValueError(f"non-regular release member: {member.filename}")
-                    destination(root, member.filename).write_bytes(stream.read(member))
+                    out = destination(root, member.filename)
+                    out.write_bytes(stream.read(member))
+                    out.chmod((member.external_attr >> 16) & 0o777)
 
 
 if __name__ == "__main__":

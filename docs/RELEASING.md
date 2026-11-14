@@ -20,11 +20,16 @@ requires all of these jobs from the **same run**, not a previous green branch:
 - lint/render checks on the **packaged** chart with release-specific
   `version`, `appVersion`, daemon and controller image tags.
 
+Archive smoke tests extract the final archive, verify its internal checksums
+and execute those extracted bytes. A stale output directory fails closed rather
+than accidentally including a removed binary on a rerun.
+
 Container images are saved and uploaded only after testing; publishing downloads
 and verifies those saved files and image IDs rather than rebuilding. Final
 multi-architecture manifests refer to the tested architectures. Archive and
-chart downloads are the same retained artifacts. Actions are pinned to commit
-IDs; Go/Rust/Helm/Buildx are fixed versions, BuildKit/base images are index-digest
+chart downloads are the same retained artifacts. Architecture manifests are
+promoted by registry digest, not by re-resolving a staging tag. Actions are
+pinned to commit IDs; Go/Rust/Helm/Buildx are fixed versions, BuildKit/base images are index-digest
 pinned, and Trivy binary downloads are SHA-256 checked. Dependency downloads use
 Go checksums (`go mod verify`); generated controller policies compile offline.
 Archive timestamps, ownership and ordering are normalized; Go uses `-trimpath`,
@@ -59,8 +64,9 @@ secret, Apple credential or external private infrastructure is assumed. This
 requires repository/plan support for GitHub attestations; unsupported attestation
 publication is a blocker, not a reason to skip signing.
 
-SPDX SBOMs are generated from the extracted binary archive payloads and the
-published image digests. The combined binary SBOM is bound to each archive by a
+SPDX SBOMs are generated from the extracted binary archive payloads and each
+tested native image (both AMD64 and ARM64), not just the publisher's host
+architecture. The combined binary SBOM is bound to each archive by a
 signed SBOM attestation. Provenance covers archives, chart, SBOM files,
 `IMAGES.txt`, platform support note and the top-level `SHA256SUMS`. The workflow
 verifies provenance against its exact repository, workflow path, commit and tag
