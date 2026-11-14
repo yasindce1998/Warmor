@@ -247,9 +247,12 @@ func TestSupervisedInvalidCandidateNeverPreparesKernelOrCommits(t *testing.T) {
 	c := supervisedConfig(t)
 	e, k, key := supervisedEnforcer(t, wasmtest.ConstPolicy(0, nil), c, true)
 	old, gen := e.evaluator, e.policyGen.Load()
-	for _, module := range [][]byte{[]byte("signed but malformed WASM"), wasmtest.ConstPolicy(1, nil)} {
-		path := signedCandidate(t, key, module)
-		if len(module) != len("signed but malformed WASM") {
+	for _, candidate := range []struct {
+		module       []byte
+		badSignature bool
+	}{{module: []byte("signed but malformed WASM")}, {module: wasmtest.ConstPolicy(1, nil), badSignature: true}} {
+		path := signedCandidate(t, key, candidate.module)
+		if candidate.badSignature {
 			if err := os.WriteFile(path+".sig", []byte("bad signature"), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -261,6 +264,40 @@ func TestSupervisedInvalidCandidateNeverPreparesKernelOrCommits(t *testing.T) {
 		if e.evaluator != old || e.policyGen.Load() != gen || len(k.prepared) != 1 {
 			t.Fatal("invalid candidate reached kernel preparation")
 		}
+	}
+}
+
+func TestSupervisedStartupRejectsBeforePlatformCreation(t *testing.T) {
+	c := supervisedConfig(t)
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := newPlatform
+	called := false
+	newPlatform = func(platform.Config) (platform.Platform, error) {
+		called = true
+		return &fakePlatform{}, nil
+	}
+	t.Cleanup(func() { newPlatform = old })
+	path := signedCandidate(t, key, wasmtest.ConstPolicy(0, nil))
+	for _, opts := range []*Options{
+		{SupervisedBackend: &c},
+		{SupervisedBackend: &policyhost.Config{}, PolicyVerifyKey: pub},
+	} {
+		if e, err := New(context.Background(), path, opts); err == nil || e != nil || called {
+			t.Fatal("invalid supervised config reached platform", err)
+		}
+	}
+	if err := os.WriteFile(path+".sig", []byte("invalid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if e, err := New(context.Background(), path, &Options{SupervisedBackend: &c, PolicyVerifyKey: pub}); err == nil || e != nil || called {
+		t.Fatal("invalid signature reached platform", err)
+	}
+	bad := signedCandidate(t, key, []byte("signed invalid WASM"))
+	if e, err := New(context.Background(), bad, &Options{SupervisedBackend: &c, PolicyVerifyKey: pub}); err == nil || e != nil || called {
+		t.Fatal("invalid child readiness reached platform", err)
 	}
 }
 

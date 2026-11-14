@@ -50,6 +50,9 @@ commit retains both owners and the original closure/revision. Retrying the same
 candidate finishes recovery without another child or kernel Prepare. Failed
 preparation only closes/reaps the candidate. Worker evaluation/IPC/limit failure
 denies that event without caching the error; the failed host remains terminal.
+Reaped hosts cannot serve prior userspace cached allows. Health checks are
+snapshots, not atomic liveness proofs; separately authorized static/kernel rules
+are not globally revoked merely because their evaluator child exits.
 Only an explicit activation starts another host. Budgets are process-lifetime
 budgets: request/CPU exhaustion requires operator-controlled activation, not a
 hidden renewal loop.

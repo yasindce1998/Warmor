@@ -700,7 +700,12 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	if host, ok := evaluator.(*hostEvaluator); ok {
 		cacheUsable = host.Alive()
 	}
-	if result, hit := decisionCache.Get(event); hit && cacheUsable {
+	var cachedResult *api.ActionResult
+	var cacheHit bool
+	if cacheUsable {
+		cachedResult, cacheHit = decisionCache.Get(event)
+	}
+	if result := cachedResult; cacheHit {
 		metrics.RecordCacheHit()
 		_ = e.actionHandler.Enforce(e.ctx, event, result)
 		e.logger.LogEvent(event, result)
