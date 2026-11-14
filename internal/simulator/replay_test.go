@@ -184,7 +184,7 @@ func TestSecurityEventToAPIEvent_Types(t *testing.T) {
 
 	t.Run("unknown", func(t *testing.T) {
 		se := base
-		se.EventType = "ptrace"
+		se.EventType = "unknown"
 		e := securityEventToAPIEvent(&se)
 		if e.Process != nil || e.File != nil || e.Network != nil {
 			t.Error("expected no typed payload for unknown event type")
@@ -396,7 +396,7 @@ func TestContainerStartRoundTrip(t *testing.T) {
 	}
 	// Unknown stays unknown and is not written at all.
 	data, _ = json.Marshal(streaming.FromAPIEvent(&api.Event{Comm: "x"}, nil))
-	if bytes.Contains(data, []byte("container_start")) {
+	if bytes.Contains(data, []byte(`"container_start":`)) {
 		t.Errorf("zero ContainerStart serialized: %s", data)
 	}
 }

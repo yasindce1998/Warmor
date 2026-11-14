@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -239,16 +241,71 @@ func (p *Pipeline) transform(event *api.Event, result *api.ActionResult) *Securi
 // form (without pipeline-assigned ID, hostname or labels). Detectors that
 // run outside the pipeline use it to see events exactly as sinks do.
 func FromAPIEvent(event *api.Event, result *api.ActionResult) *SecurityEvent {
+	// Own the snapshot, including mutable payloads, before handing it to sinks.
+	input := *event
+	if event.Process != nil {
+		process := *event.Process
+		process.Args = slices.Clone(event.Process.Args)
+		input.Process = &process
+	}
+	if event.File != nil {
+		file := *event.File
+		input.File = &file
+	}
+	if event.Network != nil {
+		network := *event.Network
+		input.Network = &network
+	}
 	se := &SecurityEvent{
-		Timestamp: event.Timestamp,
-		PID:       event.PID,
-		UID:       event.UID,
-		GID:       event.GID,
-		Comm:      event.Comm,
-		CgroupID:  event.CgroupID,
-		Filename:  event.Filename,
+		SchemaVersion: EventSchemaVersion,
+		PolicyInput:   &input,
+		PPID:          event.PPID,
+		Timestamp:     event.Timestamp,
+		PID:           event.PID,
+		UID:           event.UID,
+		GID:           event.GID,
+		Comm:          event.Comm,
+		CgroupID:      event.CgroupID,
+		Filename:      event.Filename,
 
 		ContainerStart: event.ContainerStart,
+	}
+	if event.Timestamp.IsZero() {
+		se.InputIssues = append(se.InputIssues, InputIssue{"timestamp", "unknown"})
+	}
+	if event.ContainerStart.IsZero() {
+		se.InputIssues = append(se.InputIssues, InputIssue{"container_start", "unknown"})
+	}
+	if event.GetType() == api.EventTypeProcess {
+		if event.Process == nil || event.Process.Args == nil {
+			se.InputIssues = append(se.InputIssues, InputIssue{"process.args", "unknown"})
+		}
+		if event.ParentComm == "" {
+			se.InputIssues = append(se.InputIssues, InputIssue{"parent_comm", "unknown"})
+		}
+	}
+	// JSON replaces invalid UTF-8 with U+FFFD. Mark loss before serialization.
+	values := map[string]string{"comm": event.Comm, "filename": event.Filename, "parent_comm": event.ParentComm, "hook": event.Hook, "mount_source": event.MountSource}
+	if event.Process != nil {
+		values["process.filename"] = event.Process.Filename
+		for _, arg := range event.Process.Args {
+			if !utf8.ValidString(arg) {
+				se.InputIssues = append(se.InputIssues, InputIssue{"process.args", "unknown"})
+				break
+			}
+		}
+	}
+	if event.File != nil {
+		values["file.path"], values["file.operation"] = event.File.Path, event.File.Operation
+	}
+	if event.Network != nil {
+		values["network.remote_addr"], values["network.local_addr"] = event.Network.RemoteAddr, event.Network.LocalAddr
+		values["network.operation"], values["network.protocol"] = event.Network.Operation, event.Network.Protocol
+	}
+	for field, value := range values {
+		if !utf8.ValidString(value) {
+			se.InputIssues = append(se.InputIssues, InputIssue{field, "unknown"})
+		}
 	}
 
 	if se.Timestamp.IsZero() {
