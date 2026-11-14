@@ -20,15 +20,15 @@ import (
 // Only the publication/drain boundary is faked; evaluators and pools are real.
 // No test in this file loads/attaches BPF or signals a host process.
 type generationKernel struct {
-	mu                              sync.Mutex
-	active                          uint64
-	prepared                        []uint64
-	aborted                         []uint64
-	acked                           []uint64
-	writes                          []uint64
-	prepareErr, activateErr, ackErr error
-	drain                           func(context.Context) error
-	publish                         func(uint64)
+	mu                                        sync.Mutex
+	active                                    uint64
+	prepared                                  []uint64
+	aborted                                   []uint64
+	acked                                     []uint64
+	writes                                    []uint64
+	prepareErr, activateErr, ackErr, abortErr error
+	drain                                     func(context.Context) error
+	publish                                   func(uint64)
 }
 
 func (k *generationKernel) Prepare(id uint64, _ kernelmap.GenerationSpec) error {
@@ -53,7 +53,7 @@ func (k *generationKernel) Abort(id uint64) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.aborted = append(k.aborted, id)
-	return nil
+	return k.abortErr
 }
 func (k *generationKernel) AcknowledgeDrain(id uint64) error {
 	k.mu.Lock()
@@ -153,12 +153,14 @@ func TestGenerationCapturedRoutingAndWorkerDrain(t *testing.T) {
 
 func TestGenerationDrainRunsWithoutDispatchOrWorkerLocks(t *testing.T) {
 	e, k := generationEnforcer(t)
+	newHandled := make(chan struct{})
 	k.publish = func(id uint64) {
 		// Kernel producers do not take userspace locks; the reader can queue
 		// new-ID work before Activate returns, but dispatch waits for publish.
 		go func() {
 			event := &api.Event{LSMEvent: true, Hook: "exec", PolicyGeneration: id, UID: 1000}
 			e.handleEvent(event)
+			close(newHandled)
 		}()
 	}
 	k.drain = func(ctx context.Context) error {
@@ -187,6 +189,7 @@ func TestGenerationDrainRunsWithoutDispatchOrWorkerLocks(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("activation deadlocked single reader/worker")
 	}
+	<-newHandled
 }
 
 func TestGenerationZeroContextAndObservationHooks(t *testing.T) {
@@ -379,5 +382,99 @@ func TestGenerationCancellationRetainsOldUntilTeardown(t *testing.T) {
 	}
 	if err := e.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGenerationOptionFailsBeforePlatformSideEffects(t *testing.T) {
+	for _, opts := range []*Options{
+		{AtomicGenerations: true},
+		{AtomicGenerations: true, RequireLSM: true, SkipLSM: true},
+	} {
+		if e, err := New(context.Background(), "not-read.wasm", opts); err == nil || e != nil {
+			t.Fatal("invalid generation posture reached platform")
+		}
+	}
+	if e, err := New(context.Background(), "not-read.yaml", &Options{AtomicGenerations: true, RequireLSM: true}); err == nil || e != nil {
+		t.Fatal("mutable compile-on-reload path admitted")
+	}
+}
+
+func TestGenerationFailedCandidateCleanupRetriedBeforeNextPrepare(t *testing.T) {
+	e, k := generationEnforcer(t)
+	k.prepareErr, k.abortErr = errors.New("populate"), errors.New("close")
+	path := generationCandidate(t, 0)
+	if err := e.ActivatePolicy(path, nil); err == nil {
+		t.Fatal("failed prepare acknowledged")
+	}
+	if e.generations.abortID != 2 {
+		t.Fatal("failed candidate cleanup ownership lost")
+	}
+	k.prepareErr = nil
+	if err := e.ActivatePolicy(path, nil); err == nil {
+		t.Fatal("new prepare passed unresolved cleanup")
+	}
+	if len(k.prepared) != 2 {
+		t.Fatal("third candidate prepared")
+	}
+	k.abortErr = nil
+	if err := e.ActivatePolicy(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if e.policyGen.Load() != 3 || e.generations.abortID != 0 {
+		t.Fatal("cleanup retry reused failed ID")
+	}
+}
+
+func TestGenerationRetirementWaitsForOldProcessOutcome(t *testing.T) {
+	e, k := generationEnforcer(t)
+	// Install a denying generation, then let an event's action outlive the
+	// next live commit. Its outcome must finish before old pool retirement.
+	k.drain = nil
+	if err := e.ActivatePolicy(generationCandidate(t, 1), nil); err != nil {
+		t.Fatal(err)
+	}
+	e.actionHandler.auditMode = false
+	entered, release, handled := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	e.actionHandler.terminate = func(*api.Event) (bool, error) {
+		close(entered)
+		<-release
+		return false, errors.New("injected identity refusal")
+	}
+	event := &api.Event{PID: 123, UID: 1000, Filename: "/bin/test"}
+	if !e.captureGeneration(event) {
+		t.Fatal("capture failed")
+	}
+	go func() { e.handleEvent(event); close(handled) }()
+	<-entered
+	draining := make(chan struct{})
+	k.drain = func(context.Context) error { close(draining); return nil }
+	oldPool := e.pool
+	done := make(chan error, 1)
+	path := generationCandidate(t, 0)
+	go func() { done <- e.ActivatePolicy(path, nil) }()
+	<-draining
+	select {
+	case <-done:
+		t.Fatal("unfinished process action crossed retirement")
+	default:
+	}
+	if p, err := oldPool.Get(context.Background()); err != nil {
+		t.Fatal("old action pool closed early")
+	} else {
+		oldPool.Put(p)
+	}
+	unblock()
+	<-handled
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldPool.Get(context.Background()); !errors.Is(err, wasm.ErrPoolClosed) {
+		t.Fatal("old pool not closed after outcome")
+	}
+	if stats := e.GetStats(); stats.Denied != 1 || stats.EnforcementRefused != 1 || stats.EnforcementSucceeded != 0 {
+		t.Fatalf("old outcome lost through activation: %+v", stats)
 	}
 }

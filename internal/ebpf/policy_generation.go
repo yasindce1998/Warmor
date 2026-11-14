@@ -24,8 +24,8 @@ const (
 )
 
 var (
-	ErrGenerationBusy  = errors.New("candidate or undrained generation already exists")
-	ErrStaleGeneration = errors.New("stale or unknown policy generation")
+	ErrGenerationBusy  = kernelmap.ErrGenerationBusy
+	ErrStaleGeneration = kernelmap.ErrStaleGeneration
 )
 
 // GenerationRule is an exact static identity. Use Pattern for exec, mount and
@@ -87,7 +87,8 @@ type policyGeneration struct {
 
 // GenerationManager is an opt-in, single-writer double buffer. It owns at most
 // two inner maps: active+candidate OR active+retiring (including failed cleanup).
-// Obtain it once from LSMLoader.PolicyGenerations. No daemon path uses it yet.
+// Obtain it once from LSMLoader.PolicyGenerations. The experimental enforcer
+// integration owns dispatch/durable recovery; legacy activation stays separate.
 //
 // Activate is atomic ONLY for the kernel's rules+markers+ID. The caller MUST
 // serialize userspace evaluator publication, event dispatch, dynamic writeback

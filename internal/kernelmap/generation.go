@@ -1,5 +1,12 @@
 package kernelmap
 
+import "errors"
+
+var (
+	ErrGenerationBusy  = errors.New("candidate or undrained generation already exists")
+	ErrStaleGeneration = errors.New("stale or unknown policy generation")
+)
+
 // GenerationRule is a complete exact static kernel identity, never a selector.
 type GenerationRule struct {
 	CgroupID  uint64

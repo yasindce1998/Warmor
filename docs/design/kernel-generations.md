@@ -1,10 +1,13 @@
 # Opt-in kernel policy generations
 
-Status: **kernel/API building block only; not enabled by daemon activation**.
-This branch does not change reload in the enforcer, fleet, or daemon. Do not
-substitute this API into those paths until the combined evaluator/publication,
-failure-recovery and drain tests below exist. The legacy reload path still has
-its documented clear/rebuild limitations; this work does not silently fix it.
+Status: **experimental opt-in daemon integration; OFF by default**.
+`--experimental-atomic-generations --require-lsm` selects the combined enforcer
+path for compiled WASM policies. This is not production readiness or a
+cross-userspace/kernel/filesystem atomicity claim. See
+[generation-activation.md](generation-activation.md) for its commit model,
+pending recovery, tests, and remaining whole-daemon VM validation gate.
+Without the option the legacy reload path retains its documented clear/rebuild
+limitations. Workload selectors are not enabled by this option.
 
 ## One pointer, one policy snapshot
 
@@ -102,7 +105,7 @@ active N --Prepare(N+1)--> active N + candidate
   Maps are not pinned; restart/adoption of a running pinned policy is not an API
   capability. Shutdown and crash availability semantics are unchanged.
 
-## Required activation-owner sequencing (not implemented here)
+## Required activation-owner sequencing
 
 There is **no cross-userspace/kernel atomic-switch claim**. The manager mutex
 only serializes its own kernel writes. The activation owner must agree on and
@@ -122,9 +125,9 @@ For the current non-sleepable policy hooks, an implementable sequence is:
    do not acquire this lock; queued new-ID events must already have an evaluator.
 4. Route each versioned LSM event by **its captured ID**, not by the userspace
    current pointer. `LSMEvent.PolicyGeneration` is preserved through
-   `internal/ebpf.Event`. The current `pkg/api.Event`/enforcer conversion does
-   **not** yet carry or dispatch it: the integration must add that context before
-   use, not discard it and label old decisions with the new ID. Capture a version
+    `internal/ebpf.Event` and `pkg/api.Event`. The experimental enforcer dispatches
+    it using a live `GenerationContext` lease, not a current-pointer relabel.
+    Capture a version
    for tracepoint/unversioned work under the same dispatch contract. Do not treat
    every ID-0 observation-only event as old-policy work forever.
 5. After successful `Activate` returns (including the kernel's non-sleepable RCU

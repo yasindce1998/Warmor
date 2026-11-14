@@ -85,6 +85,12 @@ switching: this cannot make arbitrary concurrent two-file writes transactional.
 
 ## Evaluator lifetime and kernel limits
 
+The following describes the default **legacy** activation path. Experimental
+Linux generation activation is separately opt-in; its per-event lifetime,
+irreversible live commit and pending durability/drain semantics are documented
+in [generation-activation.md](generation-activation.md). It is not a production
+atomicity guarantee and does not enable workload selectors.
+
 Reload and close are serialized. An event holds a shared drain barrier through
 cache lookup, WASM evaluation, persistence, action and reporting. Activation
 takes the exclusive barrier before kernel preparation/publication, swaps the
