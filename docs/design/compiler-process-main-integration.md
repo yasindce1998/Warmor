@@ -2,6 +2,16 @@
 
 ## Review scope
 
+The follow-up merge of `origin/main` at `fd83a1d` into `dd38e91` contains only
+main's status/readiness documentation and independently reviewed WASM fixture
+changes from PR #56. The single conflict is the equivalent comment above
+`TestPoolReplacementPinnedToOriginalModule`; use main's exact version of the
+entire `initialization_test.go`, including its stricter allocator-specific
+failure assertions. This adds no production or timeout-budget changes. The
+compiler build/metadata and subprocess helper files are unchanged. Targeted
+compiler/WASM race tests and lint validate this small follow-up; fresh nonempty
+remote CI is still required after publication, and zero checks is not success.
+
 The follow-up merge of `origin/main` at `ce1d5ab` into `4290664` is automatic:
 there are no textual conflicts or additional production resolutions. It brings
 main's independently reviewed kernel/manifest integration, including the
