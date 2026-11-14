@@ -2,6 +2,9 @@ package policyserver
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -10,6 +13,131 @@ import (
 
 	"github.com/yasindce1998/warmor/internal/telemetry"
 )
+
+func TestTelemetryDurablePublicationFailureStages(t *testing.T) {
+	for _, committed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("replacement-committed=%t", committed), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "telemetry.json")
+			store, err := OpenTelemetryStore(path, testTelemetryConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			now := time.Now()
+			store.clock = func() time.Time { return now }
+			if err := store.ConfigureGeneration("r", "g"); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, ack := telemetryTestSource(t, store, now, "agent", true)
+			if _, err := store.ingest("agent", ack, snapshot); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failure := errors.New("snapshot publication failed")
+			calls := 0
+			store.publish = func(from, to string) (bool, error) {
+				calls++
+				if committed {
+					// Model replacement succeeding before its durability barrier
+					// fails; the disk view may differ from the unpublished memory.
+					if _, err := publishSnapshot(from, to); err != nil {
+						return false, fmt.Errorf("fixture replacement: %w", err)
+					}
+				}
+				return committed, failure
+			}
+			now = now.Add(time.Second)
+			ack.LastHeartbeat = now
+			snapshot.Sequence++
+			snapshot.Total = 10
+			if _, err := store.ingest("agent", ack, snapshot); !errors.Is(err, ErrStatePersistence) {
+				t.Fatalf("publication failure not surfaced: %v", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Equal(before, after) == committed || calls != 1 {
+				t.Fatal("fixture did not fail at the expected publication stage")
+			}
+			if src := store.state.Sources["agent"]; src.Cursor.Sequence != 1 || src.Cursor.Total != 0 || store.Report("r").Canary.Total != 0 {
+				t.Fatal("failed publication exposed a partial cursor/contribution")
+			}
+			if committed {
+				if !errors.Is(store.fault, failure) || store.Report("r").Verdict != "pending" || store.Report("r").Reason != "unavailable-generation" {
+					t.Fatal("ambiguous durability did not poison reports")
+				}
+				if _, err := store.ingest("agent", ack, snapshot); !errors.Is(err, ErrStatePersistence) || calls != 1 {
+					t.Fatal("poisoned writer attempted another publication", err)
+				}
+			} else {
+				if store.fault != nil {
+					t.Fatal("definite precommit failure poisoned ordinary telemetry write")
+				}
+				store.publish = publishSnapshot
+				if result, err := store.ingest("agent", ack, snapshot); err != nil || result.Total != 10 {
+					t.Fatalf("precommit retry did not contribute exactly once: %+v %v", result, err)
+				}
+				if result, err := store.ingest("agent", ack, snapshot); err != nil || result.Status != "duplicate" || store.Report("r").Canary.Total != 10 {
+					t.Fatalf("retry duplicated evidence: %+v %v", result, err)
+				}
+			}
+		})
+	}
+}
+
+func TestTelemetryDurableReplacementPreservesPrivateSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	preparePrivateSnapshotDir(t, dir)
+	path := filepath.Join(dir, "telemetry.json")
+	store, err := OpenTelemetryStore(path, testTelemetryConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	assertSnapshot := func() {
+		t.Helper()
+		assertPrivateSnapshot(t, path)
+		assertPrivateSnapshot(t, path+".lock")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := json.Marshal(store.state)
+		if err != nil || !bytes.Equal(data, want) {
+			t.Fatalf("successful publication differs from memory: %v", err)
+		}
+		leftovers, err := filepath.Glob(filepath.Join(dir, ".telemetry-*"))
+		if err != nil || len(leftovers) != 0 {
+			t.Fatalf("publication left temporary snapshots: %v %v", leftovers, err)
+		}
+	}
+	assertSnapshot() // creation
+	if err := store.ConfigureGeneration("r", "g"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AuthorizeSession("agent"); err != nil {
+		t.Fatal(err)
+	}
+	assertSnapshot() // repeated replacement of an existing file
+	oldEpoch := store.state.Epoch
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenTelemetryStore(path, testTelemetryConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	store = reopened
+	assertSnapshot() // restart durably replaces the epoch before returning
+	if store.state.Epoch == oldEpoch || len(store.state.Sources) != 0 || store.Report("r").Verdict != "pending" {
+		t.Fatal("restart retained evidence or failed to rotate epoch")
+	}
+}
 
 func TestTelemetryDurableFailureLeavesCursorAndSnapshotUnchanged(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")

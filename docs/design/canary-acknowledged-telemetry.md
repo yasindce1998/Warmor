@@ -82,9 +82,11 @@ enablement checklist, not a statement that automatic rollback is available.
   required. Sticky overflow continues to make subsequent intervals pending.
 - Cursor, immutable attribution, quality state and aggregate contribution are
   serialized into **one** bounded telemetry snapshot and published only after a
-  successful synced write/rename/directory sync. A precommit persistence failure
-  leaves both sides unchanged; ambiguous post-rename durability poisons the
-  writer. Every reopen rotates server epoch, revokes all sessions, and discards
+  successful synced write and platform-specific durable replacement (Unix
+  rename/directory sync; Windows write-through replacement, matching the fleet
+  snapshot backend). A precommit persistence failure leaves both sides unchanged;
+  ambiguous post-replacement durability poisons the writer. Every reopen rotates
+  server epoch, revokes all sessions, and discards
   windows/cursors together. There is deliberately **no cross-restart evidence
   continuity promise**. Configuration survives but full fresh warm-up is required.
 - Receipt time uses an epoch-local monotonic elapsed timeline, not agent wall
@@ -205,6 +207,17 @@ evidence, not a native kernel/ETW/ESF run, a production collector-to-report
 lifecycle, full sensor-loss coverage, capacity certification, or automatic
 rollback acceptance. Repository opt-in external-tool/platform test requirements
 were not enabled for this validation.
+
+PR #47 Windows CI run `43612623936`, job `132500748490`, identified a distinct
+publication bug: telemetry duplicated Unix directory `Sync`, which fails with
+access denied on Windows. Telemetry now reuses the existing fleet snapshot
+publication helper, including Windows write-through replacement, rather than
+ignoring that barrier or skipping durable tests. Portable regressions check
+private snapshot/lock permissions (including native Windows DACL assertions),
+replacement/reopen, retry without double counting, and poison after ambiguous
+publication. This fix does not require the unrelated newer-main timing or
+supervised-host descriptor changes. Native Windows execution of the fix must
+still be confirmed by CI; cross-compilation is not native runtime evidence.
 
 ## Original integration proposal and acceptance checklist
 

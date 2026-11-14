@@ -93,6 +93,9 @@ type TelemetryStore struct {
 	fault  error
 	// persist is injectable for transaction-failure tests; called before publish.
 	persist func([]byte) error
+	// publish uses the fleet snapshot's platform-specific durable replacement.
+	// Its committed result distinguishes pre-replacement from ambiguous failures.
+	publish func(from, to string) (committed bool, err error)
 }
 
 func NewTelemetryStore(cfg TelemetryConfig) (*TelemetryStore, error) {
@@ -108,7 +111,7 @@ func NewTelemetryStore(cfg TelemetryConfig) (*TelemetryStore, error) {
 	// its wall representation advances only by monotonic elapsed time. Epochs
 	// are never restored, so wall-clock corrections cannot stretch a window.
 	clock := func() time.Time { return anchor.Add(time.Since(anchor)) }
-	return &TelemetryStore{state: telemetryState{Format: 1, Epoch: epoch, Config: cfg, Rollouts: map[string]string{}, Domains: map[string]string{}, Rosters: map[string]map[string]bool{}, Sources: map[string]*telemetrySource{}}, clock: clock}, nil
+	return &TelemetryStore{state: telemetryState{Format: 1, Epoch: epoch, Config: cfg, Rollouts: map[string]string{}, Domains: map[string]string{}, Rosters: map[string]map[string]bool{}, Sources: map[string]*telemetrySource{}}, clock: clock, publish: publishSnapshot}, nil
 }
 
 // OpenTelemetryStore requires a private administrator-owned directory and a
@@ -223,15 +226,11 @@ func (t *TelemetryStore) write(data []byte) error {
 	if err != nil {
 		return err
 	}
-	if err = os.Rename(name, t.path); err != nil {
-		return err
-	}
-	dir, err := os.Open(filepath.Dir(t.path))
-	if err == nil {
-		err = dir.Sync()
-		_ = dir.Close()
-	}
-	if err != nil {
+	// A single snapshot contains both cursor and contribution. Reuse the same
+	// durable publication contract as fleet state: rename + directory sync on
+	// Unix, write-through replacement on Windows (directory Sync is unsupported).
+	committed, err := t.publish(name, t.path)
+	if committed && err != nil {
 		t.fault = err
 	} // ambiguous commit poisons this writer
 	return err
