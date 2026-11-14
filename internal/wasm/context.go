@@ -96,12 +96,12 @@ func (e *PolicyEvaluator) Evaluate(ctx context.Context, event *api.Event) (*api.
 	}
 
 	// Extract matched rule reason from WASM if available
-	reason := policy.GetMatchedRule(ctx)
-	if ctx.Err() != nil {
-		// The deadline hit inside get_last_matched_rule, which closed the
-		// instance. Fail closed like any other timed-out evaluation.
+	reason, err := policy.getMatchedRule(ctx)
+	if err != nil || ctx.Err() != nil || policy.instance.IsClosed() {
+		// Traps, invalid allocations/lengths and timeouts in reason exports
+		// are evaluation failures too; never reuse the instance.
 		_ = e.pool.Replace(policy)
-		return nil, e.wrapErr(ctx, ctx.Err())
+		return nil, e.wrapErr(ctx, fmt.Errorf("read matched rule: %v (context: %v)", err, ctx.Err()))
 	}
 	e.pool.Put(policy)
 	if reason == "" {
