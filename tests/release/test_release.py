@@ -204,6 +204,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("CARGO_NET_OFFLINE=true", dockerfile)
         self.assertIn("GOTOOLCHAIN=local", dockerfile)
 
+    def test_controller_inherits_exact_debian_security_package_fixes(self):
+        dockerfile = (ROOT / "deploy/Dockerfile").read_text()
+        rust_base = dockerfile.split(" AS rust-base\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertIn("--no-install-recommends --only-upgrade --no-remove", rust_base)
+        for package, version in (("linux-libc-dev", "6.12.117-1"),
+                                 ("zlib1g", "1:1.3.dfsg+really1.3.1-1+deb13u1")):
+            self.assertIn(f"{package}={version}", rust_base)
+            self.assertIn(f"dpkg-query -W -f='${{Version}}' {package})\" = '{version}'", rust_base)
+        self.assertIn("RUN rustup target add wasm32-unknown-unknown", rust_base)
+        self.assertIn("FROM rust-base AS controller", dockerfile)
+        self.assertNotIn("--allow-unauthenticated", dockerfile)
+        self.assertNotIn("--allow-downgrades", dockerfile)
+
 
 class ArtifactTransferTests(unittest.TestCase):
     @staticmethod

@@ -169,3 +169,93 @@ follow-up run, old-job rerun, push, PR update, merge, tag or release was request
 or performed. Security findings remain release blockers, not unverified scans;
 OIDC/registry publication, artifact consumption and privileged/native driver
 infrastructure still need coordinating validation.
+
+## Controller Debian security remediation (2026-11-14)
+
+Follow-up to `5b13713`, limited to the two affected Debian packages in the shared
+`rust-base` stage. The controller still inherits Rust/Cargo, development headers
+and the wasm32 target; no package removal, OS-label change, scanner exception or
+dependency-manifest edit is used to make findings disappear.
+
+### Published base and package verification
+
+- Docker Hub's `library/rust:1.100.0-slim` tag API and `docker manifest inspect
+  --verbose` both still resolve to the existing index
+  `sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a`
+  (tag last pushed 2026-11-12). There is no refreshed digest for this version to
+  adopt at validation time. Registry manifest descriptors include AMD64
+  `sha256:4b68057dc8c103af4fa66b5cd29f21b18afec79fadfcd8fb91e295e939f0690c`
+  and ARM64
+  `sha256:11acfd0f07018a7c60d33b5e95618275feb39e465c4fbc9a73b438b1ee1e43ce`.
+  Pulling the pinned base succeeded; it reports Rust/Cargo 1.100.0, Debian 13.7,
+  `linux-libc-dev` 6.12.116-1 and vulnerable `zlib1g`.
+- Debian's signed `trixie-security` indexes publish exact fixes
+  `linux-libc-dev=6.12.117-1` and
+  `zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1`. The Dockerfile installs only these
+  versions with `--only-upgrade --no-remove --no-install-recommends` and checks
+  installed versions explicitly. A missing version fails the build. The indexes
+  remain live; indefinite package availability or bit-reproducible whole-image
+  rebuilds are not claimed.
+- AMD64 installation succeeded. ARM64 security indexes and package downloads
+  were also checked in a disposable multiarch APT container: `linux-libc-dev`
+  is **Architecture: all** (SHA-256
+  `8b4848725a2705e5b1612f2135c44300716690ba762368ab87df127e9a5ed416`),
+  and the fixed ARM64 `zlib1g` package SHA-256 is
+  `0e41b3d7ad8ad7fcd36dd4d61ca91a70018478fc4af652e044f4be770784ddff`.
+  This establishes package availability, **not** native ARM64 execution.
+
+### Actual local image build, runtime smoke and scan
+
+Docker Engine 29.9.3 successfully built the real controller target on Linux
+AMD64 (legacy builder because local Buildx is unavailable):
+
+```bash
+docker build --target controller --build-arg TARGETARCH=amd64 \
+  --build-arg VERSION=0.0.0-ci.debian-security --cpu-quota=200000 --memory=4g \
+  -t warmor-controller:debian-security-local -f deploy/Dockerfile .
+trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+  --exit-code 1 --timeout 10m warmor-controller:debian-security-local
+```
+
+Built image ID:
+`sha256:f423bb8ae7e42c8388c9fc80f1619ed19399b1fe9c706ef294c47cae12aa3186`.
+APT reports **2 upgraded, 0 newly installed, 0 to remove**. Comparing complete
+base/final `dpkg-query` inventories confirms that only the two specified package
+versions changed; the installed package set is identical.
+
+The existing installer successfully downloaded and SHA-256-verified **Trivy
+0.76.2**. Using its live DB updated **2026-11-14 13:05:54 UTC**, the unmodified
+Rust base reproduces all eight fixable HIGH findings (exit 1). The final
+controller image passes the **same gate** (exit 0):
+
+| Target | Detection | Fixable HIGH/CRITICAL findings |
+| --- | --- | --- |
+| Original immutable Rust base | Debian 13.7 | 8 |
+| Built controller image | Debian 13.7 | 0 |
+| Built controller binary | Go binary | 0 |
+
+Final JSON scan report SHA-256:
+`2ea75f99fda9f0ccaf6c1d3d88e3edc507e24c2ad5819ed6f3f96f4a913f5bcc`.
+This is a filtered vulnerability gate, not a claim of zero findings at all
+severities or with no upstream fixes available.
+
+A disposable final-image container with **`--network=none`** verified exact
+package versions, Rust/Cargo versions, installed wasm32 target, offline Cargo
+configuration and controller CLI version. Read-only, locally built compile and
+validation helpers then compiled a fresh default YAML policy inside that final
+runtime and loaded both fresh and baked WASM successfully. Only
+`warmor-daemon --validate-policy` was used; no daemon monitor, kernel enforcement,
+cluster access or privileged container was used. The sole bind mount was the
+disposable helper directory, read-only; no host system paths were mounted.
+
+The release regression suite now has **22 passing tests**, including exact
+security-package pins, installed-version checks and controller inheritance.
+`go test -mod=readonly -count=1 -p=1 ./deploy` (Go 1.26.11) and
+`git diff --check` pass. Workflow permissions/scanner options/source chart and Go
+manifests are unchanged; the coordinator's pending CRI/gRPC/x/net dependency work
+is not combined or rolled back.
+
+Still unverified: native ARM64 image build/runtime/scan and GitHub's pinned
+BuildKit execution of this patch. Native image gates remain mandatory, as do
+fresh scans after dependency integration. No push, PR, remote CI rerun, image
+publication, tag, release or deployment was performed.

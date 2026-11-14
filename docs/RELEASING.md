@@ -71,6 +71,13 @@ promoted by registry digest, not by re-resolving a staging tag. Actions are
 pinned to commit IDs; Go/Rust/Helm/Buildx are fixed versions, BuildKit/base images are index-digest
 pinned, and Trivy binary downloads are SHA-256 checked. Dependency downloads use
 Go checksums (`go mod verify`); generated controller policies compile offline.
+Until the pinned Rust base incorporates its Debian security updates,
+`deploy/Dockerfile` overlays exact `linux-libc-dev` and `zlib1g` package versions
+from signed Debian repositories. Missing versions fail the build; updates must
+retain the controller's Rust/Cargo/wasm32 compilation capability and pass the
+unchanged image scan. This is not an unpinned blanket OS upgrade. The repository
+indexes remain live, so availability of those exact versions is not guaranteed
+indefinitely; retire the overlay only after validating a refreshed immutable base.
 Archive timestamps, ownership and ordering are normalized; Go uses `-trimpath`,
 `-buildvcs=false` and no build ID. This reduces nondeterminism, **not** a claim
 that an independent party has reproduced the entire container image byte-for-byte.
