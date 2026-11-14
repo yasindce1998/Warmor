@@ -184,3 +184,20 @@ budgets, proc/cgroup membership and namespace fixtures, PID start changes,
 escape refusal, duplicate claims, incarnation gaps, retained-view revocation,
 concurrent readers, expiry, shutdown, and event backpressure. Production host
 mount acceptance and actual cgroup/BPF-ID equivalence remain real-node gates.
+
+### PR44 review follow-ups
+
+Exclusive cgroup ownership is now a separate default-off runtime contract, with
+regressions for an already-shared cgroup whose second container cannot resolve,
+retirement when ownership is unproven, and legitimate non-init child processes.
+The fake Unix server uses `t.TempDir`, not a harness-specific directory. Long
+temporary paths use a pinned `/proc/self/fd` directory address for the same
+physical fixture; ownership, permission and symlink checks also run through that
+fallback without skips. Test teardown and HTTP flush failures are checked, and
+inventory copies use the dependency's typed `proto.CloneOf` API.
+
+Follow-up validation with `GOTOOLCHAIN=go1.26.11 GOMAXPROCS=2`:
+
+* `go test -p 2 -race -count=1 ./...`: passed.
+* `golangci-lint run --timeout=5m --max-same-issues=0 --max-issues-per-linter=0 ./...`
+  (v1.64.8): passed with no issue suppressions added.

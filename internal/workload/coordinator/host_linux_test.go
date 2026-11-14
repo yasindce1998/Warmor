@@ -49,6 +49,7 @@ func fixtureHost(t *testing.T) (*HostVerifier, string, string) {
 	}
 	cr, err := os.OpenRoot(cg)
 	if err != nil {
+		closeFixture(t, pr)
 		t.Fatal(err)
 	}
 	// Fixtures intentionally bypass ONLY filesystem-superblock preflight and
@@ -59,7 +60,7 @@ func fixtureHost(t *testing.T) (*HostVerifier, string, string) {
 			err := unix.Fstat(int(f.Fd()), &st)
 			return uint64(st.Dev), st.Ino, err
 		}}
-	t.Cleanup(func() { v.Close() })
+	t.Cleanup(func() { closeFixture(t, v) })
 	return v, proc, cg
 }
 
@@ -128,7 +129,9 @@ func TestHostEvidenceRejectsUnprovableClaimsAndEscapes(t *testing.T) {
 			case "ownership-unproven":
 				claims[0].ExclusiveCgroupOwnership = false
 			case "missing":
-				os.Remove(filepath.Join(proc, "123/stat"))
+				if err := os.Remove(filepath.Join(proc, "123/stat")); err != nil {
+					t.Fatal(err)
+				}
 			case "start":
 				writeFixture(t, filepath.Join(proc, "123/stat"), statFixture(123, "0"))
 			case "root":
@@ -144,7 +147,9 @@ func TestHostEvidenceRejectsUnprovableClaimsAndEscapes(t *testing.T) {
 			case "hybrid":
 				writeFixture(t, filepath.Join(proc, "123/cgroup"), "1:cpu:/a\n0::/kubepods/container\n")
 			case "namespace":
-				os.Remove(filepath.Join(proc, "123/ns/mnt"))
+				if err := os.Remove(filepath.Join(proc, "123/ns/mnt")); err != nil {
+					t.Fatal(err)
+				}
 			case "boot":
 				writeFixture(t, filepath.Join(proc, "sys/kernel/random/boot_id"), "different")
 			case "duplicates":
@@ -179,7 +184,7 @@ func TestHostConstructorRefusesOrdinaryDirectories(t *testing.T) {
 	base := t.TempDir()
 	cfg := HostConfig{ProcRoot: base, CgroupRoot: base, HostPIDNamespace: "pid:[1]", HostCgroupNamespace: "cgroup:[2]", TrustHostMounts: true, MaxBindings: 8, MaxObservationGap: 30 * time.Second}
 	if v, err := NewHostVerifier(cfg); err == nil {
-		v.Close()
+		closeFixture(t, v)
 		t.Fatal("ordinary directory accepted as host mounts")
 	}
 	cfg.TrustHostMounts = false

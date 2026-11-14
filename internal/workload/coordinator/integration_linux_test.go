@@ -35,11 +35,17 @@ func TestConcreteAdaptersCoordinateAndRetireDeletion(t *testing.T) {
 			return
 		}
 		w.WriteHeader(200)
-		w.(http.Flusher).Flush()
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Error(err)
+			return
+		}
 		select {
 		case <-deletePod:
 			watchEvent(t, w, "DELETED", pods[0])
-			w.(http.Flusher).Flush()
+			if err := http.NewResponseController(w).Flush(); err != nil {
+				t.Error(err)
+				return
+			}
 		case <-r.Context().Done():
 			return
 		}

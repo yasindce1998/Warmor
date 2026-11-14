@@ -157,7 +157,10 @@ func TestPodSourceWatchCancellationAndRedirect(t *testing.T) {
 			return
 		}
 		w.WriteHeader(200)
-		w.(http.Flusher).Flush()
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Error(err)
+			return
+		}
 		<-r.Context().Done()
 	}))
 	defer server.Close()

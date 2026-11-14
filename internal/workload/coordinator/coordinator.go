@@ -316,12 +316,12 @@ func cloneInventory(in workload.Inventory) workload.Inventory {
 	out := workload.Inventory{Containers: make([]*runtimeapi.Container, len(in.Containers)), Sandboxes: make([]*runtimeapi.PodSandbox, len(in.Sandboxes))}
 	for n, c := range in.Containers {
 		if c != nil {
-			out.Containers[n] = proto.Clone(c).(*runtimeapi.Container)
+			out.Containers[n] = proto.CloneOf(c)
 		}
 	}
 	for n, s := range in.Sandboxes {
 		if s != nil {
-			out.Sandboxes[n] = proto.Clone(s).(*runtimeapi.PodSandbox)
+			out.Sandboxes[n] = proto.CloneOf(s)
 		}
 	}
 	return out

@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -87,26 +89,76 @@ func (v *fakeVerifier) Close() error { v.closed = true; return nil }
 func fakeUnixServer(t *testing.T) (string, *fakeCRI, func()) {
 	t.Helper()
 	// This is a test-owned fake gRPC endpoint, never a host runtime socket.
-	dir, err := os.MkdirTemp("/tmp/opencode", "cri-fixture-")
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := t.TempDir()
 	name := filepath.Join(dir, "cri.sock")
+	if len(name) > 100 {
+		// Linux sockaddr_un has a short path budget. Keep the physical fixture
+		// in t.TempDir but address it through a pinned directory descriptor;
+		// long TMPDIR/test names need no harness-specific directory or skip.
+		root, err := os.Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { closeFixture(t, root) })
+		name = filepath.Join("/proc/self/fd", fmt.Sprint(root.Fd()), "cri.sock")
+	}
 	l, err := net.Listen("unix", name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(name, 0600); err != nil {
+		closeFixture(t, l)
 		t.Fatal(err)
 	}
 	_, inv, _ := inputs()
 	fake := &fakeCRI{inv: inv, info: `{"pid":123}`}
 	server := grpc.NewServer()
 	runtimeapi.RegisterRuntimeServiceServer(server, fake)
-	go func() { _ = server.Serve(l) }()
-	stop := func() { server.Stop(); l.Close() }
-	t.Cleanup(func() { stop(); os.Remove(name); os.Remove(dir) })
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(l) }()
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			server.Stop()
+			if err := l.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				t.Error(err)
+			}
+			if err := <-done; err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+				t.Error(err)
+			}
+		})
+	}
+	t.Cleanup(stop)
 	return name, fake, stop
+}
+
+func closeFixture(t *testing.T, closer io.Closer) {
+	t.Helper()
+	if err := closer.Close(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestFakeUnixServerWithLongTempRoot(t *testing.T) {
+	// Exercise the sockaddr_un fallback regardless of the CI runner's TMPDIR.
+	longRoot := filepath.Join(t.TempDir(), strings.Repeat("fixture-", 16))
+	if err := os.Mkdir(longRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", longRoot)
+	t.Run("short-address", func(t *testing.T) {
+		name, _, stop := fakeUnixServer(t)
+		if len(name) > 100 || !strings.HasPrefix(name, "/proc/self/fd/") {
+			t.Fatal("long test temp root did not use a short pinned-directory address")
+		}
+		conn, err := net.Dial("unix", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		closeFixture(t, conn)
+		stop()
+	})
+	t.Run("authorization-and-permissions", TestUnixRuntimeDeadlinesAuthorizationAndBudgets)
 }
 
 func TestUnixRuntimeAuthorizedLifecycleAndFailureRetirement(t *testing.T) {
@@ -119,7 +171,7 @@ func TestUnixRuntimeAuthorizedLifecycleAndFailureRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
+	defer closeFixture(t, r)
 	inv, b, err := r.Poll(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -180,13 +232,21 @@ func TestUnixRuntimeDeadlinesAuthorizationAndBudgets(t *testing.T) {
 				if err := os.Chmod(name, 0602); err != nil {
 					t.Fatal(err)
 				}
-				defer os.Chmod(name, 0600)
+				defer func() {
+					if err := os.Chmod(name, 0600); err != nil {
+						t.Error(err)
+					}
+				}()
 			case "symlink":
 				link := filepath.Join(filepath.Dir(name), "link.sock")
 				if err := os.Symlink(name, link); err != nil {
 					t.Fatal(err)
 				}
-				defer os.Remove(link)
+				defer func() {
+					if err := os.Remove(link); err != nil {
+						t.Error(err)
+					}
+				}()
 				cfg.SocketPath = link
 			case "deadline":
 				server.mu.Lock()
@@ -209,7 +269,7 @@ func TestUnixRuntimeDeadlinesAuthorizationAndBudgets(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer r.Close()
+			defer closeFixture(t, r)
 			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 			defer cancel()
 			_, b, err := r.Poll(ctx)
@@ -236,7 +296,7 @@ func TestVerbosePIDRejectsMissingOrMalformedContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
+	defer closeFixture(t, r)
 	for _, info := range []string{"", `{}`, `{"pid":"123"}`, `{"pid":1}`, `{"pid":-1}`, `{"pid":1.2}`, `{"pid":2147483648}`, `not-json`} {
 		server.mu.Lock()
 		server.info = info
@@ -266,7 +326,7 @@ func TestUnixRuntimeRechecksClaimAndRetiresOutageContinuity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
+	defer closeFixture(t, r)
 	_, first, err := r.Poll(context.Background())
 	if err != nil || len(first) != 1 {
 		t.Fatal(first, err)
