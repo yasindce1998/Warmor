@@ -4,6 +4,11 @@ Status: **working experimental opt-in, off by default, Linux only**. This is a
 candidate integration for review, not a production sandbox, packaged-isolation
 release, or whole-daemon VM readiness claim.
 
+The later main refresh to signed/manifest `98d2b90`, its conflict decisions,
+compiler-7 manifest compatibility and separate Clang BTF fix are documented in
+`supervised-host-signed-main.md`. The validation record below remains the earlier
+`0fb1632` checkpoint, not evidence for untested combined signed backends.
+
 ## Branch and review ancestry
 
 Persistent worktree `.worktrees/supervised-host-integration`, branch
