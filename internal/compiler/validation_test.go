@@ -115,3 +115,29 @@ func TestCompilerExamplesValidateStrictly(t *testing.T) {
 		}
 	}
 }
+
+func TestVariableExpansionIsBoundedBeforeValidation(t *testing.T) {
+	var yaml strings.Builder
+	yaml.WriteString("name: bounded\nversion: 1\nvariables:\n  v0: /bin/tool\n")
+	for i := 1; i <= 25; i++ {
+		fmt.Fprintf(&yaml, "  v%d: [$v%d, $v%d]\n", i, i-1, i-1)
+	}
+	yaml.WriteString("rules:\n- name: r\n  event: process\n  action: deny\n  conditions: {all: [{path: {any_of: $v25}}]}\n")
+	if _, err := Parse([]byte(yaml.String())); err == nil || !strings.Contains(err.Error(), "nested operand lists") || len(err.Error()) > 1024 {
+		t.Fatalf("doubling reference error = %v", err)
+	}
+	variables := map[string]interface{}{"v0": "value"}
+	for i := 1; i <= 40; i++ {
+		variables[fmt.Sprintf("v%d", i)] = fmt.Sprintf("$v%d", i-1)
+	}
+	if _, err := resolveVariables("$v40", variables); err == nil || !strings.Contains(err.Error(), "expansion limit") {
+		t.Fatalf("depth error = %v", err)
+	}
+	items := make([]interface{}, 4097)
+	if _, err := resolveVariables(items, nil); err == nil || !strings.Contains(err.Error(), "expansion limit") {
+		t.Fatalf("width error = %v", err)
+	}
+	if _, err := resolveVariables(strings.Repeat("a", (1<<20)+1), nil); err == nil || !strings.Contains(err.Error(), "1 MiB") {
+		t.Fatalf("byte limit error = %v", err)
+	}
+}

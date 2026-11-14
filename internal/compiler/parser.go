@@ -182,35 +182,61 @@ func extractOperator(m map[string]interface{}, variables map[string]interface{})
 }
 
 func resolveVariables(value interface{}, variables map[string]interface{}) (interface{}, error) {
-	return resolveVariable(value, variables, make(map[string]bool))
+	r := variableResolver{variables: variables, visiting: make(map[string]bool), remaining: 4096, bytes: 1 << 20}
+	return r.resolve(value, 0, false)
 }
 
-func resolveVariable(value interface{}, variables map[string]interface{}, visiting map[string]bool) (interface{}, error) {
+// Limits apply before allocating expanded values. Operands are scalar or
+// flat lists, so nested lists are invalid even when reached through aliases.
+// Reject them immediately rather than traversing an exponentially expanding
+// reference graph only to reject its type afterwards.
+type variableResolver struct {
+	variables map[string]interface{}
+	visiting  map[string]bool
+	remaining int
+	bytes     int
+}
+
+func (r *variableResolver) resolve(value interface{}, depth int, inList bool) (interface{}, error) {
+	if depth > 32 || r.remaining <= 0 {
+		return nil, fmt.Errorf("variable expansion limit exceeded (maximum depth 32, 4096 values)")
+	}
+	r.remaining--
 	switch v := value.(type) {
 	case string:
+		r.bytes -= len(v)
+		if r.bytes < 0 {
+			return nil, fmt.Errorf("variable expansion exceeds 1 MiB")
+		}
 		if strings.HasPrefix(v, "$$") {
 			return v[1:], nil // Explicit escape for a literal leading dollar.
 		}
 		if strings.HasPrefix(v, "$") {
 			varName := v[1:]
-			resolved, ok := variables[varName]
+			resolved, ok := r.variables[varName]
 			if !ok {
 				return nil, fmt.Errorf("undefined variable %q (use $$ for a literal leading dollar)", varName)
 			}
-			if visiting[varName] {
+			if r.visiting[varName] {
 				return nil, fmt.Errorf("cyclic variable reference %q", varName)
 			}
-			visiting[varName] = true
-			result, err := resolveVariable(resolved, variables, visiting)
-			delete(visiting, varName)
+			r.visiting[varName] = true
+			result, err := r.resolve(resolved, depth+1, inList)
+			delete(r.visiting, varName)
 			return result, err
 		}
 		return v, nil
 	case []interface{}:
+		if inList {
+			return nil, fmt.Errorf("nested operand lists are not supported; expected a scalar list item")
+		}
+		if len(v) > r.remaining {
+			return nil, fmt.Errorf("variable expansion limit exceeded (maximum 4096 values)")
+		}
 		resolved := make([]interface{}, len(v))
 		for i, item := range v {
 			var err error
-			resolved[i], err = resolveVariable(item, variables, visiting)
+			resolved[i], err = r.resolve(item, depth+1, true)
 			if err != nil {
 				return nil, fmt.Errorf("[%d]: %w", i, err)
 			}
