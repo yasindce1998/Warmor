@@ -278,6 +278,10 @@ func forEachMutation(t *testing.T, mk func() *api.Event, visit func(desc string,
 			v.SetUint(v.Uint() + 1)
 		case reflect.Slice:
 			v.Set(reflect.Append(v, reflect.ValueOf("extra")))
+		case reflect.Chan:
+			// Live dispatch fences are not policy inputs. Still mutate them
+			// and run inputsEqual so exposing one later cannot go unnoticed.
+			v.Set(reflect.MakeChan(v.Type(), 0))
 		default:
 			t.Fatalf("%s: unhandled kind %v; extend forEachMutation", path, v.Kind())
 		}

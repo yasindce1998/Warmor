@@ -10,6 +10,8 @@ shift 2
 case "$PHASE" in
   verifier) LIMIT=300s ;;
   outcomes) LIMIT=360s ;;
+  generations) LIMIT=420s ;;
+  generation-daemon) LIMIT=480s ;;
   *) echo "error: unknown VM phase $PHASE" >&2; exit 2 ;;
 esac
 LOG="$ARTIFACTS/$PHASE.log"

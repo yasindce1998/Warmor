@@ -22,6 +22,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/escape"
+	"github.com/yasindce1998/warmor/internal/generationvm"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/lineage"
 	"github.com/yasindce1998/warmor/internal/logging"
@@ -88,6 +89,9 @@ type Options struct {
 	// (default_action: deny, exact eq rules on the kernel key); see
 	// docs/design/kernel-default-deny.md.
 	DefaultDeny bool
+	// AtomicGenerations opts into experimental Linux generation activation.
+	// Off by default pending supported-kernel combined VM validation.
+	AtomicGenerations bool
 
 	// AttackGraph enables the node-side intelligence chain: MITRE
 	// correlation, the per-container attack graph and blast-radius
@@ -152,6 +156,7 @@ type Enforcer struct {
 	// during a reload cannot repopulate the map with a stale decision after
 	// it was cleared.
 	policyGen      atomic.Uint64
+	generations    *generationDispatch
 	pipeline       *streaming.Pipeline
 	lineageTracker *lineage.Tracker
 	// intelligence is non-nil when --attack-graph is set (MITRE attack
@@ -196,6 +201,13 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	if opts == nil {
 		opts = &Options{}
 	}
+	if opts.AtomicGenerations && opts.SignedAssignment != nil {
+		return nil, errors.New("signed assignments with atomic generations require a separately reviewed activation integration")
+	}
+	if opts.AtomicGenerations && opts.Telemetry != nil {
+		opts.Telemetry.Seal()
+		return nil, errGenerationTelemetryUnsupported
+	}
 	if opts.SignedAssignment != nil && len(opts.PolicyVerifyKey) != ed25519.PublicKeySize {
 		return nil, errors.New("signed assignment requires artifact verification key")
 	}
@@ -210,6 +222,12 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		}
 	}
 	opts = &effective
+	if opts.AtomicGenerations && (runtime.GOOS != "linux" || opts.SkipLSM || !opts.RequireLSM) {
+		return nil, errors.New("atomic generations require Linux --require-lsm without --no-lsm")
+	}
+	if opts.AtomicGenerations && wasm.IsYAMLPolicy(policyPath) {
+		return nil, errors.New("atomic generations require a compiled WASM startup policy")
+	}
 	if opts.SignedAssignment != nil && opts.Telemetry != nil {
 		// Schema-1 legacy attribution cannot authorize signed deployment data.
 		opts.Telemetry.Seal()
@@ -494,9 +512,19 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	// Preload the kernel default-deny domains from the policy's static
 	// rules. No events flow yet; decisionMu is uncontended but held for
 	// symmetry with the reload path.
-	e.decisionMu.Lock()
-	activationErr := e.applyDefaultDeny(evaluator)
-	e.decisionMu.Unlock()
+	var activationErr error
+	if opts.AtomicGenerations {
+		gp, ok := plat.(platform.GenerationPlatform)
+		if !ok {
+			activationErr = errors.New("platform lacks atomic generation dispatch")
+		} else {
+			activationErr = e.enableGenerations(gp)
+		}
+	} else {
+		e.decisionMu.Lock()
+		activationErr = e.applyDefaultDeny(evaluator)
+		e.decisionMu.Unlock()
+	}
 	if activationErr != nil {
 		e.Close()
 		return nil, fmt.Errorf("activate kernel default-deny: %w", activationErr)
@@ -522,6 +550,14 @@ func (e *Enforcer) Start() error {
 	// Start event processing
 	e.wg.Add(1)
 	go e.eventLoop()
+	if e.generations != nil {
+		e.activationMu.Lock()
+		err := e.finishGeneration()
+		e.activationMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("initial generation drain: %w", err)
+		}
+	}
 
 	if _, ok := e.policyMap.(policyMapCounter); ok {
 		e.wg.Add(1)
@@ -553,6 +589,10 @@ func (e *Enforcer) eventLoop() {
 			if !ok {
 				return
 			}
+			if event.DispatchBarrier != nil {
+				close(event.DispatchBarrier)
+				continue
+			}
 			e.handleEvent(event)
 		}
 	}
@@ -560,10 +600,26 @@ func (e *Enforcer) eventLoop() {
 
 // handleEvent processes a single event with caching and metrics
 func (e *Enforcer) handleEvent(event *api.Event) {
+	defer event.GenerationContext.Complete()
 	e.eventMu.RLock()
 	defer e.eventMu.RUnlock()
 	if e.closed {
 		return
+	}
+	decisionCache := e.cache
+	var captured *evaluationGeneration
+	if e.generations != nil {
+		captured = e.eventGeneration(event)
+		if captured == nil {
+			return
+		}
+		// Direct/internal dispatch may acquire its lease here rather than in
+		// the platform. Completion is idempotent for pre-captured events.
+		defer event.GenerationContext.Complete()
+		decisionCache = captured.cache
+		if err := generationvm.Checkpoint(e.ctx, "event", captured.id, event); err != nil {
+			return
+		}
 	}
 	metrics.RecordEventProcessed(event.GetType().String())
 	if e.checkEscape(event) {
@@ -663,7 +719,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	}
 
 	// Check cache first
-	if result, hit := e.cache.Get(event); hit {
+	if result, hit := decisionCache.Get(event); hit {
 		metrics.RecordCacheHit()
 		_ = e.actionHandler.Enforce(e.ctx, event, result)
 		e.logger.LogEvent(event, result)
@@ -684,6 +740,9 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	gen := e.policyGen.Load()
 	pid := e.policyID
 	e.evaluatorMu.RUnlock()
+	if captured != nil {
+		evaluator, gen, pid = captured.evaluator, captured.id, captured.policyID
+	}
 
 	if evaluator.ReadsContainerAge(event.GetType()) {
 		e.annotateContainerStart(event)
@@ -734,7 +793,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	}
 
 	// Update cache size metric
-	cacheStats := e.cache.Stats()
+	cacheStats := decisionCache.Stats()
 	metrics.UpdateCacheSize(cacheStats.Size)
 }
 
@@ -838,7 +897,17 @@ func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, g
 	if e.policyGen.Load() != gen {
 		return
 	}
-	e.cache.Put(event, result)
+	decisionCache := e.cache
+	if e.generations != nil {
+		e.generations.mu.Lock()
+		state := e.generations.states[gen]
+		e.generations.mu.Unlock()
+		if state == nil {
+			return
+		}
+		decisionCache = state.cache
+	}
+	decisionCache.Put(event, result)
 
 	// Compile decision into BPF policy map for kernel fast-path
 	if e.policyMap != nil && !event.LSMEvent {
@@ -973,6 +1042,9 @@ func (e *Enforcer) syncDecision(event *api.Event, result *api.ActionResult, gen 
 	// fold global audit mode in here: the kernel must never be stricter than
 	// userspace, and an audit-flagged deny is only logged by the BPF side.
 	audit := result.Audit || e.auditMode
+	if e.generations != nil {
+		return e.generations.kernel.SyncEvent(gen, event, action, audit)
+	}
 
 	if es, ok := e.policyMap.(eventPolicyMapSyncer); ok {
 		return es.SyncEvent(event, action, audit)
@@ -1045,7 +1117,7 @@ func (l *logLimiter) allow(now time.Time) (bool, int) {
 // GetStats returns current statistics
 func (e *Enforcer) GetStats() api.EnforcementStats {
 	actionStats := e.actionHandler.GetStats()
-	cacheStats := e.cache.Stats()
+	cacheStats := e.currentDecisionCache().Stats()
 
 	return api.EnforcementStats{
 		Allowed:              actionStats.Allowed,
@@ -1064,7 +1136,7 @@ func (e *Enforcer) GetStats() api.EnforcementStats {
 // PrintStats prints current statistics
 func (e *Enforcer) PrintStats() {
 	stats := e.GetStats()
-	cacheStats := e.cache.Stats()
+	cacheStats := e.currentDecisionCache().Stats()
 
 	// Log structured stats
 	e.logger.LogStats(&stats)
@@ -1109,18 +1181,29 @@ func (e *Enforcer) ReloadPolicy() error {
 	return e.ActivatePolicy(e.policyPath, nil)
 }
 
-// ActivatePolicy prepares a candidate, drains old events and prepares kernel
-// state before durable publication and evaluator swap. The legacy single map
-// is NOT generation-atomic: default-deny misses may allow during rebuild and
-// rollback errors indicate degraded kernel enforcement.
-func (e *Enforcer) ActivatePolicy(path string, commit func() error) error {
+// ActivatePolicy serializes candidate activation with close/reload. In the
+// experimental generation path the kernel+userspace live commit PRECEDES the
+// error-returning durableCommit hook. An error after live commit wraps
+// ErrActivationPending, retains both evaluators, and must not be acknowledged
+// or compensated by changing a disk pointer alone. Retry the same immutable
+// path; the ORIGINAL hook is retained and must be idempotent. Supply exactly
+// one durable publication authority, not a chain
+// of independent pointer/store transactions. Nil means no durable publication
+// is requested, as for a standalone reload. No reader/worker-needed lock is held
+// during the hook, but activationMu remains held: it must not reenter activation.
+//
+// The default legacy path instead drains events, prepares its single map, calls
+// durableCommit and swaps userspace. It is NOT generation-atomic: default-deny
+// misses may allow during rebuild and rollback errors mean degraded enforcement.
+// See docs/design/generation-activation.md before implementing a backend adapter.
+func (e *Enforcer) ActivatePolicy(path string, durableCommit func() error) error {
 	if e.signedAssignment {
 		return errors.New("signed assignment mode refuses generic reload/activation")
 	}
-	return e.activatePolicy(path, nil, commit, nil)
+	return e.activatePolicy(path, nil, durableCommit, nil)
 }
 
-func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, commit func() error, snapshot *telemetry.Snapshot) error {
+func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, durableCommit func() error, snapshot *telemetry.Snapshot) error {
 	e.activationMu.Lock()
 	defer e.activationMu.Unlock()
 	e.eventMu.RLock()
@@ -1128,6 +1211,18 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, comm
 	e.eventMu.RUnlock()
 	if closed {
 		return errors.New("enforcer closed")
+	}
+	if e.generations != nil {
+		if expected != nil || e.signedAssignment {
+			return errors.New("signed assignments with atomic generations require a separately reviewed activation integration")
+		}
+		if snapshot != nil || e.telemetry != nil {
+			if e.telemetry != nil {
+				e.telemetry.Seal()
+			}
+			return errGenerationTelemetryUnsupported
+		}
+		return e.activateGeneration(path, durableCommit)
 	}
 	e.logger.LogInfo(fmt.Sprintf("Reloading policy from: %s", path))
 
@@ -1162,8 +1257,8 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, comm
 	defer e.eventMu.Unlock()
 	e.decisionMu.Lock()
 	err = e.prepareKernel(newEvaluator)
-	if err == nil && commit != nil {
-		err = commit()
+	if err == nil && durableCommit != nil {
+		err = durableCommit()
 	}
 	if err != nil {
 		// Dynamic cached kernel entries cannot be restored transactionally.
@@ -1297,6 +1392,7 @@ func (e *Enforcer) Stop() {
 	}
 
 	e.wg.Wait()
+	e.releaseQueuedGenerationEvents()
 	e.logger.LogInfo("✓ Enforcer stopped")
 }
 
@@ -1304,6 +1400,14 @@ func (e *Enforcer) Stop() {
 func (e *Enforcer) Close() error {
 	e.activationMu.Lock()
 	defer e.activationMu.Unlock()
+	if e.generations != nil {
+		e.cancel()
+		if e.platform != nil {
+			_ = e.platform.Stop()
+		}
+		e.wg.Wait()
+		e.releaseQueuedGenerationEvents()
+	}
 	e.eventMu.Lock()
 	defer e.eventMu.Unlock()
 	if e.closed {
@@ -1342,6 +1446,13 @@ func (e *Enforcer) Close() error {
 	}
 	if rt != nil {
 		rt.Close(e.ctx)
+	}
+	if e.generations != nil {
+		for _, state := range e.generations.states {
+			if state.pool != pool {
+				closeEvaluationGeneration(state)
+			}
+		}
 	}
 	if e.platform != nil {
 		e.platform.Close()

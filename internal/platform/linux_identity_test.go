@@ -44,6 +44,7 @@ func TestLinuxMonitorsPreserveKernelIdentityWithCgroupReadiness(t *testing.T) {
 			}
 			input := ebpf.Event{
 				Kind: tc.kind, PID: 1234, UID: 10001, GID: 10002, CgroupID: 42,
+				PolicyGeneration:  77,
 				KernelTimestampNS: stamp, Timestamp: time.Unix(42, 123),
 				Comm: "identity-marker", Filename: "/marker", Args: []string{"marker", "argument"},
 				PPID: 123, ParentComm: "parent", Family: 10, RemoteAddr: "::1", RemotePort: 443,
@@ -51,6 +52,16 @@ func TestLinuxMonitorsPreserveKernelIdentityWithCgroupReadiness(t *testing.T) {
 				TargetCgroupID: 43, MountSource: "/source",
 			}
 			readerErr := errors.New("synthetic reader disconnected")
+			captured, released := 0, 0
+			p.SetEventCapture(func(event *api.Event) bool {
+				captured++
+				id := uint64(99) // observation channels capture current at dispatch
+				if event.LSMEvent {
+					id = event.PolicyGeneration
+				}
+				event.GenerationContext = api.NewGenerationContext(id, func() { released++ })
+				return true
+			})
 			reads := 0
 			p.wg.Add(1)
 			tc.run(p, context.Background(), func() (*ebpf.Event, error) {
@@ -71,6 +82,9 @@ func TestLinuxMonitorsPreserveKernelIdentityWithCgroupReadiness(t *testing.T) {
 			if len(out) != 2 {
 				t.Fatalf("scope leaked or lost events: %d", len(out))
 			}
+			if captured != 2 {
+				t.Fatalf("out-of-scope event acquired a generation lease: %d captures", captured)
+			}
 			for _, wantStamp := range []uint64{stamp, 0} {
 				event := <-out
 				if event.KernelTimestampNS != wantStamp || event.CgroupID != input.CgroupID || event.PID != input.PID || event.UID != input.UID || event.GID != input.GID || event.Timestamp != input.Timestamp || event.LSMEvent != tc.lsm {
@@ -79,6 +93,20 @@ func TestLinuxMonitorsPreserveKernelIdentityWithCgroupReadiness(t *testing.T) {
 				if tc.lsm && (!event.KernelDenied || !event.IntegrityViolation || event.Hook != input.Hook || event.TargetCgroupID != input.TargetCgroupID || event.MountSource != input.MountSource) {
 					t.Fatalf("LSM outcome/identity evidence lost: %+v", event)
 				}
+				wantID := uint64(99)
+				if tc.lsm {
+					wantID = input.PolicyGeneration
+					if event.PolicyGeneration != input.PolicyGeneration {
+						t.Fatalf("lost kernel-captured generation: %+v", event)
+					}
+				}
+				if event.GenerationContext == nil || event.GenerationContext.ID != wantID {
+					t.Fatalf("lost per-channel generation lease: %+v", event)
+				}
+				event.GenerationContext.Complete()
+			}
+			if released != captured {
+				t.Fatalf("generation lease leak: %d captures, %d releases", captured, released)
 			}
 			if err := p.Ready(); !errors.Is(err, readerErr) {
 				t.Fatalf("reader failure must withdraw readiness: %v", err)

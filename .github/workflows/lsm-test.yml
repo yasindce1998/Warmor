@@ -7,6 +7,14 @@ on:
       - "bpf/**"
       - "internal/ebpf/**"
       - "internal/enforcer/**"
+      - "internal/generationvm/**"
+      - "internal/platform/**"
+      - "internal/streaming/**"
+      - "tests/integration/generation_daemon_test.go"
+      - "tests/integration/outcomes_test.go"
+      - "tests/integration/helpers_test.go"
+      - "tests/integration/generation_daemon_gate_test.go"
+      - "tests/integration/run-generation-daemon.sh"
       - "internal/compiler/**"
       - "internal/kernelmap/**"
       - "internal/wasm/**"
@@ -15,12 +23,24 @@ on:
       - ".github/workflows/lsm-test.yml"
       - "ci/kernel/**"
       - "scripts/build-ci-kernel.sh"
+      - "tests/integration/run-kernel-generations.sh"
+      - "tests/integration/kernel_generations_gate_test.go"
+      - "tests/integration/run-vm.sh"
+      - "tests/integration/workflow_test.go"
   pull_request:
     branches: [main]
     paths:
       - "bpf/**"
       - "internal/ebpf/**"
       - "internal/enforcer/**"
+      - "internal/generationvm/**"
+      - "internal/platform/**"
+      - "internal/streaming/**"
+      - "tests/integration/generation_daemon_test.go"
+      - "tests/integration/outcomes_test.go"
+      - "tests/integration/helpers_test.go"
+      - "tests/integration/generation_daemon_gate_test.go"
+      - "tests/integration/run-generation-daemon.sh"
       - "internal/compiler/**"
       - "internal/kernelmap/**"
       - "internal/wasm/**"
@@ -29,6 +49,10 @@ on:
       - ".github/workflows/lsm-test.yml"
       - "ci/kernel/**"
       - "scripts/build-ci-kernel.sh"
+      - "tests/integration/run-kernel-generations.sh"
+      - "tests/integration/kernel_generations_gate_test.go"
+      - "tests/integration/run-vm.sh"
+      - "tests/integration/workflow_test.go"
   workflow_dispatch:
 
 jobs:
@@ -46,73 +70,113 @@ jobs:
         run: go test -v -race -short -p 1 ./internal/ebpf/... ./internal/compiler/... ./internal/wasm/...
 
   bpf-compile:
-    name: BPF Compilation Check
-    runs-on: ubuntu-latest
+    name: BPF Compilation Check (Clang ${{ matrix.clang }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        clang: [18, 21]
+    env:
+      BPF2GO_CC: clang-${{ matrix.clang }}
+      BPF2GO_STRIP: llvm-strip-${{ matrix.clang }}
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       - name: Install BPF build dependencies
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev linux-headers-$(uname -r) gcc-multilib
+          sudo apt-get install -y ca-certificates curl gnupg
+          # Noble ships LLVM 18, but not 21. Add only the versioned LLVM 21
+          # archive, scoped to its fingerprint-verified key (no remote script).
+          if [ '${{ matrix.clang }}' = 21 ]; then
+            key_dir="$(mktemp -d)"
+            trap 'rm -rf "$key_dir"' EXIT
+            curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+              https://apt.llvm.org/llvm-snapshot.gpg.key -o "$key_dir/llvm.asc"
+            fingerprint="$(gpg --batch --with-colons --show-keys "$key_dir/llvm.asc" | awk -F: '$1 == "pub" { primary = 1; next } primary && $1 == "fpr" { print $10; primary = 0 }')"
+            test "$fingerprint" = 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+            gpg --batch --dearmor -o "$key_dir/llvm.gpg" "$key_dir/llvm.asc"
+            sudo install -m 0644 "$key_dir/llvm.gpg" /usr/share/keyrings/warmor-llvm.gpg
+            echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/warmor-llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' \
+              | sudo tee /etc/apt/sources.list.d/warmor-llvm21.list
+            sudo apt-get update --error-on=any
+          fi
+          apt-cache policy clang-${{ matrix.clang }} llvm-${{ matrix.clang }}
+          sudo apt-get install -y clang-${{ matrix.clang }} llvm-${{ matrix.clang }} libbpf-dev linux-headers-$(uname -r) gcc-multilib
+          clang-${{ matrix.clang }} --version
+          llvm-strip-${{ matrix.clang }} --version
 
       - name: Compile LSM exec program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_exec.bpf.c -o /tmp/lsm_exec.bpf.o
 
       - name: Compile LSM file program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_file.bpf.c -o /tmp/lsm_file.bpf.o
 
       - name: Compile LSM connect program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_connect.bpf.c -o /tmp/lsm_connect.bpf.o
 
       - name: Compile LSM bind program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_bind.bpf.c -o /tmp/lsm_bind.bpf.o
 
       - name: Compile LSM listen program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_listen.bpf.c -o /tmp/lsm_listen.bpf.o
 
       - name: Compile LSM ptrace program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_ptrace.bpf.c -o /tmp/lsm_ptrace.bpf.o
 
       - name: Compile LSM mount program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_mount.bpf.c -o /tmp/lsm_mount.bpf.o
 
       - name: Compile monitor programs
-        run: make -C bpf all
+        run: make -C bpf all CLANG='clang-${{ matrix.clang }} -mcpu=v1'
+
+      - name: Check regenerated generation ABI and compile VM fixtures offline
+        env:
+          BPF2GO_CFLAGS: -D__TARGET_ARCH_x86 -mcpu=v1
+        run: |
+          go generate ./internal/ebpf
+          go test -count=1 -run '^TestGenerationObject' ./internal/ebpf
+          go test -race -count=1 ./internal/ebpf
+          go test -tags integration -run '^$' ./internal/ebpf
 
       - name: Verify BPF object files
         run: |
           for obj in /tmp/lsm_exec.bpf.o /tmp/lsm_file.bpf.o /tmp/lsm_connect.bpf.o /tmp/lsm_bind.bpf.o /tmp/lsm_listen.bpf.o /tmp/lsm_ptrace.bpf.o /tmp/lsm_mount.bpf.o; do
             echo "=== $(basename $obj) ==="
-            llvm-objdump -h "$obj" | head -20
+            llvm-objdump-${{ matrix.clang }} -h "$obj" | head -20
             echo ""
           done
 
@@ -257,3 +321,75 @@ jobs:
           CGO_ENABLED=0 $(go env GOPATH)/bin/vimto \
             -kernel "$GITHUB_WORKSPACE/kernel-out/vmlinuz" -- \
             go test -v -count 1 -tags integration -timeout 300s ./internal/ebpf/
+
+  kernel-generations-strict:
+    name: Required generation verifier/outcomes (${{ matrix.version }})
+    runs-on: ubuntu-24.04
+    needs: [unit-tests, bpf-compile, ima-kernel]
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "6.1.188"
+            minor: "6.1"
+          - version: "6.18.53"
+            minor: "6.18"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: ima-kernel-${{ matrix.version }}
+          path: kernel-out
+      - name: Install VM and BPF dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 clang llvm libbpf-dev gcc-multilib
+          if [ -e /dev/kvm ]; then
+            sudo chmod a+rw /dev/kvm
+          else
+            echo VIMTO_DISABLE_KVM=1 >> "$GITHUB_ENV"
+          fi
+          CGO_ENABLED=0 go install lmb.io/vimto@v0.4.0
+      - name: Regenerate exact embedded BPF inputs
+        env:
+          BPF2GO_CFLAGS: -D__TARGET_ARCH_x86 -mcpu=v1
+        run: go generate ./internal/ebpf
+      - name: Install real policy compilation target for daemon phase
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+      - name: Validate strict gate oracles without enforcement
+        run: |
+          bash -n tests/integration/run-kernel-generations.sh tests/integration/run-vm.sh
+          go test -race -count=1 -run '^(TestGenerationGate|TestVM)' ./tests/integration
+          bash -n tests/integration/run-generation-daemon.sh
+          go test -race -count=1 -run '^TestGenerationDaemonGate' ./tests/integration
+      - name: Require actual non-skipped generation, legacy and integrity outcomes in VM
+        env:
+          KERNEL: ${{ github.workspace }}/kernel-out/vmlinuz
+          EXPECT_KERNEL_MINOR: ${{ matrix.minor }}
+        run: bash tests/integration/run-kernel-generations.sh
+      - name: Require whole-daemon generation reload and pending recovery outcomes
+        env:
+          KERNEL: ${{ github.workspace }}/kernel-out/vmlinuz
+          EXPECT_KERNEL_MINOR: ${{ matrix.minor }}
+        run: bash tests/integration/run-generation-daemon.sh
+      - name: Retain exact inputs and VM verdict evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-generations-${{ matrix.version }}
+          path: |
+            tests/integration/artifacts/generations.*/build-info.txt
+            tests/integration/artifacts/generations.*/required-tests.txt
+            tests/integration/artifacts/generations.*/SHA256SUMS
+            tests/integration/artifacts/generations.*/*.log
+            tests/integration/artifacts/generations.*/generations-status.txt
+            tests/integration/artifacts/generation-daemon.*/**
+          if-no-files-found: error
+          retention-days: 14

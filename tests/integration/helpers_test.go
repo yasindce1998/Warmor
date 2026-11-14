@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -22,7 +23,71 @@ func createOutcomeRecordings(work string) (string, error) {
 	if err := os.Mkdir(dir, 0700); err != nil {
 		return "", fmt.Errorf("create guest-local recordings directory: %w", err)
 	}
+	if err := validateOutcomeRecordings(work, dir); err != nil {
+		return "", err
+	}
 	return dir, nil
+}
+
+// Never chmod/chown a host-owned ancestor to make recording startup succeed.
+// In the VM effective UID is root; on host unit tests it is the invoking user.
+func validateOutcomeRecordings(work, dir string) error {
+	if dir != filepath.Join(work, "recordings") {
+		return errors.New("recordings must be directly inside the guest fixture")
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || stat.Uid != uint32(os.Geteuid()) {
+		return errors.New("recordings directory must be private and owned by the daemon UID")
+	}
+	return nil
+}
+
+// Only the daemon Wait goroutine reports completion. A timeout always remains
+// an error, even if forced cleanup produces an otherwise ordinary wait result.
+func awaitOutcomeDaemonExit(done <-chan error, timeout time.Duration, kill func() error) error {
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("daemon did not shut down cleanly: %w", err)
+		}
+		return nil
+	case <-time.After(timeout):
+		killErr := kill()
+		cleanupErr := <-done
+		return errors.Join(fmt.Errorf("daemon shutdown timed out (harness kill is not success): %w", context.DeadlineExceeded), killErr, cleanupErr)
+	}
+}
+
+func TestOutcomeDaemonExitNeverMasksTimeoutOrNonzero(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		waitErr error
+		timeout bool
+	}{
+		{"clean", nil, false}, {"nonzero", errors.New("exit status 1"), false}, {"forced kill", errors.New("signal: killed"), true}, {"timeout despite nil cleanup", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			done := make(chan error, 1)
+			killed := false
+			if !tc.timeout {
+				done <- tc.waitErr
+			}
+			err := awaitOutcomeDaemonExit(done, time.Millisecond, func() error { killed = true; done <- tc.waitErr; return nil })
+			if (err == nil) != (tc.name == "clean") || killed != tc.timeout {
+				t.Fatalf("wait failure masked: err=%v killed=%v", err, killed)
+			}
+			if tc.timeout && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatal("timeout identity lost", err)
+			}
+			if tc.waitErr != nil && !errors.Is(err, tc.waitErr) {
+				t.Fatal("nonzero wait error lost", err)
+			}
+		})
+	}
 }
 
 // exportOutcomeRecording runs after the daemon has exited, including when its
@@ -97,6 +162,23 @@ func TestOutcomeRecordingDirectoryRejectsExistingSymlink(t *testing.T) {
 	entries, err := os.ReadDir(target)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("symlink target modified: %v %v", entries, err)
+	}
+}
+
+func TestOutcomeRecordingDirectoryRejectsSharedOrPublicPath(t *testing.T) {
+	work := t.TempDir()
+	dir, err := createOutcomeRecordings(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateOutcomeRecordings(work, t.TempDir()); err == nil {
+		t.Fatal("shared artifact path accepted as live recording directory")
+	}
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateOutcomeRecordings(work, dir); err == nil {
+		t.Fatal("public recording directory accepted")
 	}
 }
 

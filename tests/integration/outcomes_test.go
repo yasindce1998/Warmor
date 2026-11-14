@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -422,15 +423,39 @@ func TestTimeoutCleanupIsNotTerminationProof(t *testing.T) {
 }
 
 type daemonProcess struct {
-	cmd     *exec.Cmd
-	done    chan error
-	metrics string
-	events  string
-	log     string
+	cmd      *exec.Cmd
+	done     chan error
+	metrics  string
+	events   string
+	log      string
+	stopOnce sync.Once
+}
+
+func (d *daemonProcess) stop(t *testing.T) {
+	t.Helper()
+	d.stopOnce.Do(func() {
+		_ = d.cmd.Process.Signal(syscall.SIGTERM)
+		if err := awaitOutcomeDaemonExit(d.done, outcomeTimeout, d.cmd.Process.Kill); err != nil {
+			t.Errorf("%v (log %s)", err, d.log)
+		}
+	})
 }
 
 func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ...string) *daemonProcess {
 	t.Helper()
+	return f.startDaemonBinary(t, "warmor-daemon", name, policy, flags...)
+}
+
+// Normal daemon is the default. Only explicitly instrumented scenarios select
+// the separately hashed profile executable; never infer a profile from env.
+func (f *outcomeFixture) startDaemonBinary(t *testing.T, binary, name, policy string, flags ...string) *daemonProcess {
+	t.Helper()
+	if binary != "warmor-daemon" && binary != "warmor-daemon-profile" {
+		t.Fatal("unknown prepared daemon binary", binary)
+	}
+	if err := validateOutcomeRecordings(f.work, f.recordings); err != nil {
+		t.Fatal(err)
+	}
 	// Reserve an available VM-local port. A startup race fails closed below.
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -456,7 +481,7 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 	}
 	args := []string{"--policy", policy, "--require-lsm", "--lsm-enforce", "--cgroup-filter", f.cgroup,
 		"--metrics-port", fmt.Sprint(port), "--event-sink", "file:" + d.events, "--stats-interval", "1h"}
-	d.cmd = exec.Command(filepath.Join(f.dir, "warmor-daemon"), append(args, flags...)...)
+	d.cmd = exec.Command(filepath.Join(f.dir, binary), append(args, flags...)...)
 	d.cmd.Stdout, d.cmd.Stderr = log, log
 	if err := d.cmd.Start(); err != nil {
 		_ = log.Close() // Preserve the daemon startup failure.
@@ -464,17 +489,7 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 	}
 	go func() { d.done <- d.cmd.Wait() }()
 	t.Cleanup(func() {
-		_ = d.cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case err := <-d.done:
-			if err != nil {
-				t.Errorf("daemon did not shut down cleanly: %v (log %s)", err, d.log)
-			}
-		case <-time.After(outcomeTimeout):
-			_ = d.cmd.Process.Kill()
-			cleanupErr := <-d.done
-			t.Errorf("daemon shutdown timed out (cleanup result %v; log %s)", cleanupErr, d.log)
-		}
+		d.stop(t)
 		// Wait has completed (also after forced cleanup), so the recording is
 		// closed. Retain partial evidence even when the subtest already failed.
 		if err := exportOutcomeRecording(d.events, filepath.Join(f.dir, name+".ndjson")); err != nil {

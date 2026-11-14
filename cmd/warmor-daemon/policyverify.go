@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -96,11 +97,33 @@ func policyUpdateHandler(policyPath string, pub ed25519.PublicKey, activate func
 }
 
 func (s policyRevisionStager) updateHandler(policyPath string, activate func(string, func() error) error) func(*policyserver.PolicyAssignment, []byte) error {
+	// Keep an uncertain live commit's immutable pair and callback. Retrying a
+	// fresh revision would lose the disk recovery owner after the kernel commit.
+	var pending *stagedPolicyRevision
+	var pendingID string
 	return func(a *policyserver.PolicyAssignment, data []byte) error {
+		id := fmt.Sprintf("%s/%d/%s", a.PolicyID, a.Version, a.WASMHash)
+		if pending != nil {
+			// Resolve the old live commit even if the desired assignment has
+			// changed. Never acknowledge that recovery as the NEW assignment.
+			if err := activate(pending.modulePath, pending.commit); err != nil {
+				return err
+			}
+			pending.discard()
+			pending = nil
+			if id == pendingID {
+				return nil
+			}
+		}
 		r, err := s.stage(policyPath, a, data)
 		if err == nil {
-			defer r.discard()
 			err = activate(r.modulePath, r.commit)
+			if errors.Is(err, enforcer.ErrActivationPending) {
+				pending, pendingID = r, id
+			} else {
+				pending = nil
+				r.discard()
+			}
 		}
 		if err != nil {
 			log.Printf("❌ Failed to activate policy %s v%d: %v", a.PolicyID, a.Version, err)

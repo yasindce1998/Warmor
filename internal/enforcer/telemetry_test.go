@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/platform"
 	"github.com/yasindce1998/warmor/internal/telemetry"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -157,5 +158,64 @@ func TestTelemetryActivationCannotBypassSignedAssignment(t *testing.T) {
 	e.recordTelemetryDecision(&api.ActionResult{Action: api.ActionAllow}, nil)
 	if s := e.telemetry.Snapshot(); s.Total != 0 || s.Errors != 0 || s.Excluded != 0 {
 		t.Fatalf("signed decisions entered legacy telemetry: %+v", s)
+	}
+}
+
+func TestGenerationTelemetryStartupRejectedBeforeSideEffects(t *testing.T) {
+	collector := &telemetry.Collector{}
+	session := telemetry.Session{Epoch: "epoch", SessionID: "session"}
+	if err := collector.SetSession(session); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := collector.Prepare(telemetry.Assignment{Session: session, AssignmentRevision: 1}, telemetry.Revision{PolicyID: "p", PolicyVersion: 1, PolicyHash: strings.Repeat("a", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector.Replace(snapshot)
+	original := newPlatform
+	t.Cleanup(func() { newPlatform = original })
+	called := false
+	newPlatform = func(platform.Config) (platform.Platform, error) {
+		called = true
+		return nil, errors.New("unexpected platform construction")
+	}
+	e, err := New(context.Background(), "not-read.wasm", &Options{AtomicGenerations: true, RequireLSM: true, Telemetry: collector})
+	if e != nil || !errors.Is(err, errGenerationTelemetryUnsupported) || called || collector.Snapshot() != nil {
+		t.Fatalf("unsupported collector reached generation startup or retained evidence: enforcer=%v err=%v platform=%v", e, err, called)
+	}
+}
+
+func TestGenerationTelemetryCannotPublishOrMisattributeLeasedWork(t *testing.T) {
+	for _, apiPath := range []string{"telemetry", "generic"} {
+		t.Run(apiPath, func(t *testing.T) {
+			e, kernel := generationEnforcer(t)
+			old := &api.Event{UID: 1000, Filename: "/bin/old"}
+			if !e.captureGeneration(old) {
+				t.Fatal("old lease not captured")
+			}
+			defer old.GenerationContext.Complete()
+			a, revision := attachTestTelemetry(t, e)
+			snapshot, err := e.telemetry.Prepare(a, revision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			committed := false
+			commit := func() error { committed = true; return nil }
+			if apiPath == "telemetry" {
+				err = e.ActivatePolicyTelemetry("not-read.wasm", commit, a, revision)
+			} else {
+				err = e.ActivatePolicy("not-read.wasm", commit)
+			}
+			if !errors.Is(err, errGenerationTelemetryUnsupported) || committed || len(kernel.prepared) != 1 || kernel.active != 1 || e.telemetry.Snapshot() != nil {
+				t.Fatalf("unsupported telemetry crossed publication or retained evidence: %v", err)
+			}
+			// Even an internal late collector attachment cannot attribute old
+			// generation decisions to an unrelated legacy assignment snapshot.
+			e.telemetry.Replace(snapshot)
+			e.recordTelemetryDecision(&api.ActionResult{Action: api.ActionAllow}, nil)
+			if got := e.telemetry.Snapshot(); got == nil || got.Total != 0 || got.Denied != 0 || got.Errors != 0 {
+				t.Fatalf("generation work entered legacy collector: %+v", got)
+			}
+		})
 	}
 }

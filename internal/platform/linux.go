@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/yasindce1998/warmor/internal/ebpf"
+	"github.com/yasindce1998/warmor/internal/generationvm"
 	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -47,16 +49,28 @@ type tracepointMonitor interface {
 }
 
 type LinuxPlatform struct {
-	ebpfLoader tracepointMonitor
-	lsmLoader  *ebpf.LSMLoader
-	eventChan  chan<- *api.Event
-	stopChan   chan struct{}
-	stopOnce   sync.Once
-	stopErr    error
-	wg         sync.WaitGroup
-	config     LinuxConfig
-	lsmEnabled bool
-	scope      cgroupScope
+	ebpfLoader    tracepointMonitor
+	lsmLoader     *ebpf.LSMLoader
+	eventChan     chan<- *api.Event
+	stopChan      chan struct{}
+	stopOnce      sync.Once
+	stopErr       error
+	wg            sync.WaitGroup
+	config        LinuxConfig
+	lsmEnabled    bool
+	scope         cgroupScope
+	capture       func(*api.Event) bool // installed before Start; never changed afterward
+	drainMu       sync.Mutex
+	drainPending  chan struct{}
+	drainObserved bool
+	readerFailed  chan struct{}
+	readerErr     error
+	lsmEvents     lsmEventStream // production loader or VM-free reader fixture
+}
+
+type lsmEventStream interface {
+	ReadLSMEvent() (*ebpf.Event, error)
+	FlushLSMEvents() error
 }
 
 func NewLinuxPlatform(config LinuxConfig) (Platform, error) {
@@ -82,8 +96,9 @@ func NewLinuxPlatform(config LinuxConfig) (Platform, error) {
 		}
 	}
 	return &LinuxPlatform{
-		stopChan: make(chan struct{}),
-		config:   config,
+		stopChan:     make(chan struct{}),
+		config:       config,
+		readerFailed: make(chan struct{}),
 	}, nil
 }
 
@@ -166,6 +181,7 @@ func (p *LinuxPlatform) Load(ctx context.Context) (loadErr error) {
 	}
 	if lsmLoader != nil {
 		p.lsmLoader = lsmLoader
+		p.lsmEvents = lsmLoader
 		p.lsmEnabled = true
 
 		// Scope MUST be established before enabling blocking. Optional LSM
@@ -324,11 +340,7 @@ func (p *LinuxPlatform) monitorProcessEventsFrom(ctx context.Context, read func(
 			},
 		}
 
-		select {
-		case p.eventChan <- event:
-		case <-ctx.Done():
-			return
-		case <-p.stopChan:
+		if !p.deliver(ctx, event) {
 			return
 		}
 	}
@@ -385,11 +397,7 @@ func (p *LinuxPlatform) monitorFileEventsFrom(ctx context.Context, read func() (
 			},
 		}
 
-		select {
-		case p.eventChan <- event:
-		case <-ctx.Done():
-			return
-		case <-p.stopChan:
+		if !p.deliver(ctx, event) {
 			return
 		}
 	}
@@ -450,18 +458,14 @@ func (p *LinuxPlatform) monitorNetworkEventsFrom(ctx context.Context, read func(
 			},
 		}
 
-		select {
-		case p.eventChan <- event:
-		case <-ctx.Done():
-			return
-		case <-p.stopChan:
+		if !p.deliver(ctx, event) {
 			return
 		}
 	}
 }
 
 func (p *LinuxPlatform) monitorLSMEvents(ctx context.Context) {
-	p.monitorLSMEventsFrom(ctx, p.lsmLoader.ReadLSMEvent)
+	p.monitorLSMEventsFrom(ctx, p.lsmEvents.ReadLSMEvent)
 }
 
 func (p *LinuxPlatform) monitorLSMEventsFrom(ctx context.Context, read func() (*ebpf.Event, error)) {
@@ -477,7 +481,28 @@ func (p *LinuxPlatform) monitorLSMEventsFrom(ctx context.Context, read func() (*
 
 		ev, err := read()
 		if err != nil {
+			if errors.Is(err, ringbuf.ErrFlushed) {
+				p.drainMu.Lock()
+				fence := p.drainPending
+				if p.drainObserved {
+					fence = nil
+				}
+				if fence != nil {
+					p.drainObserved = true
+				}
+				p.drainMu.Unlock()
+				if fence != nil && !p.deliver(ctx, &api.Event{DispatchBarrier: fence}) {
+					return
+				}
+				continue
+			}
 			p.readerError(err)
+			p.drainMu.Lock()
+			p.readerErr = err
+			if p.readerFailed != nil {
+				close(p.readerFailed)
+			}
+			p.drainMu.Unlock()
 			return
 		}
 		if !p.scope.contains(ev.CgroupID) {
@@ -496,6 +521,7 @@ func (p *LinuxPlatform) monitorLSMEventsFrom(ctx context.Context, read func() (*
 			KernelTimestampNS: ev.KernelTimestampNS,
 			CgroupID:          ev.CgroupID,
 			LSMEvent:          true,
+			PolicyGeneration:  ev.PolicyGeneration,
 
 			KernelDenied:       ev.KernelDenied,
 			IntegrityViolation: ev.IntegrityViolation,
@@ -554,13 +580,82 @@ func (p *LinuxPlatform) monitorLSMEventsFrom(ctx context.Context, read func() (*
 			}
 		}
 
-		select {
-		case p.eventChan <- event:
-		case <-ctx.Done():
-			return
-		case <-p.stopChan:
+		if !p.deliver(ctx, event) {
 			return
 		}
+	}
+}
+
+func (p *LinuxPlatform) SetEventCapture(capture func(*api.Event) bool) { p.capture = capture }
+
+func (p *LinuxPlatform) deliver(ctx context.Context, event *api.Event) bool {
+	if event.DispatchBarrier == nil && p.capture != nil && !p.capture(event) {
+		return true // unknown generation is refused, never relabeled as current
+	}
+	if event.DispatchBarrier == nil {
+		generationvm.Capture(event)
+	}
+	select {
+	case p.eventChan <- event:
+		return true
+	case <-ctx.Done():
+	case <-p.stopChan:
+	}
+	event.GenerationContext.Complete()
+	return false
+}
+
+type linuxPolicyGenerations struct {
+	*ebpf.GenerationManager
+	p *LinuxPlatform
+}
+
+func (p *LinuxPlatform) PolicyGenerations() PolicyGenerations {
+	if p.lsmLoader == nil {
+		return nil
+	}
+	return &linuxPolicyGenerations{p.lsmLoader.PolicyGenerations(), p}
+}
+
+// Drain never reads the ring itself. The existing single reader must observe
+// ErrFlushed and enqueue a fence behind every old sample, even NO_WAKEUP ones.
+// A timed-out request remains outstanding; retries wait for that SAME fence.
+func (g *linuxPolicyGenerations) Drain(ctx context.Context) error {
+	p := g.p
+	p.drainMu.Lock()
+	if p.readerErr != nil {
+		err := p.readerErr
+		p.drainMu.Unlock()
+		return err
+	}
+	if p.drainPending == nil {
+		p.drainPending = make(chan struct{})
+		p.drainObserved = false
+		if err := p.lsmEvents.FlushLSMEvents(); err != nil {
+			p.drainPending = nil
+			p.drainMu.Unlock()
+			return err
+		}
+	}
+	fence := p.drainPending
+	p.drainMu.Unlock()
+	select {
+	case <-fence:
+		p.drainMu.Lock()
+		if p.drainPending == fence {
+			p.drainPending = nil
+		}
+		p.drainMu.Unlock()
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.stopChan:
+		return errors.New("LSM reader stopped before drain")
+	case <-p.readerFailed:
+		p.drainMu.Lock()
+		err := p.readerErr
+		p.drainMu.Unlock()
+		return err
 	}
 }
 
@@ -617,6 +712,9 @@ func (p *LinuxPlatform) Stop() error {
 		// Readers can be idle forever (including ReadLSMEvent's deadline
 		// retry loop). Interrupt them before waiting, but keep enforcement
 		// hooks/maps alive until Close finishes the resource lifecycle.
+		// Do not hold drainMu or a generation dispatch/worker lock here:
+		// reader completion may need them. stopChan aborts pending drains,
+		// never acknowledging an interrupted flush as a completed fence.
 		var errs []error
 		if p.ebpfLoader != nil {
 			errs = append(errs, p.ebpfLoader.StopReaders())
