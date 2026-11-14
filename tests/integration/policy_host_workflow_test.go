@@ -96,6 +96,7 @@ func TestSupervisedHostRunnerControlsAndTrustEvidence(t *testing.T) {
 		`"$ARTIFACTS/POLICY_HOST_SHA256"`, `"$ARTIFACTS/fixture-public.pem"`,
 		`"$ARTIFACTS/"*.sig`, `"$ARTIFACTS/reviewed-declaration-digests.txt"`,
 		`bash tests/integration/check-host-outcomes.sh "$ARTIFACTS/outcomes.log"`,
+		`bash tests/integration/check-host-outcomes.sh --verifier "$ARTIFACTS/verifier.log"`,
 	} {
 		if !strings.Contains(string(data), required) {
 			t.Error("missing exact host evidence:", required)
@@ -131,6 +132,34 @@ func TestSupervisedHostPASSCounterRejectsFalseEvidence(t *testing.T) {
 			err := exec.Command("bash", "check-host-outcomes.sh", path).Run()
 			if (err == nil) != (name == "good") {
 				t.Fatalf("false host evidence accepted or good rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestSupervisedHostVerifierRequiresExactNonSkippedPASS(t *testing.T) {
+	var lines []string
+	for _, name := range []string{"LoadAndAttach", "StopReadersInterruptsIdleMonitors", "ExactExecCollisionFirstMatchDefaultDenyAndScope", "ExactAuditDeniesAreNotKernelRefusals", "ExactEndpointCollisionDefaultDeny", "TruncatedExecCannotHitExactAllow", "ExactIPv6AndMappedEndpointIdentities"} {
+		lines = append(lines, "--- PASS: TestLSM_"+name+" (0.01s)")
+	}
+	good := strings.Join(lines, "\n") + "\nPASS\n"
+	for name, log := range map[string]string{
+		"good":          good,
+		"empty":         "",
+		"missing":       strings.Replace(good, lines[0]+"\n", "", 1),
+		"duplicate":     good + lines[0] + "\n",
+		"skip":          good + "    --- SKIP: TestLSM_ExactExecCollisionFirstMatchDefaultDenyAndScope/nested (0.00s)\n",
+		"failure":       good + "FAIL\n",
+		"missing-final": strings.TrimSuffix(good, "PASS\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "verifier.log")
+			if err := os.WriteFile(path, []byte(log), 0600); err != nil {
+				t.Fatal(err)
+			}
+			err := exec.Command("bash", "check-host-outcomes.sh", "--verifier", path).Run()
+			if (err == nil) != (name == "good") {
+				t.Fatalf("incorrect verifier evidence accepted/rejected: %v", err)
 			}
 		})
 	}

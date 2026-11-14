@@ -62,6 +62,10 @@ No actual VM result or broad-green claim is supplied by these offline probes.
 Both legacy/atomic VM runs remain for CI after the coordinator combines reviewed
 PR53 source/unsupported-combination guards and private VM recording changes.
 
+Integration from PR53 `5ed1817` now retains those guards and recordings without
+changing the proof scope. See `supervised-host-outcomes-integration.md` for the
+current combined validation; the original 399f605/aaf328e checkpoints remain frozen.
+
 ## Focused validation
 
 Go 1.26.11, `GOMAXPROCS=2`, `-p 2`: focused normal/race tests for the shared

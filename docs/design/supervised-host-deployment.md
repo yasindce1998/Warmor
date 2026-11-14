@@ -69,3 +69,10 @@ and maps survive Stop/leases until Close; VM SIGTERM probes check bounded clean
 exit and child reaping, not an instrumented proof of every map-teardown instant.
 Native arm64/container bootstrap, deployment updates, blocked-seccomp profiles,
 and Windows/macOS equivalents remain platform/infrastructure validation work.
+
+This gate verifies detached **artifact signatures**, not signed deployment
+intent. PR53's `--signed-assignments` + Host/atomic refusal remains in force;
+neither the fixture nor declaration pins enable those unsupported combinations.
+Live event recordings stay under physical guest-owned
+`/tmp/warmor-outcome-fixtures/recordings` (0700), never on the shared checkout;
+they are exported as private evidence only after the daemon exits.

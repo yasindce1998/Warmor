@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/yasindce1998/warmor/internal/privatefile"
 )
 
 // createOutcomeRecordings is called only with the freshly created guest-local
@@ -97,6 +99,21 @@ func TestOutcomeRecordingDirectoryRejectsExistingSymlink(t *testing.T) {
 	entries, err := os.ReadDir(target)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("symlink target modified: %v %v", entries, err)
+	}
+}
+
+func TestOutcomeRecordingUsesPrivateFileContract(t *testing.T) {
+	work := t.TempDir()
+	dir, err := createOutcomeRecordings(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := privatefile.OpenAppend(filepath.Join(dir, "host.ndjson"), false, false)
+	if err != nil {
+		t.Fatalf("guest recording must satisfy real private sink ownership checks: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -31,7 +31,7 @@ const outcomeTimeout = 20 * time.Second
 
 // Guest-local, traversable by uid 65534 even when the host checkout lives in
 // a private home directory. Never chmod the shared host checkout or its parents.
-const guestFixtureDir = "/var/tmp/warmor-outcome-fixtures"
+const guestFixtureDir = "/tmp/warmor-outcome-fixtures"
 
 func artifactDir(t *testing.T) string {
 	t.Helper()

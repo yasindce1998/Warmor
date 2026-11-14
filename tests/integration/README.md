@@ -5,7 +5,7 @@ This is a **disposable-VM-only** test of the real `cmd/warmor-daemon`, compiler-
 ## Optional supervised host gate
 
 `bash tests/integration/run-outcomes.sh --policy-host` runs the same outcome
-oracle with a separately built signed-policy host. Add `--atomic-generations`
+oracle with a separately built host and artifact-signed modules. Add `--atomic-generations`
 to select generation maps; without it the legacy single-map mode is explicit.
 Add `--build-only` for preparation without starting a VM or daemon. The existing
 default run and kernel-generation gates remain independent and required.
@@ -35,6 +35,10 @@ uncached ALLOW **before** releasing the still-loading candidate; the real load
 deadline and eventual LKG assertions follow. Release/Docker binaries never use
 this profile. See [phase-proof scope and negative probes](../../docs/design/supervised-host-phase-proof.md).
 Artifact signatures here do not imply signed-deployment validation.
+PR53's `--signed-assignments` + Host/atomic combinations remain explicitly
+unsupported. Live NDJSON uses guest-owned `/tmp/warmor-outcome-fixtures/recordings`
+(0700); private exports are copied to retained artifacts only after daemon exit.
+Both verifier and outcome logs require exact non-skipped PASS evidence in host mode.
 
 ## What a passing VM run proves
 
@@ -72,7 +76,7 @@ For systems with a small/memory-backed `/tmp`, put the OCI cache on persistent d
 XDG_CACHE_HOME="$HOME/.cache/warmor-outcomes" bash tests/integration/run-outcomes.sh
 ```
 
-The guest runs controlled executables in its private `/var/tmp` overlay, so a checkout under a mode-0700 host home directory does not require weakening host permissions. No host secret paths or service-account tokens are created or touched.
+The guest runs controlled executables in its private `/tmp` overlay, so a checkout under a mode-0700 host home directory does not require weakening host permissions. No host secret paths or service-account tokens are created or touched.
 
 ### Safe local validation without a VM
 

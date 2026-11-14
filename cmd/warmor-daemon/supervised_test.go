@@ -29,6 +29,7 @@ func TestSupervisedBackendRequiresExplicitOptIn(t *testing.T) {
 
 func TestSignedBackendCombinationsRejectBeforeConfiguration(t *testing.T) {
 	for _, tc := range []struct{ signed, atomic, host bool }{
+		{false, false, false}, {false, true, false},
 		{true, false, false}, {false, false, true}, {false, true, true},
 		{true, true, false}, {true, false, true}, {true, true, true},
 	} {
@@ -44,6 +45,7 @@ func TestMainSignedExperimentalCombinationsRejectBeforeSideEffects(t *testing.T)
 		{"--experimental-atomic-generations"},
 		{"--experimental-supervised-policy-host"},
 		{"--experimental-atomic-generations", "--experimental-supervised-policy-host"},
+		{"--experimental-supervised-policy-host", "--verify-key", "/not-opened/public.pem", "--policy-host", "/not-executed/host", "--policy-host-sha256", strings.Repeat("a", 64), "--policy-host-load-timeout", "1s"},
 	} {
 		args := append([]string{"--signed-assignments", "--assignment-state-dir", "/not-opened/state", "--event-sink", "file:/not-opened/events"}, flags...)
 		r := runChild(t, nil, args...)
