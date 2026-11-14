@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/yasindce1998/warmor/internal/policymeta"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 )
 
 type BuildOptions struct {
@@ -64,7 +64,7 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err = policymeta.Append(data, policymeta.Metadata{Compiler: Identity, DefaultAction: policy.DefaultAction})
+	data, err = policybuild.Append(data, policybuild.Metadata{Compiler: Identity, DefaultAction: policy.DefaultAction})
 	if err != nil {
 		return nil, err
 	}

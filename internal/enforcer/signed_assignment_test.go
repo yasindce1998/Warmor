@@ -14,7 +14,8 @@ import (
 	"github.com/yasindce1998/warmor/internal/agentstore"
 	"github.com/yasindce1998/warmor/internal/crypto"
 	"github.com/yasindce1998/warmor/internal/crypto/assignment"
-	"github.com/yasindce1998/warmor/internal/policymeta"
+	"github.com/yasindce1998/warmor/internal/platform"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 	"github.com/yasindce1998/warmor/internal/policyserver"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 	"github.com/yasindce1998/warmor/pkg/api"
@@ -28,7 +29,7 @@ func TestSignedHTTPActivationWaitsForRealEventDrain(t *testing.T) {
 	signer, _ := crypto.GenerateSigningKey()
 	e.verifyKey = artifact.Public
 	e.signedAssignment = true
-	module, err := policymeta.Append(wasmtest.VersionedConstPolicy(1, 1), policymeta.Metadata{Compiler: "test-build", DefaultAction: "allow"})
+	module, err := policybuild.Append(wasmtest.VersionedConstPolicy(1, 1), policybuild.Metadata{Compiler: "test-build", DefaultAction: "allow"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,5 +128,77 @@ func TestSignedHTTPActivationWaitsForRealEventDrain(t *testing.T) {
 	}
 	if err := e.ActivateAssignment(path, d.Policy, func() error { return store.Commit(assignment.Verified{}, "revision-zero", clock) }); !errors.Is(err, assignment.ErrInvalid) {
 		t.Fatal(err)
+	}
+}
+
+type signedKernelPlatform struct {
+	fakePlatform
+	pm *fakePolicyMap
+}
+
+func (*signedKernelPlatform) Capabilities() platform.Capabilities {
+	return platform.Capabilities{Enforcement: true, LSMEnforcement: true}
+}
+func (p *signedKernelPlatform) PolicyMap() any { return p.pm }
+
+func TestSignedRequiredDefaultDenyUsesActualEligibleDomainsAndRequiredLSM(t *testing.T) {
+	isolateCacheDir(t)
+	artifact, err := crypto.GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := policybuild.Append(wasmtest.DefaultDenyPolicy(), policybuild.Metadata{Compiler: "test-build", DefaultAction: "deny"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "policy.wasm")
+	if err := os.WriteFile(path, module, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".sig", artifact.SignPolicyFile(module), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := assignment.Policy{ID: "deny-all", Version: 1, SHA256: assignment.Digest(module), ABI: 1, Compiler: "test-build", Posture: assignment.Posture{Mode: "enforce", DefaultAction: "deny", RequireDefaultDeny: true}}
+	for _, mode := range []string{"valid", "missing-require-lsm", "ineligible", "kernel-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			pm := &fakePolicyMap{}
+			opts := &Options{Platform: &signedKernelPlatform{pm: pm}, MetricsPort: -1, LSMEnforce: true, RequireLSM: true, DefaultDeny: true, PolicyVerifyKey: artifact.Public, SignedAssignment: &want}
+			if mode == "missing-require-lsm" {
+				opts.RequireLSM = false
+			}
+			if mode == "kernel-failure" {
+				pm.ddMarkErr = errors.New("injected kernel publication failure")
+			}
+			candidate := path
+			if mode == "ineligible" {
+				other, err := policybuild.Append(wasmtest.VersionedConstPolicy(1, 1), policybuild.Metadata{Compiler: "test-build", DefaultAction: "deny"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				candidate = filepath.Join(t.TempDir(), "ineligible.wasm")
+				if err := os.WriteFile(candidate, other, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(candidate+".sig", artifact.SignPolicyFile(other), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				copy := want
+				copy.SHA256 = assignment.Digest(other)
+				opts.SignedAssignment = &copy
+			}
+			e, err := New(context.Background(), candidate, opts)
+			if mode == "valid" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer e.Close()
+				if !e.pool.StaticRulesProcess().Eligible || !e.pool.StaticRulesNetwork().Eligible {
+					t.Fatal("test domains not eligible")
+				}
+			} else if err == nil {
+				e.Close()
+				t.Fatal("unsatisfied signed kernel posture accepted")
+			}
+		})
 	}
 }

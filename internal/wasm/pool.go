@@ -26,6 +26,7 @@ type Pool struct {
 	// temporal: the module is sent temporal context (ABI >= 3).
 	temporal   bool
 	abiVersion uint32
+	abiSet     bool
 	// staticProcess/staticNetwork are the kernel default-deny declarations
 	// (compiler.StaticRulesExport), read once from the first instance.
 	staticProcess StaticDomain
@@ -66,6 +67,7 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 		}
 		if i == 0 {
 			p.abiVersion = policy.abiVersion
+			p.abiSet = true
 			p.fields = readFieldsDeclaration(ctx, policy)
 			p.temporal = policy.temporal()
 			p.staticProcess = readStaticDomain(ctx, policy, 0)
@@ -89,7 +91,17 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 
 func (p *Pool) instantiate(ctx context.Context) (*Policy, error) {
 	// Anonymous instances allow multiple pools to coexist in one runtime.
-	return p.runtime.instantiatePolicy(ctx, p.module, p.runtime.config.WithName(""))
+	// Keep the captured module and bounded initialization path from main;
+	// declaration checks must never reinstate raw/unbounded instantiation.
+	policy, err := p.runtime.instantiatePolicy(ctx, p.module, p.runtime.config.WithName(""))
+	if err != nil {
+		return nil, err
+	}
+	if p.abiSet && policy.abiVersion != p.abiVersion {
+		policy.Close(ctx)
+		return nil, fmt.Errorf("replacement policy ABI declaration changed")
+	}
+	return policy, nil
 }
 
 // Get retrieves a policy instance from the pool. Blocks if all instances are

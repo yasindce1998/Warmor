@@ -19,7 +19,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/enforcer"
 	"github.com/yasindce1998/warmor/internal/platform"
-	"github.com/yasindce1998/warmor/internal/policymeta"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 	"github.com/yasindce1998/warmor/internal/policyserver"
 	"github.com/yasindce1998/warmor/internal/streaming"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
@@ -61,6 +61,9 @@ func writeJSON(t *testing.T, path string, v any) {
 func newSignedFixture(t *testing.T) *signedFixture {
 	t.Helper()
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	artifact, err := crypto.GenerateSigningKey()
 	if err != nil {
@@ -76,6 +79,15 @@ func newSignedFixture(t *testing.T) *signedFixture {
 	}
 	now := time.Now().UTC().Truncate(time.Second)
 	cfg := assignmentConfig{Scope: "tenant/prod", Audience: "node-1", Keys: []assignmentKeyConfig{{ID: "deployment", PublicKey: string(pub), CanRollback: true}}, Compilers: []string{"test-build-1"}, MaxLifetimeSeconds: 3600}
+	// Independently reviewed stateless fixtures, not pins derived from any
+	// received deployment or signature.
+	for _, action := range []int32{0, 1} {
+		module, err := policybuild.Append(wasmtest.VersionedConstPolicy(action, 1), policybuild.Metadata{Compiler: "test-build-1", DefaultAction: "allow"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.TrustedDeclarationDigests = append(cfg.TrustedDeclarationDigests, assignment.Digest(module))
+	}
 	configPath, clockPath := filepath.Join(root, "trust.json"), filepath.Join(root, "clock.json")
 	writeJSON(t, configPath, cfg)
 	writeJSON(t, clockPath, clockHealth{CheckedAt: now.Unix() - 1, ValidUntil: now.Unix() + 30})
@@ -91,7 +103,7 @@ func newSignedFixture(t *testing.T) *signedFixture {
 
 func (f *signedFixture) bundle(t *testing.T, d assignment.Deployment, action int32) assignment.Bundle {
 	t.Helper()
-	module, err := policymeta.Append(wasmtest.VersionedConstPolicy(action, 1), policymeta.Metadata{Compiler: "test-build-1", DefaultAction: "allow"})
+	module, err := policybuild.Append(wasmtest.VersionedConstPolicy(action, 1), policybuild.Metadata{Compiler: "test-build-1", DefaultAction: "allow"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,6 +223,14 @@ func TestSignedModeHTTPRelayRealActivationRestartRollback(t *testing.T) {
 	if d.Sequence != 3 || path != filepath.Join(f.m.root, st.Active.Revision, "module.wasm") {
 		t.Fatal("restart selected wrong authority")
 	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	e, err = enforcer.New(context.Background(), path, &enforcer.Options{Platform: &signedTestPlatform{}, AuditMode: true, MetricsPort: -1, PolicyVerifyKey: f.artifact.Public, SignedAssignment: &d.Policy})
+	if err != nil {
+		t.Fatal("restored signed artifact did not load", err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
 	// A new client can re-ack restored state without replaying commit.
 	client = newClient(bundleAssignment(t, renewal))
 	if err := client.Poll(context.Background()); err != nil {
@@ -240,7 +260,7 @@ func TestSignedModeHTTPRelayRealActivationRestartRollback(t *testing.T) {
 func bytesReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
 
 func TestSignedCommitFreshTrustClockAndActualDeclarations(t *testing.T) {
-	for _, failure := range []string{"revoked", "clock", "abi", "compiler", "default-action", "mode", "default-deny", "artifact", "replay"} {
+	for _, failure := range []string{"revoked", "clock", "abi", "compiler", "default-action", "mode", "default-deny", "artifact", "replay", "untrusted-declarations"} {
 		t.Run(failure, func(t *testing.T) {
 			f := newSignedFixture(t)
 			e, _ := bootstrapFixture(t, f)
@@ -262,6 +282,9 @@ func TestSignedCommitFreshTrustClockAndActualDeclarations(t *testing.T) {
 				d.Policy.Posture = assignment.Posture{Mode: "enforce", DefaultAction: "deny", RequireDefaultDeny: true}
 			case "replay":
 				d.Sequence = 1
+			case "untrusted-declarations":
+				f.config.TrustedDeclarationDigests = f.config.TrustedDeclarationDigests[:1]
+				writeJSON(t, f.m.configPath, f.config)
 			}
 			b := f.bundle(t, d, 1)
 			if failure == "artifact" {
@@ -406,5 +429,113 @@ func TestSignedTrustRotationLockFailsClosed(t *testing.T) {
 	st, _ := f.m.store.Snapshot()
 	if st.HighWater != 1 {
 		t.Fatal("lock conflict consumed sequence")
+	}
+}
+
+func TestSignedActualArtifactMissingMetadataABIAndExpiredDuringPreparation(t *testing.T) {
+	for _, failure := range []string{"missing-metadata", "missing-abi", "expired-after-prepare", "clock-regression", "signature-pair"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newSignedFixture(t)
+			e, _ := bootstrapFixture(t, f)
+			d := f.base
+			d.Sequence = 2
+			d.Policy.Version = 2
+			b := f.bundle(t, d, 1)
+			if failure == "missing-metadata" || failure == "missing-abi" {
+				module := wasmtest.VersionedConstPolicy(1, 1)
+				if failure == "missing-abi" {
+					var err error
+					module, err = policybuild.Append(wasmtest.ConstPolicy(1, nil), policybuild.Metadata{Compiler: "test-build-1", DefaultAction: "allow"})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				d.Policy.SHA256 = assignment.Digest(module)
+				signed, err := assignment.Sign(f.signer.Private, d)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wire, err := assignment.Encode(signed)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b = assignment.Bundle{Envelope: wire, WASM: module, ArtifactSignature: f.artifact.Sign(module)}
+				f.config.TrustedDeclarationDigests = append(f.config.TrustedDeclarationDigests, d.Policy.SHA256)
+				writeJSON(t, f.m.configPath, f.config)
+			}
+			activate := func(path string, p assignment.Policy, commit func() error) error {
+				if failure == "signature-pair" {
+					if err := os.WriteFile(path+".sig", f.artifact.SignPolicyFile([]byte("unrelated")), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return e.ActivateAssignment(path, p, func() error {
+					if failure == "expired-after-prepare" {
+						future := f.clock.Add(2 * time.Hour)
+						f.m.now = func() time.Time { return future }
+						writeJSON(t, f.m.clockPath, clockHealth{CheckedAt: future.Unix() - 1, ValidUntil: future.Unix() + 30})
+					}
+					if failure == "clock-regression" {
+						past := f.clock.Add(-time.Second)
+						f.m.now = func() time.Time { return past }
+					}
+					return commit()
+				})
+			}
+			if err := f.m.update(bundleAssignment(t, b), b.WASM, activate); err == nil {
+				t.Fatal("invalid artifact/lease accepted")
+			}
+			st, _ := f.m.store.Snapshot()
+			if st.HighWater != 1 {
+				t.Fatal("failed preparation consumed deployment sequence")
+			}
+		})
+	}
+}
+
+func TestSignedBootstrapRecoveryKeepsMarksAndRequiresFreshSource(t *testing.T) {
+	f := newSignedFixture(t)
+	initial, _ := bootstrapFixture(t, f)
+	if err := initial.Close(); err != nil {
+		t.Fatal(err)
+	}
+	v2 := f.base
+	v2.Sequence = 2
+	v2.Policy.Version = 2
+	b2 := f.bundle(t, v2, 1)
+	opts := &enforcer.Options{Platform: &signedTestPlatform{}, AuditMode: true, MetricsPort: -1, PolicyVerifyKey: f.artifact.Public}
+	recovered, err := f.m.bootstrap(context.Background(), b2, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	if _, err := openSignedPolicy(f.m.configPath, f.m.clockPath, f.m.root, f.artifact.Public, true); err == nil {
+		t.Fatal("explicit bootstrap reset existing replay state")
+	}
+	st, _ := f.m.store.Snapshot()
+	if st.HighWater != 2 || st.Policies["policy"].Version != 2 {
+		t.Fatal("recovery reset marks")
+	}
+	if _, err := f.m.bootstrap(context.Background(), f.bundle(t, f.base, 0), opts); !errors.Is(err, agentstore.ErrReplay) {
+		t.Fatal("recovery replay accepted", err)
+	}
+	_, current, err := f.m.restore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb := f.base
+	rb.Sequence = 3
+	rb.Rollback = &assignment.Rollback{FromSequence: 2, From: current.Policy, Reason: "approved pre-start restore"}
+	if err := recovered.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err = f.m.bootstrap(context.Background(), f.bundle(t, rb, 0), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	st, _ = f.m.store.Snapshot()
+	if st.HighWater != 3 || st.Policies["policy"].Version != 2 {
+		t.Fatal("pre-start rollback lowered history")
 	}
 }

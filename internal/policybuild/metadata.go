@@ -1,7 +1,7 @@
-// Package policymeta stores artifact-author-approved build declarations in a
+// Package policybuild stores artifact-author-approved build declarations in a
 // WASM custom section. These are authenticated by the artifact signature, not
 // proof of compiler provenance or a semantic analysis of arbitrary WASM.
-package policymeta
+package policybuild
 
 import (
 	"bytes"

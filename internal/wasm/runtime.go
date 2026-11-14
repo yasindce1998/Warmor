@@ -15,7 +15,7 @@ import (
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"github.com/yasindce1998/warmor/internal/compiler"
-	"github.com/yasindce1998/warmor/internal/policymeta"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 )
 
 // RuntimeConfig configures the WASM runtime.
@@ -69,7 +69,7 @@ type Runtime struct {
 	// cacheDir is RuntimeConfig.CacheDir; compiled YAML policies are kept
 	// under it (see LoadPolicyFromYAML).
 	cacheDir string
-	metadata *policymeta.Metadata
+	metadata *policybuild.Metadata
 	digest   string
 }
 
@@ -186,7 +186,7 @@ func (r *Runtime) LoadPolicyBytes(ctx context.Context, wasmBytes []byte) error {
 	if err := preflightModule(ctx, wasmBytes); err != nil {
 		return fmt.Errorf("policy preflight: %w", err)
 	}
-	metadata, err := policymeta.Read(wasmBytes)
+	metadata, err := policybuild.Read(wasmBytes)
 	if err != nil {
 		return err
 	}

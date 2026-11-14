@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"sync"
 	"time"
 
@@ -37,6 +40,9 @@ type assignmentConfig struct {
 	MaxLifetimeSeconds int64                 `json:"max_lifetime_seconds"`
 	RequireEnforce     bool                  `json:"require_enforce"`
 	RequireDefaultDeny bool                  `json:"require_default_deny"`
+	// Independent administrator attestation of truthful/exhaustive guest
+	// declarations. Never derived from a signature, build claim or download.
+	TrustedDeclarationDigests []string `json:"trusted_declaration_digests"`
 }
 type clockHealth struct {
 	// A local time-health supervisor atomically publishes a short-lived
@@ -88,6 +94,17 @@ func (m *signedPolicyManager) verification() (assignment.Trust, assignment.Verif
 	if c.MaxLifetimeSeconds <= 0 || c.MaxLifetimeSeconds > 86400 || len(c.Compilers) == 0 || len(c.Compilers) > 64 || len(c.Keys) == 0 || len(c.Keys) > 64 {
 		return nil, assignment.VerifyOptions{}, errors.New("invalid assignment trust limits")
 	}
+	if len(c.TrustedDeclarationDigests) == 0 || len(c.TrustedDeclarationDigests) > 256 {
+		return nil, assignment.VerifyOptions{}, errors.New("signed mode requires independently attested declaration digest pins (maximum 256)")
+	}
+	seen := map[string]bool{}
+	for _, digest := range c.TrustedDeclarationDigests {
+		raw, err := hex.DecodeString(digest)
+		if err != nil || len(raw) != 32 || hex.EncodeToString(raw) != digest || seen[digest] {
+			return nil, assignment.VerifyOptions{}, errors.New("invalid/duplicate declaration digest pin")
+		}
+		seen[digest] = true
+	}
 	trust := assignment.Trust{}
 	for _, k := range c.Keys {
 		if _, exists := trust[k.ID]; exists || k.ID == "" {
@@ -137,6 +154,11 @@ func openSignedPolicy(configPath, clockPath, root string, artifact ed25519.Publi
 	if err != nil {
 		return nil, err
 	}
+	if info, err := os.Stat(root); err != nil {
+		return nil, err
+	} else if !info.IsDir() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) {
+		return nil, errors.New("assignment state directory must be private (mode 0700)")
+	}
 	var c assignmentConfig
 	if err := strictJSON(configPath, 64<<10, &c); err != nil {
 		return nil, err
@@ -175,6 +197,15 @@ func (m *signedPolicyManager) verify(b assignment.Bundle) (assignment.Verified, 
 	trust, opts, err := m.verification()
 	if err != nil {
 		return assignment.Verified{}, err
+	}
+	// The same rotation lock covers these reads at durable commit. This is an
+	// independent local attestation, not an envelope-controlled permission.
+	var config assignmentConfig
+	if err := strictJSON(m.configPath, 64<<10, &config); err != nil {
+		return assignment.Verified{}, err
+	}
+	if !slices.Contains(config.TrustedDeclarationDigests, e.Deployment.Policy.SHA256) {
+		return assignment.Verified{}, errors.New("artifact declarations not independently trusted for this exact digest")
 	}
 	return assignment.Verify(e, b.WASM, trust, opts)
 }

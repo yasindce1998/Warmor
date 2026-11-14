@@ -1,11 +1,16 @@
-# Signed deployment assignments (library foundation)
+# Signed deployment assignments (explicit opt-in)
 
-**Not enabled or wired into the daemon/server.** This change adds
-`internal/crypto/assignment` and `internal/agentstore`, plus tests of the real
-enforcer commit callback. It does not add CLI flags, a network endpoint, a
-signing service, or a production clock-health provider. Existing unsigned and
-`--verify-key` behavior is unchanged. A WASM-only signature does **not**
-authenticate policy ID, version, targeting, or deployment authorization.
+The daemon's **`--signed-assignments`** mode verifies deployment intent separately
+from the artifact signature and persists anti-replay state in its sole activation
+record. The central server can durably relay externally signed bundles; it does
+not sign them. Default unsigned and existing `--verify-key` behavior is unchanged.
+A WASM-only signature does **not** authenticate policy ID, version, targeting, or
+deployment authorization. This is not a hosted signer, clock-health service,
+automatic canary signer, or a claim of live kernel-generation atomicity.
+Daemon activation supports the same Linux/macOS durable fleet platforms as the
+base activation path; Windows fleet mode remains explicitly refused. The
+standalone signer/store primitives cross-compile for Windows; enforce private
+Windows ACLs where Unix mode bits are not available.
 
 ## Two separate trust roles
 
@@ -17,8 +22,9 @@ authenticate policy ID, version, targeting, or deployment authorization.
 2. **Assignment key:** a different Ed25519 key approves deploying a particular
    artifact and posture to an exact scope/audience. Provision its public key to
    agents independently of the policy server response. The library takes a
-   private key only in `assignment.Sign`; it never discovers, generates, stores,
-   or automatically loads a private key. Prefer a separate deployment signer;
+   private key only in `assignment.Sign` and the separate
+   `warmor-policy-assignment` command; the daemon and server never load one.
+   Prefer a separate deployment signer;
    the central server can relay pre-signed envelopes. Putting an assignment key
    on a server is an explicit trust decision, not a default. It still must not
    give the server the artifact private key.
@@ -32,8 +38,8 @@ This library does not prove compiler provenance or policy semantic equivalence.
 ### Provisioning and rotation procedure
 
 There are deliberately no example private keys, private-key files, or generated
-key material in the repository. The following are operator procedures, not
-implemented CLI commands:
+key material in the repository. Key generation and secure distribution remain
+operator procedures:
 
 1. Generate **distinct** Ed25519 artifact and assignment key pairs in their
    respective protected signing environments. Export public keys as PKIX PEM
@@ -64,8 +70,12 @@ implemented CLI commands:
    key ID with a sequence **greater than the agent's persisted high-water**.
    Remove the old grant after rollout. Never reset/recreate agent state or
    restart the deployment counter for a new signer. Serialize trust/config
-   changes with prepare/commit (or re-verify with current trust in the callback)
-   so a verification token created before revocation cannot commit afterward.
+   changes with commit using the stable `<assignment-config>.lock` file
+   (`flock -x` on Unix, or `agentstore.WithConfigurationLock` for embedded users)
+   **before** atomically replacing the configuration. The daemon takes that
+   same lock and re-verifies current trust immediately around commit/start.
+   Never unlink/replace the lock itself. This protocol ensures
+   a verification token created before revocation cannot commit afterward.
    Tokens are immutable but not a live revocation service.
 5. Artifact trust rotation is separate. Keep the old artifact public key as long
    as approved retained/recovery artifacts require it, or re-sign and verify
@@ -177,7 +187,7 @@ accidental corruption, not malicious administrator modification or full-disk
 snapshot rollback. `Open` validates structure, **not cryptographic trust**;
 re-verify the selected envelope/artifact using current trust before execution.
 
-Commit belongs in `Enforcer.ActivatePolicy`'s drained, prepared, pre-swap
+Signed commit uses `Enforcer.ActivateAssignment`'s shared drained, prepared, pre-swap
 callback. Immutable module/signature files and their directories must already
 be fsynced. After successful commit the evaluator swap must be infallible;
 acknowledge only afterward. A crash before commit selects the previous record;
@@ -211,44 +221,188 @@ health is lost or its envelope expires; no weaker/unsigned fallback is selected.
 On restart, the strict signed-mode integration must verify the selected record
 at current trusted time. Unknown time, expired lease or revoked trust must leave
 the agent not ready, with no unverified evaluator; provide a fresh signed
-authorization through a pre-start recovery path. That recovery/bootstrap path
-is not implemented here. Never renew an expired stored lease by rewriting its
+authorization through `--assignment-recovery`. Never renew an expired stored lease by rewriting its
 timestamp or reusing its sequence.
 
-## Required main activation/protocol hooks (not implemented)
+## Operator configuration
 
-1. Add an explicit signed-assignment opt-in mode and local trust/target/state/
-   clock configuration. Validate them at startup. Legacy unsigned mode remains
-   unchanged; once opted in, missing/invalid envelopes, lost state, unknown
-   time or unsupported server capability **must never downgrade** to legacy
-   WASM-only/unsigned verification or policy fallback.
-2. Carry the exact encoded envelope alongside the artifact. Bind it to the
-   downloaded metadata/digest and authenticated request identity. Existing
-   `PolicyAssignment`, server persistence and rollout signing need schema/
-   capability negotiation, signer-side durable sequence allocation, and
-   authorized rollback issuance; none is faked by this library.
-3. `ClientConfig.Verify` can verify downloads but cannot consume replay state
-   before activation. `OnUpdate` must stage exact verified bytes, validate actual
-   ABI/declared posture against effective daemon and kernel settings, drain and
-   prepare via `ActivatePolicy`, and call `agentstore.Commit` in its commit
-   callback with a fresh trusted clock/current trust decision.
-4. **Replace**, do not chain, `stagedPolicyRevision.commit`'s separate `current`
-   pointer authority for signed mode. Store `assignment.json` inside the revision
-   root and use `Active.Revision` as the sole startup/publication reference.
-   Any aliases are derived conveniences and cannot drive restore or security
-   decisions. The existing `discard` method knows only `current`/`previous`;
-   change retention to protect the state-selected revision and every uncertain
-   publication before using it. Do not run two independent durability commits.
-5. At signed-mode boot, `Open` state without automatic create, select one
-   immutable revision, read once, verify its artifact signature and assignment
-   with current trust/time, compare actual ABI/effective posture, then load
-   exactly those bytes and reconstruct kernel state. Never choose `previous`
-   just because current validation fails. A real rollback needs a fresh
-   authorization and higher sequence through the recovery path.
-6. Extend heartbeats/conditional polling with deployment sequence and full
-   active identity; seed them from the durably restored and successfully loaded
-   record. Same-artifact lease renewal must not be skipped by version/hash-only
-   comparison. Re-acknowledge a matching restored record without replaying commit.
-   Handle `ErrIndeterminate` as a fatal reconciliation requirement, not an
-   ordinary failed download. Tests of these future hooks are required before
-   claiming end-to-end signed-assignment enforcement.
+Build `./cmd/warmor-policy-assignment`, `./cmd/warmor-server` and
+`./cmd/warmor-daemon` (also included by `make tools`). The deployment signer runs
+in a protected environment separate from the relay. First build an artifact
+using `warmor-compile`; compiler version 6 embeds `warmor.build.v1` custom
+section metadata with compiler identity `warmor-yaml/6` and default action.
+Sign the final bytes with the offline artifact key **after** compilation.
+Custom toolchains must append `policybuild.Metadata` before artifact signing and
+export `abi_version() -> i32`. Signed mode rejects missing metadata/ABI. Metadata
+is an artifact-author-approved declaration, not independent compiler provenance
+or a proof that arbitrary WASM implements its claimed default action.
+
+Create deployment-intent JSON matching `assignment.Deployment` (all fields,
+including `format: 1`, exact `key_id`/`target`, `policy`, newly allocated
+`sequence`, UTC Unix `issued_at`/`expires_at`, and `rollback: null` or the exact
+source authorization). The signer checks the actual module ABI/digest and its
+artifact-signed compiler/default-action metadata, then packages both signatures:
+
+```sh
+warmor-policy-assignment --intent deployment-intent.json --wasm policy.wasm \
+  --artifact-public-key /protected/public/artifact.pub \
+  --assignment-private-key /protected/deployment-signer/deployment.pk8 \
+  --out deployment-bundle.json
+```
+
+The signer never allocates a sequence, infers a rollback source or uses an
+artifact private key. It refuses overwriting output. Intent construction and
+durable shared sequence allocation are deliberately operator/signing-service
+responsibilities, not guessed from a stale server snapshot.
+
+### Relay
+
+`--assignment-trust-file` enables the relay on `warmor-server` and requires both
+`--verify-key` and `--state-file`, even in insecure development mode. The trust
+file is a JSON array of **public** grants, for example this shape (replace the
+placeholder with independently provisioned public PEM contents):
+
+```json
+[{"id":"deployment-2026","public_key":"<PKIX PUBLIC KEY PEM>",
+  "target":{"scope":"tenant/prod","audience":"node-1"},"can_rollback":false}]
+```
+
+Use the normal authenticated TLS server settings and upload canonical bundle
+bytes to **`POST /api/v1/admin/deployments`** with administrator authentication.
+The server verifies distinct artifact/assignment public keys, both signatures,
+target grant, lifetime (maximum 24 hours), and monotonic per-audience publication;
+retained bundles share the configured snapshot/artifact budgets with legacy
+policies. Server restart preserves the bundle. Relay admission uses server wall
+time only as an additional filter; agents independently require clock health.
+Changing relay trust requires server restart; changed/revoked agent trust still
+wins over already retained relay content.
+
+**`GET /api/v1/deployment?agent_id=node-1`** requires the matching authenticated
+agent identity, or explicit insecure development mode. Exact target scope remains
+independently agent-verified. The response is one canonical `assignment.Bundle`:
+base64 `envelope` (exact canonical bytes), base64 `wasm`, and base64 raw
+`artifact_signature`. Protocol responses have `X-Warmor-Signed-Assignment: 1`.
+Conditional polling uses `if_sequence` plus `if_envelope_hash`. Heartbeats retain
+`deployment_sequence` and `envelope_hash` alongside full policy identity. A
+same-artifact renewal with a higher sequence is activated, not skipped.
+
+Signed relay publication is explicit per audience. It is **not** driven by
+legacy label selectors, upload activation, rollouts, abort or canary handlers;
+those cannot invent a new signed authorization. Operators must sign and upload
+the intended deployment/rollback for each exact audience.
+
+### Agent
+
+Provision an administrator-owned config file:
+
+```json
+{
+  "scope":"tenant/prod","audience":"node-1",
+  "keys":[{"id":"deployment-2026","public_key":"<PKIX PUBLIC KEY PEM>","can_rollback":false}],
+  "compilers":["warmor-yaml/6"],"max_lifetime_seconds":3600,
+  "trusted_declaration_digests":["<exact lowercase SHA-256 from independently reviewed build>"],
+  "require_enforce":true,"require_default_deny":true
+}
+```
+
+Provision a **separate local time-health supervisor** that checks actual time
+synchronization and atomically refreshes a protected JSON file containing
+`{"checked_at":<UTC Unix seconds>,"valid_until":<UTC Unix seconds>}`. Leases must
+be positive, at most 60 seconds, and include the current time. Unknown sync must
+stop refresh; the daemon never writes or manufactures this attestation. Missing,
+stale, future or malformed attestations refuse boot/new activation. This is an
+explicit local trust boundary, not cryptographically authenticated network time.
+The persisted high-water clock rejects regression across restarts/commits.
+
+Create a private mode-0700 state directory on reliable local storage. First
+enrollment is explicit and uses the signed bootstrap bundle:
+
+```sh
+warmor-daemon --signed-assignments --agent-id node-1 \
+  --server https://policy-server.example:8443 --tls-ca ca.pem \
+  --tls-cert node.crt --tls-key node.key --verify-key artifact.pub \
+  --assignment-config /etc/warmor/assignment.json \
+  --assignment-clock-health /run/warmor/clock-health.json \
+  --assignment-state-dir /var/lib/warmor/signed \
+  --assignment-bootstrap deployment-bundle.json \
+  --lsm-enforce --require-lsm --default-deny
+```
+
+Omit `--assignment-bootstrap` on subsequent boots; it refuses existing state.
+If a selected lease expired or trust was rotated, use
+`--assignment-recovery fresh-deployment-bundle.json` instead, retaining existing
+state and increasing sequence. Bootstrap and recovery are mutually exclusive.
+For audit deployments, choose audit intent and agent requirements, use `--audit`,
+and do not claim required kernel default-deny. An enforce intent must match
+effective non-audit mode and a platform with enforcement capability. Required
+kernel default-deny additionally requires `--lsm-enforce --require-lsm`, a capable
+map, and eligible process **and** network static allowlists; preparation failures
+prevent publication. Generic reload/SIGHUP, policy file watchers, YAML fallback,
+and missing protocol capability cannot bypass signed intent.
+
+The signed root's `assignment.json` is the **only** publication/startup authority;
+it replaces PR38's `current`/`previous` pointer publication in this mode. Module
+and sibling signature are staged in a private immutable revision directory;
+startup compares the artifact digest to the selected envelope, and the runtime
+loads its own single verified read. No public alias is maintained. Definite
+unpublished candidates are removed; successful or indeterminate revisions are
+retained. Automatic garbage collection is not implemented: monitor disk usage,
+and never delete a state-selected/uncertain revision or replay history.
+
+Trust changes use the lock procedure above, are re-read after drain, and local
+minimum requirements cannot be overridden by a recovery key. Artifact public
+trust is fixed for the process; restart is required to change it. Signed startup
+rechecks current trust/time before starting capture. Running policy retention on
+lease expiry remains intentional; boot and fresh activations still fail closed.
+
+`trusted_declaration_digests` is mandatory in this integration, bounded to 256
+exact independently reviewed module digests. Existing in-process optimizations
+consume guest dependency/static declarations; a signature, compiler-name custom
+section or matching assignment digest does not establish their truth. Do not
+automatically populate these pins from a downloaded candidate or signature.
+No pin means no signed activation, even for a validly signed audit deployment.
+
+## Validation and remaining boundaries
+
+Tests cover in-process HTTP relay/upload and client transport, real enforcer
+event drain, actual ABI/build/posture mismatches, absent protocol, fresh trust/
+clock checks, rotation-lock conflicts, sequence-aware acknowledgement/renewal,
+restart, rollback, and publication faults. The store also has abrupt-process-exit
+and pre-/post-rename tests. No live cluster/server, private release keys, HSM,
+external clock supervisor or VM kernel was used to validate this integration.
+Kernel generations, replicated relay storage, automated rollout signing, TPM
+anti-rollback anchoring, automatic artifact trust rotation and semantic compiler
+attestation remain separate work; this mode does not silently simulate them.
+
+### Combining with generation-atomic activation
+
+The generation-activation branch is independent and is not merged here. Its
+combined API must preserve **one** error-returning durable commit hook, not a
+chain of agentstore and PR38 pointer commits. Strict ABI/build/digest/posture
+validation must inspect the same captured candidate used to build the kernel
+generation and evaluator; fresh trust/time verification wraps the durable
+agentstore commit. Old-generation references must drain according to that
+branch's capture contract before retirement, without changing which deployment
+is acknowledged.
+
+An error after durable commit or after uncertain kernel publication is not an
+ordinary retryable failure. The combined owner must expose explicit terminal/
+indeterminate status, stop acknowledgement and competing activation, retain
+selected/uncertain artifacts, and reconstruct kernel/evaluator from the selected
+agentstore record on restart. It must not roll back only a pointer, reset marks,
+acknowledge a rollback that did not publish, or treat two separately successful
+commits as a transaction. Failure ordering must be reviewed when combining the
+branches; these legacy-map tests do not establish generation-atomic guarantees.
+
+The metadata-owner branch's `internal/policymeta.Source/Module/StaticDomain` is
+the canonical shared runtime-observation surface. This branch deliberately uses
+`internal/policybuild` only for artifact-signed compiler/default-action **claims**
+in a custom section; it introduces no competing runtime metadata model. On
+combination, compare `ModuleSHA256` and actual `ABIVersion` from a validated
+`Module` against the signed policy, retain absent ABI as 0/reject it in signed
+mode, and separately compare artifact build claims. Kernel/cache routing must
+use the canonical model's independently trust-gated effective methods, never
+raw guest masks/flags/domains. The signed configuration's independent digest
+pins can supply the local declaration-attestation input; do not infer that trust
+from a signature, build compiler name, or candidate digest. Keep sanitization,
+count/key/encoding bounds and copied snapshots from the canonical owner.

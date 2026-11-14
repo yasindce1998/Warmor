@@ -398,6 +398,9 @@ func (s *Store) validateLocked(integrity bool) error {
 	// Conservative metadata bound prevents encoding a huge snapshot before the
 	// exact serialized-size check. JSON string escaping costs at most 6x.
 	estimated := int64(1024 + len(s.audit)*1024)
+	for id, wire := range s.deployments {
+		estimated += 512 + int64(6*len(id)+base64.StdEncoding.EncodedLen(len(wire)))
+	}
 	for _, a := range s.audit {
 		estimated += int64(6 * (len(a.Action) + len(a.Resource)))
 	}

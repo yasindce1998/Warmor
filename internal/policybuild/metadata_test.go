@@ -1,4 +1,4 @@
-package policymeta
+package policybuild
 
 import (
 	"bytes"

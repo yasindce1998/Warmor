@@ -32,6 +32,9 @@ func (c *Client) pollSigned(ctx context.Context) error {
 		return errors.New("server lacks signed assignment protocol; refusing legacy fallback")
 	}
 	if resp.StatusCode == http.StatusNotModified {
+		if sequence == 0 || hash == "" {
+			return errors.New("signed not-modified response without restored deployment identity")
+		}
 		return nil
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -59,6 +62,7 @@ func (c *Client) pollSigned(ctx context.Context) error {
 	if d.Sequence == sequence {
 		return nil
 	} // already loaded and durably acknowledged
+	activeEnvelopeHash := assignment.Digest(b.Envelope)
 	a := &PolicyAssignment{PolicyID: d.Policy.ID, Version: int64(d.Policy.Version), WASMHash: d.Policy.SHA256, Envelope: b.Envelope, DeploymentSequence: d.Sequence, Signature: b.ArtifactSignature}
 	if c.verify == nil || c.onUpdate == nil {
 		return errors.New("signed deployment requires verification and durable activation callbacks")
@@ -72,7 +76,7 @@ func (c *Client) pollSigned(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.policyID, c.policyVersion, c.policyHash = d.Policy.ID, int64(d.Policy.Version), d.Policy.SHA256
-	c.deploymentSequence, c.envelopeHash = d.Sequence, assignment.Digest(b.Envelope)
+	c.deploymentSequence, c.envelopeHash = d.Sequence, activeEnvelopeHash
 	return nil
 }
 

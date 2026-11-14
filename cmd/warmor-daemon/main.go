@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/agentstore"
+
 	"github.com/yasindce1998/warmor/internal/crypto"
 	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/dashboard"
@@ -88,6 +90,9 @@ func main() {
 	}
 
 	if *validatePolicy != "" {
+		if *signedAssignments {
+			log.Fatal("--validate-policy checks only artifact validity; it cannot be combined with --signed-assignments")
+		}
 		os.Exit(runValidatePolicy(*validatePolicy, *verifyKey, os.Stdout, os.Stderr))
 	}
 
@@ -421,7 +426,18 @@ func runDaemon(stop <-chan struct{}) {
 	log.Println("")
 
 	// Start enforcer
-	if err := enf.Start(); err != nil {
+	start := enf.Start
+	if signedManager != nil {
+		start = func() error {
+			return agentstore.WithConfigurationLock(signedManager.configPath+".lock", func() error {
+				if _, _, err := signedManager.restore(); err != nil {
+					return err
+				}
+				return enf.Start()
+			})
+		}
+	}
+	if err := start(); err != nil {
 		log.Fatalf("❌ Failed to start enforcer: %v", err)
 	}
 
