@@ -8,6 +8,11 @@ the default in-process backend. The process boundary/resource limitations in
 quota, protection from a compromised trusted host executable, or protection from
 daemon downtime.
 
+Follow-ups: `supervised-evaluator-main.md` records the pinned PR40 main merge and
+security fixes. `supervised-evaluator-shutdown.md` records the separately based
+reader-close-before-join shutdown integration; earlier reviewed branches remain
+unchanged.
+
 ## Configuration and trust
 
 Explicit opt-in is `--experimental-supervised-policy-host`, with `--verify-key`,
