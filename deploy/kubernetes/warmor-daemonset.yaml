@@ -24,12 +24,19 @@ spec:
       hostPID: true
       hostNetwork: true
       serviceAccountName: warmor-agent
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/os: linux
+        kubernetes.io/arch: amd64
       containers:
         - name: warmor-agent
           image: ghcr.io/yasindce1998/warmor:latest
           # warmor-daemon is configured only through flags (plus the optional
           # WARMOR_SERVER_TOKEN env var for JWT auth); see warmor-daemon -h.
           args:
+            - "--audit"
+            - "--cgroup-filter=auto"
+            - "--cgroup-root=/host/sys/fs/cgroup"
             - "--server"
             - "https://warmor-server.warmor-system.svc:8443"
             # mTLS to the policy server. The warmor-agent-certs secret must
@@ -56,8 +63,12 @@ spec:
             - "--policy-fallback"
             - "/etc/warmor/policy.wasm"
           securityContext:
-            privileged: true
+            privileged: false
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
             capabilities:
+              drop: ["ALL"]
               add:
                 - SYS_ADMIN
                 - BPF
@@ -66,16 +77,19 @@ spec:
             - name: sys-kernel
               mountPath: /sys/kernel
               readOnly: true
-            - name: bpf-maps
-              mountPath: /sys/fs/bpf
-            - name: containerd-sock
-              mountPath: /run/containerd/containerd.sock
+            - name: host-cgroup
+              mountPath: /host/sys/fs/cgroup
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
             - name: certs
               mountPath: /etc/warmor/certs
               readOnly: true
             - name: policy-state
               mountPath: /var/lib/warmor
           env:
+            - name: XDG_CACHE_HOME
+              value: /tmp/.cache
             # Not read by the daemon; only expanded into --agent-id above.
             - name: NODE_NAME
               valueFrom:
@@ -85,17 +99,25 @@ spec:
             - containerPort: 9090
               name: metrics
               protocol: TCP
+          startupProbe:
+            httpGet: {path: /health, port: metrics}
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: {path: /health, port: metrics}
+          readinessProbe:
+            httpGet: {path: /ready, port: metrics}
       volumes:
         - name: sys-kernel
           hostPath:
             path: /sys/kernel
-        - name: bpf-maps
+        - name: host-cgroup
           hostPath:
-            path: /sys/fs/bpf
-        - name: containerd-sock
-          hostPath:
-            path: /run/containerd/containerd.sock
-            type: Socket
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
         - name: certs
           secret:
             secretName: warmor-agent-certs
@@ -106,28 +128,7 @@ spec:
 ---
 apiVersion: v1
 kind: ServiceAccount
+automountServiceAccountToken: false
 metadata:
   name: warmor-agent
   namespace: warmor-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: warmor-agent
-rules:
-  - apiGroups: [""]
-    resources: ["pods", "namespaces"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: warmor-agent
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: warmor-agent
-subjects:
-  - kind: ServiceAccount
-    name: warmor-agent
-    namespace: warmor-system

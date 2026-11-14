@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -62,17 +64,20 @@ func actionRestrictiveness(action string) int {
 // so the same variable name in two policies cannot collide once the
 // policies are merged into one file.
 func variablePrefix(cr *WarmorPolicy) string {
-	return cr.Metadata.Name + "__"
+	// Injectively encode the complete tuple, not a delimiter-joined name or
+	// truncated hash. Hex also yields valid variable identifier characters.
+	identity, _ := json.Marshal([]string{cr.Metadata.Namespace, cr.Metadata.Name, cr.Metadata.UID})
+	return "cr_" + hex.EncodeToString(identity) + "__"
 }
 
 // renderPolicy converts a WarmorPolicy spec into the daemon's policy
 // format. It is purely mechanical translation plus namespacing:
 //   - actions map from the CRD vocabulary (allow/deny/audit) to the
 //     daemon's (allow/deny/log);
-//   - variables are renamed "<policy>__<name>" and $-references inside
+//   - variables are keyed by namespace/name/UID and $-references inside
 //     conditions are rewritten to match, so merged policies never share a
 //     variable namespace;
-//   - rule names are prefixed with "<policy>/" so reasons stay
+//   - rule names are prefixed with "<namespace>/<policy>/<UID>/" so reasons stay
 //     attributable when rules from several policies land in one module.
 //
 // Semantic validation (condition fields, operators, variables actually
@@ -122,7 +127,7 @@ func renderPolicy(cr *WarmorPolicy) (*policymerge.PolicyYAML, error) {
 			return nil, fmt.Errorf("rules[%d].name is required", i)
 		}
 		renderedRule := policymerge.RuleYAML{
-			Name:   cr.Metadata.Name + "/" + rule.Name,
+			Name:   cr.Metadata.Namespace + "/" + cr.Metadata.Name + "/" + cr.Metadata.UID + "/" + rule.Name,
 			Event:  rule.Event,
 			Action: action,
 			Reason: rule.Reason,
@@ -206,12 +211,10 @@ func rewriteValue(value any, prefix string, variables map[string]any) (any, erro
 // effectivePolicy merges the rendered policies of every accepted CR into
 // the single policy the agents run.
 //
-// A single policy passes through verbatim — its rule order is the
-// author's precedence and is preserved exactly. When several policies
-// merge, rules are re-ordered most-restrictive-first (deny, then log,
+// Rules are always re-ordered most-restrictive-first (deny, then log,
 // then allow; the compiled module is first-match-wins, so an allow
 // emitted before another policy's deny would silently shadow it) and
-// deterministically (policy name, then rule order as written), and the
+// deterministically (source namespace/name, then rule order as written), and the
 // effective default action is the strictest across the merged policies.
 func effectivePolicy(name string, rendered []*policymerge.PolicyYAML) *policymerge.PolicyYAML {
 	if len(rendered) == 0 {
@@ -220,9 +223,8 @@ func effectivePolicy(name string, rendered []*policymerge.PolicyYAML) *policymer
 
 	sorted := make([]*policymerge.PolicyYAML, len(rendered))
 	copy(sorted, rendered)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		return sorted[i].Name < sorted[j].Name
-	})
+	// Reconcile provides namespace/name order. spec.name is display metadata,
+	// not a source identity, and must not influence composition order.
 
 	defaults := make([]string, len(sorted))
 	for i, p := range sorted {
@@ -235,9 +237,8 @@ func effectivePolicy(name string, rendered []*policymerge.PolicyYAML) *policymer
 		DefaultAction: strictestCRAction(defaults),
 	}
 	if len(sorted) == 1 {
-		// Pass through: a lone policy keeps its own version and
-		// description, so the compiled module identifies as what the
-		// CR asked for, and its rules keep the author's order.
+		// Keep display metadata, but use identical composition semantics
+		// regardless of source count.
 		effective.Version = sorted[0].Version
 		effective.Description = sorted[0].Description
 	} else {
@@ -259,11 +260,9 @@ func effectivePolicy(name string, rendered []*policymerge.PolicyYAML) *policymer
 		effective.Rules = append(effective.Rules, p.Rules...)
 	}
 
-	if len(sorted) > 1 {
-		// Most-restrictive-first, stable within each action class.
-		sort.SliceStable(effective.Rules, func(i, j int) bool {
-			return actionRestrictiveness(effective.Rules[i].Action) < actionRestrictiveness(effective.Rules[j].Action)
-		})
-	}
+	// Adding a second CR must not change precedence inside an existing CR.
+	sort.SliceStable(effective.Rules, func(i, j int) bool {
+		return actionRestrictiveness(effective.Rules[i].Action) < actionRestrictiveness(effective.Rules[j].Action)
+	})
 	return effective
 }

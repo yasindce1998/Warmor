@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -16,24 +17,31 @@ import (
 type Server struct {
 	server   *http.Server
 	listener net.Listener
+	mu       sync.RWMutex
+	ready    func() error
 }
 
 // NewServer creates a new metrics server
 func NewServer(port int) *Server {
+	return NewServerAddress(fmt.Sprintf(":%d", port))
+}
+
+// NewServerAddress permits an explicit metrics/probes bind address.
+func NewServerAddress(address string) *Server {
+	s := &Server{}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/health", healthHandler)
-	mux.HandleFunc("/ready", readyHandler)
+	mux.HandleFunc("/ready", s.readyHandler)
 
-	return &Server{
-		server: &http.Server{
-			Addr:         fmt.Sprintf(":%d", port),
-			Handler:      mux,
-			ReadTimeout:  5 * time.Second,
-			WriteTimeout: 10 * time.Second,
-			IdleTimeout:  60 * time.Second,
-		},
+	s.server = &http.Server{
+		Addr:         address,
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
+	return s
 }
 
 // Start starts the metrics server and returns an error if port binding fails
@@ -73,7 +81,25 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("OK"))
 }
 
-func readyHandler(w http.ResponseWriter, _ *http.Request) {
+// SetReadinessCheck installs a concurrency-safe local readiness source. A
+// server without an initialized source is NOT ready. Liveness stays independent.
+func (s *Server) SetReadinessCheck(check func() error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ready = check
+}
+func (s *Server) readyHandler(w http.ResponseWriter, _ *http.Request) {
+	s.mu.RLock()
+	check := s.ready
+	s.mu.RUnlock()
+	if check == nil {
+		http.Error(w, "readiness is not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	if err := check(); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("READY"))
 }

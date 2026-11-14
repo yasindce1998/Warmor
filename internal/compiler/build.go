@@ -49,6 +49,8 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}
+	// Failed builds otherwise leak sources and target files: no BuildResult
+	// reaches the caller's Cleanup.
 	succeeded := false
 	defer func() {
 		if !succeeded {
@@ -97,6 +99,9 @@ func checkCargoContext(ctx context.Context) error {
 
 	output, err := runTool(ctx, exec.Command("rustup", "target", "list", "--installed"))
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("failed to check rust targets (is rustup installed?): %w", err)
 	}
 
