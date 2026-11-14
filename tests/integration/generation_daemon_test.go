@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/streaming"
 	"github.com/yasindce1998/warmor/internal/wasm"
 	"github.com/yasindce1998/warmor/pkg/api"
+	"golang.org/x/sys/unix"
 )
 
 // Preparation is host-safe: compile actual policies, never start a daemon or
@@ -157,6 +159,35 @@ func generationStatus(t *testing.T, dir, stage string, id uint64) {
 		_, err := os.Stat(filepath.Join(dir, fmt.Sprintf("%s-%d.json", stage, id)))
 		return err == nil
 	})
+}
+
+func generationMonotonicNow() (int64, error) {
+	var stamp unix.Timespec
+	err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &stamp)
+	return stamp.Nano(), err
+}
+
+func generationPhaseTime(dir, stage string, id uint64) (int64, error) {
+	data, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("%s-%d.json", stage, id)))
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var phase struct {
+		Stage       string
+		Generation  uint64
+		Attempt     int
+		MonotonicNS int64
+	}
+	if err := json.Unmarshal(data, &phase); err != nil {
+		return 0, err
+	}
+	if phase.Stage != stage || phase.Generation != id || phase.Attempt != 1 || phase.MonotonicNS <= 0 {
+		return 0, fmt.Errorf("invalid atomic %s-%d phase: %s", stage, id, data)
+	}
+	return phase.MonotonicNS, nil
 }
 
 func readGenerationEvidence(t *testing.T, dir string) []daemonGenerationEvidence {
@@ -477,10 +508,13 @@ func TestDaemonGenerationOutcomes(t *testing.T) {
 			t.Fatal(err)
 		}
 		var receiptMu sync.Mutex
-		var receipts []policyserver.HeartbeatRequest
-		unknownSeen, earlyAck := false, false
+		var receipts []generationHeartbeatReceipt
+		var receiptErrors []string
 		handler := srv.Handler()
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Capture arrival BEFORE body decoding or phase reads. A later
+			// retirement may not excuse an acknowledgement already received.
+			receivedNS, clockErr := generationMonotonicNow()
 			if r.URL.Path == "/api/v1/heartbeat" {
 				body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 				if err != nil {
@@ -493,18 +527,16 @@ func TestDaemonGenerationOutcomes(t *testing.T) {
 				if err := json.Unmarshal(body, &h); err != nil {
 					t.Error(err)
 				} else {
+					receipt := generationHeartbeatReceipt{ReceivedNS: receivedNS, Heartbeat: h}
+					retiredNS, retiredErr := generationPhaseTime(control, "retired", 2)
+					liveNS, liveErr := generationPhaseTime(control, "live", 3)
+					observedNS, observedErr := generationMonotonicNow()
+					receipt.LiveNS, receipt.RetiredNS, receipt.ObservedNS = liveNS, retiredNS, observedNS
+					validationErr := errors.Join(clockErr, liveErr, retiredErr, observedErr, validateGenerationHeartbeatReceipt(receipt))
 					receiptMu.Lock()
-					receipts = append(receipts, h)
-					if h.PolicyVersion == 0 && h.ActivationError != "" {
-						unknownSeen = true
-					}
-					if unknownSeen && h.PolicyVersion != 0 {
-						if h.PolicyVersion != 2 {
-							earlyAck = true
-						}
-						if _, err := os.Stat(filepath.Join(control, "retired-2.json")); err != nil {
-							earlyAck = true
-						}
+					receipts = append(receipts, receipt)
+					if validationErr != nil {
+						receiptErrors = append(receiptErrors, validationErr.Error())
 					}
 					receiptMu.Unlock()
 				}
@@ -521,8 +553,24 @@ func TestDaemonGenerationOutcomes(t *testing.T) {
 				return
 			}
 			mustWrite(t, filepath.Join(f.dir, "generation-heartbeats.json"), data, 0644)
-			if earlyAck {
-				t.Error("fleet acknowledged a live revision before pending drain retirement")
+			for _, err := range receiptErrors {
+				t.Error("invalid fleet acknowledgement transcript:", err)
+			}
+			// Reconcile with completed atomic records too: a live checkpoint
+			// racing body decode must not leave a stale-A receipt exempt merely
+			// because live.json had not finished its rename on the first read.
+			retiredNS, retiredErr := generationPhaseTime(control, "retired", 2)
+			liveNS, liveErr := generationPhaseTime(control, "live", 3)
+			observedNS, clockErr := generationMonotonicNow()
+			if err := errors.Join(retiredErr, liveErr, clockErr); err != nil {
+				t.Error(err)
+				return
+			}
+			for _, receipt := range receipts {
+				receipt.LiveNS, receipt.RetiredNS, receipt.ObservedNS = liveNS, retiredNS, observedNS
+				if err := validateGenerationHeartbeatReceipt(receipt); err != nil {
+					t.Errorf("completed phase transcript rejects heartbeat at %d: %v", receipt.ReceivedNS, err)
+				}
 			}
 		})
 		active := f.activePolicy(t, "generation-fleet-active", filepath.Join(f.dir, "generation-A.wasm"))

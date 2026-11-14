@@ -116,3 +116,55 @@ negative-evidence oracle is run on the host and reused for real VM associations.
 kernel's daemon phase, physical crash, signed/Host combination, cross-platform
 runtime or BPF regeneration. Publish only after actual non-skipped CI results.
 Offline oracles and compilation alone do not establish whole-daemon safety.
+
+### P2 acknowledgement-oracle follow-up
+
+The `2dc6784` oracle incorrectly armed only after an unknown/error heartbeat.
+The follow-up checks **every** receipt: B/version 2 before `retired-2` is always
+invalid, including B success before the first error heartbeat. A claimed old A
+after live publication is invalid independently of whether it carries an error.
+Legitimate pre-live A remains allowed.
+
+Atomic checkpoint records now include an actual guest `CLOCK_MONOTONIC` sample.
+The server fixture samples that same clock at HTTP ingress, **before** decoding
+the request or reading phase records. Validation uses phase time as of ingress:
+retirement observed during decode cannot excuse early B, and publication after
+ingress cannot invalidate pre-live A. Final transcript reconciliation handles a
+phase record whose atomic rename raced the handler's first read. Neither control
+files nor heartbeat fields supply phase timestamps, future timestamps fail, and
+the checkpoint and its timestamp are published in one atomic record.
+
+Offline negative transcripts include the exact early-B → first pending error →
+retirement → B-success counterexample; old-A/no-error after live; early B decoded
+after retirement; late-live-record reconciliation; and the valid pre-live-A →
+pending → retirement → B-success sequence. This is an oracle fix, not a pipeline
+snapshot/lease fix or evidence that the VM phases have executed.
+
+Follow-up validation: Go 1.26.11, `GOMAXPROCS=2`, `-p 2`; normal affected package
+tests, gate race oracles (10 repetitions), profile guard/timestamp/fault race
+oracles (10 repetitions), normal/profile lint and profile vet pass. The tagged
+integration fixture compiles with `-run '^$'`; no VM/host hook was run. Logs:
+`/tmp/opencode/generation-daemon-vm-p2-*.log`.
+
+### PR51 integration prerequisite: recording ownership
+
+Read-only source review of PR51's `54d9ea5` found a necessary fixture change not
+present in this branch's old `6efd049` base: `outcomeFixture.recordings` is created
+by `createOutcomeRecordings(f.work)` on the guest filesystem. Daemon recordings
+must go there, **not** to `f.dir` in the shared host-user-owned checkout, since
+the enforcing daemon is guest root and PR39's private-path checks must stay on.
+`exportOutcomeRecording` runs only after daemon wait/forced cleanup completes,
+retaining partial evidence without weakening source recording ownership.
+
+This branch's inherited `startDaemon` still uses the old shared recording path;
+it must not be published as PR39-ready independently. The requested new PR51
+integration must retain `54d9ea5` while combining this branch's `stopOnce`/explicit
+stop helper: cleanup must wait for the daemon, then export the closed recording
+once. Its generation-specific control directories already live under guest-only
+`/var/tmp/warmor-generation-*` mode 0700, with status/evidence files mode 0600;
+the fixture copies them to host artifacts after daemon cleanup. Those deliberate
+exports are not the live daemon recording directory. PR51 currently owns the
+newer private-recording changes; no edit or merge was made to that owner branch
+by this oracle follow-up. Actual VM CI on both kernels remains required after
+combining the fixtures; local oracle passes do not prove private recording or
+whole-daemon execution under that newer main.

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/pkg/api"
+	"golang.org/x/sys/unix"
 )
 
 func TestProfileGuardRejectsHostAndContainer(t *testing.T) {
@@ -56,6 +57,10 @@ func TestProfileFaultStagesAndHeldEventCancellation(t *testing.T) {
 		}
 	}
 	set(control{FailDurable: true, FailDrain: true})
+	var before unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &before); err != nil {
+		t.Fatal(err)
+	}
 	for _, stage := range []string{"durable-sync", "before-drain"} {
 		if err := Checkpoint(context.Background(), stage, 2, nil); err == nil {
 			t.Fatal("fault stage falsely succeeded", stage)
@@ -69,9 +74,19 @@ func TestProfileFaultStagesAndHeldEventCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var status struct{ Attempt int }
+	var after unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &after); err != nil {
+		t.Fatal(err)
+	}
+	var status struct {
+		Attempt     int
+		MonotonicNS int64
+	}
 	if err := json.Unmarshal(data, &status); err != nil || status.Attempt != 2 {
 		t.Fatalf("recovery did not retry same named stage: %s %v", data, err)
+	}
+	if status.MonotonicNS < before.Nano() || status.MonotonicNS > after.Nano() {
+		t.Fatalf("checkpoint timestamp is not actual guest monotonic time: %+v", status)
 	}
 	set(control{HoldID: 1, HoldPath: "/fixture"})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)

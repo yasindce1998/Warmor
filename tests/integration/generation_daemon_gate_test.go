@@ -13,8 +13,78 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yasindce1998/warmor/internal/policyserver"
 	"gopkg.in/yaml.v3"
 )
+
+type generationHeartbeatReceipt struct {
+	ReceivedNS int64 // fixture CLOCK_MONOTONIC sampled at HTTP handler entry
+	ObservedNS int64 // fixture clock after reading the atomic phase records
+	LiveNS     int64 // actual live-3 checkpoint; zero means no record observed
+	RetiredNS  int64 // actual retired-2 checkpoint; zero means no record observed
+	Heartbeat  policyserver.HeartbeatRequest
+}
+
+// Evaluate EVERY receipt, not just those following an unknown/error heartbeat.
+// Phase records read during decoding may be newer than request arrival: they
+// cannot retroactively authorize an early B or disqualify a pre-live A.
+func validateGenerationHeartbeatReceipt(r generationHeartbeatReceipt) error {
+	if r.ReceivedNS <= 0 || r.ObservedNS < r.ReceivedNS || r.LiveNS < 0 || r.RetiredNS < 0 || r.LiveNS > r.ObservedNS || r.RetiredNS > r.ObservedNS {
+		return errors.New("invalid/future phase or fixture receipt clock")
+	}
+	if r.RetiredNS != 0 && (r.LiveNS == 0 || r.RetiredNS < r.LiveNS) {
+		return errors.New("retirement without ordered live publication")
+	}
+	h := r.Heartbeat
+	// Any nonempty identity is a claim, even if its version/error is mixed.
+	claimed := h.PolicyVersion != 0 || h.PolicyID != "" || h.PolicyHash != ""
+	if h.PolicyVersion == 2 && (r.RetiredNS == 0 || r.RetiredNS > r.ReceivedNS) {
+		return errors.New("B acknowledged before retirement, independent of pending heartbeat")
+	}
+	if r.LiveNS != 0 && r.LiveNS <= r.ReceivedNS && claimed {
+		if h.PolicyVersion != 2 || h.PolicyID != "generation" || h.PolicyHash == "" || h.ActivationError != "" || r.RetiredNS == 0 || r.RetiredNS > r.ReceivedNS {
+			return errors.New("old/mixed or premature active acknowledgement after live publication")
+		}
+	}
+	return nil
+}
+
+func TestGenerationDaemonGateHeartbeatTranscriptOracle(t *testing.T) {
+	a := policyserver.HeartbeatRequest{PolicyID: "generation", PolicyVersion: 1, PolicyHash: "hash-A"}
+	b := policyserver.HeartbeatRequest{PolicyID: "generation", PolicyVersion: 2, PolicyHash: "hash-B"}
+	pending := policyserver.HeartbeatRequest{ActivationError: "pending drain"}
+	receipt := func(at, live, retired int64, h policyserver.HeartbeatRequest) generationHeartbeatReceipt {
+		return generationHeartbeatReceipt{ReceivedNS: at, ObservedNS: 100, LiveNS: live, RetiredNS: retired, Heartbeat: h}
+	}
+	for name, tc := range map[string]struct {
+		receipts []generationHeartbeatReceipt
+		valid    bool
+	}{
+		// Exact reported counterexample: B success appears before the FIRST
+		// unknown heartbeat, then pending, retirement, and eventual B success.
+		"early B before unknown then pending retired B": {[]generationHeartbeatReceipt{receipt(10, 0, 0, a), receipt(30, 20, 0, b), receipt(40, 20, 0, pending), receipt(60, 20, 50, b)}, false},
+		"old A after live without error":                {[]generationHeartbeatReceipt{receipt(10, 0, 0, a), receipt(30, 20, 0, a), receipt(40, 20, 0, pending), receipt(60, 20, 50, b)}, false},
+		"correct prelive A pending retired B":           {[]generationHeartbeatReceipt{receipt(10, 0, 0, a), receipt(30, 20, 0, pending), receipt(40, 20, 0, pending), receipt(60, 20, 50, b)}, true},
+		"prelive A decoded after live":                  {[]generationHeartbeatReceipt{receipt(10, 20, 0, a), receipt(30, 20, 0, pending), receipt(60, 20, 50, b)}, true},
+		"early B decoded after retirement":              {[]generationHeartbeatReceipt{receipt(30, 20, 50, b), receipt(40, 20, 50, pending), receipt(60, 20, 50, b)}, false},
+		"early B before any live artifact":              {[]generationHeartbeatReceipt{receipt(10, 0, 0, b)}, false},
+		"old A after retirement":                        {[]generationHeartbeatReceipt{receipt(60, 20, 50, a)}, false},
+		"self reported future phase":                    {[]generationHeartbeatReceipt{receipt(60, 20, 101, b)}, false},
+		"retirement precedes live":                      {[]generationHeartbeatReceipt{receipt(60, 50, 20, b)}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			valid := true
+			for _, r := range tc.receipts {
+				if validateGenerationHeartbeatReceipt(r) != nil {
+					valid = false
+				}
+			}
+			if valid != tc.valid {
+				t.Fatalf("transcript accepted=%v want=%v: %+v", valid, tc.valid, tc.receipts)
+			}
+		})
+	}
+}
 
 type daemonGenerationEvidence struct {
 	Phase                                    string
@@ -55,6 +125,25 @@ func validateGenerationDaemonEvidence(e daemonGenerationEvidence, scoped uint64)
 		}
 	}
 	return nil
+}
+
+func TestGenerationDaemonGateLatePhaseRecordReconciliation(t *testing.T) {
+	// The handler can read live.json before its atomic rename, even though
+	// the checkpoint's monotonic sample already precedes this request.
+	a := policyserver.HeartbeatRequest{PolicyID: "generation", PolicyVersion: 1, PolicyHash: "hash-A"}
+	r := generationHeartbeatReceipt{ReceivedNS: 30, ObservedNS: 40, Heartbeat: a}
+	if err := validateGenerationHeartbeatReceipt(r); err != nil {
+		t.Fatal("snapshot cannot yet disqualify A", err)
+	}
+	r.LiveNS, r.RetiredNS, r.ObservedNS = 20, 50, 60
+	if err := validateGenerationHeartbeatReceipt(r); err == nil {
+		t.Fatal("late atomic live record exempted stale A forever")
+	}
+	// Later phases must not retroactively reject an actually pre-live A.
+	r.ReceivedNS = 10
+	if err := validateGenerationHeartbeatReceipt(r); err != nil {
+		t.Fatal("later phase rejected pre-live A", err)
+	}
 }
 
 func TestGenerationDaemonGateCapturedVerdictOracle(t *testing.T) {

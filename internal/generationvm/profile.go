@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -92,12 +94,20 @@ func readControlLocked() (control, error) {
 func writeStatusLocked(stage string, id uint64, event *api.Event) error {
 	key := fmt.Sprintf("%s-%d", stage, id)
 	profile.attempts[key]++
+	// Same guest CLOCK_MONOTONIC as the fixture's HTTP ingress clock. Sample
+	// at this checkpoint, never from control input or a heartbeat claim, and
+	// publish the timestamp atomically with the phase record below.
+	var stamp unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &stamp); err != nil {
+		return err
+	}
 	data, err := json.Marshal(struct {
-		Stage      string
-		Generation uint64
-		Attempt    int
-		Event      *api.Event `json:",omitempty"`
-	}{stage, id, profile.attempts[key], event})
+		Stage       string
+		Generation  uint64
+		Attempt     int
+		MonotonicNS int64
+		Event       *api.Event `json:",omitempty"`
+	}{stage, id, profile.attempts[key], stamp.Nano(), event})
 	if err != nil {
 		return err
 	}
