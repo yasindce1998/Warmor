@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/crypto"
 	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/policybuild"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
@@ -97,7 +98,11 @@ func TestCompiledAssignmentRetainsBuildContextSafeIdentifierAndMetadata(t *testi
 	policy := &compiler.Policy{Name: "signed \"context\"/../policy", Version: 1, DefaultAction: "deny", Rules: []compiler.Rule{{Name: "allow-safe", Event: "process", Action: "allow", Conditions: compiler.Conditions{All: []compiler.Condition{{Field: "path", Operator: "eq", Value: "/bin/safe"}}}}}}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	result, err := compiler.Build(policy, compiler.BuildOptions{Context: ctx, OutputPath: filepath.Join(t.TempDir(), "policy.wasm")})
+	out := filepath.Join(t.TempDir(), "policy.wasm")
+	if err := os.WriteFile(out, []byte("previous artifact"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := compiler.Build(policy, compiler.BuildOptions{Context: ctx, OutputPath: out})
 	defer compiler.Cleanup(result)
 	if err != nil {
 		t.Fatal(err)
@@ -106,12 +111,28 @@ func TestCompiledAssignmentRetainsBuildContextSafeIdentifierAndMetadata(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	declarations, err := policybuild.Read(module)
+	if err != nil || declarations == nil || declarations.Compiler != "warmor-yaml/7" || declarations.DefaultAction != "deny" {
+		t.Fatalf("published build declarations = %+v, %v", declarations, err)
+	}
+	key, err := crypto.GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(crypto.PolicySignaturePath(out), key.SignPolicyFile(module), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Sign only after Build's one-file commit; loading uses exactly verified bytes.
+	verified, err := crypto.ReadVerifiedPolicy(key.Public, out, 64<<20)
+	if err != nil {
+		t.Fatal("published artifact/signature mismatch", err)
+	}
 	rt, err := NewRuntime(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rt.Close(context.Background())
-	if err := rt.LoadPolicyBytes(ctx, module); err != nil {
+	if err := rt.LoadPolicyBytes(ctx, verified); err != nil {
 		t.Fatal(err)
 	}
 	pool, err := NewPool(ctx, rt, 1)
