@@ -15,7 +15,7 @@ check_log() {
   while IFS= read -r test; do
     [ "$(grep -Ec -- "^--- PASS: ${test} \([0-9.]+s\)$" "$log" || true)" = 1 ] || return 1
   done < <(required_tests)
-  for test in opposing-captured-reload-LKG-and-idle-shutdown fleet-live-durable-and-drain-pending-no-false-ack SIGTERM-cancels-held-generation-worker; do
+  for test in release-compiled-reload-LKG-and-idle-shutdown opposing-captured-reload-LKG-and-idle-shutdown fleet-live-durable-and-drain-pending-no-false-ack SIGTERM-cancels-held-generation-worker; do
     [ "$(grep -Ec -- "^    --- PASS: TestDaemonGenerationOutcomes/${test} \([0-9.]+s\)$" "$log" || true)" = 1 ] || return 1
   done
   grep -qx PASS "$log"
@@ -44,8 +44,8 @@ echo "Generation daemon artifacts: $ARTIFACTS"
 export CGO_ENABLED=0 WARMOR_OUTCOME_ARTIFACTS="$ARTIFACTS"
 # Fault flags and controls are absent from the normal daemon. Both tags AND
 # actual private vimto identity are required to arm the instrumented profile.
-go build -tags 'integration generation_daemon_vm' -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon
-go build -o "$ARTIFACTS/warmor-daemon-release" ./cmd/warmor-daemon
+go build -tags 'integration generation_daemon_vm' -o "$ARTIFACTS/warmor-daemon-profile" ./cmd/warmor-daemon
+go build -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon
 go test -c -tags integration -o "$ARTIFACTS/outcomes.test" ./tests/integration
 WARMOR_OUTCOME_PREPARE=1 "$ARTIFACTS/outcomes.test" -test.v -test.run '^TestPrepareGenerationDaemonArtifacts$' | tee "$ARTIFACTS/build.log"
 required_tests > "$ARTIFACTS/required-tests.txt"
@@ -58,7 +58,7 @@ required_tests > "$ARTIFACTS/required-tests.txt"
   echo 'flags=--experimental-atomic-generations --require-lsm --lsm-enforce --default-deny'
   echo "kernel=${KERNEL:-not-run} minor=${EXPECT_KERNEL_MINOR:-not-run}"
 } > "$ARTIFACTS/build-info.txt"
-sha256sum "$ARTIFACTS/warmor-daemon" "$ARTIFACTS/warmor-daemon-release" "$ARTIFACTS/outcomes.test" \
+sha256sum "$ARTIFACTS/warmor-daemon" "$ARTIFACTS/warmor-daemon-profile" "$ARTIFACTS/outcomes.test" \
   "$ARTIFACTS/required-tests.txt" "$ARTIFACTS/"*.wasm "$ARTIFACTS/allowed" "$ARTIFACTS/first-denied" \
   "$ARTIFACTS/reload-denied" "$ARTIFACTS/rule-audit" "$ARTIFACTS/global-audit" "$ARTIFACTS/file-victim" \
   "$ROOT"/internal/ebpf/*_bpf*.o "$ROOT"/internal/ebpf/*_bpf*.go "$ROOT"/bpf/*.bpf.c "$ROOT"/bpf/*.h > "$ARTIFACTS/SHA256SUMS"

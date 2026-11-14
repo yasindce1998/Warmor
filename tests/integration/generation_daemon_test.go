@@ -421,10 +421,53 @@ func TestDaemonGenerationOutcomes(t *testing.T) {
 	other.runAllowed(t, "first-denied", "outside-baseline", 0)
 	f.runAllowed(t, "allowed", "generation-baseline-A", 0)
 	f.runAllowed(t, "reload-denied", "generation-baseline-B", 0)
+	t.Run("release-compiled-reload-LKG-and-idle-shutdown", func(t *testing.T) {
+		// No test tags, control flag, profile record or fault hook is needed
+		// for real successful reload/LKG/prevention/clean-shutdown outcomes.
+		srv := policyserver.NewServer(policyserver.ServerConfig{Insecure: true})
+		if err := srv.Store().CreatePolicy(&policyserver.Policy{ID: "release-generation"}, filepath.Join(f.dir, "generation-A.wasm")); err != nil {
+			t.Fatal(err)
+		}
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+		active := f.activePolicy(t, "generation-release-active", filepath.Join(f.dir, "generation-A.wasm"))
+		d := f.startDaemon(t, "generation-release", active, "--experimental-atomic-generations", "--default-deny", "--eval-timeout", "2s", "--server", ts.URL, "--agent-id", "release-vm", "--poll-interval", "100ms")
+		waitFor(t, "normal-build fleet A acknowledgement", func() bool {
+			a, ok := srv.Store().GetAgent("release-vm")
+			return ok && a.PolicyID == "release-generation" && a.PolicyVersion == 1 && a.ActivationError == ""
+		})
+		f.runAudited(t, d, "allowed", "release-A-allowed")
+		f.requireFirstDenied(t, "reload-denied", "release-A-denied")
+		if err := srv.Store().AddVersion("release-generation", filepath.Join(f.dir, "generation-B.wasm"), nil, true); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(filepath.Join(f.dir, "generation-B.wasm"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		bHash := fmt.Sprintf("%x", sha256.Sum256(b))
+		waitFor(t, "normal-build B acknowledgement after reload", func() bool {
+			a, ok := srv.Store().GetAgent("release-vm")
+			return ok && a.PolicyVersion == 2 && a.PolicyHash == bHash && a.ActivationError == ""
+		})
+		f.requireFirstDenied(t, "allowed", "release-B-first-denied")
+		f.runAudited(t, d, "reload-denied", "release-B-first-allowed")
+		if err := srv.Store().AddVersion("release-generation", filepath.Join(f.dir, "invalid-generation.wasm"), nil, true); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "normal-build rejected compiler artifact retains B acknowledgement", func() bool {
+			a, ok := srv.Store().GetAgent("release-vm")
+			return ok && a.PolicyVersion == 2 && a.PolicyHash == bHash && a.ActivationError != ""
+		})
+		f.requireFirstDenied(t, "allowed", "release-LKG-denied")
+		f.runAudited(t, d, "reload-denied", "release-LKG-allowed")
+		other.runAllowed(t, "first-denied", "outside-release-reload", 0)
+		d.stop(t)
+	})
 	t.Run("opposing-captured-reload-LKG-and-idle-shutdown", func(t *testing.T) {
 		control := generationControlDir(t, "reload")
 		active := f.activePolicy(t, "generation-active", filepath.Join(f.dir, "generation-A.wasm"))
-		d := f.startDaemon(t, "generation-reload", active, "--experimental-atomic-generations", "--default-deny", "--eval-timeout", "2s", "--generation-vm-control", control)
+		d := f.startDaemonBinary(t, "warmor-daemon-profile", "generation-reload", active, "--experimental-atomic-generations", "--default-deny", "--eval-timeout", "2s", "--generation-vm-control", control)
 		t.Cleanup(func() { controlGeneration(t, control, generationControl{}) }) // failure cleanup must unblock before releasing helpers
 		f.requireFirstDenied(t, "reload-denied", "generation-A-first-denied")
 		controlGeneration(t, control, generationControl{HoldID: 1, HoldPath: filepath.Join(f.work, "allowed")})
@@ -574,7 +617,7 @@ func TestDaemonGenerationOutcomes(t *testing.T) {
 			}
 		})
 		active := f.activePolicy(t, "generation-fleet-active", filepath.Join(f.dir, "generation-A.wasm"))
-		d := f.startDaemon(t, "generation-fleet", active, "--experimental-atomic-generations", "--default-deny", "--eval-timeout", "2s", "--generation-vm-control", control, "--server", ts.URL, "--agent-id", "generation-vm", "--poll-interval", "100ms")
+		d := f.startDaemonBinary(t, "warmor-daemon-profile", "generation-fleet", active, "--experimental-atomic-generations", "--default-deny", "--eval-timeout", "2s", "--generation-vm-control", control, "--server", ts.URL, "--agent-id", "generation-vm", "--poll-interval", "100ms")
 		t.Cleanup(func() { controlGeneration(t, control, generationControl{}) })
 		// Initial desired A is reactivated by fleet once; the live B below
 		// must remain generation 3 across every failed recovery attempt.
@@ -646,7 +689,7 @@ func TestDaemonGenerationOutcomes(t *testing.T) {
 	})
 	t.Run("SIGTERM-cancels-held-generation-worker", func(t *testing.T) {
 		control := generationControlDir(t, "shutdown")
-		d := f.startDaemon(t, "generation-worker-stop", filepath.Join(f.dir, "generation-A.wasm"), "--experimental-atomic-generations", "--default-deny", "--eval-timeout", "2s", "--generation-vm-control", control)
+		d := f.startDaemonBinary(t, "warmor-daemon-profile", "generation-worker-stop", filepath.Join(f.dir, "generation-A.wasm"), "--experimental-atomic-generations", "--default-deny", "--eval-timeout", "2s", "--generation-vm-control", control)
 		controlGeneration(t, control, generationControl{HoldID: 1, HoldPath: filepath.Join(f.work, "allowed")})
 		_, release := heldGenerationHelper(t, f, "allowed", "generation-stop-held")
 		t.Cleanup(func() { controlGeneration(t, control, generationControl{}) })

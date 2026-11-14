@@ -4,10 +4,14 @@ Status: **fixtures/build-only verified locally; actual VM CI execution required*
 The feature remains experimental/off by default. This is not signed-mode,
 supervised-Host, workload-selector or crash/power-loss proof.
 
-Branch `test/generation-daemon-outcomes`, worktree `.worktrees/generation-daemon-vm`,
-starts at PR51 source `6efd049`. Original owner branches/worktrees are untouched.
-No signed/main integration is merged here. BPF C, embedded objects, the 416-byte
-event and 288-byte key ABI are unchanged.
+Fixture source branch `test/generation-daemon-outcomes` started at `6efd049`.
+The new integration branch `test/generation-daemon-integration` in persistent
+`.worktrees/generation-daemon-integration` starts at current PR51 `e3f5b84` and
+cherry-picks **only** `3bf1b26`, `2dc6784` and `edfb824` as `c8149c0`, `c8d90e5`
+and `73127d5`. Original owner/source branches are untouched. Existing signed
+assignment code from the base is retained, including the explicit refusal guard;
+no signed/generation or supervised-Host deployment combination is tested here.
+BPF C, embedded objects, the 416-byte event and 288-byte key ABI are unchanged.
 
 ## Runner and required evidence
 
@@ -40,7 +44,14 @@ Allowed execs must run and create unique markers; first denied execs must return
 **EPERM**, not missing-file errors, exit codes, later kills or timeouts. Baselines
 work without a daemon; a sibling cgroup remains unaffected throughout reload.
 
-1. **Opposing reload, captured association, LKG and idle shutdown.** Hold a real
+1. **Normal compiled daemon reload/LKG/shutdown.** The default, untagged
+   `warmor-daemon` binary acknowledges A through the real fleet client, loads B,
+   then rejects a compiler-invalid candidate retaining B. First denied execs
+   must be EPERM, permitted audited execs must survive real evaluation, and
+   sibling scope remains unaffected. No profile control flag or injected seam
+   is used. The exact separately hashed binary is the same normal build used
+   by existing legacy daemon outcome tests.
+2. **Opposing reload, captured association, LKG and idle shutdown.** Hold a real
    generation-1 exec after captured evaluator acquisition. Queue old-ID denial
    and audit samples. The real standalone watcher loads compiled B and publishes
    generation 2. While old work is held, first new deny must be EPERM and first
@@ -53,7 +64,7 @@ work without a daemon; a sibling cgroup remains unaffected throughout reload.
    LKG for new operations. SIGTERM with idle rings must exit zero without a wakeup
    operation. Tracepoint declarations are audited where necessary so their dynamic
    writeback cannot suppress LSM samples used by the ID oracle.
-2. **Fleet durable/drain pending recovery, no false acknowledgement.** A real
+3. **Fleet durable/drain pending recovery, no false acknowledgement.** A real
    client/server acknowledges A. B becomes live generation 3. A named test-only
    error at the real revision directory sync boundary follows live publication;
    disk rolls back to A, B remains enforced, and heartbeats must become unknown/
@@ -61,13 +72,15 @@ work without a daemon; a sibling cgroup remains unaffected throughout reload.
    pre-drain failure, again unknown/error with live B unchanged. Clearing both
    completes the original immutable callback/drain, retires generation 2 and
    acknowledges B's exact hash/version without generation 4 publication.
-3. **SIGTERM with worker work.** A real captured LSM exec remains held while
+4. **SIGTERM with worker work.** A real captured LSM exec remains held while
    SIGTERM cancels its event context. Cancellation must release the lease and
    exit the daemon zero within the bound; the harness kill cannot pass.
 
 The VM selects a 2-second evaluation deadline for slow QEMU/TCG; production's
 default is unchanged and its latency SLO is not tested. Readers, dynamic writers,
 kernel maps, evaluators, drain, disk commit and client heartbeat remain real.
+Only scenarios requiring held-worker scheduling/faults or captured-ID evidence
+explicitly choose `warmor-daemon-profile`; ordinary cases use `warmor-daemon`.
 
 ## Compile-profile-only seams
 
@@ -156,15 +169,20 @@ the enforcing daemon is guest root and PR39's private-path checks must stay on.
 `exportOutcomeRecording` runs only after daemon wait/forced cleanup completes,
 retaining partial evidence without weakening source recording ownership.
 
-This branch's inherited `startDaemon` still uses the old shared recording path;
-it must not be published as PR39-ready independently. The requested new PR51
-integration must retain `54d9ea5` while combining this branch's `stopOnce`/explicit
-stop helper: cleanup must wait for the daemon, then export the closed recording
-once. Its generation-specific control directories already live under guest-only
+The new PR51 integration retains `54d9ea5`: all `FileSink` recordings are made
+inside guest-root-owned `work/recordings` (0700), never the host-owned artifact
+checkout. Validation before every daemon start requires that exact directory,
+no symlink, mode 0700 and the daemon's effective UID. No ownership repair or
+chmod bypass is performed. `stopOnce`/explicit stop waits before cleanup exports
+the closed recording once, and export failure still fails an already-failed
+subtest. Unit oracles reject shared/public recording paths, missing/failed
+exports, nonzero wait, SIGKILL cleanup and timeout even if cleanup returns nil.
+Generation-specific control directories also live under guest-only
 `/var/tmp/warmor-generation-*` mode 0700, with status/evidence files mode 0600;
 the fixture copies them to host artifacts after daemon cleanup. Those deliberate
-exports are not the live daemon recording directory. PR51 currently owns the
-newer private-recording changes; no edit or merge was made to that owner branch
-by this oracle follow-up. Actual VM CI on both kernels remains required after
+exports are not the live daemon recording directory. The first fixture cherry-pick
+had conflicts only in main startup and daemon cleanup. Both startup checks and
+private-recording post-wait export were preserved; later picks applied cleanly.
+No edit or merge was made to the PR51 owner branch. Actual VM CI on both kernels remains required after
 combining the fixtures; local oracle passes do not prove private recording or
 whole-daemon execution under that newer main.

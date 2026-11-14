@@ -185,23 +185,25 @@ func TestGenerationDaemonGateCapturedVerdictOracle(t *testing.T) {
 
 func TestGenerationDaemonGatePassOracle(t *testing.T) {
 	const parent = "--- PASS: TestDaemonGenerationOutcomes (1.23s)\n"
+	const release = "    --- PASS: TestDaemonGenerationOutcomes/release-compiled-reload-LKG-and-idle-shutdown (0.50s)\n"
 	const reload = "    --- PASS: TestDaemonGenerationOutcomes/opposing-captured-reload-LKG-and-idle-shutdown (0.50s)\n"
 	const recovery = "    --- PASS: TestDaemonGenerationOutcomes/fleet-live-durable-and-drain-pending-no-false-ack (0.50s)\n"
 	const shutdown = "    --- PASS: TestDaemonGenerationOutcomes/SIGTERM-cancels-held-generation-worker (0.20s)\n"
-	good := parent + reload + recovery + shutdown + "PASS\n"
+	good := parent + release + reload + recovery + shutdown + "PASS\n"
 	for name, log := range map[string]string{
-		"pass":             good,
-		"empty":            "",
-		"missing child":    parent + reload + "PASS\n",
-		"missing shutdown": parent + reload + recovery + "PASS\n",
-		"missing parent":   reload + recovery + shutdown + "PASS\n",
-		"no tests":         "testing: warning: no tests to run\nPASS\n",
-		"skip":             good + "    --- SKIP: TestDaemonGenerationOutcomes/required (0.00s)\n",
-		"fail":             good + "    --- FAIL: TestDaemonGenerationOutcomes/required (0.00s)\n",
-		"panic":            good + "panic: unexpected fault\n",
-		"duplicate":        good + parent,
-		"no final PASS":    parent + reload + recovery,
-		"near match":       strings.Replace(good, "Outcomes (", "OutcomesOther (", 1),
+		"pass":                 good,
+		"empty":                "",
+		"missing child":        parent + reload + "PASS\n",
+		"missing shutdown":     parent + reload + recovery + "PASS\n",
+		"missing normal build": parent + reload + recovery + shutdown + "PASS\n",
+		"missing parent":       reload + recovery + shutdown + "PASS\n",
+		"no tests":             "testing: warning: no tests to run\nPASS\n",
+		"skip":                 good + "    --- SKIP: TestDaemonGenerationOutcomes/required (0.00s)\n",
+		"fail":                 good + "    --- FAIL: TestDaemonGenerationOutcomes/required (0.00s)\n",
+		"panic":                good + "panic: unexpected fault\n",
+		"duplicate":            good + parent,
+		"no final PASS":        parent + reload + recovery,
+		"near match":           strings.Replace(good, "Outcomes (", "OutcomesOther (", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "log")
@@ -223,7 +225,7 @@ func TestGenerationDaemonGateRunnerAndProfileSafety(t *testing.T) {
 	}
 	runner := string(data)
 	for _, required := range []string{
-		"set -euo pipefail", "go build -tags 'integration generation_daemon_vm'", "go build -o \"$ARTIFACTS/warmor-daemon-release\"",
+		"set -euo pipefail", `go build -tags 'integration generation_daemon_vm' -o "$ARTIFACTS/warmor-daemon-profile"`, `go build -o "$ARTIFACTS/warmor-daemon"`,
 		`go test -c -tags integration -o "$ARTIFACTS/outcomes.test"`, `WARMOR_OUTCOME_PREPARE=1`, `^TestPrepareGenerationDaemonArtifacts$`,
 		`WARMOR_OUTCOME_VM=1 WARMOR_GENERATION_DAEMON_VM=1`, `WARMOR_EXPECT_KERNEL_MINOR="$EXPECT_KERNEL_MINOR"`,
 		`bash tests/integration/run-vm.sh generation-daemon "$ARTIFACTS"`, `"$VIMTO" -kernel "$KERNEL" exec -- "$ARTIFACTS/outcomes.test"`,
@@ -274,10 +276,12 @@ func TestGenerationDaemonGateWorkflowBothKernels(t *testing.T) {
 	var w struct {
 		On   map[string]struct{ Paths []string } `yaml:"on"`
 		Jobs map[string]struct {
-			Continue any `yaml:"continue-on-error"`
+			Continue any      `yaml:"continue-on-error"`
+			Needs    []string `yaml:"needs"`
 			Strategy struct {
 				Matrix struct {
 					Include []struct{ Version, Minor string }
+					Clang   []int
 				}
 			}
 			Steps []struct {
@@ -293,6 +297,21 @@ func TestGenerationDaemonGateWorkflowBothKernels(t *testing.T) {
 	job := w.Jobs["kernel-generations-strict"]
 	if job.Continue != nil && job.Continue != false {
 		t.Fatal("daemon outcomes must not allow failure")
+	}
+	needs := "," + strings.Join(job.Needs, ",") + ","
+	if !strings.Contains(needs, ",bpf-compile,") || !strings.Contains(needs, ",ima-kernel,") {
+		t.Fatal("both-kernel daemon outcomes must depend on BPF compiler matrix and built IMA kernels")
+	}
+	compilers := w.Jobs["bpf-compile"]
+	if compilers.Continue != nil && compilers.Continue != false {
+		t.Fatal("compiler matrix must not permit failure")
+	}
+	clang := map[int]bool{}
+	for _, version := range compilers.Strategy.Matrix.Clang {
+		clang[version] = true
+	}
+	if !clang[18] || !clang[21] {
+		t.Fatal("both Clang 18 and Clang 21 are required before daemon gate")
 	}
 	seen := map[string]bool{}
 	for _, item := range job.Strategy.Matrix.Include {
@@ -365,5 +384,40 @@ func TestGenerationDaemonGateManifestHasGuardedFixture(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(manifest)); got != "TestDaemonGenerationOutcomes" {
 		t.Fatalf("unexpected manifest: %s", got)
+	}
+}
+
+func TestGenerationDaemonGateRecordingAndBinarySelection(t *testing.T) {
+	data, err := os.ReadFile("outcomes_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	if !strings.Contains(source, `filepath.Join(f.recordings, name+".ndjson")`) || strings.Contains(source, `events:  filepath.Join(f.dir, name+".ndjson")`) {
+		t.Fatal("daemon FileSink must record privately in guest, not shared artifacts")
+	}
+	stop := strings.Index(source, "\t\td.stop(t)")
+	export := strings.Index(source, "exportOutcomeRecording(d.events,")
+	if stop < 0 || export < stop || !strings.Contains(source, `t.Errorf("export daemon recording: %v", err)`) {
+		t.Fatal("wait must precede recording export, whose failure must fail even failed subtests")
+	}
+	if !strings.Contains(source, `return f.startDaemonBinary(t, "warmor-daemon", name, policy, flags...)`) {
+		t.Fatal("normal binary must remain default")
+	}
+	fixture, err := os.ReadFile("generation_daemon_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(fixture)
+	normal := strings.Index(text, `t.Run("release-compiled-reload-LKG-and-idle-shutdown"`)
+	profile := strings.Index(text, `t.Run("opposing-captured-reload-LKG-and-idle-shutdown"`)
+	if normal < 0 || profile < normal {
+		t.Fatal("missing normal-build generation outcomes")
+	}
+	if !strings.Contains(text[normal:profile], `f.startDaemon(t, "generation-release"`) || strings.Contains(text[normal:profile], "generation-vm-control") {
+		t.Fatal("nonfault outcomes must not select instrumented daemon")
+	}
+	if strings.Count(text, `f.startDaemonBinary(t, "warmor-daemon-profile"`) != 3 {
+		t.Fatal("instrumented scenarios must select profile explicitly")
 	}
 }

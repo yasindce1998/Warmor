@@ -435,21 +435,27 @@ func (d *daemonProcess) stop(t *testing.T) {
 	t.Helper()
 	d.stopOnce.Do(func() {
 		_ = d.cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case err := <-d.done:
-			if err != nil {
-				t.Errorf("daemon did not shut down cleanly: %v (log %s)", err, d.log)
-			}
-		case <-time.After(outcomeTimeout):
-			_ = d.cmd.Process.Kill()
-			cleanupErr := <-d.done
-			t.Errorf("daemon shutdown timed out (cleanup result %v; log %s)", cleanupErr, d.log)
+		if err := awaitOutcomeDaemonExit(d.done, outcomeTimeout, d.cmd.Process.Kill); err != nil {
+			t.Errorf("%v (log %s)", err, d.log)
 		}
 	})
 }
 
 func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ...string) *daemonProcess {
 	t.Helper()
+	return f.startDaemonBinary(t, "warmor-daemon", name, policy, flags...)
+}
+
+// Normal daemon is the default. Only explicitly instrumented scenarios select
+// the separately hashed profile executable; never infer a profile from env.
+func (f *outcomeFixture) startDaemonBinary(t *testing.T, binary, name, policy string, flags ...string) *daemonProcess {
+	t.Helper()
+	if binary != "warmor-daemon" && binary != "warmor-daemon-profile" {
+		t.Fatal("unknown prepared daemon binary", binary)
+	}
+	if err := validateOutcomeRecordings(f.work, f.recordings); err != nil {
+		t.Fatal(err)
+	}
 	// Reserve an available VM-local port. A startup race fails closed below.
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -475,7 +481,7 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 	}
 	args := []string{"--policy", policy, "--require-lsm", "--lsm-enforce", "--cgroup-filter", f.cgroup,
 		"--metrics-port", fmt.Sprint(port), "--event-sink", "file:" + d.events, "--stats-interval", "1h"}
-	d.cmd = exec.Command(filepath.Join(f.dir, "warmor-daemon"), append(args, flags...)...)
+	d.cmd = exec.Command(filepath.Join(f.dir, binary), append(args, flags...)...)
 	d.cmd.Stdout, d.cmd.Stderr = log, log
 	if err := d.cmd.Start(); err != nil {
 		_ = log.Close() // Preserve the daemon startup failure.
