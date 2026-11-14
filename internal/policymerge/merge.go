@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/yasindce1998/warmor/internal/compiler"
 	"gopkg.in/yaml.v3"
 )
 
@@ -15,6 +16,10 @@ func LoadFile(path string) (*PolicyYAML, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	// Validate original bytes before the editing model can drop unknown keys.
+	if _, err := compiler.Parse(data); err != nil {
+		return nil, fmt.Errorf("validate %s: %w", path, err)
 	}
 	var p PolicyYAML
 	if err := yaml.Unmarshal(data, &p); err != nil {

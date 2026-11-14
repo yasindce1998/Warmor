@@ -32,8 +32,8 @@ func TestDiffEmptyPolicies(t *testing.T) {
 	if len(r.OnlyA)+len(r.OnlyB)+len(r.Both) != 0 {
 		t.Errorf("expected empty result, got %+v", r)
 	}
-	if got := FormatDetailed(r, "a", "b"); got != "" {
-		t.Errorf("FormatDetailed on empty diff = %q, want empty", got)
+	if got := FormatDetailed(r, "a", "b"); !strings.Contains(got, "Effective default action: deny -> deny") {
+		t.Errorf("FormatDetailed omitted effective defaults: %q", got)
 	}
 }
 
@@ -135,7 +135,7 @@ func TestFormatDetailedChanged(t *testing.T) {
 	rb := rule("r2", "file", "deny", "/etc/shadow")
 	rb.Mode = "enforce"
 	out := FormatDetailed(Diff(policy("a", ra), policy("b", rb)), "a.yaml", "b.yaml")
-	want := "=== Changed (1 rules) ===\n  - [file] r -> r2: action allow -> deny, mode \"\" -> \"enforce\"\n\n"
+	want := "Effective default action: deny -> deny\nStructural comparison only; not a proof of decision equivalence.\n\n=== Changed (1 rules) ===\n  - [file] r -> r2: action allow -> deny, mode \"\" -> \"enforce\"\n\n"
 	if out != want {
 		t.Errorf("FormatDetailed =\n%q\nwant\n%q", out, want)
 	}
@@ -291,7 +291,7 @@ func TestFormatSummaryContent(t *testing.T) {
 	}
 	r.Changed = make([]RuleChange, 1)
 	got := FormatSummary(r, "sbom.yaml", "audit.yaml")
-	want := "Only in sbom.yaml: 3 rules\nOnly in audit.yaml: 2 rules\nChanged:    1 rules\nIn both:    5 rules\n"
+	want := "Only in sbom.yaml: 3 rules\nOnly in audit.yaml: 2 rules\nChanged:    1 rules\nIn both:    5 rules\nEffective defaults:  -> \nVariable changes: 0\nRule order changed: false\nStructural comparison only; not a proof of decision equivalence.\n"
 	if got != want {
 		t.Errorf("FormatSummary =\n%q\nwant\n%q", got, want)
 	}
@@ -304,7 +304,7 @@ func TestFormatDetailedAllSections(t *testing.T) {
 		Both:  []policymerge.RuleYAML{{Name: "s1", Event: "process", Action: "allow"}},
 	}
 	got := FormatDetailed(r, "left.yaml", "right.yaml")
-	want := "=== Only in left.yaml (1 rules) ===\n" +
+	want := "Effective default action:  -> \nStructural comparison only; not a proof of decision equivalence.\n\n=== Only in left.yaml (1 rules) ===\n" +
 		"  - [file] a1 (allow)\n\n" +
 		"=== Only in right.yaml (2 rules) ===\n" +
 		"  - [network] b1 (deny)\n" +
