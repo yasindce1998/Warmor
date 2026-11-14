@@ -31,7 +31,6 @@ const (
 type recordingSecurity struct {
 	user *windows.SID
 	sd   *windows.SECURITY_DESCRIPTOR
-	acl  *windows.ACL
 }
 
 func currentSecurity() (*recordingSecurity, error) {
@@ -63,7 +62,7 @@ func currentSecurity() (*recordingSecurity, error) {
 	if err = sd.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
 		return nil, err
 	}
-	return &recordingSecurity{user: u.User.Sid, sd: sd, acl: acl}, nil
+	return &recordingSecurity{user: u.User.Sid, sd: sd}, nil
 }
 
 // recordingPath excludes device/UNC namespaces, drive-relative paths, alternate
@@ -183,8 +182,7 @@ func (s *recordingSecurity) protect(h windows.Handle) error {
 	if !windows.EqualSid(owner, s.user) {
 		return fmt.Errorf("recording is not owned by current user")
 	}
-	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, s.acl, nil); err != nil {
+	if err := setRecordingDACL(h, s.sd); err != nil {
 		return err
 	}
 	// Fail closed on filesystems which ignore protection or ACL replacement.
@@ -302,21 +300,14 @@ func (s *recordingSecurity) directory(root string, parts []string, privateLeaf, 
 	for i, part := range parts {
 		leaf := i == len(parts)-1
 		a := access
-		sharing := share
 		if leaf && privateLeaf {
-			// SetSecurityInfo documents that a handle opened with
-			// MAXIMUM_ALLOWED does not propagate ACEs to children. Exclusive
-			// sharing alone proved insufficient on native Windows: tightening
-			// a private parent changed rejected foreign/reparse target ACLs.
-			// Required rights remain explicit so a restricted grant fails closed.
-			a |= windows.WRITE_DAC | windows.MAXIMUM_ALLOWED
-			sharing = 0
+			a |= windows.WRITE_DAC
 		}
-		next, openErr := openRelative(h, part, a, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE, sharing, nil)
+		next, openErr := openRelative(h, part, a, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE, share, nil)
 		if openErr == windows.STATUS_OBJECT_NAME_NOT_FOUND && create {
-			next, openErr = openRelative(h, part, a, windows.FILE_CREATE, windows.FILE_DIRECTORY_FILE, sharing, s.sd)
+			next, openErr = openRelative(h, part, a, windows.FILE_CREATE, windows.FILE_DIRECTORY_FILE, share, s.sd)
 			if openErr == windows.STATUS_OBJECT_NAME_COLLISION {
-				next, openErr = openRelative(h, part, a, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE, sharing, nil)
+				next, openErr = openRelative(h, part, a, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE, share, nil)
 			}
 		}
 		if openErr != nil {

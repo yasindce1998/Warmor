@@ -149,6 +149,94 @@ func TestWindowsOpenAppendTightensExistingOwnerDACL(t *testing.T) {
 	}
 }
 
+func requireInheritedDACL(t *testing.T, path string) {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, _, err := sd.DACL()
+	if err != nil || acl == nil {
+		t.Fatalf("missing inherited fixture DACL: %v", err)
+	}
+	for i := uint16(0); i < acl.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, uint32(i), &ace); err != nil {
+			t.Fatal(err)
+		}
+		if ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
+			return
+		}
+	}
+	t.Fatalf("fixture did not exercise inherited ACE metadata: %s", sd.String())
+}
+
+func TestWindowsPrivateDirectoryPreservesInheritedChildACLs(t *testing.T) {
+	root := t.TempDir()
+	store := filepath.Join(root, "store")
+	if err := os.Mkdir(store, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ownedFixture(t, store)
+	// Install inherited owner/full and Everyone/read grants before creating
+	// descendants. Do not protect the children: the native CI failure was an
+	// inherited-to-explicit metadata conversion, not a change in access masks.
+	s, err := currentSecurity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + s.user.String() + ")(A;OICI;FR;;;WD)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(store, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(store, "unrelated")
+	nested := filepath.Join(store, "nested")
+	if err := os.Mkdir(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	grandchild := filepath.Join(nested, "unrelated")
+	for _, path := range []string{child, grandchild} {
+		if err := os.WriteFile(path, []byte("keep"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := map[string]string{}
+	for _, path := range []string{child, nested, grandchild} {
+		requireInheritedDACL(t, path)
+		before[path] = securityString(t, path)
+	}
+	// An inherited child with an alias outside the store must not have its
+	// ACL changed via an implicit walk before its link count can be checked.
+	alias := filepath.Join(root, "outside-alias")
+	if err := os.Link(child, alias); err != nil {
+		t.Fatal(err)
+	}
+	before[alias] = securityString(t, alias)
+	for i := 0; i < 2; i++ {
+		f, err := OpenAppend(filepath.Join(store, "events"), true, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		assertOwnerDACL(t, store)
+		for path, want := range before {
+			if got := securityString(t, path); got != want {
+				t.Fatalf("private directory update changed child %s:\nbefore: %s\nafter:  %s", path, want, got)
+			}
+		}
+	}
+}
+
 func TestWindowsOpenAppendRejectsUnsafePaths(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target")
@@ -186,6 +274,7 @@ func TestWindowsOpenAppendRejectsReparsePoints(t *testing.T) {
 	if err := os.WriteFile(target, []byte("keep"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	requireInheritedDACL(t, target)
 	before := securityString(t, target)
 	link := filepath.Join(dir, "link")
 	// Windows CI is elevated. Do not skip this security check on a runner
@@ -289,6 +378,7 @@ func TestWindowsOpenAppendRejectsForeignOwnership(t *testing.T) {
 			if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, admin, nil, nil, nil); err != nil {
 				t.Fatal(err)
 			}
+			requireInheritedDACL(t, path)
 			before := securityString(t, path)
 			filePath := path
 			if directory {
