@@ -14,9 +14,10 @@ import (
 // container-relationship graph blast radius is computed from. See
 // docs/design/intelligence-chain.md.
 type intelligence struct {
-	correlator *attackgraph.Correlator
-	graph      *attackgraph.Graph
-	analyzer   *blastradius.Analyzer
+	correlator    *attackgraph.Correlator
+	graph         *attackgraph.Graph
+	relationships *blastradius.Graph
+	analyzer      *blastradius.Analyzer
 }
 
 // newIntelligence builds the attack-graph enrichers. They run in pipeline
@@ -30,6 +31,7 @@ func newIntelligence() (*intelligence, []streaming.Enricher) {
 	}
 	i.graph = attackgraph.NewGraph(i.correlator)
 	brGraph := blastradius.NewGraph()
+	i.relationships = brGraph
 	i.analyzer = blastradius.NewAnalyzer(brGraph)
 
 	enrichers := []streaming.Enricher{
@@ -53,8 +55,13 @@ func (o eventObserver) Enrich(event *streaming.SecurityEvent) {
 
 // publishMetrics exports the attack-graph summary and per-container blast
 // radius. It is called from the enforcer's metrics loop, not on every
-// event, so a busy host pays a constant cost.
+// event. Retention and metric cardinality are capped by the graph limits.
 func (i *intelligence) publishMetrics() {
+	// Quiet hosts still expire departed cgroups before lifecycle events land.
+	i.graph.Prune()
+	if i.relationships != nil {
+		i.relationships.Prune()
+	}
 	if s := i.graph.Summary(); s != nil {
 		coverage := make(map[string]int, len(s.TacticCoverage))
 		for tactic, n := range s.TacticCoverage {
@@ -64,12 +71,8 @@ func (i *intelligence) publishMetrics() {
 	}
 
 	metrics.ResetBlastRadius()
-	for _, cgid := range i.graph.Containers() {
-		br := i.analyzer.Reach(cgid, 0)
-		if br == nil {
-			continue
-		}
-		metrics.SetBlastRadius(cgid, len(br.Reachable))
+	for cgid, reachable := range i.analyzer.ReachableCounts(i.graph.Containers()) {
+		metrics.SetBlastRadius(cgid, reachable)
 	}
 }
 

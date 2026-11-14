@@ -28,12 +28,16 @@ type Tracker struct {
 	elems    map[uint32]*list.Element
 	maxDepth int
 	maxSize  int
+	ttl      time.Duration
+	clock    func() time.Time
 }
 
 // TrackerConfig configures the process lineage tracker.
 type TrackerConfig struct {
-	MaxDepth int // Maximum ancestry chain depth (default 16)
-	MaxSize  int // Maximum number of processes to track (default 100000)
+	MaxDepth int              // Maximum ancestry chain depth (default 16)
+	MaxSize  int              // Maximum number of processes to track (default 100000)
+	TTL      time.Duration    // Maximum time since observed exec (default: 1 hour)
+	Clock    func() time.Time // Monotonic, concurrency-safe clock
 }
 
 // NewTracker creates a process lineage tracker.
@@ -44,12 +48,20 @@ func NewTracker(cfg TrackerConfig) *Tracker {
 	if cfg.MaxSize <= 0 {
 		cfg.MaxSize = 100000
 	}
+	if cfg.TTL <= 0 {
+		cfg.TTL = time.Hour
+	}
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
+	}
 	return &Tracker{
 		processes: make(map[uint32]*ProcessInfo, 4096),
 		order:     list.New(),
 		elems:     make(map[uint32]*list.Element, 4096),
 		maxDepth:  cfg.MaxDepth,
 		maxSize:   cfg.MaxSize,
+		ttl:       cfg.TTL,
+		clock:     cfg.Clock,
 	}
 }
 
@@ -57,6 +69,8 @@ func NewTracker(cfg TrackerConfig) *Tracker {
 func (t *Tracker) RecordExec(pid, ppid, uid, gid uint32, comm, filename string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	now := t.clock()
+	t.prune(now)
 
 	if el, ok := t.elems[pid]; ok {
 		// Re-exec of a tracked PID: it becomes the newest entry.
@@ -75,7 +89,7 @@ func (t *Tracker) RecordExec(pid, ppid, uid, gid uint32, comm, filename string) 
 		Filename:  filename,
 		UID:       uid,
 		GID:       gid,
-		StartTime: time.Now(),
+		StartTime: now,
 	}
 }
 
@@ -96,8 +110,9 @@ func (t *Tracker) remove(pid uint32) {
 
 // GetAncestors returns the ancestry chain for a given PID, from parent up to root.
 func (t *Tracker) GetAncestors(pid uint32) []ProcessInfo {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.prune(t.clock())
 
 	var chain []ProcessInfo
 	seen := make(map[uint32]bool)
@@ -114,7 +129,9 @@ func (t *Tracker) GetAncestors(pid uint32) []ProcessInfo {
 		seen[current] = true
 
 		parent, ok := t.processes[info.PPID]
-		if !ok {
+		if !ok || parent.StartTime.After(info.StartTime) {
+			// A parent observed after this child may be a reused PID. Without
+			// kernel start-time identity, fail closed rather than invent ancestry.
 			break
 		}
 		chain = append(chain, *parent)
@@ -125,8 +142,9 @@ func (t *Tracker) GetAncestors(pid uint32) []ProcessInfo {
 
 // GetProcess returns info for a specific PID.
 func (t *Tracker) GetProcess(pid uint32) (ProcessInfo, bool) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.prune(t.clock())
 	info, ok := t.processes[pid]
 	if !ok {
 		return ProcessInfo{}, false
@@ -147,9 +165,33 @@ func (t *Tracker) HasAncestor(pid uint32, comm string) bool {
 
 // Size returns the number of tracked processes.
 func (t *Tracker) Size() int {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.prune(t.clock())
 	return len(t.processes)
+}
+
+// Prune provides a periodic fallback until runtime process-exit events are
+// wired to RecordExit. Reads and writes also prune, and MaxSize always applies.
+// TTL is conservative: a quiet live process may be forgotten; this tracker is
+// observed ancestry, not an authoritative inventory of running processes.
+func (t *Tracker) Prune() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.prune(t.clock())
+}
+
+func (t *Tracker) prune(now time.Time) int {
+	removed := 0
+	for el := t.order.Front(); el != nil; el = t.order.Front() {
+		pid := el.Value.(uint32)
+		if now.Sub(t.processes[pid].StartTime) < t.ttl {
+			break
+		}
+		t.remove(pid)
+		removed++
+	}
+	return removed
 }
 
 // evictOldest drops the process with the oldest StartTime. Entries are
