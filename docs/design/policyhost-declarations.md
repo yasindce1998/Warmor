@@ -1,7 +1,8 @@
 # Policy-host declarations: authenticated observations, explicit trust
 
 Status: optional backend/API checkpoint on `feat/policyhost-declarations`, based
-on PR45's frozen `f394546`. **No enforcer routing, generation activation, kernel
+on PR45's frozen `f394546`, with only descriptor-sanitizer fix `84a8176`
+cherry-picked subsequently. **No enforcer routing, generation activation, kernel
 map writes or default backend changes.** PR45's process-boundary limitations
 continue to apply.
 
@@ -17,11 +18,43 @@ retain their trust semantics; new metadata/eligibility methods sanitize invalid
 declarations. Combined evaluator lifecycle/interface wiring belongs to the
 generation-activation integration, not this branch.
 
+### Shared signed-activation contract
+
+Read-only comparison with signed activation `f54480a` found an independent
+`policymeta.Metadata/Read/Append` custom-section codec, not a shared observation
+API. That agent's subsequent worktree moves the codec to `internal/policybuild`;
+this branch follows the same package split and preserves the exact
+`warmor.build.v1` canonical JSON format (`compiler`, `default_action`). It adds
+only stricter bounded text validation (`policybuild.Validate`). No signed agent
+or generation-activation branch is edited here.
+
+- `policybuild.Metadata` is an artifact-author-approved claim, parsed only in
+  the child runtime for supervised loads; duplicate/malformed sections fail load.
+- `policymeta.Module.Build` transports that optional claim beside the actual
+  worker-observed digest/ABI/encoding. `Module.MatchArtifact(digest, abi,
+  compilerIdentity, defaultAction)` compares assignment expectations against
+  those observations/claims without importing assignment code or parsing WASM
+  in the parent. Missing build metadata or mismatches fail comparison.
+- Compiler field constants and `StaticRule` alias the dependency-free
+  `policymeta` vocabulary. Thus compiler build writers can import `policybuild`
+  (or the shared observation types) without a compiler↔metadata import cycle.
+- Compiler labels such as `warmor-yaml/6` are **not immutable build provenance**.
+  Matching one never attests exhaustive declarations, semantic default action,
+  runtime enforce/audit mode or successful kernel default deny. Signed activation
+  must separately verify assignment/artifact trust and effective mode/kernel
+  posture; enabling optimizations still requires exact module-digest attestation.
+
+The local compiler's build-output pipeline is not changed to append sections by
+this branch: the signed agent owns that integration. A real worker test consumes
+the same codec and demonstrates that any guest may carry a matching compiler
+label without gaining cache/default-deny permission. Combined integration must
+retain one `policybuild` codec, not resurrect a second `policymeta.Read` parser.
+
 Wire protocol **2** requires `Ready{Control, Metadata}` instead of protocol 1's
 bare ready control frame. Metadata has its own version (1), exact module SHA-256,
 actual observed ABI export result (0 explicitly means absent), selected entrypoint
 encoding (`binary` or `json`), exactly three ordered event records and two ordered
-process/network domains. Missing, duplicate, unexpected, noncanonical or oversized
+process/network domains plus optional build claims. Missing, duplicate, unexpected, noncanonical or oversized
 structured input is rejected; a protocol 1 worker cannot silently omit metadata.
 The existing initialization/load deadline covers metadata construction and upload.
 There is no parent WASM parsing or compilation; `go list -deps` tests enforce the
@@ -55,6 +88,8 @@ evaluation but never optimized; unsupported ABI values fail load/validation.
 Unknown/future field bits become `FieldsUnknown` in worker observations and are
 rejected if presented as finite metadata. Time/container-age inputs retain current
 ABI 3+ semantics; temporal dependencies decline decision and kernel caching.
+Untrusted masks also cannot suppress container-age enrichment for ABI 3+ guests;
+only an explicitly trusted declaration may optimize that enrichment away.
 
 Kernel-key flags describe only dependency coverage by Linux exec full-path and
 binary endpoint keys. They do not authorize global rules, kernel default deny,
@@ -71,6 +106,13 @@ per-event kernel entries must obey the same exact-key requirements.
   map capacity, but not a promise of free capacity in any particular map.
 - Paths/patterns are nonempty, valid UTF-8, NUL-free and at most 254 bytes.
   Process entries have port zero. Event labels must match their enclosing domain.
+  For the current binary event ABI, process static rules must additionally be
+  **shorter than 128 bytes**: the guest path field has a 128-byte capacity with
+  no truncation marker. A 128-byte eq rule also matches longer truncation aliases;
+  a longer rule cannot match its own input. The existing compiler's static export
+  currently admits up to 254 bytes, so metadata declines the entire process
+  domain when such a rule is observed. JSON ABI metadata retains the 254-byte
+  kernel bound. This branch does not change compiler evaluation semantics.
 - Network entries require canonical unzoned IPv4/IPv6 text, not IPv4-mapped aliases
   or alternate textual spellings. Rewriting an alias would change guest string-eq
   semantics, so an unusable declaration declines the whole domain instead.
@@ -107,6 +149,13 @@ metadata and allow/deny/log/audit results. Tests cover compiler first-match
 deduplication, ABI 3 static rules and ABI 5 args/invalid-UTF-8 behavior. Run with
 `WARMOR_REQUIRE_CARGO=1` to make a missing Rust/wasm32 toolchain fail rather than
 skip. No host security hooks or arbitrary process signals are installed.
+Real-worker malformed static tables (eligibility/action/audit/count/length/key
+errors) are declined even with explicit digest trust; evaluation remains usable.
+Parent readiness validation is tested through the exact production validator
+with malformed decoded observations. Compiler boundary fixtures cover binary
+path lengths 127/128/254/255, 0/65535 ports, maximal IPv6 text, and noncanonical/
+mapped addresses. Maximum escaped metadata and real FNV-colliding full paths
+exercise frame capacity and lossless key identities, not only happy-path values.
 
 This is not semantic verification of arbitrary WASM. The existing kernel branch's
 collision-free exact identities and generation-atomic installation are still

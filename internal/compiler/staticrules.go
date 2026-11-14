@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"fmt"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"net"
 	"strings"
 	"unicode/utf8"
@@ -26,19 +27,7 @@ const StaticRulesExport = "warmor_static_rules"
 
 // StaticRule is one exactly-enumerable policy rule, as preloaded into the
 // kernel policy map for the global (cgroup_id = 0) domain.
-type StaticRule struct {
-	// Event is the YAML event name: "process" or "network".
-	Event string
-	// Action is 0 (allow) or 1 (deny), matching the policy map value.
-	Action uint8
-	// Audit marks a would-deny (mode: audit) or log rule.
-	Audit bool
-	// Pattern is the exec path for process rules, the remote address for
-	// network rules.
-	Pattern string
-	// Port is the remote port (host byte order) for network rules.
-	Port uint16
-}
+type StaticRule = policymeta.StaticRule
 
 // StaticRules analyses a policy for kernel default-deny eligibility, per
 // event type ("process" = exec, "network" = connect).
@@ -87,7 +76,7 @@ func staticRulesForEvent(policy *Policy, event string) (rules []StaticRule, reas
 		}
 		// First match wins in the WASM evaluator, so a later rule on the
 		// same key is dead there and must not overwrite the entry.
-		key := sr.patternKey()
+		key := fmt.Sprintf("%s/%d/%s", sr.Event, sr.Port, sr.Pattern)
 		if seen[key] {
 			continue
 		}
@@ -192,11 +181,6 @@ func toPort(v any) (uint16, bool) {
 		}
 	}
 	return 0, false
-}
-
-// patternKey identifies the policy-map entry the rule compiles to.
-func (sr StaticRule) patternKey() string {
-	return fmt.Sprintf("%s/%d/%s", sr.Event, sr.Port, sr.Pattern)
 }
 
 // encodeStaticRules serializes a domain's rules into the export table

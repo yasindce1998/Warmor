@@ -15,6 +15,7 @@ import (
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 )
 
 // RuntimeConfig configures the WASM runtime.
@@ -70,7 +71,8 @@ type Runtime struct {
 	cacheDir string
 	// moduleDigest identifies exactly the bytes successfully loaded, never
 	// guest-provided metadata or the runtime's native compilation cache.
-	moduleDigest string
+	moduleDigest  string
+	buildMetadata *policybuild.Metadata
 }
 
 // NewRuntime creates a new WASM runtime with compilation cache support.
@@ -186,6 +188,10 @@ func (r *Runtime) LoadPolicyBytes(ctx context.Context, wasmBytes []byte) error {
 	if err := preflightModule(ctx, wasmBytes); err != nil {
 		return fmt.Errorf("policy preflight: %w", err)
 	}
+	buildMetadata, err := policybuild.Read(wasmBytes)
+	if err != nil {
+		return fmt.Errorf("policy build metadata: %w", err)
+	}
 	// This is synchronous by design: racing CompileModule against a timer
 	// would abandon non-interruptible work in a goroutine. The context is
 	// NOT a hard wall-time/RSS bound on the compiler itself.
@@ -208,6 +214,7 @@ func (r *Runtime) LoadPolicyBytes(ctx context.Context, wasmBytes []byte) error {
 	r.module = compiled
 	digest := sha256.Sum256(wasmBytes)
 	r.moduleDigest = hex.EncodeToString(digest[:])
+	r.buildMetadata = buildMetadata
 	return nil
 }
 
