@@ -76,12 +76,14 @@ type CacheStats struct {
 // from Timestamp and ContainerStart) is deliberately not in the key:
 // decisions that may depend on it are not cached (SetTimeDependent).
 type Key struct {
-	typ      api.EventType
-	pid      uint32 // zero when the policy does not read it
-	uid      uint32
-	gid      uint32
-	comm     string
-	filename string
+	typ        api.EventType
+	pid        uint32 // zero when the policy does not read it
+	uid        uint32
+	gid        uint32
+	comm       string
+	filename   string
+	cgroupID   uint64
+	parentComm string
 
 	hasProcess  bool
 	procFile    string
@@ -235,11 +237,13 @@ func (c *DecisionCache) Stats() CacheStats {
 func (c *DecisionCache) makeKey(event *api.Event) Key {
 	typ := event.GetType()
 	k := Key{
-		typ:      typ,
-		uid:      event.UID,
-		gid:      event.GID,
-		comm:     event.Comm,
-		filename: event.Filename,
+		typ:        typ,
+		uid:        event.UID,
+		gid:        event.GID,
+		comm:       event.Comm,
+		filename:   event.Filename,
+		cgroupID:   event.CgroupID,
+		parentComm: event.ParentComm,
 	}
 	if c.pidRelevant == nil || c.pidRelevant(typ) {
 		k.pid = event.PID

@@ -3,6 +3,7 @@ package compiler
 import (
 	"fmt"
 	"math"
+	"unicode/utf8"
 
 	"github.com/yasindce1998/warmor/internal/temporal"
 )
@@ -58,6 +59,9 @@ func (p *Policy) Validate() error {
 	if p.Name == "" {
 		return fmt.Errorf("policy name is required")
 	}
+	if !utf8.ValidString(p.Name) {
+		return fmt.Errorf("policy name must be valid UTF-8")
+	}
 	if p.Version < 1 {
 		return fmt.Errorf("policy version must be >= 1")
 	}
@@ -86,6 +90,9 @@ func (p *Policy) Validate() error {
 func (r *Rule) Validate() error {
 	if r.Name == "" {
 		return fmt.Errorf("rule name is required")
+	}
+	if !utf8.ValidString(r.Name) || !utf8.ValidString(r.Reason) {
+		return fmt.Errorf("rule name and reason must be valid UTF-8")
 	}
 	if !isValidEvent(r.Event) {
 		return fmt.Errorf("invalid event type %q (must be process, file, or network)", r.Event)
@@ -173,8 +180,12 @@ func (c *Condition) Validate(eventType string) error {
 
 func validateConditionValue(field string, value interface{}) error {
 	if !isNumericField(field) {
-		if _, ok := value.(string); !ok {
+		s, ok := value.(string)
+		if !ok {
 			return fmt.Errorf("field %q requires a string, got %T", field, value)
+		}
+		if !utf8.ValidString(s) {
+			return fmt.Errorf("field %q requires valid UTF-8", field)
 		}
 		return nil
 	}
@@ -223,4 +234,4 @@ func isValidEvent(event string) bool {
 // Version identifies the YAML-to-WASM compiler. Bump it whenever the output
 // for an unchanged YAML policy changes (codegen, ABI or build settings), so
 // cached compiled policies are rebuilt.
-const Version = "5"
+const Version = "6"

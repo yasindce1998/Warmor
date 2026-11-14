@@ -1,7 +1,6 @@
 package policyserver
 
 import (
-	"errors"
 	"net/http"
 
 	"github.com/yasindce1998/warmor/internal/drift"
@@ -13,25 +12,10 @@ import (
 const (
 	// MaxFingerprintPatterns bounds the distinct behavior patterns
 	// (event-type+comm pairs) one agent may report.
-	MaxFingerprintPatterns = 10_000
+	MaxFingerprintPatterns = drift.DefaultMaxPatterns
 	// MaxFingerprintImageKeyLen bounds the grouping key length.
-	MaxFingerprintImageKeyLen = 256
+	MaxFingerprintImageKeyLen = drift.MaxKeyLength
 )
-
-// validateFingerprint rejects fingerprints that are oversized or missing
-// the fields the fleet comparison keys on.
-func validateFingerprint(fp *drift.BehaviorFingerprint) error {
-	if fp.ImageHash == "" {
-		return errors.New("fingerprint image_hash is required")
-	}
-	if len(fp.ImageHash) > MaxFingerprintImageKeyLen {
-		return errors.New("fingerprint image_hash too long")
-	}
-	if len(fp.Vectors) > MaxFingerprintPatterns {
-		return errors.New("fingerprint has too many patterns")
-	}
-	return nil
-}
 
 // driftStatusResponse is the admin drift view: per-image fleet status and
 // every anomaly currently detected across the fleet.

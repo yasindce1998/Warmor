@@ -18,13 +18,13 @@ func NewCollector(graph *Graph) *Collector {
 
 // ProcessEvent handles a security event, updating the graph with new relationships.
 func (c *Collector) ProcessEvent(event *streaming.SecurityEvent) {
-	if event.CgroupID == 0 {
+	if event == nil || event.CgroupID == 0 {
 		return
 	}
 
 	now := event.Timestamp
 	if now.IsZero() {
-		now = time.Now()
+		now = c.graph.config.Clock()
 	}
 
 	c.ensureNode(event.CgroupID, event.Comm, now)

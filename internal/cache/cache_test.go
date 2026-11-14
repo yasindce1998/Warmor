@@ -296,8 +296,8 @@ func forEachMutation(t *testing.T, mk func() *api.Event, visit func(desc string,
 	}
 }
 
-func inputsEqual(a, b *api.Event, temporal bool) bool {
-	ia, ib := wasm.PolicyInputs(a, temporal), wasm.PolicyInputs(b, temporal)
+func inputsEqual(a, b *api.Event, abiVersion uint32) bool {
+	ia, ib := wasm.PolicyInputsForABI(a, abiVersion), wasm.PolicyInputsForABI(b, abiVersion)
 	for i := range ia {
 		if !bytes.Equal(ia[i], ib[i]) {
 			return false
@@ -317,7 +317,8 @@ func inputsEqual(a, b *api.Event, temporal bool) bool {
 // The test pins down exactly which event fields feed it, so a new input
 // cannot slip into that exception unnoticed.
 func TestKey_CoversEveryPolicyInput(t *testing.T) {
-	for _, temporal := range []bool{false, true} {
+	for abiVersion := uint32(0); abiVersion <= wasm.MaxABIVersion; abiVersion++ {
+		temporal := abiVersion >= wasm.TemporalABIVersion
 		temporalOnly := map[string]bool{}
 		for _, typ := range []api.EventType{-1, api.EventTypeProcess, api.EventTypeFile, api.EventTypeNetwork} {
 			mk := func() *api.Event { return fullEvent(typ) }
@@ -329,7 +330,7 @@ func TestKey_CoversEveryPolicyInput(t *testing.T) {
 				base := mk()
 				baseKey := c.makeKey(base)
 				forEachMutation(t, mk, func(desc string, ev *api.Event) {
-					if inputsEqual(base, ev, temporal) {
+					if inputsEqual(base, ev, abiVersion) {
 						return
 					}
 					if !pidRelevant && desc == "Event.PID" {
@@ -339,13 +340,13 @@ func TestKey_CoversEveryPolicyInput(t *testing.T) {
 					if c.makeKey(ev) != baseKey {
 						return
 					}
-					if temporal && inputsEqual(base, ev, false) {
+					if temporal && inputsEqual(base, ev, 0) {
 						// Only the temporal context differs.
 						temporalOnly[desc] = true
 						return
 					}
-					t.Errorf("type %v, pidRelevant=%v, temporal=%v: mutating %s changes what the policy sees but not the cache key",
-						typ, pidRelevant, temporal, desc)
+					t.Errorf("type %v, pidRelevant=%v, ABI=%d: mutating %s changes what the policy sees but not the cache key",
+						typ, pidRelevant, abiVersion, desc)
 				})
 			}
 		}
