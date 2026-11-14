@@ -964,12 +964,16 @@ func (e *Enforcer) GetStats() api.EnforcementStats {
 	cacheStats := e.cache.Stats()
 
 	return api.EnforcementStats{
-		Allowed:     actionStats.Allowed,
-		Denied:      actionStats.Denied,
-		Logged:      actionStats.Logged,
-		AuditDenied: actionStats.AuditDenied,
-		CacheHits:   cacheStats.TotalHits,
-		CacheMisses: actionStats.Allowed + actionStats.Denied + actionStats.Logged - cacheStats.TotalHits,
+		Allowed:              actionStats.Allowed,
+		Denied:               actionStats.Denied,
+		Logged:               actionStats.Logged,
+		AuditDenied:          actionStats.AuditDenied,
+		EnforcementAttempted: actionStats.EnforcementAttempted,
+		EnforcementSucceeded: actionStats.EnforcementSucceeded,
+		EnforcementFailed:    actionStats.EnforcementFailed,
+		EnforcementRefused:   actionStats.EnforcementRefused,
+		CacheHits:            cacheStats.TotalHits,
+		CacheMisses:          actionStats.Allowed + actionStats.Denied + actionStats.Logged - cacheStats.TotalHits,
 	}
 }
 

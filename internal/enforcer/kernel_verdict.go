@@ -13,6 +13,9 @@ import (
 // is terminated: the syscall failed with EPERM, so the process never ran the
 // denied operation and killing it would turn a refused exec into a crash.
 func (h *ActionHandler) RecordKernelDenied(event *api.Event, result *api.ActionResult) {
+	result.Enforced = true
+	result.EnforcementAttempted = false // synchronous kernel refusal, not termination
+	result.EnforcementError = ""
 	atomic.AddUint64(&h.denied, 1)
 	log.Printf("DENY (kernel) pid=%d type=%s reason=%q", event.PID, event.Type, result.Reason)
 }
