@@ -98,6 +98,14 @@ old policy is active once that is known false, and never claims the new revision
 active/durable on callback failure. Active identity remains self-reported, not
 remote attestation.
 
+Fleet SIGHUP/local reload is rejected **before** enforcer invocation, in both
+legacy and generation modes. Only the fleet client's update/recovery owner may
+publish live policy. Thus an externally written local B cannot replace an
+acknowledged A through SIGHUP and leave A indefinitely acknowledged via 304.
+The rejection is logged, not reported as an activation attempt; live A and its
+acknowledgement remain unchanged. Standalone SIGHUP behavior is unchanged. The
+same ownership prohibition must be retained by explicit signed-mode wiring.
+
 ### Signed backend integration request (not wired here)
 
 `Enforcer.ActivatePolicy(immutableModulePath, durableCommit func() error)` is the
@@ -243,3 +251,25 @@ still compares actual policy serialization; no input-coverage check was skipped.
 Subsequent full and race suites pass. No whole-daemon VM, physical crash/power
 loss, host-enforcing run, BPF build regeneration, or native cross-platform test
 was performed by this integration task.
+
+### Review follow-up: fleet SIGHUP ownership
+
+Review of `22cc85e` found that the signal path invalidated fleet identity only
+after a nil reload result. A live generation B followed by failed drain could
+therefore leave acknowledged A stuck behind identity-aware 304 responses. The
+follow-up chooses explicit prohibition rather than another recovery owner:
+`reloadLocalPolicy` rejects fleet-local reload before invoking the enforcer.
+Its regression test acknowledges A through a real client/server, stages local B
+and supplies a would-be live-B/failed-drain callback; that callback is never
+called, live/acknowledged A stays genuine, and subsequent 304s are valid.
+Standalone success, precommit error and pending error propagation are unchanged.
+The existing normal fleet uncertain-commit and precommit-failure identity tests
+also remain passing. Signed-mode wiring must retain this ownership prohibition.
+
+Go 1.26.11, `GOMAXPROCS=2`, `-p 2`: daemon/server/enforcer package tests pass;
+focused reload/generation/uncertain/precommit race tests pass ten repetitions;
+daemon vet and repository-configured golangci-lint pass. Lint initially found
+another session holding its global runner lock; rerunning with
+`--allow-serial-runners` passed. Logs: `/tmp/opencode/generation-activation-sighup-`
+`{tests,race,lint,vet}.log`. No full-suite rerun or VM execution is claimed for
+this focused follow-up. No other owner branch was changed.

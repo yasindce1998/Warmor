@@ -380,11 +380,9 @@ func runDaemon(stop <-chan struct{}) {
 		case sig := <-sigChan:
 			if isReloadSignal(sig) {
 				log.Println("")
-				log.Println("📥 Received reload signal, reloading policy...")
-				if err := enf.ReloadPolicy(); err != nil {
+				log.Println("📥 Received reload signal")
+				if err := reloadLocalPolicy(policyClient != nil, enf.ReloadPolicy); err != nil {
 					log.Printf("❌ Failed to reload policy: %v", err)
-				} else if policyClient != nil {
-					policyClient.InvalidateActiveRevision()
 				}
 				log.Println("")
 			} else if isShutdownSignal(sig) {
