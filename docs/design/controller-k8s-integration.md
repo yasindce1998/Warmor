@@ -25,6 +25,13 @@ Merge `e25546c` subsequently incorporates `1e49aa7`, also without textual
 conflicts. This is a local merge into the integration branch, not a merge into
 main or a remote publication.
 
+During final handoff `origin/main` advanced independently to `89e6ff1` (PR #32,
+isolated streaming sinks). That later work is not incorporated or validated on
+this branch. Use pinned base `1e49aa7` for the integration delta, or a three-dot
+merge-base diff; do not interpret a two-dot diff against a moving main as intended
+reverts of later commits. The coordinator must re-test after combining newer
+streaming work with this branch.
+
 ## Integration follow-ups
 
 - Kind explicitly applies/establishes the additive CRD before controller upgrade
