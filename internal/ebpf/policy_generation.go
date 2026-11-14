@@ -10,6 +10,7 @@ import (
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 
+	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -29,31 +30,16 @@ var (
 
 // GenerationRule is an exact static identity. Use Pattern for exec, mount and
 // ptrace; Address+Port for connect/bind. No file/basename or hash identities.
-type GenerationRule struct {
-	CgroupID  uint64
-	EventType uint8
-	Pattern   string
-	Address   string
-	Port      uint16
-	Action    uint8
-	Audit     bool
-}
+type GenerationRule = kernelmap.GenerationRule
 
 // GenerationDomain marks a complete exec/connect allowlist. CgroupID 0 is the
 // explicit global fallback, never an inferred workload identity.
-type GenerationDomain struct {
-	CgroupID  uint64
-	EventType uint8
-	Mode      uint8
-}
+type GenerationDomain = kernelmap.GenerationDomain
 
 // GenerationSpec is copied into a fresh, unreachable kernel map by Prepare.
 // It must describe the COMPLETE candidate static policy and default-deny set.
 // Dynamic decisions are intentionally not copied from the old generation.
-type GenerationSpec struct {
-	Rules       []GenerationRule
-	DefaultDeny []GenerationDomain
-}
+type GenerationSpec = kernelmap.GenerationSpec
 
 type generationValue struct {
 	Policy     PolicyValue

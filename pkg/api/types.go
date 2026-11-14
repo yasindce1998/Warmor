@@ -145,6 +145,12 @@ type Event struct {
 
 	// LSM fields
 	LSMEvent bool `json:"lsm_event,omitempty"`
+	// PolicyGeneration preserves the kernel snapshot, including zero for
+	// legacy/observation hooks. GenerationContext records dispatch capture.
+	PolicyGeneration  uint64             `json:"policy_generation,omitempty"`
+	GenerationContext *GenerationContext `json:"-"`
+	// DispatchBarrier is an internal single-reader queue fence, not an event.
+	DispatchBarrier chan struct{} `json:"-"`
 	// KernelDenied is set when the kernel already refused the operation
 	// (policy-map deny or integrity failure in enforce mode). The enforcer
 	// records such events but does not evaluate or act on them again.
