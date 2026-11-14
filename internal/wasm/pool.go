@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
-	"time"
+
+	"github.com/tetratelabs/wazero"
 )
 
 // ErrPoolClosed is returned by Get after the pool has been closed.
@@ -17,8 +17,8 @@ var ErrPoolClosed = errors.New("policy pool is closed")
 type Pool struct {
 	instances chan *Policy
 	runtime   *Runtime
+	module    wazero.CompiledModule
 	size      int
-	counter   atomic.Uint64
 
 	// fields is the module's fields-read declaration per event type,
 	// read once from the first instance.
@@ -46,10 +46,13 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 	if runtime.module == nil {
 		return nil, fmt.Errorf("runtime has no compiled module")
 	}
+	ctx, cancel := context.WithTimeout(ctx, runtime.initTimeout)
+	defer cancel()
 
 	p := &Pool{
 		instances: make(chan *Policy, size),
 		runtime:   runtime,
+		module:    runtime.module,
 		size:      size,
 		done:      make(chan struct{}),
 	}
@@ -66,6 +69,11 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 			p.staticProcess = readStaticDomain(ctx, policy, 0)
 			p.staticNetwork = readStaticDomain(ctx, policy, 2)
 		}
+		if policy.instance.IsClosed() || ctx.Err() != nil {
+			policy.Close(ctx)
+			p.Close(ctx)
+			return nil, fmt.Errorf("initialize pool member %d: guest closed or initialization deadline exceeded", i)
+		}
 		p.instances <- policy
 	}
 
@@ -73,14 +81,8 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 }
 
 func (p *Pool) instantiate(ctx context.Context) (*Policy, error) {
-	n := p.counter.Add(1)
-	modConfig := p.runtime.config.WithName(fmt.Sprintf("policy_%d", n))
-	instance, err := p.runtime.runtime.InstantiateModule(ctx, p.runtime.module, modConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	return initPolicy(ctx, p.runtime, instance)
+	// Anonymous instances allow multiple pools to coexist in one runtime.
+	return p.runtime.instantiatePolicy(ctx, p.module, p.runtime.config.WithName(""))
 }
 
 // Get retrieves a policy instance from the pool. Blocks if all instances are
@@ -133,7 +135,7 @@ func (p *Pool) Replace(broken *Policy) error {
 		return nil
 	default:
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), instantiateTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), p.runtime.initTimeout)
 	defer cancel()
 	fresh, err := p.instantiate(ctx)
 	if err != nil {
@@ -142,10 +144,6 @@ func (p *Pool) Replace(broken *Policy) error {
 	p.Put(fresh)
 	return nil
 }
-
-// instantiateTimeout bounds instantiating a replacement instance (which runs
-// the module's start function and malloc).
-const instantiateTimeout = 5 * time.Second
 
 // Size returns the pool capacity.
 func (p *Pool) Size() int {

@@ -22,8 +22,14 @@ func PolicyInputs(event *api.Event, temporal bool) [][]byte {
 		abiVersion = TemporalABIVersion
 	}
 
+	return PolicyInputsForABI(event, abiVersion)
+}
+
+// PolicyInputsForABI covers the inputs at a specific ABI version, including
+// ABI 4 process context. The legacy boolean helper covers only ABI 0/3.
+func PolicyInputsForABI(event *api.Event, abiVersion uint32) [][]byte {
 	bin := make([]byte, eventStructSize)
-	writeEventBinary(bin, event, temporal)
+	writeEventBinary(bin, event, abiVersion >= TemporalABIVersion)
 
 	js, err := marshalEventForWASM(event, abiVersion)
 	if err != nil {

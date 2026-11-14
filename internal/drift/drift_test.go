@@ -78,7 +78,7 @@ func TestDetectorSubmitAndAnomalies(t *testing.T) {
 
 	// Submit 5 agents with similar rates, 1 outlier
 	for i := range 5 {
-		d.Submit(&BehaviorFingerprint{
+		submitFingerprint(t, d, &BehaviorFingerprint{
 			AgentID:   agentID(i),
 			ImageHash: "sha256:img1",
 			Vectors:   map[string]float64{"exec:/bin/ls": 10.0},
@@ -86,7 +86,7 @@ func TestDetectorSubmitAndAnomalies(t *testing.T) {
 		})
 	}
 	// Outlier agent
-	d.Submit(&BehaviorFingerprint{
+	submitFingerprint(t, d, &BehaviorFingerprint{
 		AgentID:   "agent-outlier",
 		ImageHash: "sha256:img1",
 		Vectors:   map[string]float64{"exec:/bin/ls": 100.0},
@@ -118,7 +118,7 @@ func TestDetectorSubmitAndAnomalies(t *testing.T) {
 func TestDetectorNoAnomalySingleAgent(t *testing.T) {
 	d := NewDetector(DetectorConfig{Threshold: 3.0})
 
-	d.Submit(&BehaviorFingerprint{
+	submitFingerprint(t, d, &BehaviorFingerprint{
 		AgentID:   "agent-1",
 		ImageHash: "sha256:img1",
 		Vectors:   map[string]float64{"exec:/bin/ls": 10.0},
@@ -135,7 +135,7 @@ func TestDetectorNoAnomalyUniformRates(t *testing.T) {
 	d := NewDetector(DetectorConfig{Threshold: 3.0})
 
 	for i := range 5 {
-		d.Submit(&BehaviorFingerprint{
+		submitFingerprint(t, d, &BehaviorFingerprint{
 			AgentID:   agentID(i),
 			ImageHash: "sha256:img1",
 			Vectors:   map[string]float64{"exec:/bin/ls": 10.0},
@@ -154,7 +154,7 @@ func TestDetectorUniquePatternDetection(t *testing.T) {
 
 	// 4 agents have only "exec:/bin/ls"
 	for i := range 4 {
-		d.Submit(&BehaviorFingerprint{
+		submitFingerprint(t, d, &BehaviorFingerprint{
 			AgentID:   agentID(i),
 			ImageHash: "sha256:img1",
 			Vectors:   map[string]float64{"exec:/bin/ls": 10.0},
@@ -162,7 +162,7 @@ func TestDetectorUniquePatternDetection(t *testing.T) {
 		})
 	}
 	// 1 agent has an additional unique pattern
-	d.Submit(&BehaviorFingerprint{
+	submitFingerprint(t, d, &BehaviorFingerprint{
 		AgentID:   "agent-unique",
 		ImageHash: "sha256:img1",
 		Vectors: map[string]float64{
@@ -188,14 +188,14 @@ func TestDetectorAnomaliesForAgent(t *testing.T) {
 	d := NewDetector(DetectorConfig{Threshold: 2.0})
 
 	for i := range 5 {
-		d.Submit(&BehaviorFingerprint{
+		submitFingerprint(t, d, &BehaviorFingerprint{
 			AgentID:   agentID(i),
 			ImageHash: "sha256:img1",
 			Vectors:   map[string]float64{"exec:/bin/ls": 10.0},
 			Timestamp: time.Now(),
 		})
 	}
-	d.Submit(&BehaviorFingerprint{
+	submitFingerprint(t, d, &BehaviorFingerprint{
 		AgentID:   "agent-outlier",
 		ImageHash: "sha256:img1",
 		Vectors:   map[string]float64{"exec:/bin/ls": 100.0},
@@ -223,13 +223,13 @@ func TestDetectorAnomaliesForAgent(t *testing.T) {
 func TestDetectorSubmitUpdatesExisting(t *testing.T) {
 	d := NewDetector(DetectorConfig{Threshold: 3.0})
 
-	d.Submit(&BehaviorFingerprint{
+	submitFingerprint(t, d, &BehaviorFingerprint{
 		AgentID:   "agent-1",
 		ImageHash: "sha256:img1",
 		Vectors:   map[string]float64{"exec:/bin/ls": 10.0},
 		Timestamp: time.Now(),
 	})
-	d.Submit(&BehaviorFingerprint{
+	submitFingerprint(t, d, &BehaviorFingerprint{
 		AgentID:   "agent-1",
 		ImageHash: "sha256:img1",
 		Vectors:   map[string]float64{"exec:/bin/ls": 50.0},
@@ -244,13 +244,13 @@ func TestDetectorSubmitUpdatesExisting(t *testing.T) {
 func TestDetectorMultipleImages(t *testing.T) {
 	d := NewDetector(DetectorConfig{Threshold: 3.0})
 
-	d.Submit(&BehaviorFingerprint{
+	submitFingerprint(t, d, &BehaviorFingerprint{
 		AgentID:   "agent-1",
 		ImageHash: "sha256:img1",
 		Vectors:   map[string]float64{"exec:/bin/ls": 10.0},
 		Timestamp: time.Now(),
 	})
-	d.Submit(&BehaviorFingerprint{
+	submitFingerprint(t, d, &BehaviorFingerprint{
 		AgentID:   "agent-2",
 		ImageHash: "sha256:img2",
 		Vectors:   map[string]float64{"exec:/bin/ls": 10.0},
@@ -266,7 +266,7 @@ func TestDetectorMultipleImages(t *testing.T) {
 func TestDetectorClear(t *testing.T) {
 	d := NewDetector(DetectorConfig{Threshold: 3.0})
 
-	d.Submit(&BehaviorFingerprint{
+	submitFingerprint(t, d, &BehaviorFingerprint{
 		AgentID:   "agent-1",
 		ImageHash: "sha256:img1",
 		Vectors:   map[string]float64{"exec:/bin/ls": 10.0},
@@ -284,7 +284,7 @@ func TestDetectorFleetStatus(t *testing.T) {
 
 	now := time.Now()
 	for i := range 10 {
-		d.Submit(&BehaviorFingerprint{
+		submitFingerprint(t, d, &BehaviorFingerprint{
 			AgentID:   agentID(i),
 			ImageHash: "sha256:img1",
 			Vectors:   map[string]float64{"exec:/bin/ls": 10.0},
@@ -292,7 +292,7 @@ func TestDetectorFleetStatus(t *testing.T) {
 		})
 	}
 	// Add an outlier to ensure anomaly count > 0
-	d.Submit(&BehaviorFingerprint{
+	submitFingerprint(t, d, &BehaviorFingerprint{
 		AgentID:   "agent-outlier",
 		ImageHash: "sha256:img1",
 		Vectors:   map[string]float64{"exec:/bin/ls": 500.0},
@@ -323,14 +323,14 @@ func TestDetectorDeficitDirection(t *testing.T) {
 
 	// 5 agents with high rate, 1 with very low rate
 	for i := range 5 {
-		d.Submit(&BehaviorFingerprint{
+		submitFingerprint(t, d, &BehaviorFingerprint{
 			AgentID:   agentID(i),
 			ImageHash: "sha256:img1",
 			Vectors:   map[string]float64{"exec:/bin/ls": 100.0},
 			Timestamp: time.Now(),
 		})
 	}
-	d.Submit(&BehaviorFingerprint{
+	submitFingerprint(t, d, &BehaviorFingerprint{
 		AgentID:   "agent-deficit",
 		ImageHash: "sha256:img1",
 		Vectors:   map[string]float64{"exec:/bin/ls": 0.0},
@@ -359,14 +359,14 @@ func TestDetectorZScoreAccuracy(t *testing.T) {
 	// z-score for 40: (40-16)/12 = 2.0
 	// z-score for 10: (10-16)/12 = -0.5
 	for i := range 4 {
-		d.Submit(&BehaviorFingerprint{
+		submitFingerprint(t, d, &BehaviorFingerprint{
 			AgentID:   agentID(i),
 			ImageHash: "sha256:img1",
 			Vectors:   map[string]float64{"p": 10.0},
 			Timestamp: time.Now(),
 		})
 	}
-	d.Submit(&BehaviorFingerprint{
+	submitFingerprint(t, d, &BehaviorFingerprint{
 		AgentID:   "agent-high",
 		ImageHash: "sha256:img1",
 		Vectors:   map[string]float64{"p": 40.0},
@@ -398,7 +398,9 @@ func TestSubmitFromCollector(t *testing.T) {
 	fc.Record("agent-1", "sha256:img1", "exec:/bin/ls")
 
 	d := NewDetector(DetectorConfig{Threshold: 3.0})
-	d.SubmitFromCollector(fc, "agent-1")
+	if err := d.SubmitFromCollector(fc, "agent-1"); err != nil {
+		t.Fatal(err)
+	}
 
 	if d.AgentCount("sha256:img1") != 1 {
 		t.Errorf("expected 1 agent after SubmitFromCollector, got %d", d.AgentCount("sha256:img1"))
@@ -409,7 +411,9 @@ func TestSubmitFromCollectorNonexistent(t *testing.T) {
 	fc := NewFingerprintCollector(5 * time.Minute)
 	d := NewDetector(DetectorConfig{Threshold: 3.0})
 
-	d.SubmitFromCollector(fc, "nonexistent")
+	if err := d.SubmitFromCollector(fc, "nonexistent"); err != nil {
+		t.Fatal(err)
+	}
 	if d.AgentCount("any") != 0 {
 		t.Error("expected no agents for nonexistent collector snapshot")
 	}
@@ -419,9 +423,9 @@ func TestPruneStale(t *testing.T) {
 	d := NewDetector(DetectorConfig{Threshold: 3.0})
 	now := time.Now()
 
-	d.Submit(&BehaviorFingerprint{AgentID: "a1", ImageHash: "img", Timestamp: now.Add(-time.Hour)})
-	d.Submit(&BehaviorFingerprint{AgentID: "a2", ImageHash: "img", Timestamp: now})
-	d.Submit(&BehaviorFingerprint{AgentID: "a3", ImageHash: "gone", Timestamp: now.Add(-time.Hour)})
+	submitFingerprint(t, d, &BehaviorFingerprint{AgentID: "a1", ImageHash: "img", Timestamp: now.Add(-time.Hour)})
+	submitFingerprint(t, d, &BehaviorFingerprint{AgentID: "a2", ImageHash: "img", Timestamp: now})
+	submitFingerprint(t, d, &BehaviorFingerprint{AgentID: "a3", ImageHash: "gone", Timestamp: now.Add(-time.Hour)})
 
 	d.PruneStale(now.Add(-time.Minute))
 
@@ -440,4 +444,26 @@ func TestPruneStale(t *testing.T) {
 
 func agentID(i int) string {
 	return "agent-" + string(rune('0'+i))
+}
+
+// submitFingerprint asserts successful admission for test fixtures. Tests of
+// rejection use Submit directly and check the returned error instead.
+func submitFingerprint(t testing.TB, d *Detector, fp *BehaviorFingerprint) {
+	t.Helper()
+	if err := d.Submit(fp); err != nil {
+		t.Fatalf("submit fingerprint: %v", err)
+	}
+}
+
+func TestSubmitFromCollectorReportsRejection(t *testing.T) {
+	fc := NewFingerprintCollector(time.Minute)
+	fc.Record("agent", "image", "exec:bash")
+	fc.Record("agent", "image", "exec:curl")
+	d := NewDetector(DetectorConfig{MaxPatterns: 1})
+	if err := d.SubmitFromCollector(fc, "agent"); err == nil {
+		t.Fatal("expected collector submission to report detector admission error")
+	}
+	if d.AgentCount("image") != 0 {
+		t.Fatal("rejected collector fingerprint was retained")
+	}
 }
