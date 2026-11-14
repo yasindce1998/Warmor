@@ -12,6 +12,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/policymerge"
 	"github.com/yasindce1998/warmor/internal/simulator"
 	"github.com/yasindce1998/warmor/internal/streaming"
+	"github.com/yasindce1998/warmor/internal/testutil"
 	"github.com/yasindce1998/warmor/internal/wasm"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -129,7 +130,7 @@ func TestRecordLearnCompileReplay(t *testing.T) {
 		{Type: api.EventTypeNetwork, Comm: "server", Hook: "listen", Network: &api.NetworkEvent{Operation: "listen", Protocol: "tcp", LocalPort: 8080}},
 		{Type: api.EventTypeNetwork, Comm: "server", Hook: "bind", Network: &api.NetworkEvent{Operation: "bind", Protocol: "tcp", LocalPort: 8443}},
 	}
-	dir := t.TempDir()
+	dir := testutil.PhysicalTempDir(t)
 	store, err := simulator.NewEventStore(dir)
 	if err != nil {
 		t.Fatal(err)

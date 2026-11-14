@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/yasindce1998/warmor/internal/testutil"
 )
 
 func TestOpenAppendProtectsOnlyPrivateLeafAndRecording(t *testing.T) {
-	parent := t.TempDir()
+	parent := testutil.PhysicalTempDir(t)
 	if err := os.Chmod(parent, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +50,7 @@ func TestOpenAppendProtectsOnlyPrivateLeafAndRecording(t *testing.T) {
 }
 
 func TestOpenAppendRejectsAliasesWithoutChangingTarget(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.PhysicalTempDir(t)
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, []byte("keep"), 0644); err != nil {
 		t.Fatal(err)
@@ -80,7 +82,7 @@ func TestOpenAppendRejectsAliasesWithoutChangingTarget(t *testing.T) {
 }
 
 func TestRotateChecksDescriptorAndNeverOverwritesArchive(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.PhysicalTempDir(t)
 	path := filepath.Join(dir, "events")
 	f, err := OpenAppend(path, false, false)
 	if err != nil {
@@ -111,5 +113,48 @@ func TestRotateChecksDescriptorAndNeverOverwritesArchive(t *testing.T) {
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != "replacement" {
 		t.Fatalf("replacement changed: %q %v", data, err)
+	}
+}
+
+func TestPhysicalFixtureRootStillRejectsSymlinkParents(t *testing.T) {
+	// Canonicalize only the test-owned root. Resolving the final recording
+	// path instead would hide these hostile components from the no-follow walk.
+	root := testutil.PhysicalTempDir(t)
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(alias, "events"), filepath.Join(alias, "new", "events")} {
+		if f, err := OpenAppend(path, true, true); err == nil {
+			_ = f.Close()
+			t.Fatalf("followed attacker-controlled parent: %s", path)
+		}
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0755 || len(entries) != 0 {
+		t.Fatalf("symlink target was chmodded or populated: mode %o, entries %v", info.Mode().Perm(), entries)
+	}
+	// Confirm the root was usable: rejection must not just be an unrelated
+	// platform alias failure before reaching the hostile component.
+	f, err := OpenAppend(filepath.Join(root, "safe", "events"), true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

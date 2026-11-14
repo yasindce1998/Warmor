@@ -10,12 +10,13 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/streaming"
+	"github.com/yasindce1998/warmor/internal/testutil"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 func TestPipelineRecordReplayPreservesActionOutcomes(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := testutil.PhysicalTempDir(t)
 	storeDir := filepath.Join(dir, "store")
 	store, err := NewEventStore(storeDir)
 	if err != nil {

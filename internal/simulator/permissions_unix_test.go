@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/streaming"
+	"github.com/yasindce1998/warmor/internal/testutil"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -26,7 +27,7 @@ func TestEventStorePermissionsUmask022(t *testing.T) {
 		return
 	}
 	syscall.Umask(0022)
-	root := t.TempDir()
+	root := testutil.PhysicalTempDir(t)
 	dir := filepath.Join(root, "new", "store")
 	store, err := NewEventStore(dir)
 	if err != nil {

@@ -10,10 +10,11 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/streaming"
+	"github.com/yasindce1998/warmor/internal/testutil"
 )
 
 func TestNewEventStore_CreatesNestedDir(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "a", "b", "c")
+	dir := filepath.Join(testutil.PhysicalTempDir(t), "a", "b", "c")
 	store, err := NewEventStore(dir)
 	if err != nil {
 		t.Fatalf("NewEventStore: %v", err)
@@ -30,7 +31,7 @@ func TestNewEventStore_CreatesNestedDir(t *testing.T) {
 }
 
 func TestNewEventStore_DirIsFile(t *testing.T) {
-	f := filepath.Join(t.TempDir(), "file")
+	f := filepath.Join(testutil.PhysicalTempDir(t), "file")
 	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +44,7 @@ func TestNewEventStore_DirIsFile(t *testing.T) {
 }
 
 func TestNewEventStore_EventFileIsDir(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.PhysicalTempDir(t)
 	// Occupy today's event file path with a directory so OpenFile fails.
 	name := "events-" + time.Now().UTC().Format("2006-01-02") + ".ndjson"
 	if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
@@ -59,7 +60,7 @@ func TestNewEventStore_EventFileIsDir(t *testing.T) {
 }
 
 func TestEventStore_RotatesOnDateChange(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.PhysicalTempDir(t)
 	store, err := NewEventStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +96,7 @@ func TestEventStore_RotatesOnDateChange(t *testing.T) {
 }
 
 func TestEventStore_WriteRotateError(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.PhysicalTempDir(t)
 	store, err := NewEventStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +125,7 @@ func TestEventStore_FlushCloseNilFile(t *testing.T) {
 }
 
 func TestEventStore_ConcurrentWrites(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.PhysicalTempDir(t)
 	store, err := NewEventStore(dir)
 	if err != nil {
 		t.Fatal(err)

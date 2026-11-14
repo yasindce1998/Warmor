@@ -67,6 +67,12 @@ and rotation use the same descriptor-relative no-follow checks; a failed reopen
 does not continue writing via the old encoder. A platform without these private
 file guarantees fails closed (notably Windows until an ACL implementation exists).
 Operators using symlinked log paths must configure the physical directory path.
+On macOS this includes system aliases such as `/var` and `/tmp`: use the
+corresponding physical `/private/var` or `/private/tmp` recording path. Recording
+does not call `EvalSymlinks` on user-supplied paths. Tests resolve only their
+newly allocated temporary fixture root before constructing recording paths, so
+native macOS temporary-directory aliases work without accepting symlinks planted
+inside the fixture or weakening the production no-follow checks.
 
 Tightening cannot revoke access via descriptors already opened by other users or
 undo previous disclosure: treat credentials captured by older permissive logs as

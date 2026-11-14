@@ -17,6 +17,7 @@ on:
       - 'internal/simulator/**'
       - 'internal/streaming/**'
       - 'internal/privatefile/**'
+      - 'internal/testutil/**'
       - 'pkg/api/**'
       - 'internal/wasm/**'
       - 'cmd/warmor-learn/**'
@@ -41,6 +42,7 @@ on:
       - 'internal/simulator/**'
       - 'internal/streaming/**'
       - 'internal/privatefile/**'
+      - 'internal/testutil/**'
       - 'pkg/api/**'
       - 'internal/wasm/**'
       - 'cmd/warmor-learn/**'
@@ -73,7 +75,7 @@ jobs:
       - name: Record, learn, validate, compile and replay contract
         env:
           WARMOR_REQUIRE_CARGO: "1"
-        run: go test ./internal/learner ./internal/simulator ./internal/streaming ./cmd/warmor-learn ./cmd/warmor-simulate -v
+        run: go test ./internal/learner ./internal/simulator ./internal/streaming ./internal/privatefile ./internal/testutil ./cmd/warmor-learn ./cmd/warmor-simulate -v
 
       - name: Run policy package tests
         run: |

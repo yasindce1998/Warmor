@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/testutil"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -30,7 +31,7 @@ func TestFileRecordingPermissionsUmask022(t *testing.T) {
 		return
 	}
 	syscall.Umask(0022)
-	dir := t.TempDir()
+	dir := testutil.PhysicalTempDir(t)
 	path := filepath.Join(dir, "events.ndjson")
 	// Tighten a legacy world-readable file before appending argv.
 	if err := os.WriteFile(path, []byte("legacy\n"), 0644); err != nil {
@@ -167,7 +168,7 @@ func TestPrivateRecordingQueueDrainsAndCloses(t *testing.T) {
 		return
 	}
 	syscall.Umask(0022)
-	dir := t.TempDir()
+	dir := testutil.PhysicalTempDir(t)
 	if err := os.Chmod(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
