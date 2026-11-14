@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   supervised-host-outcomes:
-    name: Signed supervised host (${{ matrix.maps }}, VM)
+    name: Artifact-signed supervised host (${{ matrix.maps }}, VM)
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
@@ -32,7 +32,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.26.2'
+          go-version: '1.26.11'
       - name: Configure VM cache outside shared checkout
         run: |
           mkdir -p "$RUNNER_TEMP/warmor-host-cache"
@@ -53,8 +53,9 @@ jobs:
       - name: Offline harness and owned-host lifetime tests
         run: |
           bash -n tests/integration/run-outcomes.sh tests/integration/check-host-outcomes.sh tests/integration/run-vm.sh
-          go test -race -count=1 ./tests/integration ./cmd/warmor-daemon
-          go test -race -count=1 ./internal/enforcer -run '^TestSupervised'
+          go test -race -p 2 -count=1 ./tests/integration ./cmd/warmor-daemon ./internal/testutil/loadphase
+          go test -race -p 2 -count=1 ./internal/enforcer -run '^TestSupervised'
+          go test -race -p 2 -tags policyhost_phaseproof -count=1 ./internal/policyhost -run '^TestPhaseProof'
       - name: Regenerate BPF from tested source
         env:
           BPF2GO_CFLAGS: -D__TARGET_ARCH_x86 -mcpu=v1

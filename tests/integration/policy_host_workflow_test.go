@@ -56,8 +56,23 @@ func TestSupervisedHostWorkflowIsSeparateRequiredVMMatrix(t *testing.T) {
 			retained = true
 		}
 	}
-	if !ran || !retained || !strings.Contains(string(data), "go-version: '1.26.2'") {
+	if !ran || !retained || !strings.Contains(string(data), "go-version: '1.26.11'") {
 		t.Fatal("missing real VM gate, retained evidence, or toolchain pin")
+	}
+	if !strings.Contains(string(data), "-tags policyhost_phaseproof") || !strings.Contains(string(data), "./internal/testutil/loadphase") {
+		t.Fatal("CI must exercise tagged real-worker barrier and negative offline oracle")
+	}
+}
+
+func TestSupervisedPhaseProfileExcludedFromReleasePackaging(t *testing.T) {
+	for _, path := range []string{"../../scripts/release-build.sh", "../../deploy/Dockerfile"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "policyhost_phaseproof") {
+			t.Fatalf("test-only profile leaked into release build: %s", path)
+		}
 	}
 }
 
@@ -75,7 +90,9 @@ func TestSupervisedHostRunnerControlsAndTrustEvidence(t *testing.T) {
 	for _, required := range []string{
 		`export GIT_DIR="$(git rev-parse --absolute-git-dir)"`, `export GIT_WORK_TREE="$ROOT"`,
 		`unset WARMOR_OUTCOME_POLICY_HOST WARMOR_OUTCOME_ATOMIC_GENERATIONS`,
-		`go build -o "$ARTIFACTS/warmor-policy-host" ./cmd/warmor-policy-host`,
+		`unset WARMOR_TEST_HOST_PHASE_SOCKET WARMOR_TEST_HOST_PHASE_DIGESTS`,
+		`go build -tags policyhost_phaseproof -o "$ARTIFACTS/warmor-policy-host" ./cmd/warmor-policy-host`,
+		`go build -tags policyhost_phaseproof -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon`,
 		`"$ARTIFACTS/POLICY_HOST_SHA256"`, `"$ARTIFACTS/fixture-public.pem"`,
 		`"$ARTIFACTS/"*.sig`, `"$ARTIFACTS/reviewed-declaration-digests.txt"`,
 		`bash tests/integration/check-host-outcomes.sh "$ARTIFACTS/outcomes.log"`,

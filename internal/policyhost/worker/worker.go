@@ -47,6 +47,9 @@ func Run(in io.Reader, out io.Writer) error {
 		return err
 	}
 	ctx := context.Background()
+	if err := testLoadPhase(in, out, c); err != nil {
+		return err
+	}
 	rt, err := wasm.NewRuntime(ctx, wasm.RuntimeConfig{PoolSize: 1, MemoryLimitPages: c.Limits.MemoryPages, InitializationTimeout: time.Minute})
 	if err != nil {
 		return errors.New("runtime unavailable")

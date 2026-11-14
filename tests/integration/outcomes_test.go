@@ -442,6 +442,11 @@ type daemonProcess struct {
 
 func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ...string) *daemonProcess {
 	t.Helper()
+	return f.startDaemonEnv(t, name, policy, nil, flags...)
+}
+
+func (f *outcomeFixture) startDaemonEnv(t *testing.T, name, policy string, env []string, flags ...string) *daemonProcess {
+	t.Helper()
 	// Reserve an available VM-local port. A startup race fails closed below.
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -469,6 +474,7 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 		"--metrics-port", fmt.Sprint(port), "--event-sink", "file:" + d.events, "--stats-interval", "1h"}
 	args = append(args, f.hostFlags...)
 	d.cmd = exec.Command(filepath.Join(f.dir, "warmor-daemon"), append(args, flags...)...)
+	d.cmd.Env = append(os.Environ(), env...)
 	d.cmd.Stdout, d.cmd.Stderr = log, log
 	if err := d.cmd.Start(); err != nil {
 		_ = log.Close() // Preserve the daemon startup failure.

@@ -79,6 +79,9 @@ func verifySameBuild(t *testing.T) {
 		if settings["vcs.revision"] == "" || settings["GOOS"] != "linux" {
 			t.Fatalf("%s lacks exact Linux VCS provenance: %+v", name, settings)
 		}
+		if settings["-tags"] != "policyhost_phaseproof" {
+			t.Fatalf("%s missing explicit paired test-only phase-proof build tag", name)
+		}
 		if revision != "" && revision != settings["vcs.revision"] {
 			t.Fatal("daemon and host built from different commits")
 		}
@@ -182,7 +185,8 @@ func (d *daemonProcess) hostPIDs(t *testing.T) []int {
 
 func (f *outcomeFixture) hostLoadFailures(t *testing.T) {
 	active := f.activePolicy(t, "host-LKG", filepath.Join(f.dir, "static.wasm"))
-	d := f.startDaemon(t, "host-LKG", active, "--default-deny")
+	listener, env := listenHostLoadPhase(t, f)
+	d := f.startDaemonEnv(t, "host-LKG", active, env, "--default-deny")
 	old := d.hosts[0]
 	for _, candidate := range []string{"compile-heavy", "init-loop", "signed-malformed"} {
 		t.Run(candidate, func(t *testing.T) {
@@ -192,15 +196,24 @@ func (f *outcomeFixture) hostLoadFailures(t *testing.T) {
 			// A simultaneous SIGHUP would queue a second activation and obscure
 			// which candidate failed. Real compile/init children remain visible.
 			if candidate != "signed-malformed" {
-				waitFor(t, "watcher-owned compile/init candidate", func() bool { return len(d.hostPIDs(t)) == 2 })
+				phase := acceptHostLoadPhase(t, listener, hostFixtureDigest(t, filepath.Join(f.dir, candidate+".wasm")), old)
+				owned := false
+				for _, pid := range d.hostPIDs(t) {
+					owned = owned || uint64(pid) == phase.held.Sequence
+				}
+				if !owned {
+					t.Fatal("held-load receipt PID is not an owned daemon child")
+				}
+				// Completing work and confirming the still-held child happens
+				// BEFORE release, never racing a 500ms deadline. Dispatch stalled
+				// for the entire load cannot satisfy the fresh phase confirmation.
+				f.requireAllowDuringLoad(t, d, phase, candidate)
+				phase.release(t)
+			} else {
+				// Malformed framing rejects immediately: only eventual LKG is
+				// claimed for this candidate, not concurrent load progress.
+				f.runAllowed(t, "allowed", candidate+"-LKG-allow", 0)
 			}
-			// Work while the candidate owns the activation lock, not just after
-			// rejection. Exact EPERM and allowed side effects use the same oracle.
-			pid := f.runAllowed(t, "allowed", candidate+"-LKG-allow", 100*time.Millisecond)
-			d.requireEvent(t, func(e streaming.SecurityEvent) bool {
-				return e.PID == uint32(pid) && e.UID == 65534 && e.EventType == "file" &&
-					e.Filename == filepath.Join(f.work, "markers", candidate+"-LKG-allow") && e.Decision == "allow" && !e.Cached
-			})
 			f.requireFirstDenied(t, candidate+"-denied", candidate+"-LKG-deny")
 			waitFor(t, "signed child load rejection", func() bool {
 				data, _ := os.ReadFile(d.log)

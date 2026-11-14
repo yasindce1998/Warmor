@@ -30,6 +30,7 @@ done
 if "$ATOMIC" && ! "$POLICY_HOST"; then usage >&2; exit 2; fi
 # Inherited controls must never silently alter the legacy gate.
 unset WARMOR_OUTCOME_POLICY_HOST WARMOR_OUTCOME_ATOMIC_GENERATIONS
+unset WARMOR_TEST_HOST_PHASE_SOCKET WARMOR_TEST_HOST_PHASE_DIGESTS
 if "$POLICY_HOST"; then export WARMOR_OUTCOME_POLICY_HOST=1; fi
 if "$ATOMIC"; then export WARMOR_OUTCOME_ATOMIC_GENERATIONS=1; fi
 
@@ -56,10 +57,13 @@ echo "Outcome artifacts: $ARTIFACTS (retained on success and failure)"
 export CGO_ENABLED=0
 export WARMOR_OUTCOME_ARTIFACTS="$ARTIFACTS"
 git rev-parse HEAD > "$ARTIFACTS/source-sha.txt"
-go build -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon
 if "$POLICY_HOST"; then
-  go build -o "$ARTIFACTS/warmor-policy-host" ./cmd/warmor-policy-host
+  # Explicit test-only paired protocol: production/release builds omit it.
+  go build -tags policyhost_phaseproof -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon
+  go build -tags policyhost_phaseproof -o "$ARTIFACTS/warmor-policy-host" ./cmd/warmor-policy-host
   sha256sum "$ARTIFACTS/warmor-policy-host" | cut -d ' ' -f1 > "$ARTIFACTS/POLICY_HOST_SHA256"
+else
+  go build -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon
 fi
 go test -c -tags integration -o "$ARTIFACTS/outcomes.test" ./tests/integration
 go test -c -tags integration -o "$ARTIFACTS/kernel.test" ./internal/ebpf
@@ -73,6 +77,7 @@ WARMOR_OUTCOME_PREPARE=1 "$ARTIFACTS/outcomes.test" \
   rustc --version
   echo "kernel=$KERNEL"
   echo "policy_host=$POLICY_HOST atomic_generations=$ATOMIC"
+  echo "test_only_phase_profile=$POLICY_HOST (no deadline changes; paired load barrier before real compilation)"
   echo 'BPF objects below are the exact go:embed inputs used by both binaries.'
 } > "$ARTIFACTS/build-info.txt"
 sha256sum "$ARTIFACTS/source-sha.txt" "$ARTIFACTS/warmor-daemon" "$ARTIFACTS/outcomes.test" "$ARTIFACTS/kernel.test" \

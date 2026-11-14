@@ -23,11 +23,18 @@ automatic respawn after an active host dies, and clean SIGTERM cancellation of a
 watcher-owned candidate. `check-host-outcomes.sh` rejects skips, duplicates,
 missing nested PASS evidence, and final success without all selected fixtures.
 `.github/workflows/supervised-host-outcomes.yml` requires separate legacy/atomic
-VM jobs using Go 1.26.2 and the existing `/dev/null` transport/deadline launcher.
+VM jobs using Go 1.26.11 and the existing `/dev/null` transport/deadline launcher.
 These are new CI gates, not locally claimed VM results. Deterministic real-host,
 fake-kernel tests retain the precise old-lease/maps-until-Close ordering oracle;
 the process-level VM test does not pretend to observe every teardown instant.
 See [deployment assumptions](../../docs/design/supervised-host-deployment.md).
+
+The host-mode pair now uses the explicit test-only `policyhost_phaseproof` build
+profile. Its owned IPC barrier requires helper completion and an attributed
+uncached ALLOW **before** releasing the still-loading candidate; the real load
+deadline and eventual LKG assertions follow. Release/Docker binaries never use
+this profile. See [phase-proof scope and negative probes](../../docs/design/supervised-host-phase-proof.md).
+Artifact signatures here do not imply signed-deployment validation.
 
 ## What a passing VM run proves
 

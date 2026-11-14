@@ -200,6 +200,9 @@ func (s *Supervisor) Start(ctx context.Context, p *StagedPolicy) (*Host, error) 
 	}
 	if err == nil {
 		phase = "load"
+		err = testLoadPhase(ctx, h)
+	}
+	if err == nil {
 		stop()
 		var loadCancel context.CancelFunc
 		ctx, loadCancel = context.WithTimeout(ctx, s.config.LoadTimeout)
