@@ -114,7 +114,7 @@ func TestRunnerUsesPreparedBinariesInVM(t *testing.T) {
 
 func TestVMDeadlinePropagatesFailureAndCapturesStderr(t *testing.T) {
 	// Exercise only a fake vimto. No guest, BPF loader or daemon is executed.
-	for _, code := range []string{"0", "7", "124"} {
+	for _, code := range []string{"0", "7", "124", "137"} {
 		t.Run(code, func(t *testing.T) {
 			dir := t.TempDir()
 			fake := filepath.Join(dir, "vimto")
@@ -140,6 +140,9 @@ func TestVMDeadlinePropagatesFailureAndCapturesStderr(t *testing.T) {
 			if err != nil || !strings.Contains(string(status), "exit="+code) {
 				t.Fatalf("retain VM phase exit: %q %v", status, err)
 			}
+			if code != "0" && !strings.Contains(string(status), "deadline_expired=false") {
+				t.Fatalf("launcher exit %s without a deadline must not be classified as one: %s", code, status)
+			}
 		})
 	}
 }
@@ -158,12 +161,22 @@ func TestVMDeadlineCoversPreGuestStartup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(workflow), "XDG_CACHE_HOME: ${{ runner.temp }}/warmor-outcome-cache") {
-		t.Fatal("kernel root-overlay cache must stay on runner disk outside the shared checkout")
+	if strings.Contains(string(workflow), "${{ runner.temp }}") ||
+		!strings.Contains(string(workflow), `echo "XDG_CACHE_HOME=$RUNNER_TEMP/warmor-outcome-cache" >> "$GITHUB_ENV"`) {
+		t.Fatal("configure the cache using shell RUNNER_TEMP, not an unavailable job-env expression context")
 	}
 }
 
 func TestVMDeadlineActuallyStopsStalledLauncher(t *testing.T) {
+	for _, hardKill := range []bool{false, true} {
+		t.Run(fmt.Sprint("hard-kill=", hardKill), func(t *testing.T) {
+			testStalledLauncherDeadline(t, hardKill)
+		})
+	}
+}
+
+func testStalledLauncherDeadline(t *testing.T, hardKill bool) {
+	t.Helper()
 	// Shorten only the test's timeout executable, not the production deadline.
 	// The fake launcher never boots a VM or starts enforcement.
 	timeout, err := exec.LookPath("timeout")
@@ -175,26 +188,38 @@ func TestVMDeadlineActuallyStopsStalledLauncher(t *testing.T) {
 	if err := os.Mkdir(bin, 0700); err != nil {
 		t.Fatal(err)
 	}
-	wrapper := "#!/bin/sh\nshift 4\nexec " + timeout + " --signal=QUIT --kill-after=1s 0.1s \"$@\"\n"
+	wrapper := "#!/bin/sh\nshift 4\nexec " + timeout + " --verbose --signal=QUIT --kill-after=0.5s 1s \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "timeout"), []byte(wrapper), 0700); err != nil {
 		t.Fatal(err)
 	}
 	fake := filepath.Join(bin, "vimto")
-	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho stalled-before-guest >&2\nexec sleep 30\n"), 0700); err != nil {
+	trap := "trap 'exit 0' QUIT\n"
+	if hardKill {
+		trap = "trap '' QUIT\n"
+	}
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\n"+trap+"echo stalled-before-guest >&2\nwhile :; do sleep 1; done\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "run-vm.sh", "verifier", dir, fake)
 	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
 	output, err := cmd.CombinedOutput()
 	var exit *exec.ExitError
-	if ctx.Err() != nil || !errors.As(err, &exit) || exit.ExitCode() != 124 {
+	if ctx.Err() != nil || !errors.As(err, &exit) || (exit.ExitCode() != 124 && exit.ExitCode() != 137) {
 		t.Fatalf("stalled launcher must fail at host deadline: %v context=%v output=%s", err, ctx.Err(), output)
 	}
 	status, err := os.ReadFile(filepath.Join(dir, "verifier-status.txt"))
-	if err != nil || !strings.Contains(string(status), "exit=124") || !strings.Contains(string(status), "No prevention or termination proof") {
+	if err != nil || !strings.Contains(string(status), fmt.Sprint("exit=", exit.ExitCode())) ||
+		!strings.Contains(string(status), "deadline_expired=true") || !strings.Contains(string(status), "No prevention or termination proof") {
 		t.Fatalf("retain failed startup diagnosis, not success: %q %v", status, err)
+	}
+	log, err := os.ReadFile(filepath.Join(dir, "verifier.log"))
+	if err != nil || !strings.Contains(string(log), "timeout: sending signal QUIT to command ") {
+		t.Fatalf("require phase-local timeout signal evidence, not any exit 137: %q %v", log, err)
+	}
+	if hardKill && (exit.ExitCode() != 137 || !strings.Contains(string(log), "timeout: sending signal KILL to command ")) {
+		t.Fatalf("ignored QUIT must exercise hard-kill deadline path: exit=%d log=%s", exit.ExitCode(), log)
 	}
 }
 

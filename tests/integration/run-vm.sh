@@ -23,12 +23,20 @@ STATUS="$ARTIFACTS/$PHASE-status.txt"
 # QUIT obtains Go stacks if vimto is stuck before guest tests start. The whole
 # command process group (including QEMU) is bounded; no --foreground or retry.
 # Capture stderr too: boot/transport failures must reach the retained artifact.
-if GOTRACEBACK=all timeout --verbose --signal=QUIT --kill-after=15s "$LIMIT" "$@" 2>&1 | tee "$LOG"; then
+if LC_ALL=C GOTRACEBACK=all timeout --verbose --signal=QUIT --kill-after=15s "$LIMIT" "$@" 2>&1 | tee "$LOG"; then
   echo 'exit=0' >> "$STATUS"
 else
   code=$?
+  deadline=false
+  # GNU timeout can return 137 when its hard-kill grace expires. Neither 137
+  # nor 124 alone proves a deadline: the launcher may return either itself.
+  if { [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; } &&
+      grep -Fq 'timeout: sending signal QUIT to command ' "$LOG"; then
+    deadline=true
+  fi
   {
     echo "exit=$code"
+    echo "deadline_expired=$deadline"
     date -u '+failed=%Y-%m-%dT%H:%M:%SZ'
     echo 'No prevention or termination proof: VM phase did not complete.'
     ps -eo pid,ppid,stat,etime,args
