@@ -80,3 +80,41 @@ func (i *intelligence) publishMetrics() {
 // recomputed. The graphs are updated on every event; the gauges do not
 // need to be.
 const attackGraphMetricsInterval = 15 * time.Second
+
+// State maintenance is independent of attack-graph metrics and heartbeat
+// traffic: silent hosts must expire lineage and drift state too.
+const stateMaintenanceInterval = 15 * time.Second
+
+func (e *Enforcer) startStateMaintenance() {
+	if e.lineageTracker == nil && e.driftCollector == nil {
+		return
+	}
+	ticker := time.NewTicker(stateMaintenanceInterval)
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		defer ticker.Stop()
+		e.stateMaintenanceLoop(ticker.C)
+	}()
+}
+
+// A tick channel lets tests advance maintenance without sleeping or starting
+// the platform monitor. The caller owns the ticker and goroutine lifetime.
+func (e *Enforcer) stateMaintenanceLoop(ticks <-chan time.Time) {
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case _, ok := <-ticks:
+			if !ok {
+				return
+			}
+			if e.lineageTracker != nil {
+				e.lineageTracker.Prune()
+			}
+			if e.driftCollector != nil {
+				e.driftCollector.Prune()
+			}
+		}
+	}
+}

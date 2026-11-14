@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/dashboard"
-	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/enforcer"
 	"github.com/yasindce1998/warmor/internal/policyserver"
 	"github.com/yasindce1998/warmor/internal/streaming"
@@ -37,8 +36,8 @@ var (
 	eventLabels    = flag.String("event-labels", "", "Labels to attach to streamed events and report to the policy server (format: k=v,k2=v2)")
 	attackGraph    = flag.Bool("attack-graph", false, "Build the MITRE attack graph and blast-radius metrics from observed events (labels streamed events with technique IDs)")
 	dashboardPort  = flag.Int("dashboard-port", 0, "Serve the web dashboard (SSE) on this port (0 = off)")
-	driftEnabled   = flag.Bool("drift", false, "Fingerprint observed behavior (event-type+comm rates) and ship it in policy server heartbeats for fleet drift detection (requires --server)")
-	driftImageKey  = flag.String("drift-image-key", "", "Grouping key for the fleet drift comparison: agents reporting the same key are compared (default: SHA-256 of the policy file)")
+	driftEnabled   = flag.Bool("drift", false, "Collect bounded local host behavior rates; fleet submission is withheld until real workload identity is available")
+	driftImageKey  = flag.String("drift-image-key", "", "Deprecated and ignored: arbitrary grouping keys are not workload image identity; --drift currently collects locally only")
 	showVersion    = flag.Bool("version", false, "Show version and exit")
 	evalTimeout    = flag.Duration("eval-timeout", 50*time.Millisecond, "Deadline for one WASM policy evaluation; a policy exceeding it is denied (fail closed)")
 
@@ -276,9 +275,14 @@ func runDaemon(stop <-chan struct{}) {
 	}
 	defer enf.Close()
 
-	// The policy server client is created after the enforcer so that,
-	// with --drift, each heartbeat can attach the enforcer's current
-	// behavioral fingerprint.
+	if *driftImageKey != "" {
+		log.Printf("⚠️  --drift-image-key is deprecated and ignored: policy hashes and operator grouping keys are not workload image identity")
+	}
+	if *driftEnabled {
+		log.Printf("Drift: bounded local host collection enabled; fingerprints omitted from heartbeats until real workload identity is available")
+	}
+	// Do not label the host aggregate with a policy hash or operator key.
+	// Ordinary heartbeats must still succeed when workload identity is absent.
 	var policyClient *policyserver.Client
 	if *serverURL != "" {
 		clientCfg := policyClientConfig{
@@ -292,14 +296,7 @@ func runDaemon(stop <-chan struct{}) {
 			Verify:    verifyDownload(pub),
 		}
 		if *driftEnabled {
-			clientCfg.Fingerprint = func() *drift.BehaviorFingerprint {
-				fp := enf.DriftFingerprint()
-				if fp == nil {
-					return nil
-				}
-				fp.ImageHash = resolveDriftImageKey(*policyPath, *driftImageKey)
-				return fp
-			}
+			clientCfg.Fingerprint = identifiedDriftFingerprint(enf.DriftFingerprint)
 		}
 		var err error
 		policyClient, err = newPolicyClient(clientCfg, policyUpdateHandler(*policyPath, reloadCh))
@@ -307,11 +304,6 @@ func runDaemon(stop <-chan struct{}) {
 			log.Fatalf("❌ Policy server: %v", err)
 		}
 		log.Printf("Policy Server: %s", *serverURL)
-		if *driftEnabled {
-			log.Printf("Drift Detection: fingerprints shipped in heartbeats (image key: %s)", resolveDriftImageKey(*policyPath, *driftImageKey))
-		}
-	} else if *driftEnabled {
-		log.Printf("⚠️  --drift requires --server; fingerprints are only shipped in policy server heartbeats")
 	}
 
 	log.Println("")

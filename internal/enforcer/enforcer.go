@@ -80,10 +80,10 @@ type Options struct {
 	// metrics (see docs/design/intelligence-chain.md).
 	AttackGraph bool
 
-	// Drift enables behavioral fingerprinting for fleet drift detection:
-	// event-type+comm rates are counted in the streaming pipeline and
-	// shipped to the policy server in heartbeats (see
-	// docs/design/fleet-drift.md). Requires --server to reach anyone.
+	// Drift enables bounded local event-type+comm rates in the streaming
+	// pipeline. Host aggregates are not submitted for fleet comparison until
+	// genuine workload identity and scoped collection are available (see
+	// docs/design/fleet-drift.md); no server is required for local collection.
 	Drift bool
 
 	// Streaming pipeline configuration
@@ -133,8 +133,8 @@ type Enforcer struct {
 	// intelligence is non-nil when --attack-graph is set (MITRE attack
 	// graph + blast radius).
 	intelligence *intelligence
-	// driftCollector is non-nil when --drift is set (fleet drift
-	// fingerprinting; snapshots ship in policy server heartbeats).
+	// driftCollector is non-nil when --drift is set (local host observations;
+	// fleet submission requires real workload identity, not a policy hash).
 	driftCollector *drift.FingerprintCollector
 	netFilter      *NetFilter
 	sandbox        *SandboxManager
@@ -457,6 +457,7 @@ func (e *Enforcer) Start() error {
 		e.wg.Add(1)
 		go e.attackGraphMetricsLoop(attackGraphMetricsInterval)
 	}
+	e.startStateMaintenance()
 
 	e.logger.LogInfo("Enforcer started, processing events...")
 	return nil

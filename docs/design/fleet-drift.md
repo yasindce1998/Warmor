@@ -1,90 +1,87 @@
-# Fleet drift detection: fingerprints in heartbeats
+# Drift observations and fleet comparison
 
-Status: shipped (`--drift` on agents, `--drift-threshold`/`--metrics-port`
-on the server).
+Status: bounded local collection ships with `--drift`. The policy server's
+comparison library, heartbeat transport, admin API, and metrics are available,
+but the daemon **does not submit its host aggregate for fleet comparison**:
+real workload identity and per-workload collection are not yet available.
 Owner: policy server + enforcer.
-
-## The gap
-
-`internal/drift` shipped a behavioral fingerprint collector and a z-score
-detector as tested libraries that nothing reached: no agent collected
-fingerprints, no transport carried them, and the server never ran the
-detector. This change wires the whole chain:
-
-```
-agent (--drift)                     server
-┌─────────────────────┐            ┌──────────────────────────────┐
-│ pipeline enricher   │  heartbeat │ drift.Detector (z-scores per │
-│  counts "type:comm" │ ─────────> │  image group)                │
-│  rate vectors       │  + finger- │  → /api/v1/admin/drift       │
-│                     │  print     │  → warmor_drift_* gauges     │
-└─────────────────────┘            └──────────────────────────────┘
-```
 
 ## Agent side (`--drift`)
 
-- A pipeline enricher (the same `streaming.SecurityEvent` stream the
-  sinks see) counts one counter per **`event_type:comm`** pair (e.g.
-  `exec:bash`, `network:curl`). Comm granularity is chosen for bounded
-  cardinality (task comms are 16 bytes) — filenames or argument lists
-  would explode the fingerprint and leak paths into heartbeats.
-- Rates are per-minute averages **since daemon start** (the library's
-  semantics), not a sliding window: a single 30 s interval is too noisy
-  for z-scores, and long-run rates are what "this node behaves like the
-  others" means.
-- Every heartbeat attaches the current snapshot
-  (`HeartbeatRequest.fingerprint`). Agents without `--drift` keep
-  sending plain heartbeats; nothing changes for them.
-- The client stamps the fingerprint's `AgentID` with its own agent ID,
-  and the server **overwrites it again** with the authenticated request
-  identity — a fingerprint can never claim to be another agent.
+- A streaming enricher records `event_type:comm` patterns (for example,
+  `exec:bash`, `network:curl`) into a bounded local collector. This is one
+  host-level observation, not a container-image fingerprint.
+- Rates are events per minute over a **rolling ten-minute window**, not since
+  daemon startup. Sixty time buckets bound state independently of event volume;
+  expiry can conservatively omit at most one bucket at the oldest boundary.
+- Pattern cardinality is capped at 1,024, including the `__other__` overflow
+  pattern. Comms are attacker-controlled; their short length does not itself
+  bound the number of distinct patterns. Keys are capped at 256 bytes.
+- Snapshots remain available through the enforcer's `DriftFingerprint()` Go
+  API, not a new CLI or HTTP endpoint. The first full window is marked
+  `warmup`; the detector does not compare warmup with mature observations.
+- Idle collector state expires after thirty minutes. A cancellable maintenance
+  loop runs every fifteen seconds, independently of `--attack-graph`, event
+  traffic, and whether a policy server is configured.
 
-## Grouping (the "image hash")
+## Identity and heartbeat safety
 
-The detector compares agents **running the same image**. Agents cannot
-see container images (no runtime integration yet — the same gap that
-leaves blast-radius remote resolution unimplemented), so the grouping key
-is a proxy:
+`ImageHash` is deliberately empty in the current host-level collector. The
+daemon omits that fingerprint field entirely from the heartbeat; registration,
+policy polling, and ordinary heartbeats continue normally. Startup logs and
+`--help` explicitly describe local-only collection.
 
-- default: the **SHA-256 of the current policy file**, recomputed per
-  heartbeat, so agents enforcing the same policy are compared and a
-  policy change re-groups the agent on the next heartbeat;
-- `--drift-image-key <string>` overrides it for workload-based grouping
-  (e.g. the same value per node pool or DaemonSet).
+A policy-file digest identifies policy content, **not a workload image**.
+Neither hostname, node pool, comm, cgroup ID, nor an operator-supplied grouping
+string establishes image identity. Even a real image digest cannot describe a
+host aggregate containing unrelated workloads. Future fleet submission needs a
+runtime-backed identity **and** observations scoped to that workload. The
+identity guard preserves a source-supplied identity; it never derives one from
+policy files or overrides it with an operator key.
 
-For homogeneous fleets (one fleet-wide policy) both defaults behave the
-same: every agent lands in one group.
+The client stamps a submitted fingerprint's `AgentID` with its configured
+agent identity, and the server overwrites it with the authenticated request
+identity. The adapter copies the source snapshot before the client stamps it.
+
+## Migration from policy-hash grouping
+
+Earlier daemon versions shipped every host snapshot under the current policy's
+SHA-256 (or the `--drift-image-key` override). This conflated policy equality
+with workload equality and could report differences between unrelated hosts as
+image drift. Those implicit comparisons are no longer produced.
+
+- `--drift` now enables bounded **local** collection and does not require
+  `--server`. It does not currently produce new fleet anomalies from the daemon.
+- `--drift-image-key` remains accepted for command-line compatibility, but is
+  **deprecated and ignored**, with a startup warning. Remove it from manifests;
+  it does not opt back into policy-hash or arbitrary-cohort comparisons.
+- Existing server fingerprints age out under the server's stale/TTL policy;
+  they are not evidence of new workload-scoped observations after upgrade.
+- Alerting that relied on automatic host grouping must be reviewed. Do not
+  substitute a policy hash or node-pool label into `ImageHash` to restore it.
+  A future explicit cohort comparison would need a separate grouping kind,
+  rather than masquerading as an image comparison.
 
 ## Server side
 
-- `handleHeartbeat` validates the fingerprint (present image hash,
-  bounded length, at most 10 000 patterns — it is untrusted input that
-  lives in server memory) and submits it to `drift.Detector`.
-- The stale loop prunes fingerprints silent for twice the stale
-  threshold (an agent gone from the comparison instead of skewing it
-  forever) and republishes the metrics.
-- **Admin API:** `GET /api/v1/admin/drift` (admin JWT) returns per-image
-  fleet status and every anomaly; `?agent_id=` filters to one agent.
-- **Metrics** (`--metrics-port`, 0 = off, served unauthenticated like the
-  daemon's): `warmor_drift_tracked_images` and `warmor_drift_anomalies`
-  — totals only, deliberately unlabeled: per-image and per-agent
-  breakdowns are agent-influenced data and would invite label-cardinality
-  abuse on a metrics endpoint; they live behind the authenticated admin
-  API instead.
-- `--drift-threshold` (default 3.0) sets the z-score threshold.
-
-## Known limits
-
-- Rates are cumulative since daemon start; an agent that restarts
-  starts over (its fingerprint briefly has high-variance rates until it
-  accumulates samples again).
-- The grouping key is a policy hash, not a real container image; agents
-  enforcing the same policy but running different workloads will
-  legitimately differ. Use `--drift-image-key` for heterogeneous fleets.
-- One fingerprint per agent (node), not per container: container-level
-  drift needs the runtime integration that does not exist yet.
-- Anomalies are computed on read (admin API / metrics loop), not cached
-  per event; with very large fleets this is O(agents × patterns) per
-  read.
-- The server keeps fingerprints in memory only; they are lost on restart
-  and repopulate as agents heartbeat.
+- Heartbeat transport still accepts identified fingerprints from integrations
+  with genuine scoped identity. Unidentified daemon observations are omitted,
+  so validation cannot reject an otherwise valid host heartbeat for missing
+  image identity.
+- The detector owns copies of submitted vectors, rejects invalid/non-finite
+  rates, bounds total fingerprints (4,096), images (256), agents per image
+  (256), and patterns per fingerprint (1,024), and expires submissions thirty
+  minutes after local receipt. The stale loop can prune earlier according to
+  its configured threshold. No sender timestamp can pin state indefinitely.
+- Only mature fingerprints with matching window durations and overlapping
+  timestamps are compared. Legacy window-zero fingerprints compare only with
+  other legacy window-zero fingerprints, not new rolling observations.
+- `GET /api/v1/admin/drift` (admin JWT) returns status and anomalies;
+  `?agent_id=` filters by agent. `--drift-threshold` defaults to a z-score of 3.
+- Server metrics (`--metrics-port`, 0 disables) expose unlabelled totals
+  `warmor_drift_tracked_images` and `warmor_drift_anomalies`. Per-agent/image
+  breakdowns remain behind the authenticated admin API to avoid unbounded
+  Prometheus labels. The metrics listener itself is unauthenticated.
+- Fingerprints are in memory and are lost on server restart. Anomalies are
+  calculated on read. Runtime lifecycle/identity integration remains future
+  work; see [lifecycle assumptions](../../internal/attackgraph/LIFECYCLE.md).

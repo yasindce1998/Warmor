@@ -27,9 +27,10 @@ Metrics reachability uses one bounded connected-component snapshot, not BFS
 with path allocation for every container.
 
 Lineage and drift collectors expose `Prune()` and also expire on access/write.
-The enforcer-main owner should call `lineageTracker.Prune()` and
-`driftCollector.Prune()` from its periodic maintenance loop, even when attack
-graphs are disabled. No package starts an unmanaged background goroutine.
+The enforcer calls both from a fifteen-second maintenance loop, even when
+attack graphs are disabled and no heartbeat or event arrives. Shutdown cancels
+and joins this loop and stops its ticker; tests inject ticks without waiting.
+No package starts an unmanaged background goroutine.
 Runtime process-exit integration should call `RecordExit`; container-removal
 integration should call graph `Remove`/`RemoveNode`. These must use real runtime
 identity. A process exit is **not** sufficient evidence of container removal.
@@ -57,6 +58,7 @@ Node-side collection currently aggregates host events and deliberately leaves
 `ImageHash` empty. Host version, hostname, comm, and cgroup ID are **not** workload
 identity and must not be substituted. Fleet submission requires a genuine
 grouping identity and per-workload observation before enabling that comparison.
-Heartbeat integration must omit unidentified fingerprints, not reject ordinary
-heartbeats or invent a grouping key. That integration belongs to the fleet/
-enforcer-main owners; the detector itself refuses empty identity.
+The daemon omits unidentified fingerprints without breaking ordinary
+heartbeats. `--drift-image-key` is deprecated and ignored, not a way to label
+host aggregates as images. See [migration notes](../../docs/design/fleet-drift.md).
+The detector itself also refuses empty identity.
