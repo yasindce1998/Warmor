@@ -509,7 +509,7 @@ func TestCanaryAutoRollbackServesBase(t *testing.T) {
 		t.Fatalf("canary should be on v2 before rollback, got %d", a.Version)
 	}
 
-	ca.Configure("rb", CanaryConfig{MaxDenyRateDelta: 0.1, MinSampleSize: 1, AutoRollback: true})
+	mustConfigureCanary(t, ca, "rb", CanaryConfig{MaxDenyRateDelta: 0.1, MinSampleSize: 1, AutoRollback: true})
 	ca.RecordDecision("rb", false, false)
 	ca.RecordDecision("rb", true, true)
 	if _, rolledBack := ca.Evaluate("rb"); !rolledBack {

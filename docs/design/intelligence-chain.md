@@ -43,12 +43,17 @@ file, webhook), so:
 |------|---------|--------|
 | `--attack-graph` | off | adds the three enrichers above and the metrics loop |
 | `--dashboard-port` | 0 (off) | serves `/dashboard` + `/dashboard/events` (SSE) on the port, and adds the dashboard sink so the pipeline exists without `--event-sink` |
+| `--dashboard-bind` | `127.0.0.1` | literal listen IP (`localhost` also accepted); remote/wildcard IPs require explicit choice |
+| `--dashboard-token-file` | unset | optional HTTP Basic password file (user `warmor`); alternatively use `WARMOR_DASHBOARD_TOKEN` |
 | `--event-sink syslog:[udp\|tcp://]host:port` | — | CEF-formatted events over syslog; bare `syslog:host:port` means UDP |
 
 The dashboard gets its own `http.Server` rather than a route on the
 metrics port because the metrics server has a 10 s `WriteTimeout`,
 which would kill every SSE stream mid-flight; the dashboard server sets
-none.
+none. It does set 5 s header, 10 s request-read and 60 s idle-connection
+timeouts, plus a 16 KiB header limit; none limits the lifetime of an active
+SSE response. See [dashboard access](../dashboard.md) for authentication
+and reverse-proxy deployment.
 
 ## Metrics
 

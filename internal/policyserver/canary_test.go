@@ -1,8 +1,13 @@
 package policyserver
 
 import (
+	"encoding/json"
+	"errors"
+	"math"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -47,7 +52,7 @@ func TestCanaryHealthy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ca.Configure("canary-1", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-1", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 0, // immediate for testing
 		MinSampleSize:     10,
@@ -85,7 +90,7 @@ func TestCanaryRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ca.Configure("canary-2", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-2", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 0,
 		MinSampleSize:     10,
@@ -129,7 +134,7 @@ func TestCanaryDegradedNoAutoRollback(t *testing.T) {
 		Percentage:    10,
 	})
 
-	ca.Configure("canary-3", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-3", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 0,
 		MinSampleSize:     10,
@@ -168,7 +173,7 @@ func TestCanaryPendingInsufficientSamples(t *testing.T) {
 		Percentage:    10,
 	})
 
-	ca.Configure("canary-4", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-4", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 0,
 		MinSampleSize:     100,
@@ -204,7 +209,7 @@ func TestCanaryPendingObservationWindow(t *testing.T) {
 		Percentage:    10,
 	})
 
-	ca.Configure("canary-5", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-5", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 5 * time.Minute,
 		MinSampleSize:     10,
@@ -247,7 +252,7 @@ func TestCanaryReset(t *testing.T) {
 		Percentage:    10,
 	})
 
-	ca.Configure("canary-6", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-6", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 0,
 		MinSampleSize:     10,
@@ -277,7 +282,7 @@ func TestCanaryMetricsAccuracy(t *testing.T) {
 		Percentage:    10,
 	})
 
-	ca.Configure("canary-7", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-7", CanaryConfig{
 		MaxDenyRateDelta:  0.50,
 		ObservationWindow: 0,
 		MinSampleSize:     10,
@@ -318,7 +323,7 @@ func TestCanaryIdempotentAfterRollback(t *testing.T) {
 		Percentage:    10,
 	})
 
-	ca.Configure("canary-8", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-8", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 0,
 		MinSampleSize:     10,
@@ -352,29 +357,463 @@ func TestCanaryUnconfigured(t *testing.T) {
 		t.Errorf("expected pending without config, got %+v %v", m, rolledBack)
 	}
 
-	// Recording without Configure creates counters lazily, but Evaluate still
-	// requires a config.
+	// Unconfigured input cannot allocate state or contribute to later verdicts.
 	ca.RecordDecision("lazy", true, true)
 	ca.RecordDecision("lazy", false, false)
 	m := ca.Metrics("lazy")
-	if m.CanarySamples != 1 || m.BaselineSamples != 1 || m.CanaryDenyRate != 1 || m.BaselineDenyRate != 0 {
-		t.Errorf("unexpected lazy metrics: %+v", m)
+	if m.CanarySamples != 0 || m.BaselineSamples != 0 {
+		t.Errorf("unconfigured input must be ignored: %+v", m)
 	}
 	if m, _ := ca.Evaluate("lazy"); m.Verdict != "pending" {
 		t.Errorf("expected pending for unconfigured rollout, got %s", m.Verdict)
 	}
 
-	// Configuring after decisions keeps existing counters.
-	ca.Configure("lazy", CanaryConfig{MinSampleSize: 1})
-	if m := ca.Metrics("lazy"); m.CanarySamples != 1 {
-		t.Errorf("Configure must not reset existing counters: %+v", m)
+	if len(ca.counters) != 0 {
+		t.Fatal("unconfigured input allocated counters")
+	}
+	if err := ca.Configure("lazy", CanaryConfig{MinSampleSize: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if m := ca.Metrics("lazy"); m.CanarySamples != 0 {
+		t.Errorf("Configure must not inherit unconfigured decisions: %+v", m)
+	}
+}
+
+func assertFiniteCanaryMetrics(t *testing.T, m CanaryMetrics) {
+	t.Helper()
+	for _, rate := range []float64{m.BaselineDenyRate, m.CanaryDenyRate} {
+		if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 || rate > 1 {
+			t.Errorf("invalid deny rate: %+v", m)
+		}
+	}
+	if m.ObservedFor < 0 || m.BaselineSamples < 0 || m.CanarySamples < 0 {
+		t.Errorf("negative metrics: %+v", m)
+	}
+	if _, err := json.Marshal(m); err != nil {
+		t.Errorf("metrics are not JSON safe: %v", err)
+	}
+}
+
+func mustConfigureCanary(t *testing.T, ca *CanaryAnalyzer, id string, cfg CanaryConfig) {
+	t.Helper()
+	if err := ca.Configure(id, cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCanaryConfigValidation(t *testing.T) {
+	valid := CanaryConfig{MaxDenyRateDelta: 0.1, MinSampleSize: 1}
+	tests := []struct {
+		name string
+		edit func(*CanaryConfig)
+	}{
+		{"nan", func(c *CanaryConfig) { c.MaxDenyRateDelta = math.NaN() }},
+		{"positive infinity", func(c *CanaryConfig) { c.MaxDenyRateDelta = math.Inf(1) }},
+		{"negative infinity", func(c *CanaryConfig) { c.MaxDenyRateDelta = math.Inf(-1) }},
+		{"negative delta", func(c *CanaryConfig) { c.MaxDenyRateDelta = -0.01 }},
+		{"delta above one", func(c *CanaryConfig) { c.MaxDenyRateDelta = 1.01 }},
+		{"zero samples", func(c *CanaryConfig) { c.MinSampleSize = 0 }},
+		{"negative samples", func(c *CanaryConfig) { c.MinSampleSize = -1 }},
+		{"negative observation", func(c *CanaryConfig) { c.ObservationWindow = -1 }},
+		{"negative retention", func(c *CanaryConfig) { c.SampleWindow = -1 }},
+		{"unbounded retention", func(c *CanaryConfig) { c.SampleWindow = time.Duration(math.MaxInt64) }},
+		{"observation beyond retention", func(c *CanaryConfig) { c.ObservationWindow = DefaultCanarySampleWindow + 1 }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ca := NewCanaryAnalyzer(nil)
+			cfg := valid
+			tt.edit(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("invalid config passed Validate")
+			}
+			if err := ca.Configure("bad", cfg); err == nil {
+				t.Fatal("invalid config passed Configure")
+			}
+			ca.RecordDecision("bad", true, true)
+			m, rolled := ca.Evaluate("bad")
+			if m.Verdict != "pending" || rolled || len(ca.configs) != 0 || len(ca.counters) != 0 {
+				t.Fatalf("invalid config changed state: %+v, rolled=%v", m, rolled)
+			}
+			assertFiniteCanaryMetrics(t, m)
+		})
+	}
+	for _, id := range []string{"", " \t\n"} {
+		if err := NewCanaryAnalyzer(nil).Configure(id, valid); err == nil {
+			t.Errorf("empty rollout ID %q accepted", id)
+		}
+	}
+	for _, delta := range []float64{0, 1} {
+		cfg := valid
+		cfg.MaxDenyRateDelta = delta
+		cfg.SampleWindow = MaxCanarySampleWindow
+		cfg.ObservationWindow = MaxCanarySampleWindow
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("valid boundary config rejected: %v", err)
+		}
+	}
+}
+
+func TestCanaryReconfiguration(t *testing.T) {
+	ca := NewCanaryAnalyzer(nil)
+	now := time.Unix(1000, 0)
+	ca.clock = func() time.Time { return now }
+	cfg := CanaryConfig{MaxDenyRateDelta: 0.1, MinSampleSize: 1, ObservationWindow: time.Minute}
+	mustConfigureCanary(t, ca, "r", cfg)
+	ca.RecordDecision("r", false, false)
+	ca.RecordDecision("r", true, true)
+	now = now.Add(2 * time.Minute)
+	invalid := cfg
+	invalid.MinSampleSize = 0
+	if err := ca.Configure("r", invalid); err == nil {
+		t.Fatal("invalid reconfiguration succeeded")
+	}
+	// Explicit default retention is semantically identical to zero.
+	cfg.SampleWindow = DefaultCanarySampleWindow
+	mustConfigureCanary(t, ca, "r", cfg)
+	if m, _ := ca.Evaluate("r"); m.Verdict != "degraded" || m.CanarySamples != 1 {
+		t.Fatalf("invalid/identical configuration changed observation: %+v", m)
+	}
+	cfg.MaxDenyRateDelta = 0.2
+	mustConfigureCanary(t, ca, "r", cfg)
+	if m, _ := ca.Evaluate("r"); m.Verdict != "pending" || m.CanarySamples != 0 || m.ObservedFor != 0 {
+		t.Fatalf("changed configuration retained old evidence: %+v", m)
+	}
+	// Idle configured time must not satisfy the observation requirement.
+	now = now.Add(time.Hour)
+	ca.RecordDecision("r", false, false)
+	ca.RecordDecision("r", true, true)
+	if m, _ := ca.Evaluate("r"); m.Verdict != "pending" || m.ObservedFor != 0 {
+		t.Fatalf("idle time counted as observation: %+v", m)
+	}
+}
+
+func TestCanaryRollingWindow(t *testing.T) {
+	ca := NewCanaryAnalyzer(nil)
+	now := time.Unix(1000, 0)
+	ca.clock = func() time.Time { return now }
+	cfg := CanaryConfig{MaxDenyRateDelta: 0.1, MinSampleSize: 2, SampleWindow: 128 * time.Second, ObservationWindow: 10 * time.Second}
+	mustConfigureCanary(t, ca, "r", cfg)
+	for range 2 {
+		ca.RecordDecision("r", false, false)
+		ca.RecordDecision("r", true, true)
+	}
+	now = now.Add(10 * time.Second)
+	if m, _ := ca.Evaluate("r"); m.Verdict != "degraded" || m.ObservedFor != 10*time.Second {
+		t.Fatalf("expected degraded at observation boundary: %+v", m)
+	}
+	now = now.Add(cfg.SampleWindow - 10*time.Second)
+	if m := ca.Metrics("r"); m.CanarySamples != 0 || m.BaselineSamples != 0 || m.ObservedFor != 0 {
+		t.Fatalf("samples at retention boundary did not expire: %+v", m)
+	}
+	for range 2 {
+		ca.RecordDecision("r", false, false)
+		ca.RecordDecision("r", true, false)
+	}
+	if m, _ := ca.Evaluate("r"); m.Verdict != "pending" || m.ObservedFor != 0 {
+		t.Fatalf("expired observation age reused: %+v", m)
+	}
+	now = now.Add(10 * time.Second)
+	if m, _ := ca.Evaluate("r"); m.Verdict != "healthy" || m.CanaryDenyRate != 0 {
+		t.Fatalf("old degraded samples contaminated fresh window: %+v", m)
+	}
+	// Keep fresh samples arriving for many complete windows. Memory and reported
+	// observation duration must stay bounded; counts cannot accumulate forever.
+	for range 1000 {
+		now = now.Add(time.Second)
+		ca.RecordDecision("r", false, false)
+		ca.RecordDecision("r", true, false)
+		m := ca.Metrics("r")
+		if m.CanarySamples > 128 || m.BaselineSamples > 128 || m.ObservedFor > cfg.SampleWindow {
+			t.Fatalf("rolling window is not bounded: %+v", m)
+		}
+		assertFiniteCanaryMetrics(t, m)
+	}
+	now = now.Add(time.Duration(math.MaxInt64))
+	if m, _ := ca.Evaluate("r"); m.Verdict != "pending" || m.CanarySamples != 0 {
+		t.Fatalf("large clock jump retained samples: %+v", m)
+	}
+}
+
+func TestCanarySubBucketExpiryAndBackwardClock(t *testing.T) {
+	ca := NewCanaryAnalyzer(nil)
+	now := time.Unix(1000, 0)
+	ca.clock = func() time.Time { return now }
+	cfg := CanaryConfig{MinSampleSize: 1, SampleWindow: 128 * time.Second}
+	mustConfigureCanary(t, ca, "r", cfg)
+	ca.RecordDecision("r", false, false)
+	now = now.Add(500 * time.Millisecond)
+	ca.RecordDecision("r", true, true)
+	now = now.Add(-time.Hour)
+	ca.RecordDecision("r", true, false)
+	m, _ := ca.Evaluate("r")
+	if m.CanarySamples != 2 || m.CanaryDenyRate != 0.5 || m.ObservedFor != 500*time.Millisecond {
+		t.Fatalf("backwards clock corrupted metrics: %+v", m)
+	}
+	assertFiniteCanaryMetrics(t, m)
+	// Whole-bucket expiry is conservative: never retain a sample too long.
+	now = time.Unix(1000, 0).Add(cfg.SampleWindow)
+	if m := ca.Metrics("r"); m.CanarySamples != 0 || m.BaselineSamples != 0 {
+		t.Fatalf("expired bucket retained samples: %+v", m)
+	}
+	// A tiny positive window must not divide by zero or create a negative index.
+	cfg.SampleWindow = time.Nanosecond
+	mustConfigureCanary(t, ca, "r", cfg)
+	ca.RecordDecision("r", false, false)
+	ca.RecordDecision("r", true, true)
+	if m, _ := ca.Evaluate("r"); m.Verdict != "degraded" {
+		t.Fatalf("tiny window failed: %+v", m)
+	}
+	now = now.Add(time.Nanosecond)
+	if m := ca.Metrics("r"); m.CanarySamples != 0 {
+		t.Fatalf("tiny window did not expire: %+v", m)
+	}
+}
+
+type canaryTestAborter struct {
+	calls int
+	err   error
+}
+
+func (a *canaryTestAborter) AbortRollout(string) error {
+	a.calls++
+	return a.err
+}
+
+func TestCanaryAbortFailureAndRetry(t *testing.T) {
+	ca := NewCanaryAnalyzer(nil)
+	aborter := &canaryTestAborter{err: errors.New("persist abort: disk full")}
+	ca.rollouts = aborter
+	cfg := CanaryConfig{MinSampleSize: 1, AutoRollback: true}
+	mustConfigureCanary(t, ca, "r", cfg)
+	ca.RecordDecision("r", false, false)
+	ca.RecordDecision("r", true, true)
+	for range 2 {
+		m, rolled := ca.Evaluate("r")
+		if rolled || m.Verdict != "degraded" || m.RollbackError != aborter.err.Error() {
+			t.Fatalf("phantom successful rollback: %+v, rolled=%v", m, rolled)
+		}
+		if m := ca.Metrics("r"); m.Verdict == "rolled-back" || m.RollbackError == "" {
+			t.Fatalf("metrics lost abort failure: %+v", m)
+		}
+	}
+	if aborter.calls != 2 {
+		t.Fatalf("failed abort was latched: calls=%d", aborter.calls)
+	}
+	aborter.err = nil
+	if m, rolled := ca.Evaluate("r"); !rolled || m.Verdict != "rolled-back" || m.RollbackError != "" {
+		t.Fatalf("successful retry not reported: %+v, rolled=%v", m, rolled)
+	}
+	cfg.MaxDenyRateDelta = 0.5
+	mustConfigureCanary(t, ca, "r", cfg)
+	if m, rolled := ca.Evaluate("r"); rolled || m.Verdict != "rolled-back" || aborter.calls != 3 {
+		t.Fatalf("successful abort was not latched across configuration: %+v", m)
+	}
+	ca.Reset("r")
+	if m := ca.Metrics("r"); m.Verdict != "pending" || m.RollbackError != "" {
+		t.Fatalf("Reset retained abort state: %+v", m)
+	}
+}
+
+func TestCanaryAbortMissingOrInactiveRollout(t *testing.T) {
+	for _, status := range []string{"missing", "completed", "aborted", "nil manager"} {
+		t.Run(status, func(t *testing.T) {
+			rm, ca := setupCanaryTest(t)
+			if status == "nil manager" {
+				ca = NewCanaryAnalyzer(nil)
+			} else if status != "missing" {
+				if _, err := rm.CreateRollout(RolloutConfig{ID: "r", PolicyID: "canary-policy", TargetVersion: 2, Percentage: 10}); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				if status == "completed" {
+					err = rm.CompleteRollout("r")
+				} else {
+					err = rm.AbortRollout("r")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			mustConfigureCanary(t, ca, "r", CanaryConfig{MinSampleSize: 1, AutoRollback: true})
+			ca.RecordDecision("r", false, false)
+			ca.RecordDecision("r", true, true)
+			if m, rolled := ca.Evaluate("r"); rolled || m.Verdict != "degraded" || m.RollbackError == "" {
+				t.Fatalf("unsuccessful abort reported as success: %+v, rolled=%v", m, rolled)
+			}
+		})
+	}
+}
+
+func TestCanarySampleOverflow(t *testing.T) {
+	for _, mode := range []string{"bucket", "sum"} {
+		t.Run(mode, func(t *testing.T) {
+			ca := NewCanaryAnalyzer(nil)
+			now := time.Unix(1000, 0)
+			ca.clock = func() time.Time { return now }
+			mustConfigureCanary(t, ca, "r", CanaryConfig{MinSampleSize: 1, AutoRollback: true})
+			ca.RecordDecision("r", false, false)
+			ca.RecordDecision("r", true, true)
+			b := &ca.counters["r"].buckets[0]
+			b.canaryTotal, b.canaryDeny = int(^uint(0)>>1), int(^uint(0)>>1)
+			if mode == "sum" {
+				now = now.Add(time.Minute)
+			}
+			ca.RecordDecision("r", true, true)
+			m, rolled := ca.Evaluate("r")
+			if rolled || m.Verdict != "pending" || !m.SampleOverflow || m.CanarySamples != 0 || m.BaselineSamples != 0 {
+				t.Fatalf("overflow produced a health/rollback verdict: %+v", m)
+			}
+			assertFiniteCanaryMetrics(t, m)
+			now = now.Add(DefaultCanarySampleWindow)
+			ca.RecordDecision("r", false, false)
+			ca.RecordDecision("r", true, false)
+			if m, _ := ca.Evaluate("r"); m.SampleOverflow || m.Verdict != "healthy" {
+				t.Fatalf("expired overflow poisoned new window: %+v", m)
+			}
+		})
+	}
+}
+
+func TestCanaryConcurrentDecisionsAndEvaluation(t *testing.T) {
+	ca := NewCanaryAnalyzer(nil)
+	fixed := time.Unix(1000, 0)
+	ca.clock = func() time.Time { return fixed }
+	mustConfigureCanary(t, ca, "r", CanaryConfig{MinSampleSize: 1})
+	var wg sync.WaitGroup
+	for worker := range 12 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 1000 {
+				ca.RecordDecision("r", worker%2 == 0, i%4 == 0)
+				if i%20 == 0 {
+					m, _ := ca.Evaluate("r")
+					assertFiniteCanaryMetrics(t, m)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	m := ca.Metrics("r")
+	if m.CanarySamples != 6000 || m.BaselineSamples != 6000 || m.CanaryDenyRate != 0.25 || m.BaselineDenyRate != 0.25 {
+		t.Fatalf("concurrent decisions lost or duplicated: %+v", m)
+	}
+}
+
+func TestCanaryConcurrentRollbackExactlyOnce(t *testing.T) {
+	_, ca := setupCanaryTest(t)
+	aborter := &canaryTestAborter{}
+	ca.rollouts = aborter
+	mustConfigureCanary(t, ca, "r", CanaryConfig{MinSampleSize: 1, AutoRollback: true})
+	ca.RecordDecision("r", false, false)
+	ca.RecordDecision("r", true, true)
+	var wg sync.WaitGroup
+	var successes atomic.Int32
+	for range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m, rolled := ca.Evaluate("r")
+			if rolled {
+				successes.Add(1)
+			}
+			if m.Verdict != "rolled-back" {
+				t.Errorf("unexpected concurrent verdict: %+v", m)
+			}
+		}()
+	}
+	wg.Wait()
+	if successes.Load() != 1 || aborter.calls != 1 {
+		t.Fatalf("abort was not exactly once: successes=%d calls=%d", successes.Load(), aborter.calls)
+	}
+}
+
+func TestCanaryConcurrentResetAndConfiguration(t *testing.T) {
+	ca := NewCanaryAnalyzer(nil)
+	cfg := CanaryConfig{MinSampleSize: 1}
+	var wg sync.WaitGroup
+	for worker := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 200 {
+				switch worker % 4 {
+				case 0:
+					if err := ca.Configure("r", cfg); err != nil {
+						t.Errorf("valid concurrent configuration failed: %v", err)
+					}
+				case 1:
+					ca.Reset("r")
+				case 2:
+					ca.RecordDecision("r", true, true)
+					ca.RecordDecision("r", false, false)
+				case 3:
+					m, _ := ca.Evaluate("r")
+					assertFiniteCanaryMetrics(t, m)
+					assertFiniteCanaryMetrics(t, ca.Metrics("r"))
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	ca.Reset("r")
+	if m := ca.Metrics("r"); m.Verdict != "pending" || m.CanarySamples != 0 {
+		t.Fatalf("final reset failed: %+v", m)
+	}
+}
+
+func TestCanaryRequiresFreshSamplesInBothCohorts(t *testing.T) {
+	ca := NewCanaryAnalyzer(nil)
+	now := time.Unix(1000, 0)
+	ca.clock = func() time.Time { return now }
+	cfg := CanaryConfig{MinSampleSize: 2, SampleWindow: 128 * time.Second}
+	mustConfigureCanary(t, ca, "r", cfg)
+	ca.RecordDecision("r", false, false)
+	ca.RecordDecision("r", false, false)
+	ca.RecordDecision("r", true, true)
+	if m, _ := ca.Evaluate("r"); m.Verdict != "pending" {
+		t.Fatalf("insufficient canary samples produced a verdict: %+v", m)
+	}
+	now = now.Add(time.Minute)
+	ca.RecordDecision("r", true, true)
+	if m, _ := ca.Evaluate("r"); m.Verdict != "degraded" {
+		t.Fatalf("both cohorts at minimum did not evaluate: %+v", m)
+	}
+	now = now.Add(68 * time.Second)
+	ca.RecordDecision("r", true, true)
+	if m, _ := ca.Evaluate("r"); m.Verdict != "pending" || m.BaselineSamples != 0 || m.CanarySamples != 2 {
+		t.Fatalf("expired baseline still allowed comparison: %+v", m)
+	}
+}
+
+func TestCanaryThresholdAndMetricsAreSideEffectFree(t *testing.T) {
+	ca := NewCanaryAnalyzer(nil)
+	aborter := &canaryTestAborter{}
+	ca.rollouts = aborter
+	cfg := CanaryConfig{MinSampleSize: 1, MaxDenyRateDelta: 0.5, AutoRollback: true}
+	mustConfigureCanary(t, ca, "r", cfg)
+	ca.RecordDecision("r", false, false)
+	ca.RecordDecision("r", true, true)
+	ca.RecordDecision("r", true, false)
+	if m, rolled := ca.Evaluate("r"); rolled || m.Verdict != "healthy" || aborter.calls != 0 {
+		t.Fatalf("delta equal to threshold triggered an abort: %+v", m)
+	}
+	ca.RecordDecision("r", true, true)
+	for range 3 {
+		if m := ca.Metrics("r"); m.Verdict != "pending" || aborter.calls != 0 {
+			t.Fatalf("Metrics evaluated or aborted the rollout: %+v", m)
+		}
+	}
+	if m, rolled := ca.Evaluate("r"); !rolled || m.Verdict != "rolled-back" || aborter.calls != 1 {
+		t.Fatalf("delta above threshold did not trigger explicit evaluation: %+v", m)
 	}
 }
 
 func TestCanaryMetricsAfterRollback(t *testing.T) {
 	rm, ca := setupCanaryTest(t)
 	_, _ = rm.CreateRollout(RolloutConfig{ID: "rb", PolicyID: "canary-policy", TargetVersion: 2, Percentage: 50})
-	ca.Configure("rb", CanaryConfig{MaxDenyRateDelta: 0.1, MinSampleSize: 1, AutoRollback: true})
+	mustConfigureCanary(t, ca, "rb", CanaryConfig{MaxDenyRateDelta: 0.1, MinSampleSize: 1, AutoRollback: true})
 	ca.RecordDecision("rb", false, false)
 	ca.RecordDecision("rb", true, true)
 
