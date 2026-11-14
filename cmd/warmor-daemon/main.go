@@ -227,7 +227,7 @@ func runDaemon(stop <-chan struct{}) {
 			_ = dashboardServer.Shutdown(shutdownCtx)
 		}()
 		log.Printf("✓ Web dashboard listening on http://%s/dashboard (authentication enabled: %t)", listener.Addr(), token != "")
-		if addr := listener.Addr().(*net.TCPAddr); !addr.IP.IsLoopback() {
+		if addr, ok := listener.Addr().(*net.TCPAddr); !ok || !addr.IP.IsLoopback() {
 			log.Print("⚠ Dashboard remote access explicitly enabled; restrict network access and use a trusted TLS/authenticating reverse proxy (dashboard HTTP is plaintext)")
 		}
 	}
