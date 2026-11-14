@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/cilium/ebpf"
 
@@ -20,9 +21,12 @@ import (
 // PolicyKey matches struct policy_key in warmor_lsm.h
 type PolicyKey struct {
 	CgroupID  uint64
-	RuleHash  uint32
 	EventType uint8
-	Pad       [3]uint8
+	Family    uint8
+	Port      [2]byte // network byte order on every architecture
+	Address   [16]byte
+	Path      [256]byte
+	Pad       [4]uint8
 }
 
 // PolicyValue matches struct policy_value in warmor_lsm.h
@@ -165,19 +169,20 @@ func NewPolicyMapManager(m *ebpf.Map) *PolicyMapManager {
 	return &PolicyMapManager{policyMap: kernelPolicyMap{m}}
 }
 
-// HashPattern computes the FNV-1a hash of a pattern string, matching the BPF-side implementation.
+// HashPattern is retained for the observation-only unix_watch map and legacy
+// callers. Hashes are NOT accepted as security policy identities.
 func HashPattern(pattern string) uint32 {
 	h := fnv.New32a()
 	h.Write([]byte(pattern))
 	return h.Sum32()
 }
 
-// Longest strings the BPF programs hash in full, per event type. Each program
+// Longest strings the BPF programs read in full, per event type. Each program
 // reads its string into a fixed buffer and skips the policy map when the read
 // fills the buffer (the string may have been truncated), so only strings of at
 // most bufsize-2 bytes can ever be matched by a rule.
 const (
-	maxExecPatternLen   = 254 // lsm_exec fname_buf[WARMOR_HASH_STR_MAX]
+	maxExecPatternLen   = 254 // lsm_exec policy_key.path[256]
 	maxMountPatternLen  = 62  // lsm_mount type_buf[64]
 	maxPtracePatternLen = 15  // task comm, TASK_COMM_LEN 16 (never truncated)
 )
@@ -188,10 +193,10 @@ const (
 // events, which is worse than no kernel fast-path at all.
 var ErrNotKernelMatchable = kernelmap.ErrNotKernelMatchable
 
-// ruleHash returns the policy_map rule_hash the BPF program for eventType
-// computes for pattern, or ErrNotKernelMatchable if the program never sees
-// pattern as a whole.
-func ruleHash(eventType uint8, pattern string) (uint32, error) {
+// stringPolicyKey preserves every byte, with a zero-padded tail. No path
+// cleaning, symlink resolution, or basename substitution is performed.
+func stringPolicyKey(cgroupID uint64, eventType uint8, pattern string) (PolicyKey, error) {
+	key := PolicyKey{CgroupID: cgroupID, EventType: eventType}
 	var maxLen int
 	switch eventType {
 	case EventTypeExec:
@@ -203,39 +208,41 @@ func ruleHash(eventType uint8, pattern string) (uint32, error) {
 	case EventTypeFile:
 		// lsm_file only sees the dentry basename, never the path userspace
 		// evaluated, so a file rule would match every same-named file.
-		return 0, fmt.Errorf("file event: %w", ErrNotKernelMatchable)
+		return key, fmt.Errorf("file event: %w", ErrNotKernelMatchable)
 	default:
-		// Network/bind/listen are keyed on binary endpoint hashes; use
-		// SetEndpointRule, SetNetworkRule or HashPort instead.
-		return 0, fmt.Errorf("event type %d is not keyed by string: %w", eventType, ErrNotKernelMatchable)
+		return key, fmt.Errorf("event type %d is not keyed by string: %w", eventType, ErrNotKernelMatchable)
 	}
-	// The kernel stops hashing at the first NUL.
-	if len(pattern) > maxLen || strings.IndexByte(pattern, 0) >= 0 {
-		return 0, fmt.Errorf("pattern %q for event type %d: %w", pattern, eventType, ErrNotKernelMatchable)
+	// The sensor and WASM both treat NUL as the end of a string.
+	if pattern == "" || len(pattern) > maxLen || strings.IndexByte(pattern, 0) >= 0 || !utf8.ValidString(pattern) {
+		return key, fmt.Errorf("pattern %q for event type %d: %w", pattern, eventType, ErrNotKernelMatchable)
 	}
-	return HashPattern(pattern), nil
+	copy(key.Path[:], pattern)
+	return key, nil
 }
 
-// endpointHash returns the rule_hash lsm_connect/lsm_bind compute for addr and
-// port. The BPF programs hash the raw sockaddr fields as loaded from memory
-// (network-order bytes read as native integers), so reproduce those values.
-func endpointHash(addr string, port uint16) (uint32, error) {
+func endpointPolicyKey(cgroupID uint64, eventType uint8, addr string, port uint16) (PolicyKey, error) {
+	key := PolicyKey{CgroupID: cgroupID, EventType: eventType}
+	if eventType != EventTypeNetwork && eventType != EventTypeBind {
+		return key, fmt.Errorf("event type %d is not an endpoint event: %w", eventType, ErrNotKernelMatchable)
+	}
 	ip := net.ParseIP(addr)
-	if ip == nil {
-		return 0, fmt.Errorf("invalid endpoint address %q", addr)
+	// Policy eq compares the sensor's canonical string, not semantic IP
+	// equality. Other spellings could preload a rule WASM never matches.
+	if ip == nil || ip.String() != addr {
+		return key, fmt.Errorf("noncanonical endpoint address %q: %w", addr, ErrNotKernelMatchable)
 	}
-	var portBytes [2]byte
-	binary.BigEndian.PutUint16(portBytes[:], port)
-	rawPort := binary.NativeEndian.Uint16(portBytes[:])
+	binary.BigEndian.PutUint16(key.Port[:], port)
 	if ip4 := ip.To4(); ip4 != nil {
-		return HashIPv4Endpoint(binary.NativeEndian.Uint32(ip4), rawPort), nil
+		key.Family = 2
+		copy(key.Address[:4], ip4)
+	} else {
+		key.Family = 10
+		copy(key.Address[:], ip.To16())
 	}
-	var ip16 [16]byte
-	copy(ip16[:], ip.To16())
-	return HashIPv6Endpoint(ip16, rawPort), nil
+	return key, nil
 }
 
-// HashIPv4Endpoint hashes an IPv4 address and port, matching the BPF-side implementation.
+// HashIPv4Endpoint is a legacy hash helper, not a security identity.
 func HashIPv4Endpoint(addr uint32, port uint16) uint32 {
 	hash := uint32(2166136261)
 	hash ^= addr & 0xFF
@@ -253,7 +260,7 @@ func HashIPv4Endpoint(addr uint32, port uint16) uint32 {
 	return hash
 }
 
-// HashIPv6Endpoint hashes an IPv6 address and port.
+// HashIPv6Endpoint is a legacy hash helper, not a security identity.
 func HashIPv6Endpoint(addr [16]byte, port uint16) uint32 {
 	hash := uint32(2166136261)
 	for i := 0; i < 16; i++ {
@@ -267,7 +274,7 @@ func HashIPv6Endpoint(addr [16]byte, port uint16) uint32 {
 	return hash
 }
 
-// HashPort hashes a 2-byte port value with FNV-1a, matching the BPF-side hash_port.
+// HashPort is a legacy hash helper, not a security identity.
 func HashPort(port uint16) uint32 {
 	hash := uint32(2166136261)
 	hash ^= uint32(port & 0xFF)
@@ -283,17 +290,11 @@ func (m *PolicyMapManager) SetRule(cgroupID uint64, eventType uint8, pattern str
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	hash, err := ruleHash(eventType, pattern)
+	key, err := stringPolicyKey(cgroupID, eventType, pattern)
 	if err != nil {
 		return err
 	}
 
-	key := PolicyKey{
-		CgroupID:  cgroupID,
-		RuleHash:  hash,
-		EventType: eventType,
-	}
-
 	auditByte := uint8(0)
 	if audit {
 		auditByte = 1
@@ -304,52 +305,26 @@ func (m *PolicyMapManager) SetRule(cgroupID uint64, eventType uint8, pattern str
 		Audit:  auditByte,
 	}
 
-	return m.policyMap.Put(key, val)
+	return m.put(key, val)
 }
 
-// SetNetworkRule adds a network rule using IP+port hash.
+// SetNetworkRule cannot safely reconstruct an endpoint from a hash.
+// Deprecated: use SetEndpointRule. Retained only for source compatibility;
+// it always returns ErrNotKernelMatchable and never modifies the map.
 func (m *PolicyMapManager) SetNetworkRule(cgroupID uint64, addrHash uint32, action uint8, audit bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	key := PolicyKey{
-		CgroupID:  cgroupID,
-		RuleHash:  addrHash,
-		EventType: EventTypeNetwork,
-	}
-
-	auditByte := uint8(0)
-	if audit {
-		auditByte = 1
-	}
-
-	val := PolicyValue{
-		Action: action,
-		Audit:  auditByte,
-	}
-
-	return m.policyMap.Put(key, val)
+	return fmt.Errorf("hash-only endpoint rules are unsafe: %w", ErrNotKernelMatchable)
 }
 
 // SetEndpointRule adds a connect or bind rule for addr:port (port in host
 // order), keyed exactly as lsm_connect/lsm_bind look it up.
 func (m *PolicyMapManager) SetEndpointRule(cgroupID uint64, eventType uint8, addr string, port uint16, action uint8, audit bool) error {
-	if eventType != EventTypeNetwork && eventType != EventTypeBind {
-		return fmt.Errorf("event type %d is not an endpoint event: %w", eventType, ErrNotKernelMatchable)
-	}
-	hash, err := endpointHash(addr, port)
+	key, err := endpointPolicyKey(cgroupID, eventType, addr, port)
 	if err != nil {
 		return err
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	key := PolicyKey{
-		CgroupID:  cgroupID,
-		RuleHash:  hash,
-		EventType: eventType,
-	}
 
 	auditByte := uint8(0)
 	if audit {
@@ -361,6 +336,17 @@ func (m *PolicyMapManager) SetEndpointRule(cgroupID uint64, eventType uint8, add
 		Audit:  auditByte,
 	}
 
+	return m.put(key, val)
+}
+
+// put requires mu. Unknown actions must never become kernel allows.
+func (m *PolicyMapManager) put(key PolicyKey, val PolicyValue) error {
+	if val.Action != ActionAllow && val.Action != ActionDeny {
+		return fmt.Errorf("invalid policy action %d", val.Action)
+	}
+	if m.policyMap == nil {
+		return errors.New("policy map not loaded")
+	}
 	return m.policyMap.Put(key, val)
 }
 
@@ -369,17 +355,14 @@ func (m *PolicyMapManager) DeleteRule(cgroupID uint64, eventType uint8, pattern 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	hash, err := ruleHash(eventType, pattern)
+	key, err := stringPolicyKey(cgroupID, eventType, pattern)
 	if err != nil {
 		return err
 	}
 
-	key := PolicyKey{
-		CgroupID:  cgroupID,
-		RuleHash:  hash,
-		EventType: eventType,
+	if m.policyMap == nil {
+		return errors.New("policy map not loaded")
 	}
-
 	return m.policyMap.Delete(key)
 }
 
@@ -415,17 +398,16 @@ func (m *PolicyMapManager) SyncFromWASM(decisions []CachedDecision) error {
 	defer m.mu.Unlock()
 
 	for _, d := range decisions {
-		hash, err := ruleHash(d.EventType, d.Pattern)
+		// Evaluated inputs, not explicit static identities. Unknown scope
+		// and ABI prefixes must not create reusable entries.
+		if d.CgroupID == 0 || (d.EventType == EventTypeExec && len(d.Pattern) > kernelmap.MaxPolicyPathBytes) {
+			continue
+		}
+		key, err := stringPolicyKey(d.CgroupID, d.EventType, d.Pattern)
 		if err != nil {
 			// Not expressible in the kernel map; userspace still enforces it.
 			continue
 		}
-		key := PolicyKey{
-			CgroupID:  d.CgroupID,
-			RuleHash:  hash,
-			EventType: d.EventType,
-		}
-
 		auditByte := uint8(0)
 		if d.Audit {
 			auditByte = 1
@@ -436,7 +418,7 @@ func (m *PolicyMapManager) SyncFromWASM(decisions []CachedDecision) error {
 			Audit:  auditByte,
 		}
 
-		if err := m.policyMap.Put(key, val); err != nil {
+		if err := m.put(key, val); err != nil {
 			return fmt.Errorf("set rule for pattern %q: %w", d.Pattern, err)
 		}
 	}
@@ -495,14 +477,44 @@ func SetLSMCgroupFilter(filterMap *ebpf.Map, ids []uint64) error {
 
 // Ensure PolicyKey is serialized correctly for BPF map operations
 func (k PolicyKey) MarshalBinary() ([]byte, error) {
-	buf := make([]byte, 16)
+	buf := make([]byte, 288)
 	binary.NativeEndian.PutUint64(buf[0:8], k.CgroupID)
-	binary.NativeEndian.PutUint32(buf[8:12], k.RuleHash)
-	buf[12] = k.EventType
-	buf[13] = 0
-	buf[14] = 0
-	buf[15] = 0
+	buf[8] = k.EventType
+	buf[9] = k.Family
+	copy(buf[10:12], k.Port[:])
+	copy(buf[12:28], k.Address[:])
+	copy(buf[28:284], k.Path[:])
 	return buf, nil
+}
+
+// SyncEvent is the enforcer's dynamic-decision entry point. It must prove
+// completeness in both the sensor and binary WASM ABI; explicit static-rule
+// writes instead use SetRule/SetEndpointRule. Unknown cgroups are not global.
+func (m *PolicyMapManager) SyncEvent(event *api.Event, action uint8, audit bool) error {
+	if event == nil || event.CgroupID == 0 {
+		return fmt.Errorf("missing event scope: %w", ErrNotKernelMatchable)
+	}
+	switch event.GetType() {
+	case api.EventTypeProcess:
+		if event.Hook != "" && event.Hook != "exec" {
+			break
+		}
+		path := event.Filename
+		if event.Process != nil {
+			path = event.Process.Filename
+		}
+		if len(path) > kernelmap.MaxPolicyPathBytes {
+			break
+		}
+		return m.SetRule(event.CgroupID, EventTypeExec, path, action, audit)
+	case api.EventTypeNetwork:
+		if event.Network == nil || event.Network.Operation != "connect" ||
+			(event.Hook != "" && event.Hook != "connect") {
+			break
+		}
+		return m.SetEndpointRule(event.CgroupID, EventTypeNetwork, event.Network.RemoteAddr, event.Network.RemotePort, action, audit)
+	}
+	return fmt.Errorf("incomplete or unsupported event identity: %w", ErrNotKernelMatchable)
 }
 
 // KernelKeyFields reports which event fields (compiler field names) the BPF

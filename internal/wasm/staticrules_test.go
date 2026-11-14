@@ -2,20 +2,166 @@ package wasm
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
+	"github.com/yasindce1998/warmor/pkg/api"
 )
+
+func staticTestTable(pattern string, action byte, port uint16) []byte {
+	return append([]byte{action, 0, byte(port), byte(port >> 8), byte(len(pattern)), byte(len(pattern) >> 8)}, pattern...)
+}
+
+// Exercise the real compiled evaluator and its static exports together: exact
+// identity changes must not change declaration-order first-match or defaults.
+func TestCompiledStaticCollisionsAndLengthBoundary(t *testing.T) {
+	if !compiler.CargoAvailable() {
+		if os.Getenv("WARMOR_REQUIRE_CARGO") == "1" {
+			t.Fatal("cargo and wasm32-unknown-unknown target are required")
+		}
+		t.Skip("needs cargo and wasm32-unknown-unknown target")
+	}
+	if testing.Short() {
+		t.Skip("needs cargo and wasm32-unknown-unknown target")
+	}
+	a, b := "/opt/warmor/collision-000079bb", "/opt/warmor/collision-00044848"
+	boundary := "/" + strings.Repeat("x", 126)
+	yaml := fmt.Sprintf(`name: exact-identity
+version: 1
+default_action: deny
+rules:
+  - name: first-allow
+    event: process
+    conditions:
+      all:
+        - path: %q
+    action: allow
+  - name: colliding-deny
+    event: process
+    conditions:
+      all:
+        - path: %q
+    action: deny
+  - name: shadowed-deny
+    event: process
+    conditions:
+      all:
+        - path: %q
+    action: deny
+  - name: shared-length-boundary
+    event: process
+    conditions:
+      all:
+        - path: %q
+    action: allow
+  - name: endpoint-allow
+    event: network
+    conditions:
+      all:
+        - remote_addr: 127.1.156.58
+        - remote_port: 8644
+    action: allow
+  - name: endpoint-colliding-deny
+    event: network
+    conditions:
+      all:
+        - remote_addr: 127.1.248.57
+        - remote_port: 24525
+    action: deny
+`, a, b, a, boundary)
+	ctx := context.Background()
+	file := filepath.Join(t.TempDir(), "identity.yaml")
+	if err := os.WriteFile(file, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := NewRuntime(ctx, RuntimeConfig{CacheDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := rt.Close(ctx); err != nil {
+			t.Errorf("close static policy runtime: %v", err)
+		}
+	}()
+	if err := rt.LoadPolicyFromYAML(ctx, file); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := NewPolicy(ctx, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := policy.Close(ctx); err != nil {
+			t.Errorf("close static policy: %v", err)
+		}
+	}()
+	process := readStaticDomain(ctx, policy, 0)
+	network := readStaticDomain(ctx, policy, 2)
+	if !process.Eligible || len(process.Rules) != 3 || process.Rules[0].Action != 0 || process.Rules[1].Action != 1 ||
+		!network.Eligible || len(network.Rules) != 2 {
+		t.Fatalf("static exports: %+v %+v", process, network)
+	}
+	for _, tc := range []struct {
+		event *api.Event
+		want  api.Action
+	}{
+		{&api.Event{Filename: a}, api.ActionAllow},
+		{&api.Event{Filename: b}, api.ActionDeny},
+		{&api.Event{Filename: "/unknown"}, api.ActionDeny},
+		{&api.Event{Filename: boundary}, api.ActionAllow},
+		{&api.Event{Filename: boundary + "x"}, api.ActionDeny},
+		{&api.Event{Type: api.EventTypeNetwork, Network: &api.NetworkEvent{Operation: "connect", RemoteAddr: "127.1.156.58", RemotePort: 8644}}, api.ActionAllow},
+		{&api.Event{Type: api.EventTypeNetwork, Network: &api.NetworkEvent{Operation: "connect", RemoteAddr: "127.1.248.57", RemotePort: 24525}}, api.ActionDeny},
+		{&api.Event{Type: api.EventTypeNetwork, Network: &api.NetworkEvent{Operation: "connect", RemoteAddr: "127.1.156.58", RemotePort: 8645}}, api.ActionDeny},
+	} {
+		got, err := policy.Evaluate(ctx, tc.event)
+		if err != nil || got != tc.want {
+			t.Fatalf("%+v: action %v want %v error %v", tc.event, got, tc.want, err)
+		}
+	}
+}
+
+func TestParseStaticTableIdentityContractAndFirstMatch(t *testing.T) {
+	for _, p := range []string{"", strings.Repeat("x", 128), strings.Repeat("x", 254), "a\x00b", "a\xff"} {
+		if _, eligible, err := parseStaticTable(append([]byte{1}, staticTestTable(p, 0, 0)...), 0); eligible || err == nil {
+			t.Fatalf("accepted incomplete process identity %q", p)
+		}
+	}
+	for _, p := range []string{"2001:0db8::1", "::ffff:192.0.2.1", "fe80::1%eth0"} {
+		if _, eligible, err := parseStaticTable(append([]byte{1}, staticTestTable(p, 0, 80)...), 2); eligible || err == nil {
+			t.Fatalf("accepted noncanonical endpoint %q", p)
+		}
+	}
+	if _, eligible, err := parseStaticTable([]byte{2}, 0); eligible || err == nil {
+		t.Fatal("accepted invalid eligibility")
+	}
+	a, b := "/opt/warmor/collision-000079bb", "/opt/warmor/collision-00044848"
+	table := append([]byte{1}, staticTestTable(a, 0, 0)...)
+	table = append(table, staticTestTable(b, 1, 0)...)
+	table = append(table, staticTestTable(a, 1, 0)...)
+	rules, eligible, err := parseStaticTable(table, 0)
+	if err != nil || !eligible || len(rules) != 2 || rules[0].Action != 0 || rules[1].Action != 1 {
+		t.Fatalf("first-match: %+v %v %v", rules, eligible, err)
+	}
+}
 
 // TestCompiledYAMLStaticRules builds a YAML allowlist policy with the real
 // Rust toolchain and checks the module's static-rules declaration
 // round-trips through the export ABI.
 func TestCompiledYAMLStaticRules(t *testing.T) {
-	if testing.Short() || !compiler.CargoAvailable() {
+	if !compiler.CargoAvailable() {
+		if os.Getenv("WARMOR_REQUIRE_CARGO") == "1" {
+			t.Fatal("cargo and wasm32-unknown-unknown target are required")
+		}
+		t.Skip("needs cargo and the wasm32-unknown-unknown target")
+	}
+	if testing.Short() {
 		t.Skip("needs cargo and the wasm32-unknown-unknown target")
 	}
 	ctx := context.Background()
@@ -57,7 +203,11 @@ rules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rt.Close(ctx)
+	defer func() {
+		if err := rt.Close(ctx); err != nil {
+			t.Errorf("close YAML policy runtime: %v", err)
+		}
+	}()
 	if err := rt.LoadPolicyFromYAML(ctx, yamlPath); err != nil {
 		t.Fatalf("LoadPolicyFromYAML: %v", err)
 	}
@@ -65,7 +215,11 @@ rules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close(ctx)
+	defer func() {
+		if err := pool.Close(ctx); err != nil {
+			t.Errorf("close YAML policy pool: %v", err)
+		}
+	}()
 
 	// The glob rule makes the process domain ineligible; the network
 	// domain is eligible.

@@ -7,6 +7,10 @@ on:
       - "bpf/**"
       - "internal/ebpf/**"
       - "internal/enforcer/**"
+      - "internal/compiler/**"
+      - "internal/kernelmap/**"
+      - "internal/wasm/**"
+      - "pkg/api/**"
       - "cmd/warmor-daemon/**"
       - ".github/workflows/lsm-test.yml"
       - "ci/kernel/**"
@@ -17,6 +21,10 @@ on:
       - "bpf/**"
       - "internal/ebpf/**"
       - "internal/enforcer/**"
+      - "internal/compiler/**"
+      - "internal/kernelmap/**"
+      - "internal/wasm/**"
+      - "pkg/api/**"
       - "cmd/warmor-daemon/**"
       - ".github/workflows/lsm-test.yml"
       - "ci/kernel/**"
@@ -25,7 +33,7 @@ on:
 
 jobs:
   unit-tests:
-    name: Unit Tests (hash, serialization)
+    name: Unit Tests (exact identities, serialization)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,8 +42,8 @@ jobs:
         with:
           go-version: "1.24"
 
-      - name: Run hash and serialization tests
-        run: go test -v -race -run "TestHash|TestPolicyKey" ./internal/ebpf/...
+      - name: Run identity, static-rule, and serialization tests
+        run: go test -v -race -short -p 1 ./internal/ebpf/... ./internal/compiler/... ./internal/wasm/...
 
   bpf-compile:
     name: BPF Compilation Check
