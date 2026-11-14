@@ -25,6 +25,7 @@ done
 VIMTO="${VIMTO:-$(go env GOPATH)/bin/vimto}"
 KERNEL="${KERNEL:-ghcr.io/cilium/ci-kernels:stable-selftests}"
 if ! "$BUILD_ONLY"; then
+  command -v timeout >/dev/null || { echo 'error: GNU timeout is required to bound VM startup' >&2; exit 1; }
   [ -x "$VIMTO" ] || { echo "error: vimto not found at $VIMTO; install lmb.io/vimto@v0.4.0" >&2; exit 1; }
   case "$(uname -m)" in
     x86_64) QEMU=qemu-system-x86_64 ;;
@@ -62,16 +63,17 @@ if "$BUILD_ONLY"; then
 fi
 
 # No sudo, host daemon, Docker, kind, kubectl, or host enforcement fallback.
-WARMOR_OUTCOME_VM=1 WARMOR_REQUIRE_BPF_LSM=1 "$VIMTO" -kernel "$KERNEL" exec -- \
+WARMOR_OUTCOME_VM=1 WARMOR_REQUIRE_BPF_LSM=1 bash tests/integration/run-vm.sh verifier "$ARTIFACTS" \
+  "$VIMTO" -kernel "$KERNEL" exec -- \
   "$ARTIFACTS/kernel.test" -test.v -test.count=1 -test.timeout=120s \
-  -test.run '^TestLSM_(LoadAndAttach|ExactExecCollisionFirstMatchDefaultDenyAndScope|ExactAuditDeniesAreNotKernelRefusals|ExactEndpointCollisionDefaultDeny|TruncatedExecCannotHitExactAllow|ExactIPv6AndMappedEndpointIdentities)$' \
-  | tee "$ARTIFACTS/verifier.log"
+  -test.run '^TestLSM_(LoadAndAttach|ExactExecCollisionFirstMatchDefaultDenyAndScope|ExactAuditDeniesAreNotKernelRefusals|ExactEndpointCollisionDefaultDeny|TruncatedExecCannotHitExactAllow|ExactIPv6AndMappedEndpointIdentities)$'
 for test in LoadAndAttach ExactExecCollisionFirstMatchDefaultDenyAndScope ExactAuditDeniesAreNotKernelRefusals ExactEndpointCollisionDefaultDeny TruncatedExecCannotHitExactAllow ExactIPv6AndMappedEndpointIdentities; do
   grep -q -- "^--- PASS: TestLSM_${test} " "$ARTIFACTS/verifier.log"
 done
-WARMOR_OUTCOME_VM=1 "$VIMTO" -kernel "$KERNEL" exec -- \
+WARMOR_OUTCOME_VM=1 bash tests/integration/run-vm.sh outcomes "$ARTIFACTS" \
+  "$VIMTO" -kernel "$KERNEL" exec -- \
   "$ARTIFACTS/outcomes.test" -test.v -test.count=1 -test.timeout=180s \
-  -test.run '^TestDaemonOutcomes$' | tee "$ARTIFACTS/outcomes.log"
+  -test.run '^TestDaemonOutcomes$'
 # A skipped/mis-selected suite must not turn a successful go-test exit into
 # enforcement proof. The guest writes this only after every outcome/cleanup.
 grep -qx 'whole-daemon outcomes passed in vimto' "$ARTIFACTS/outcome-success.txt"
