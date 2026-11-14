@@ -44,7 +44,8 @@ treated as proof that no ancestor exists.
 The collector computes rates over its configured rolling window, never elapsed
 daemon uptime. Sixty equal-duration buckets bound state independently of event
 volume. The oldest bucket is expired conservatively: at most one bucket width
-(window/60) of recent events can be omitted at the boundary. Snapshot reads do
+(window/60, rounded up to a nanosecond) of recent events can be omitted at the
+boundary. Snapshot reads do
 not reset counts. Pattern churn is folded into `__other__` after the budget is
 reached; discarded key lengths are capped at 256 bytes. Image changes reset
 the observation window. New collectors mark snapshots `warmup` for a full

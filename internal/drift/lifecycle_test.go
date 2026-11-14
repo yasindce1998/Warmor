@@ -197,3 +197,46 @@ func TestConcurrentCollectorAndDetectorLifecycle(t *testing.T) {
 		t.Fatal("concurrent churn exceeded budget")
 	}
 }
+
+func TestDetectorIndependentCapacityLimits(t *testing.T) {
+	now := time.Unix(1200, 0)
+	for _, tc := range []struct {
+		name   string
+		config DetectorConfig
+	}{
+		{"global", DetectorConfig{MaxFingerprints: 2}},
+		{"per-image", DetectorConfig{MaxAgentsPerImage: 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.config.Clock = func() time.Time { return now }
+			d := NewDetector(tc.config)
+			for n := range 3 {
+				d.Submit(&BehaviorFingerprint{AgentID: fmt.Sprint(n), ImageHash: "image"})
+				now = now.Add(time.Second)
+			}
+			if d.AgentCount("image") != 2 || len(d.received) != 2 {
+				t.Fatal("capacity not enforced")
+			}
+			for _, fp := range d.fingerprints["image"] {
+				if fp.AgentID == "0" {
+					t.Fatal("oldest fingerprint was not evicted")
+				}
+			}
+		})
+	}
+}
+
+func TestRollingWindowRoundsBucketWidthUp(t *testing.T) {
+	now := time.Unix(1200, 0)
+	fc := NewFingerprintCollectorWithConfig(CollectorConfig{Window: 119 * time.Nanosecond, Clock: func() time.Time { return now }})
+	if fc.bucketWidth != 2*time.Nanosecond {
+		t.Fatalf("bucket width %v, want ceil(window/60)", fc.bucketWidth)
+	}
+	fc.Record("agent", "image", "pattern")
+	now = now.Add(100 * time.Nanosecond)
+	fc.Record("agent", "image", "pattern")
+	fp := fc.Snapshot("agent")
+	if fp.Vectors["pattern"] != 2/fc.config.Window.Minutes() {
+		t.Fatal("ring overwrote in-window observation")
+	}
+}

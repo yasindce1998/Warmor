@@ -36,7 +36,7 @@ type CollectorConfig struct {
 }
 
 // FingerprintCollector uses a bounded rolling ring, not lifetime counters.
-// Expiry has Window/60 granularity (at most one bucket of conservative
+// Expiry has Window/60 granularity rounded up to a nanosecond (one bucket of
 // undercount at the oldest boundary); rates always use the same full Window.
 type FingerprintCollector struct {
 	mu          sync.Mutex
@@ -77,7 +77,11 @@ func NewFingerprintCollectorWithConfig(cfg CollectorConfig) *FingerprintCollecto
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
-	return &FingerprintCollector{counters: make(map[string]*agentCounters), config: cfg, bucketWidth: max(cfg.Window/rollingBuckets, time.Nanosecond)}
+	return &FingerprintCollector{
+		counters:    make(map[string]*agentCounters),
+		config:      cfg,
+		bucketWidth: (cfg.Window-1)/rollingBuckets + 1,
+	}
 }
 
 // Record observes a pattern. An image change starts a new observation window;

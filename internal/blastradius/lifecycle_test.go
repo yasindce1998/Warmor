@@ -90,6 +90,7 @@ func TestGraphOwnedSnapshotsAndConcurrentAnalysis(t *testing.T) {
 				}
 				_, _ = json.Marshal(analyzer.Reach(id, 3))
 				_ = analyzer.ReachDirected(id, 3)
+				_ = analyzer.ReachableCounts([]uint64{id, id + 1})
 				if n%11 == 0 {
 					g.RemoveNode(id)
 					g.Prune()
@@ -105,5 +106,30 @@ func TestGraphOwnedSnapshotsAndConcurrentAnalysis(t *testing.T) {
 		if node.Name == "mutated" || node.Labels["app"] == "mutated" {
 			t.Fatal("snapshot mutation escaped")
 		}
+	}
+}
+
+func TestReachableCountsMatchesBFS(t *testing.T) {
+	g := NewGraph()
+	for id := uint64(1); id <= 7; id++ {
+		g.AddNode(&ContainerNode{CgroupID: id})
+	}
+	for _, pair := range [][2]uint64{{1, 2}, {2, 3}, {3, 1}, {4, 5}, {5, 6}} {
+		g.AddEdge(pair[0], pair[1], EdgeNetwork, "", time.Now())
+	}
+	// Multiple edge types and reciprocal edges must not count a node twice.
+	g.AddEdge(1, 2, EdgeSharedVolume, "", time.Now())
+	g.AddEdge(2, 1, EdgeNetwork, "", time.Now())
+	a := NewAnalyzer(g)
+	sources := []uint64{1, 2, 3, 4, 5, 6, 7, 99}
+	counts := a.ReachableCounts(sources)
+	for _, source := range sources {
+		if want := len(a.Reach(source, 0).Reachable); counts[source] != want {
+			t.Errorf("source %d: count %d, BFS %d", source, counts[source], want)
+		}
+	}
+	counts[1] = -1
+	if a.ReachableCounts([]uint64{1})[1] != 2 {
+		t.Fatal("returned mutable internal component state")
 	}
 }
