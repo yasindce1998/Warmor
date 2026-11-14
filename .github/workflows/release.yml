@@ -18,6 +18,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GOTOOLCHAIN: local
+
 defaults:
   run:
     shell: bash

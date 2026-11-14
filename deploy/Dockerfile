@@ -4,6 +4,7 @@ FROM golang:1.26.11@sha256:957952ae74dc010608717144399a59a2c6e82ea03d63be1c7ff65
 ARG VERSION=dev
 ARG TARGETOS=linux
 ARG TARGETARCH
+ENV GOTOOLCHAIN=local
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download && go mod verify

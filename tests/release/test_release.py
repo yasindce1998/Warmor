@@ -130,6 +130,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertRegex(image, r"@sha256:[0-9a-f]{64}$")
         self.assertIn("-trimpath -buildvcs=false", dockerfile)
         self.assertIn("CARGO_NET_OFFLINE=true", dockerfile)
+        self.assertIn("GOTOOLCHAIN=local", dockerfile)
 
 
 @unittest.skipUnless(shutil.which("helm"), "helm required for packaged chart regression")
