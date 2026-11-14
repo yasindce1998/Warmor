@@ -181,8 +181,9 @@ whole-daemon result. Local validation remains unprivileged tests and offline
 gate/oracle checks; the separate Host VM packaging owner keeps its own worktree
 and review pin. No edits are made there.
 
-Validation after the settled `162587d` checkpoint is one **sequential** run of
-fresh full tests, full race tests, vet and lint, with Go **1.26.11**,
-`GOMAXPROCS=2`, package parallelism **`-p 2`** and Cargo required. The initial
-pre-settled run is not counted as passing evidence. Logs use
+Validation is one **sequential** run of fresh full tests, full race tests, vet
+and lint, with Go **1.26.11**, `GOMAXPROCS=2`, package parallelism **`-p 2`** and
+Cargo required. The two test accessor edits landed before the run built the
+enforcer package; the remaining race/vet/lint phases use settled code `162587d`.
+No production code changed during validation. Logs use
 `/tmp/opencode/supervised-ce1-{full,race,vet,lint}.log`.
