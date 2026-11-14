@@ -114,6 +114,15 @@ func TestRunnerUsesPreparedBinariesInVM(t *testing.T) {
 
 func TestVMDeadlinePropagatesFailureAndCapturesStderr(t *testing.T) {
 	// Exercise only a fake vimto. No guest, BPF loader or daemon is executed.
+	for _, phase := range []string{"verifier", "outcomes", "generations"} {
+		t.Run(phase, func(t *testing.T) {
+			testVMDeadlinePropagatesFailureAndCapturesStderr(t, phase)
+		})
+	}
+}
+
+func testVMDeadlinePropagatesFailureAndCapturesStderr(t *testing.T, phase string) {
+	t.Helper()
 	for _, code := range []string{"0", "7", "124", "137"} {
 		t.Run(code, func(t *testing.T) {
 			dir := t.TempDir()
@@ -121,7 +130,7 @@ func TestVMDeadlinePropagatesFailureAndCapturesStderr(t *testing.T) {
 			if err := os.WriteFile(fake, []byte("#!/bin/sh\necho guest-stdout\necho boot-stderr >&2\nexit "+code+"\n"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.Command("bash", "run-vm.sh", "verifier", dir, fake)
+			cmd := exec.Command("bash", "run-vm.sh", phase, dir, fake)
 			output, err := cmd.CombinedOutput()
 			if code == "0" && err != nil {
 				t.Fatalf("successful fake VM failed: %v %s", err, output)
@@ -132,12 +141,12 @@ func TestVMDeadlinePropagatesFailureAndCapturesStderr(t *testing.T) {
 					t.Fatalf("VM failure must propagate unchanged: want %s got %v %s", code, err, output)
 				}
 			}
-			log, err := os.ReadFile(filepath.Join(dir, "verifier.log"))
+			log, err := os.ReadFile(filepath.Join(dir, phase+".log"))
 			if err != nil || !strings.Contains(string(log), "guest-stdout") || !strings.Contains(string(log), "boot-stderr") {
 				t.Fatalf("retain both VM output streams: %q %v", log, err)
 			}
-			status, err := os.ReadFile(filepath.Join(dir, "verifier-status.txt"))
-			if err != nil || !strings.Contains(string(status), "exit="+code) {
+			status, err := os.ReadFile(filepath.Join(dir, phase+"-status.txt"))
+			if err != nil || !strings.Contains(string(status), "phase="+phase+"\n") || !strings.Contains(string(status), "exit="+code) {
 				t.Fatalf("retain VM phase exit: %q %v", status, err)
 			}
 			if code != "0" && !strings.Contains(string(status), "deadline_expired=false") {
@@ -152,9 +161,14 @@ func TestVMDeadlineCoversPreGuestStartup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"verifier) LIMIT=300s", "outcomes) LIMIT=360s", "timeout --verbose --signal=QUIT --kill-after=15s", `"$LIMIT" "$@" </dev/null 2>&1 | tee`, `exit "$code"`} {
+	for _, required := range []string{"verifier) LIMIT=300s", "outcomes) LIMIT=360s", "generations) LIMIT=420s", "timeout --verbose --signal=QUIT --kill-after=15s", `"$LIMIT" "$@" </dev/null 2>&1 | tee`, `exit "$code"`} {
 		if !strings.Contains(string(data), required) {
 			t.Errorf("host cache/boot deadline or failure propagation missing: %s", required)
+		}
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "#") && strings.Contains(line, "--foreground") {
+			t.Fatal("VM deadline must signal the whole launcher/QEMU process group")
 		}
 	}
 	workflow, err := os.ReadFile("../../.github/workflows/enforcement-outcomes.yml")
@@ -171,7 +185,7 @@ func TestVMLauncherReplacesClosedCIStdinWithDevNull(t *testing.T) {
 	// Actions gives its shell an already-closed pipe. Direct vimto exec must
 	// receive /dev/null so v0.4.0 installs its held-open QEMU stdin pipe instead
 	// of forwarding EOF and disconnecting the virtio stdio port. No VM is run.
-	for _, phase := range []string{"verifier", "outcomes"} {
+	for _, phase := range []string{"verifier", "outcomes", "generations"} {
 		t.Run(phase, func(t *testing.T) {
 			dir := t.TempDir()
 			fake := filepath.Join(dir, "vimto")
@@ -197,14 +211,18 @@ func TestVMLauncherReplacesClosedCIStdinWithDevNull(t *testing.T) {
 }
 
 func TestVMDeadlineActuallyStopsStalledLauncher(t *testing.T) {
-	for _, hardKill := range []bool{false, true} {
-		t.Run(fmt.Sprint("hard-kill=", hardKill), func(t *testing.T) {
-			testStalledLauncherDeadline(t, hardKill)
+	for _, phase := range []string{"verifier", "outcomes", "generations"} {
+		t.Run(phase, func(t *testing.T) {
+			for _, hardKill := range []bool{false, true} {
+				t.Run(fmt.Sprint("hard-kill=", hardKill), func(t *testing.T) {
+					testStalledLauncherDeadline(t, phase, hardKill)
+				})
+			}
 		})
 	}
 }
 
-func testStalledLauncherDeadline(t *testing.T, hardKill bool) {
+func testStalledLauncherDeadline(t *testing.T, phase string, hardKill bool) {
 	t.Helper()
 	// Shorten only the test's timeout executable, not the production deadline.
 	// The fake launcher never boots a VM or starts enforcement.
@@ -231,19 +249,19 @@ func testStalledLauncherDeadline(t *testing.T, hardKill bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", "run-vm.sh", "verifier", dir, fake)
+	cmd := exec.CommandContext(ctx, "bash", "run-vm.sh", phase, dir, fake)
 	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
 	output, err := cmd.CombinedOutput()
 	var exit *exec.ExitError
 	if ctx.Err() != nil || !errors.As(err, &exit) || (exit.ExitCode() != 124 && exit.ExitCode() != 137) {
 		t.Fatalf("stalled launcher must fail at host deadline: %v context=%v output=%s", err, ctx.Err(), output)
 	}
-	status, err := os.ReadFile(filepath.Join(dir, "verifier-status.txt"))
+	status, err := os.ReadFile(filepath.Join(dir, phase+"-status.txt"))
 	if err != nil || !strings.Contains(string(status), fmt.Sprint("exit=", exit.ExitCode())) ||
 		!strings.Contains(string(status), "deadline_expired=true") || !strings.Contains(string(status), "No prevention or termination proof") {
 		t.Fatalf("retain failed startup diagnosis, not success: %q %v", status, err)
 	}
-	log, err := os.ReadFile(filepath.Join(dir, "verifier.log"))
+	log, err := os.ReadFile(filepath.Join(dir, phase+".log"))
 	if err != nil || !strings.Contains(string(log), "timeout: sending signal QUIT to command ") {
 		t.Fatalf("require phase-local timeout signal evidence, not any exit 137: %q %v", log, err)
 	}

@@ -17,6 +17,8 @@ on:
       - "scripts/build-ci-kernel.sh"
       - "tests/integration/run-kernel-generations.sh"
       - "tests/integration/kernel_generations_gate_test.go"
+      - "tests/integration/run-vm.sh"
+      - "tests/integration/workflow_test.go"
   pull_request:
     branches: [main]
     paths:
@@ -33,6 +35,8 @@ on:
       - "scripts/build-ci-kernel.sh"
       - "tests/integration/run-kernel-generations.sh"
       - "tests/integration/kernel_generations_gate_test.go"
+      - "tests/integration/run-vm.sh"
+      - "tests/integration/workflow_test.go"
   workflow_dispatch:
 
 jobs:
@@ -312,8 +316,8 @@ jobs:
         run: go generate ./internal/ebpf
       - name: Validate strict gate oracles without enforcement
         run: |
-          bash -n tests/integration/run-kernel-generations.sh
-          go test -race -count=1 -run '^TestGenerationGate' ./tests/integration
+          bash -n tests/integration/run-kernel-generations.sh tests/integration/run-vm.sh
+          go test -race -count=1 -run '^(TestGenerationGate|TestVM)' ./tests/integration
       - name: Require actual non-skipped generation, legacy and integrity outcomes in VM
         env:
           KERNEL: ${{ github.workspace }}/kernel-out/vmlinuz
@@ -329,5 +333,6 @@ jobs:
             tests/integration/artifacts/generations.*/required-tests.txt
             tests/integration/artifacts/generations.*/SHA256SUMS
             tests/integration/artifacts/generations.*/*.log
+            tests/integration/artifacts/generations.*/generations-status.txt
           if-no-files-found: error
           retention-days: 14

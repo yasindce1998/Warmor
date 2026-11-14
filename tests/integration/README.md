@@ -80,13 +80,22 @@ and checks the requested actual kernel minor. Broad suite skips do not count.
 Local compilation and oracle checks, **without host attachment or a VM**:
 
 ```sh
-bash -n tests/integration/run-kernel-generations.sh
-go test -race -run '^TestGenerationGate' ./tests/integration
+bash -n tests/integration/run-kernel-generations.sh tests/integration/run-vm.sh
+go test -race -run '^(TestGenerationGate|TestVM)' ./tests/integration
 bash tests/integration/run-kernel-generations.sh --build-only
 ```
 
 The dedicated CI matrix runs on the built 6.1 and 6.18 IMA kernels and retains
-logs, manifest and input hashes under `artifacts/generations.*`. See
+logs, manifest and input hashes under `artifacts/generations.*`. Its shared
+`run-vm.sh generations` phase replaces closed CI stdin with `/dev/null` and bounds
+host cache/boot/transport/guest waits to 420 seconds, plus a 15-second hard-kill
+grace for the whole launcher/QEMU process group. The guest's 180-second test
+timeout is separate. `generations.log` captures both output streams and
+`generations-status.txt` retains phase/deadline/exit and failure diagnostics,
+including failures before guest startup; both are uploaded on failure too.
+Offline fake-launcher tests cover closed stdin, failure propagation and stalled
+startup with QUIT/KILL escalation. These do not execute a VM or enforcement.
+The required-PASS/no-SKIP/duplicate-PASS oracle is unchanged. See
 [`docs/design/kernel-generations.md`](../../docs/design/kernel-generations.md)
 for concurrency, flush/retirement assertions and the still-unimplemented daemon
 activation contract. A build-only success is not verifier/runtime evidence.
