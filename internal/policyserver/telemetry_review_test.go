@@ -158,3 +158,101 @@ func TestTelemetryFailedAcknowledgementInvalidationFailsReportsClosed(t *testing
 		})
 	}
 }
+
+func TestTelemetryLongGapCannotRefreshOldHealthyEvidence(t *testing.T) {
+	for _, quality := range []string{"clean", "overflow", "errors", "excluded", "lost"} {
+		t.Run(quality, func(t *testing.T) {
+			store, err := NewTelemetryStore(testTelemetryConfig()) // window=60s, gap=10s
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			store.clock = func() time.Time { return now }
+			if err := store.ConfigureGeneration("r", "g"); err != nil {
+				t.Fatal(err)
+			}
+			baseline, baselineAck := telemetryTestSource(t, store, now, "baseline", false)
+			canary, canaryAck := telemetryTestSource(t, store, now, "canary", true)
+			snapshots := []*telemetry.Snapshot{&baseline, &canary}
+			acks := []*Agent{baselineAck, canaryAck}
+			for i, snapshot := range snapshots {
+				if _, err := store.ingest(acks[i].ID, acks[i], *snapshot); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now = now.Add(time.Second)
+			for i, snapshot := range snapshots {
+				acks[i].LastHeartbeat = now
+				snapshot.Sequence++
+				snapshot.Total = 10
+				if result, err := store.ingest(acks[i].ID, acks[i], *snapshot); err != nil || result.Total != 10 {
+					t.Fatalf("fresh samples: %+v %v", result, err)
+				}
+			}
+			now = now.Add(time.Second)
+			if report := store.Report("r"); report.Verdict != "healthy" {
+				t.Fatalf("fixture not healthy: %+v", report)
+			}
+			// Both reporters return after 11s, while their pre-gap buckets are
+			// still well within the 60s retention window. A cursor-only update
+			// must not make those old healthy observations fresh again.
+			now = now.Add(10 * time.Second)
+			switch quality {
+			case "overflow":
+				canary.Overflow = true
+			case "errors":
+				canary.Errors++
+			case "excluded":
+				canary.Excluded++
+			case "lost":
+				canary.Lost++
+			}
+			for i, snapshot := range snapshots {
+				acks[i].LastHeartbeat = now
+				snapshot.Sequence++
+				snapshot.Total += 1000
+				if result, err := store.ingest(acks[i].ID, acks[i], *snapshot); err != nil || result.Status != "cursor-only" || result.Reason != "reporting-gap" || result.Total != 0 {
+					t.Fatalf("gap result: %+v %v", result, err)
+				}
+			}
+			assertPending := func() {
+				t.Helper()
+				report := store.Report("r")
+				if report.Verdict != "pending" || !report.ReportOnly || report.Baseline.Total != 0 || report.Canary.Total != 0 || report.Baseline.Sources != 0 || report.Canary.Sources != 0 || report.ObservedFor != 0 {
+					t.Fatalf("gap revived old healthy evidence: %+v", report)
+				}
+			}
+			assertPending()
+			for i, snapshot := range snapshots {
+				if result, err := store.ingest(acks[i].ID, acks[i], *snapshot); err != nil || result.Status != "duplicate" {
+					t.Fatalf("gap retry: %+v %v", result, err)
+				}
+			}
+			assertPending()
+			if store.state.Sources["canary"].Cursor.Total != 1010 || store.state.Sources["canary"].Cursor.Lost != canary.Lost || store.state.Sources["canary"].Cursor.Overflow != canary.Overflow {
+				t.Fatal("gap failed to baseline cumulative/quality counters")
+			}
+			now = now.Add(time.Second)
+			for i, snapshot := range snapshots {
+				acks[i].LastHeartbeat = now
+				snapshot.Sequence++
+				snapshot.Total++
+				if _, err := store.ingest(acks[i].ID, acks[i], *snapshot); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if report := store.Report("r"); report.Verdict != "pending" {
+				t.Fatalf("gap bypassed fresh warm-up: %+v", report)
+			}
+			now = now.Add(time.Second)
+			report := store.Report("r")
+			if quality == "overflow" {
+				if report.Verdict != "pending" || report.Reason != "unreliable-or-overflow" {
+					t.Fatalf("sticky overflow became healthy: %+v", report)
+				}
+			} else if report.Verdict != "healthy" || report.Baseline.Total != 1 || report.Canary.Total != 1 {
+				t.Fatalf("recovery counted old evidence/backlog instead of fresh decisions: %+v", report)
+			}
+		})
+	}
+}

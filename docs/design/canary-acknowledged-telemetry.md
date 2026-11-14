@@ -75,6 +75,11 @@ enablement checklist, not a statement that automatic rollback is available.
   and long-gap intervals reseed without attributing backlog. Higher unchanged
   counters add zero. Checked `uint64` arithmetic never enters the legacy
   analyzer's `int` counters or loops over `RecordDecision`.
+  A gap exceeding the configured bound also clears every retained bucket for
+  that source, whether the returning snapshot is clean or reports overflow,
+  errors, excluded decisions or loss. Updating its cursor cannot refresh old
+  sample coverage: new valid intervals and a fresh observation warm-up are
+  required. Sticky overflow continues to make subsequent intervals pending.
 - Cursor, immutable attribution, quality state and aggregate contribution are
   serialized into **one** bounded telemetry snapshot and published only after a
   successful synced write/rename/directory sync. A precommit persistence failure

@@ -513,6 +513,12 @@ func (t *TelemetryStore) ingest(agent string, ack *Agent, report telemetry.Snaps
 			return nil
 		}
 		if now.Sub(receipt) > s.Config.MaxGap || now.Sub(receipt) >= s.Config.Window {
+			// The cursor advances to discard unknown backlog, but it must not
+			// renew coverage for pre-gap evidence. Clear all source buckets,
+			// including old healthy ones, regardless of new quality counters.
+			// Subsequent valid intervals require fresh samples and warm-up;
+			// sticky overflow still poisons those intervals below.
+			src.Buckets = [telemetryBuckets]telemetryBucket{}
 			result.Reason = "reporting-gap"
 			return nil
 		}
