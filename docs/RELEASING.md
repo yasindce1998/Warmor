@@ -6,6 +6,14 @@ longer publish `latest`, moving minor tags or a repeatedly overwritten chart.
 Do not use a tag as an instruction to deploy or upgrade any production cluster.
 The workflow performs **no deployment**.
 
+Every pull request and the weekly Monday 04:17 UTC schedule run the same
+build/test/security gates without publication. The schedule checks the default
+branch against current vulnerability databases; PR validation also covers source
+changes that do not edit dependency manifests. Both publishers require a `push`
+event on `refs/tags/v*`, so neither PR nor scheduled runs can publish images,
+charts, attestations or a GitHub release. Scanner/download failures remain hard
+failures, not warnings.
+
 ### Mandatory repository prerequisites
 
 Before enabling publication, configure and verify a repository ruleset matching
@@ -146,11 +154,11 @@ Plan H's privileged Linux/Kubernetes release-readiness gates.
 
 ```bash
 python3 -m unittest discover -s tests/release -v
-actionlint .github/workflows/{release,binaries,macos-ci}.yml
+actionlint .github/workflows/{release,binaries,release-image,macos-ci}.yml
 VERSION=9.8.7-rc.1 IMAGE_REPOSITORY=ghcr.io/example/warmor bash scripts/release-chart.sh
 ```
 
-Changes to release workflows, packaging or Dockerfile run the build-only gates
-on pull requests without package/release/signing write permissions. Actual
+All pull requests and the weekly schedule run the build-only gates
+without package/release/signing write permissions. Actual
 registry/OIDC publication and non-Linux native runners must still be verified
 by the coordinating maintainer in GitHub Actions; never simulate these as green.

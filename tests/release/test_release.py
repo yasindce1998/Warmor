@@ -148,6 +148,34 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('bash scripts/release-check-ref.sh tag\n          helm push', workflow)
         self.assertIn('bash scripts/release-check-ref.sh tag\n          gh release create', workflow)
 
+    def test_scheduled_and_all_pr_validation_cannot_publish(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        triggers = workflow.split("permissions:", 1)[0]
+        self.assertIn("  pull_request: {}", triggers)
+        self.assertIn("  schedule:\n    - cron:", triggers)
+        self.assertNotIn("paths:", triggers)
+        self.assertNotIn("paths-ignore:", triggers)
+        self.assertNotIn("pull_request_target", workflow)
+        self.assertIn("permissions:\n  contents: read", workflow)
+        jobs = dict(re.findall(r"(?ms)^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)", workflow.split("\njobs:\n", 1)[1]))
+        publishers = {name for name, body in jobs.items() if re.search(r"(?m)^      \S+: write$", body)}
+        self.assertEqual(publishers, {"publish-images", "publish"})
+        for name in publishers:
+            self.assertIn("    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')\n", jobs[name])
+
+    def test_security_scans_fail_closed(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        image = (ROOT / ".github/workflows/release-image.yml").read_text()
+        for text in (workflow, image):
+            self.assertNotIn("continue-on-error:", text)
+            for line in text.splitlines():
+                if re.search(r"\b(trivy|govulncheck)\b", line):
+                    self.assertNotIn("||", line)
+        self.assertIn("go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...", workflow)
+        self.assertIn("trivy fs --scanners vuln --pkg-types library --severity HIGH,CRITICAL", workflow)
+        self.assertIn("--ignore-unfixed --exit-code 1 --timeout 10m policies/", workflow)
+        self.assertIn('trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --timeout 10m "$IMAGE"', image)
+
     def test_macos_daemon_is_explicitly_omitted(self):
         text = (ROOT / "scripts/release-build.sh").read_text()
         self.assertIn('if [[ "$GOOS" != darwin ]]; then tools+=(warmor-daemon); fi', text)
@@ -302,22 +330,32 @@ class RefTests(unittest.TestCase):
 @unittest.skipUnless(shutil.which("helm"), "helm required for packaged chart regression")
 class ChartTests(unittest.TestCase):
     def test_packaged_chart_uses_release_version_not_source_defaults(self):
+        for version in ("9.8.7", "9.8.7-rc.1", "0.0.0-ci." + "a" * 40):
+            with self.subTest(version=version):
+                self.check_packaged_chart(version)
+
+    def check_packaged_chart(self, version):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "deploy/helm").mkdir(parents=True)
             shutil.copytree(ROOT / "deploy/helm/warmor", root / "deploy/helm/warmor")
-            source = (root / "deploy/helm/warmor/values.yaml").read_bytes()
-            env = dict(os.environ, VERSION="9.8.7-rc.1", IMAGE_REPOSITORY="ghcr.io/example/warmor")
+            chart_root = root / "deploy/helm/warmor"
+
+            def snapshot():
+                return {path.relative_to(chart_root): path.read_bytes() for path in chart_root.rglob("*") if path.is_file()}
+
+            source = snapshot()
+            env = dict(os.environ, VERSION=version, IMAGE_REPOSITORY="ghcr.io/example/warmor")
             subprocess.run(["bash", str(ROOT / "scripts/release-chart.sh")], cwd=root, env=env, check=True, capture_output=True)
-            archive = root / "dist/warmor-9.8.7-rc.1.tgz"
+            archive = root / f"dist/warmor-{version}.tgz"
             with tarfile.open(archive) as stream:
                 chart = stream.extractfile("warmor/Chart.yaml").read().decode()
                 values = stream.extractfile("warmor/values.yaml").read().decode()
-            self.assertRegex(chart, r"(?m)^version: 9\.8\.7-rc\.1$")
-            self.assertIn("appVersion: 9.8.7-rc.1", chart)
-            self.assertEqual(values.count('tag: "9.8.7-rc.1"'), 2)
+            self.assertRegex(chart, rf"(?m)^version: {re.escape(version)}$")
+            self.assertIn(f"appVersion: {version}", chart)
+            self.assertEqual(values.count(f'tag: "{version}"'), 2)
             self.assertNotIn('tag: "latest"', values)
-            self.assertEqual(source, (root / "deploy/helm/warmor/values.yaml").read_bytes())
+            self.assertEqual(source, snapshot())
 
 
 if __name__ == "__main__":

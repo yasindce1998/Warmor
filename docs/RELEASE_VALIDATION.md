@@ -83,3 +83,46 @@ macOS/ARM64 hosted runs, raw GitHub artifact transfer, OIDC/registry publication
 and the external SDK/driver infrastructure remain unverified here. The separate
 dependency-fix branch is not modified or silently folded into this release
 branch; integration and a passing rescan remain the coordinator's responsibility.
+
+## Main-based release integration
+
+Persistent worktree `.worktrees/release-integration`, branch
+`ci/tested-release-artifacts`, starts at `origin/main` **`78471f6`** and
+cherry-picks only `5915d3f`, `f0fb5ba`, `2be9737` and `0f7bd1b` from the release
+task. The validation above is historical source-branch evidence, not a claim
+that the full runtime suite was rerun on this integration. Separate review
+follow-ups to `0f7bd1b` are not folded in here.
+
+Integration-only changes make security/build validation run on every PR (not
+only selected manifest/workflow paths) and weekly Monday 04:17 UTC. These runs
+retain read-only repository permissions and cannot enter either publisher;
+both publishers still require a `push` event on `refs/tags/v*`. Vulnerability
+findings, scanner errors and download failures remain hard failures.
+
+Local checks on this integration:
+
+- **21 Python release regressions pass**, including source-chart byte snapshots
+  before/after packaging stable, prerelease and CI versions. Chart sources are
+  untouched; the pending chart-agent changes are not integrated.
+- **actionlint v1.7.12 passes** for `release.yml`, `binaries.yml`,
+  `release-image.yml` and `macos-ci.yml`, with `-shellcheck=` because shellcheck
+  is unavailable. `bash -n` passes on all four release shell scripts.
+- **CI-configured errcheck passes on both this branch and `78471f6`**, using
+  local golangci-lint v1.64.8, Go 1.26.11, the unchanged `.golangci.yml`, and
+  `golangci-lint run --disable-all --enable errcheck --out-format=line-number
+  --timeout=5m`. The baseline is an isolated `git archive 78471f6`, not a feature
+  branch. This checks errcheck only, not the complete CI linter suite.
+- Standalone `errcheck -asserts ./...` exits nonzero with **385 byte-for-byte
+  identical diagnostics** on baseline and integration. Those additional raw
+  findings must not be described as new feature regressions or as a clean raw
+  errcheck run.
+- `git diff --check` passes; `git diff 78471f6 -- deploy/helm go.mod go.sum` is
+  empty. Dependency PR #36 is deliberately not combined; integrate it through
+  main after merge and require fresh successful vulnerability scans before any
+  publication.
+
+Not revalidated here: full Go/Rust runtime suites, live vulnerability databases,
+Docker/Trivy image builds and scans, native hosted ARM64/Windows/macOS jobs,
+GitHub artifact API ZIP transfer, GHCR/Helm OCI promotion, OIDC attestations,
+immutable tag rulesets, privileged Kubernetes/BPF outcomes or native SDK/driver
+infrastructure. No remote push, PR, tag, release, deployment or merge was made.
