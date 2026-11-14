@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["image", "daemon", "hostPaths", "controller", "nodeSelector"],
+  "definitions": {
+    "image": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "tag", "digest", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1, "pattern": "^[^ @]+$"},
+        "tag": {"type": "string", "pattern": "^$|^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"},
+        "digest": {"type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "absolutePath": {"type": "string", "minLength": 2, "pattern": "^/[^\\s]*$"},
+    "duration": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m|h)$"}
+  },
+  "properties": {
+    "image": {"$ref": "#/definitions/image"},
+    "daemon": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "logLevel": {"enum": ["debug", "info", "warn", "error"]},
+        "statsInterval": {"$ref": "#/definitions/duration"},
+        "metricsPort": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "metricsBindAddress": {"type": "string", "pattern": "^[0-9a-fA-F:.]*$"},
+        "auditMode": {"type": "boolean"}, "lsmEnforce": {"type": "boolean"},
+        "requireLSM": {"type": "boolean"}, "defaultDeny": {"type": "boolean"},
+        "confirmNodeWidePolicy": {"type": "boolean"},
+        "cgroupFilter": {"type": "string", "pattern": "^$|^auto$|^/[^,]+(,/[^,]+)*$"},
+        "cgroupReconcileInterval": {"$ref": "#/definitions/duration"}
+      }
+    },
+    "hostPaths": {
+      "type": "object", "additionalProperties": false, "required": ["cgroup", "cgroupMount", "kernel"],
+      "properties": {"cgroup": {"$ref": "#/definitions/absolutePath"}, "cgroupMount": {"$ref": "#/definitions/absolutePath"}, "kernel": {"$ref": "#/definitions/absolutePath"}}
+    },
+    "controller": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"}, "image": {"$ref": "#/definitions/image"},
+        "watchAllNamespaces": {"type": "boolean"}, "resyncPeriod": {"$ref": "#/definitions/duration"},
+        "cacheSizeLimit": {"type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi)$"},
+        "resources": {"type": "object"}, "extraArgs": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "nodeSelector": {
+      "type": "object", "required": ["kubernetes.io/os", "kubernetes.io/arch"],
+      "properties": {"kubernetes.io/os": {"const": "linux"}, "kubernetes.io/arch": {"const": "amd64"}},
+      "additionalProperties": {"type": "string"}
+    },
+    "webhook": {"type": "object", "properties": {"enabled": {"const": false}}},
+    "updateStrategy": {"type": "object", "properties": {
+      "type": {"enum": ["RollingUpdate", "OnDelete"]},
+      "maxUnavailable": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "pattern": "^([1-9]|[1-9][0-9]|100)%$"}]}
+    }},
+    "serviceAccount": {"type": "object", "properties": {"create": {"type": "boolean"}, "name": {"type": "string"}}},
+    "policy": {"type": "object", "additionalProperties": false, "properties": {"existingConfigMap": {"type": "string"}}}
+  }
+}

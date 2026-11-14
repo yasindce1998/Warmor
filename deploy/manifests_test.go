@@ -75,7 +75,8 @@ type container struct {
 func TestDaemonSetMatchesDaemonFlags(t *testing.T) {
 	flags := daemonFlags(t)
 	// Env vars the daemon itself reads (cmd/warmor-daemon serverTokenEnv).
-	daemonEnv := map[string]bool{"WARMOR_SERVER_TOKEN": true}
+	// XDG_CACHE_HOME is read by os.UserCacheDir for the WASM compile cache.
+	daemonEnv := map[string]bool{"WARMOR_SERVER_TOKEN": true, "XDG_CACHE_HOME": true}
 
 	data, err := os.ReadFile(filepath.Join("kubernetes", "warmor-daemonset.yaml"))
 	if err != nil {
