@@ -4,11 +4,16 @@ package platform
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/yasindce1998/warmor/internal/ebpf"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -137,6 +142,87 @@ func TestStopIdempotent(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		if err := p.Stop(); err != nil {
 			t.Fatalf("Stop #%d: %v", i+1, err)
+		}
+	}
+}
+
+type idleTracepointMonitor struct {
+	entered chan struct{}
+	unblock chan struct{}
+	once    sync.Once
+	stops   atomic.Int32
+	closed  atomic.Bool
+	stopErr error
+}
+
+func (m *idleTracepointMonitor) read() (*ebpf.Event, error) {
+	m.entered <- struct{}{}
+	<-m.unblock
+	return nil, ringbuf.ErrClosed
+}
+
+func (m *idleTracepointMonitor) ReadProcessEvent() (*ebpf.Event, error) { return m.read() }
+func (m *idleTracepointMonitor) ReadFileEvent() (*ebpf.Event, error)    { return m.read() }
+func (m *idleTracepointMonitor) ReadNetworkEvent() (*ebpf.Event, error) { return m.read() }
+func (m *idleTracepointMonitor) StopReaders() error {
+	m.stops.Add(1)
+	m.once.Do(func() { close(m.unblock) })
+	return m.stopErr
+}
+func (m *idleTracepointMonitor) Close() error {
+	m.closed.Store(true)
+	return nil
+}
+
+func TestStopInterruptsIdleTracepointReadersBeforeWaiting(t *testing.T) {
+	for _, closeDirectly := range []bool{false, true} {
+		t.Run(fmt.Sprint("close=", closeDirectly), func(t *testing.T) {
+			monitor := &idleTracepointMonitor{entered: make(chan struct{}, 3), unblock: make(chan struct{})}
+			t.Cleanup(func() { monitor.once.Do(func() { close(monitor.unblock) }) })
+			p := &LinuxPlatform{ebpfLoader: monitor, stopChan: make(chan struct{})}
+			if err := p.Start(context.Background(), make(chan *api.Event)); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 3; i++ {
+				select {
+				case <-monitor.entered:
+				case <-time.After(time.Second):
+					t.Fatal("monitor did not enter idle read")
+				}
+			}
+			done := make(chan error, 1)
+			go func() {
+				if closeDirectly {
+					done <- p.Close()
+				} else {
+					done <- p.Stop()
+				}
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("shutdown waited for idle reads before interrupting them")
+			}
+			if monitor.stops.Load() != 1 || monitor.closed.Load() != closeDirectly {
+				t.Fatalf("Stop must interrupt once and preserve resources until Close: stops=%d closed=%v", monitor.stops.Load(), monitor.closed.Load())
+			}
+			if err := p.Stop(); err != nil || monitor.stops.Load() != 1 {
+				t.Fatalf("repeated Stop must be idempotent: %v", err)
+			}
+		})
+	}
+}
+
+func TestStopPreservesReaderInterruptionFailure(t *testing.T) {
+	want := errors.New("reader close failed")
+	monitor := &idleTracepointMonitor{unblock: make(chan struct{}), stopErr: want}
+	p := &LinuxPlatform{ebpfLoader: monitor, stopChan: make(chan struct{})}
+	for i := 0; i < 2; i++ {
+		if err := p.Stop(); !errors.Is(err, want) {
+			t.Fatalf("Stop lost reader error: %v", err)
 		}
 	}
 }

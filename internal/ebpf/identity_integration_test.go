@@ -16,6 +16,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/yasindce1998/warmor/internal/compiler"
 )
 
@@ -63,6 +64,63 @@ func identityTestLoader(t *testing.T) (*LSMLoader, uint64) {
 		t.Fatal(err)
 	}
 	return l, cgid
+}
+
+func TestLSM_StopReadersInterruptsIdleMonitors(t *testing.T) {
+	l, _ := identityTestLoader(t) // Requires the disposable VM before loading.
+	tp, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := tp.Close(); err != nil {
+			t.Errorf("close idle tracepoint loader: %v", err)
+		}
+	})
+	// No current task can produce events in this reserved test-only scope.
+	if err := tp.SetCgroupFilter([]uint64{^uint64(0)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.SetCgroupFilter([]uint64{^uint64(0)}); err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 4)
+	for _, read := range []func() (*Event, error){tp.ReadProcessEvent, tp.ReadFileEvent, tp.ReadNetworkEvent, l.ReadLSMEvent} {
+		go func() {
+			for {
+				if _, err := read(); err != nil {
+					results <- err
+					return
+				}
+			}
+		}()
+	}
+	// Let pending startup events drain; idle reads must not return themselves.
+	select {
+	case err := <-results:
+		t.Fatalf("reader returned before stop: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	if err := tp.StopReaders(); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.StopReaders(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		select {
+		case err := <-results:
+			if !errors.Is(err, ringbuf.ErrClosed) {
+				t.Fatalf("stopped read: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("idle reader was not interrupted")
+		}
+	}
+	// StopReaders must not close the policy maps or detach enforcement.
+	if _, err := l.PolicyMap().Stats(); err != nil {
+		t.Fatalf("StopReaders closed policy resources: %v", err)
+	}
 }
 
 // Prepending arbitrary bytes to a known FNV collision need not preserve it;
