@@ -67,7 +67,12 @@ directory or writable cache. The sole explicit environment entry is
 against its event snapshot. WASI receives no mounted files, argv, environment,
 network listeners or external command execution capabilities.
 
-## Wire protocol v1
+## Wire protocol v2
+
+The [declaration metadata contract](policyhost-declarations.md) extends this
+checkpoint with a required versioned readiness metadata envelope and an 8 MiB
+metadata-frame cap. Protocol 1 workers are incompatible and rejected. Metadata
+transport does not by itself authorize optimizations.
 
 Each frame has a four-byte big-endian nonzero length. Lengths are checked before
 allocation. Structured frames use the exact canonical JSON encoding of the Go
@@ -170,10 +175,9 @@ under a trusted wazero/Go host**, not a sandbox for a compromised native worker:
   there is no Job Object or tested equivalent. Cross-compilation is not platform
   execution validation. Tests do not install host security hooks or alter parent
   process rlimits.
-- Declarations are read/validated inside the child but not exposed as routing or
-  kernel metadata yet. Until a versioned bounded declaration contract is added,
-  integrations must not enable decision caching or kernel default-deny preloads
-  based on assumptions about fields-read/static rules.
+- Declarations now have an optional bounded metadata API; see its separate
+  trust contract above. Caching/default-deny remain disabled by default for the
+  supervised backend and no enforcer integration consumes this API yet.
 - The enforcer still owns a concrete in-process evaluator. Interface extraction,
   atomic verified activation/rollback, checked-out host drain, bounded replacement
   backoff, failure metrics, expected workload scope and fail-closed enforcement
