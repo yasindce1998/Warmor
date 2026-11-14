@@ -47,8 +47,13 @@ It is not shell parsing; `eq`/`any_of` compare the complete joined string, while
 `contains` searches for a substring. Missing argv is an empty string. The Linux
 exec tracepoint captures at most 16 arguments of 63 bytes each; LSM exec events
 do not carry argv yet. Rules cannot inspect arguments the sensor did not capture.
-The compiled policy refuses inputs longer than 16 KiB at evaluation time (DENY), rather
-than silently truncating them again.
+Callback inputs longer than 16 KiB or containing invalid UTF-8 are treated as
+unknown, not silently truncated again. Rule order and action still apply:
+nonblocking allow/log/audit rules require a definite match, while enforcing deny
+rules conservatively match when their conditions could hold. An uncertain audit
+or log rule is skipped, so it cannot suppress a later enforcing denial or default
+deny. An earlier definite match retains first-match precedence. Known unrelated
+conditions can still rule a match out.
 
 Policies using YAML `args` or network `operation` declare **ABI 5**, which adds
 argv host callbacks and string-length queries; older agents reject them. Upgrade
@@ -82,6 +87,9 @@ Variables let you reuse lists across rules. Reference them with `$variable_name`
 
 References must resolve, including references inside lists and other variables;
 cycles are errors. Use `$$name` to match the literal string `$name`.
+Operands must be scalar or flat lists. Expansion is bounded to depth 32,
+4096 visited values and 1 MiB of visited string data per operand; larger
+expansions are rejected before compiling.
 
 ```yaml
 variables:
