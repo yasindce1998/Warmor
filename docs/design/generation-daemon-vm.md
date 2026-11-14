@@ -186,3 +186,33 @@ private-recording post-wait export were preserved; later picks applied cleanly.
 No edit or merge was made to the PR51 owner branch. Actual VM CI on both kernels remains required after
 combining the fixtures; local oracle passes do not prove private recording or
 whole-daemon execution under that newer main.
+
+### Final PR51 integration validation
+
+Code checkpoint `ae16720` on `test/generation-daemon-integration`, Go **1.26.11**,
+`GOMAXPROCS=2`, `-p 2` where applicable. The complete normal test suite and complete
+race suite were run **once each, sequentially**, not concurrently:
+
+- `go test -p 2 ./...`: pass.
+- `go test -race -p 2 ./...`: pass.
+- Repository-configured golangci-lint, normal full tree: pass.
+- Profile-tagged golangci-lint for fixture/seam/daemon packages: pass.
+- Root actionlint v1.7.7: pass (`-shellcheck=` because shellcheck is unavailable;
+  shell syntax separately checked with `bash -n`).
+- Real Cargo `run-generation-daemon.sh --build-only`: pass; normal/profile
+  daemon binaries, all exact helper inputs and generated A/B artifacts hashed.
+- Profile guard/timestamp/fault race oracles, ten repetitions: pass.
+- Normal-build control-flag absence passes with no tags, `integration` alone,
+  and `generation_daemon_vm` alone. Both tags remain necessary to include it.
+- Profile-tagged vet and compiler-invalid artifact oracle: pass.
+- Whitespace checks: pass. No BPF source/embedded object, ABI, `go.mod` or
+  `go.sum` changes relative to `e3f5b84`.
+
+The strict daemon matrix retains hard dependencies on the **entire Clang 18/21
+compiler matrix** and built IMA kernel job; neither compiler nor 6.1.188/6.18.53
+daemon outcomes may continue-on-error. Offline workflow tests enforce these
+dependencies. Local logs are `/tmp/opencode/generation-daemon-integration-*.log`;
+latest build-only inputs are in ignored `artifacts/generation-daemon.P9BAQk`.
+No QEMU/vimto execution, BPF attachment, host enforcement, pushes or original
+branch edits occurred. CI must actually execute all required phases without
+skips on both kernels before merging; the feature stays experimental.
