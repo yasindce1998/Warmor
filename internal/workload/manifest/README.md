@@ -24,7 +24,7 @@ identity join exposes namespace names, not Namespace UIDs. Namespace recreation
 and stale-policy retirement must be fenced by controller/identity snapshots;
 this package does not invent Namespace UID evidence.
 
-The manifest pins compiler `6`, composition `deny-first/v1`, and posture
+The manifest pins compiler `7`, composition `deny-first/v1`, and posture
 `per-rule/v1`. A compiler version change fails closed until reviewed, rather
 than automatically accepting new code generation. `New` deep copies inputs;
 `Decode` additionally rejects non-exact schema field names (including case
@@ -198,3 +198,44 @@ framing error. A 10-second trailing-stream fuzz run passed, as did Go 1.26.11
 full-repo lint and workload race tests with required real Cargo. No compiler
 files were changed; this framing check protects bundles independently of any
 separate compiler parser hardening. Independent re-review is still required.
+
+## Compiler 7 compatibility review (base `98d2b90`)
+
+The compiler 6-to-7 diff was reviewed before changing the explicit compatibility
+pin. `codegen.go`, `fields.go`, `staticrules.go` and `temporal.go` are unchanged
+from the compiler-6 base (`2c415c9`): first-match rule evaluation, audit-deny
+value, temporal conditions, input layout/callbacks and `abi_version` selection
+remain the same. `exactABI` therefore still predicts 3, or 5 for argv/network
+operation callbacks; no composition/posture semantics or versions change.
+
+Compiler 7's changed output is the `warmor.build.v1` custom section, appended
+after Cargo compilation and before any artifact signing. It declares compiler
+`warmor-yaml/7` and the typed policy's effective default action. The compiler
+also gained cancellable build/toolchain execution and failed-build cleanup.
+The parser's framing hardening rejects trailing documents before typed decoding;
+the manifest already rejects these independently, along with aliases, merges
+and non-policy tags. It does not extend the accepted manifest source language.
+
+Only literal compiler `7` is accepted, and the runtime compiler must also equal
+the pin. Old `6` and unknown/future versions remain rejected. Tests bind the
+compiler into manifest, selection and compiled-generation content identities,
+including hash-only reconstruction of the old contract; old cache identities
+must not be reused even when source bytes and ABI are unchanged.
+
+Every real Cargo manifest composition test reads the actual artifact section,
+checks `warmor-yaml/7` and the effective default, calls the actual WASM ABI export,
+and compares the loader's bytes/digest/ABI/build declarations via
+`Pool.CheckAssignment`. An expectation of `warmor-yaml/6` must fail. These checks
+run for opposing namespaces, unknown/host handling, default-deny restrictive
+additions, baseline deny versus addition allow, and per-rule audit/temporal/ABI-5
+cases. Build declarations alone are **not** publisher authentication or proof
+of compiler provenance; no signatures, shared source authentication, controller
+publication, activation or selector enforcement are enabled by this change.
+
+Go 1.26.11 validation on this main-based compatibility change passed with
+`GOMAXPROCS=2`, `-p 2` and `WARMOR_REQUIRE_CARGO=1`: workload/compiler/policybuild/
+WASM tests, their race suite, and the full repository suite; full-repo lint and
+the exact Go 1.26.11 formatter also passed. An initial overlapping non-race WASM
+run hit the existing 20 ms timeout-replacement test deadline under load; the
+non-overlapping uncached affected-package rerun passed without test changes.
+These results do not substitute for independent compatibility review.
