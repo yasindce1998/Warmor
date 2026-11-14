@@ -33,14 +33,16 @@ type RuntimeConfig struct {
 	// fails inside the policy.
 	MemoryLimitPages uint32
 
-	// InitializationTimeout bounds compilation, load-time probing, initial
-	// pool construction and replacement, including all guest start functions,
-	// ABI declarations and allocations. Non-positive values use the default.
+	// InitializationTimeout bounds guest execution during load-time probing,
+	// pool construction and replacement (start, ABI exports and allocations).
+	// It is also passed to compilation, but is NOT a hard compilation deadline:
+	// wazero decoding, validation and some compiler work are not interruptible.
+	// Non-positive values use the default. See docs/design/wasm-compilation-isolation.md.
 	InitializationTimeout time.Duration
 }
 
-// DefaultInitializationTimeout is the budget for one load, pool construction,
-// direct instance creation or replacement, unless configured otherwise.
+// DefaultInitializationTimeout is the guest-initialization budget. It is not
+// an OS-enforced CPU/memory limit for module decoding or compilation.
 const DefaultInitializationTimeout = 5 * time.Second
 
 // DefaultMemoryLimitPages is the default per-instance memory cap (16 MiB),
@@ -176,8 +178,9 @@ func (r *Runtime) LoadPolicyBytes(ctx context.Context, wasmBytes []byte) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.initTimeout)
 	defer cancel()
-
-	// Compile module
+	// This is synchronous by design: racing CompileModule against a timer
+	// would abandon non-interruptible work in a goroutine. The context is
+	// NOT a hard wall-time/RSS bound on the compiler itself.
 	compiled, err := r.runtime.CompileModule(ctx, wasmBytes)
 	if err != nil {
 		return fmt.Errorf("compile module: %w", err)
