@@ -262,7 +262,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent := s.store.RegisterAgent(&req)
+	agent, err := registeredAgent(s.store, &req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	writeJSON(w, http.StatusOK, agent)
 }
 
@@ -294,7 +298,11 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.HeartbeatRevision(req); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, errAgentNotRegistered) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 
