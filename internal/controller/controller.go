@@ -18,6 +18,8 @@ import (
 
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/kube"
+	"github.com/yasindce1998/warmor/internal/nodereceipt"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 	"github.com/yasindce1998/warmor/internal/policymerge"
 )
 
@@ -64,8 +66,12 @@ type Controller struct {
 	kube *kube.Client
 	opts Options
 	// now is stubbed in tests.
-	now        func() time.Time
-	operations operations
+	now                      func() time.Time
+	operations               operations
+	receipts                 *nodereceipt.Server // enabled once before Run/serving
+	receiptPosture           nodereceipt.Posture
+	publicationABI           uint32 // reconcile-owned
+	publicationDefaultAction string // expected compiler-7 build declaration
 }
 
 // New builds a controller.
@@ -294,6 +300,9 @@ func (c *Controller) Reconcile(ctx context.Context) (rv string, reconcileErr err
 		c.publicationFailure(items, statuses, "PublicationFailed", err)
 	}
 	var statusErr error
+	if err == nil && c.receipts != nil {
+		c.aggregateReceipts(ctx, items, statuses)
+	}
 	for _, cr := range items {
 		if updateErr := c.updateStatus(ctx, cr, statuses[sourceKey(cr)]); updateErr != nil {
 			statusErr = errors.Join(statusErr, fmt.Errorf("update status %s/%s: %w", cr.Metadata.Namespace, cr.Metadata.Name, updateErr))
@@ -365,6 +374,8 @@ func (c *Controller) reconcilePublication(ctx context.Context, items []*WarmorPo
 		return fmt.Errorf("effective policy exceeds %d-rule budget", maxEffectiveRules)
 	}
 	var revision string
+	c.publicationABI = 0 // baked defaults are not desired-generation receipts
+	c.publicationDefaultAction = ""
 	var compile func() ([]byte, error)
 	if len(rendered) == 0 {
 		data, readErr := os.ReadFile(c.opts.DefaultPolicyPath)
@@ -382,6 +393,8 @@ func (c *Controller) reconcilePublication(ctx context.Context, items []*WarmorPo
 		if parseErr != nil {
 			return fmt.Errorf("validate effective policy: %w", parseErr)
 		}
+		c.publicationABI = uint32(compiler.PolicyABIVersion(parsed))
+		c.publicationDefaultAction = parsed.DefaultAction
 		key, keyErr := policyCacheKey(yamlBytes, parsed)
 		if keyErr != nil {
 			return keyErr
@@ -603,11 +616,64 @@ func (c *Controller) syncConfigMap(ctx context.Context, existing *ConfigMap, was
 		BinaryData: map[string][]byte{PolicyDataKey: wasm},
 		Data:       map[string]string{SnapshotDataKey: snapshot},
 	}
-	if len(wasm)+len(snapshot) > maxConfigMapBytes {
+	if c.receipts != nil {
+		var accepted sourceSnapshot
+		if err := json.Unmarshal([]byte(snapshot), &accepted); err != nil {
+			return false, err
+		}
+		manifest := nodereceipt.Manifest{Version: 1, Revision: hash, Digest: digest(wasm), SnapshotDigest: digest([]byte(snapshot)), Compiler: compilerIdentity, ABI: c.publicationABI, Posture: c.receiptPosture}
+		metadata, metadataErr := policybuild.Read(wasm)
+		if len(accepted.Sources) > 0 && (metadataErr != nil || metadata == nil || metadata.Compiler != compiler.Identity || metadata.DefaultAction != c.publicationDefaultAction) {
+			return false, fmt.Errorf("receipt publication requires current artifact build metadata")
+		}
+		if metadata != nil {
+			manifest.ArtifactCompiler, manifest.DefaultAction = metadata.Compiler, metadata.DefaultAction
+		}
+		for _, source := range accepted.Sources {
+			manifest.Sources = append(manifest.Sources, nodereceipt.Source{Namespace: source.Namespace, Name: source.Name, UID: source.UID, Generation: source.Generation})
+		}
+		// Reuse the epoch ONLY for an unchanged, intact durable publication.
+		// Every changed successful ConfigMap write gets a new random epoch,
+		// even A->B->A with identical accepted source identities/bytes. Failed
+		// writes do not advance it. No aggregate/watch tick is needed to fence B.
+		if existing != nil {
+			var previous nodereceipt.Manifest
+			decodeErr := json.Unmarshal([]byte(existing.Data[nodereceipt.ManifestDataKey]), &previous)
+			epochBytes, epochErr := hex.DecodeString(previous.PublicationEpoch)
+			if decodeErr == nil && epochErr == nil && len(epochBytes) == 32 && hex.EncodeToString(epochBytes) == previous.PublicationEpoch {
+				epoch := previous.PublicationEpoch
+				previous.PublicationEpoch = ""
+				unchanged := previous.ID() == manifest.ID() && string(existing.BinaryData[PolicyDataKey]) == string(wasm) && existing.Data[SnapshotDataKey] == snapshot
+				for key, value := range annotations {
+					unchanged = unchanged && existing.Metadata.Annotations[key] == value
+				}
+				if unchanged {
+					manifest.PublicationEpoch = epoch
+				}
+			}
+		}
+		if manifest.PublicationEpoch == "" {
+			epoch, err := nodereceipt.RandomEpoch()
+			if err != nil {
+				return false, fmt.Errorf("create publication epoch: %w", err)
+			}
+			manifest.PublicationEpoch = epoch
+		}
+		encoded, err := json.Marshal(manifest)
+		if err != nil {
+			return false, err
+		}
+		desired.Data[nodereceipt.ManifestDataKey] = string(encoded)
+	}
+	dataBytes := len(wasm)
+	for _, value := range desired.Data {
+		dataBytes += len(value)
+	}
+	if dataBytes > maxConfigMapBytes {
 		return false, fmt.Errorf("artifact and accepted sources exceed %d-byte ConfigMap budget", maxConfigMapBytes)
 	}
 	if existing != nil {
-		matches := string(existing.BinaryData[PolicyDataKey]) == string(wasm) && existing.Data[SnapshotDataKey] == snapshot
+		matches := string(existing.BinaryData[PolicyDataKey]) == string(wasm) && existing.Data[SnapshotDataKey] == snapshot && existing.Data[nodereceipt.ManifestDataKey] == desired.Data[nodereceipt.ManifestDataKey]
 		for key, value := range annotations {
 			matches = matches && existing.Metadata.Annotations[key] == value
 		}
@@ -686,7 +752,7 @@ func statusEqual(a, b *WarmorPolicyStatus) bool {
 	}
 	if a.Phase != b.Phase || a.ObservedGeneration != b.ObservedGeneration || a.LastApplied != b.LastApplied ||
 		a.AcceptedGeneration != b.AcceptedGeneration || a.DesiredRevision != b.DesiredRevision ||
-		a.DesiredDigest != b.DesiredDigest || a.PublishedDigest != b.PublishedDigest || a.LastPublished != b.LastPublished || a.NodesApplied != b.NodesApplied {
+		a.DesiredDigest != b.DesiredDigest || a.PublishedDigest != b.PublishedDigest || a.LastPublished != b.LastPublished || a.NodesApplied != b.NodesApplied || a.ReceiptExpiresAt != b.ReceiptExpiresAt {
 		return false
 	}
 	if len(a.Conditions) != len(b.Conditions) {

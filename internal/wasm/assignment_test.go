@@ -34,6 +34,10 @@ func TestAssignmentChecksPoolCapturedModuleAfterRuntimeReload(t *testing.T) {
 	}
 	defer pool.Close(ctx)
 	want := assignment.Policy{ID: "first", Version: 1, SHA256: assignment.Digest(first), ABI: 1, Compiler: "build-first", Posture: assignment.Posture{Mode: "audit", DefaultAction: "allow"}}
+	wantIdentity := ArtifactIdentity{Digest: want.SHA256, ABI: want.ABI, Compiler: want.Compiler, DefaultAction: want.Posture.DefaultAction}
+	if pool.Identity() != wantIdentity {
+		t.Fatalf("receipt and assignment identities differ: %+v", pool.Identity())
+	}
 	if err := pool.CheckAssignment(want); err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +55,9 @@ func TestAssignmentChecksPoolCapturedModuleAfterRuntimeReload(t *testing.T) {
 	if err := pool.CheckAssignment(want); err != nil {
 		t.Fatal("runtime reload changed captured pool identity", err)
 	}
+	if pool.Identity() != wantIdentity {
+		t.Fatal("runtime candidate changed receipt pool identity")
+	}
 	borrowed, err := pool.Get(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -60,6 +67,9 @@ func TestAssignmentChecksPoolCapturedModuleAfterRuntimeReload(t *testing.T) {
 	}
 	if err := pool.CheckAssignment(want); err != nil {
 		t.Fatal(err)
+	}
+	if pool.Identity() != wantIdentity {
+		t.Fatal("pool replacement changed receipt identity")
 	}
 	wrong := want
 	wrong.ABI = 2

@@ -200,8 +200,12 @@ spec:
                         type: string
                 nodesApplied:
                   type: integer
-                  description: Reserved for authenticated node acknowledgements. The controller does not assert this count.
+                  description: Fresh exact-manifest authenticated daemon self-reports, only with explicit node receipts opt-in. Not attestation or workload coverage proof.
                 lastApplied:
                   type: string
                   format: date-time
-                  description: Reserved for acknowledged node application. Publication does not set this field.
+                  description: Oldest measurement in a complete fresh required-node receipt set. Publication alone never sets this field.
+                receiptExpiresAt:
+                  type: string
+                  format: date-time
+                  description: Hard expiry of counted receipt evidence. Consumers must treat Applied as Unknown after this time even if controller status has not refreshed. Kubernetes status is not a live health lease.

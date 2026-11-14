@@ -63,6 +63,15 @@ policy:
 # this mode.
 controller:
   enabled: false
+  # Disabled until operator provisions controller TLS, daemon CA trust and an
+  # explicit complete desired node roster. Self-reports, NOT attestation.
+  nodeReceipts:
+    enabled: false
+    audience: ""
+    tlsSecretName: "" # tls.crt + tls.key for <release>-controller-receipts DNS
+    caConfigMapName: "" # ca.crt, mounted only in daemon
+    requiredNodes: [] # complete desired roster, not currently online nodes
+    maxAge: 1m
   image:
     # The controller image is separate from the agent image because it
     # needs cargo at runtime to compile policies.

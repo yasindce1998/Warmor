@@ -472,12 +472,17 @@ pub extern "C" fn %s(event_type: u32, buf: *mut u8, cap: u32) -> u32 {
 // Callback length queries and argv require ABI 5; older hosts must reject
 // these modules, not silently evaluate against empty/truncated inputs.
 func writeABIVersion(b *strings.Builder, policy *Policy) {
+	fmt.Fprintf(b, "#[no_mangle]\npub extern \"C\" fn abi_version() -> u32 {\n    %d\n}\n\n", PolicyABIVersion(policy))
+}
+
+// PolicyABIVersion is the ABI emitted for this policy by GenerateRust.
+func PolicyABIVersion(policy *Policy) int {
 	version := 3
 	fields := FieldsRead(policy)
 	if fields[0]&FieldBitArgs != 0 || fields[2]&FieldBitOperation != 0 {
 		version = 5
 	}
-	fmt.Fprintf(b, "#[no_mangle]\npub extern \"C\" fn abi_version() -> u32 {\n    %d\n}\n\n", version)
+	return version
 }
 
 func writeGetLastMatchedRule(b *strings.Builder) {

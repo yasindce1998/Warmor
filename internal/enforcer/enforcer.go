@@ -27,6 +27,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/lineage"
 	"github.com/yasindce1998/warmor/internal/logging"
 	"github.com/yasindce1998/warmor/internal/metrics"
+	"github.com/yasindce1998/warmor/internal/nodereceipt"
 	"github.com/yasindce1998/warmor/internal/platform"
 	"github.com/yasindce1998/warmor/internal/streaming"
 	"github.com/yasindce1998/warmor/internal/telemetry"
@@ -175,12 +176,14 @@ type Enforcer struct {
 	verifyKey        ed25519.PublicKey
 	signedAssignment bool
 	evalTimeout      time.Duration
-	policyID         string // metrics label (see policyID()); guarded by evaluatorMu
+	policyID         string                 // metrics label (see policyID()); guarded by evaluatorMu
+	activation       nodereceipt.Activation // guarded by activationMu; committed pool only
 	syncFailLog      logLimiter
 	auditMode        bool
 	learningMode     bool
 	defaultDeny      bool
 	kernelEnforce    bool
+	lsmEnforce       bool // requested mode, separate from loaded hook capability
 	ctx              context.Context
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup
@@ -499,6 +502,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		learningMode:     opts.LearningMode,
 		defaultDeny:      opts.DefaultDeny,
 		kernelEnforce:    opts.LSMEnforce && opts.RequireLSM && caps.LSMEnforcement,
+		lsmEnforce:       opts.LSMEnforce,
 		ctx:              ctx,
 		cancel:           cancel,
 	}
@@ -525,6 +529,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		e.Close()
 		return nil, fmt.Errorf("activate kernel default-deny: %w", activationErr)
 	}
+	e.activation = e.captureActivation()
 
 	return e, nil
 }
@@ -1260,6 +1265,7 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, dura
 		restoreErr := e.prepareKernel(e.evaluator)
 		e.decisionMu.Unlock()
 		if restoreErr != nil {
+			e.activation = nodereceipt.Activation{} // kernel state is no longer acknowledged
 			return fmt.Errorf("activation failed: %w; kernel rollback failed (enforcement degraded): %v", err, restoreErr)
 		}
 		return fmt.Errorf("activation failed (previous userspace policy retained): %w", err)
@@ -1275,6 +1281,10 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, dura
 	e.wasmRuntime = newRuntime
 	e.policyID = pid
 	e.policyGen.Add(1)
+	// Receipt evidence is the committed pool's identity, never the optional
+	// fleet telemetry snapshot/revision supplied by the caller. Publish both
+	// under the same drain/activation locks before admitting new events.
+	e.activation = e.captureActivation()
 	if e.telemetry != nil {
 		if snapshot == nil {
 			e.telemetry.Seal()
