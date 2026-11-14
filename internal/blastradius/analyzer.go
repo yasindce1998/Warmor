@@ -21,7 +21,7 @@ type PathEdge struct {
 type BlastRadius struct {
 	Source    uint64          `json:"source"`
 	Reachable []ReachableNode `json:"reachable"`
-	TotalHops int            `json:"total_hops"`
+	TotalHops int             `json:"total_hops"`
 }
 
 // Analyzer performs blast radius calculations on the graph.
@@ -32,6 +32,48 @@ type Analyzer struct {
 // NewAnalyzer creates a blast radius analyzer for the given graph.
 func NewAnalyzer(graph *Graph) *Analyzer {
 	return &Analyzer{graph: graph}
+}
+
+// ReachableCounts returns undirected reachability counts from a single graph
+// snapshot. Metrics need connected-component sizes, not a separate path-bearing
+// BFS per source. Copying the bounded topology also releases the writer lock
+// before traversing it, so a scrape cannot stall ingestion for V BFS queries.
+func (a *Analyzer) ReachableCounts(sources []uint64) map[uint64]int {
+	a.graph.mu.RLock()
+	adjacency := make(map[uint64][]uint64, len(a.graph.nodes))
+	for id := range a.graph.nodes {
+		adjacency[id] = nil
+	}
+	for _, edge := range a.graph.edges {
+		adjacency[edge.From] = append(adjacency[edge.From], edge.To)
+		adjacency[edge.To] = append(adjacency[edge.To], edge.From)
+	}
+	a.graph.mu.RUnlock()
+	counts := make(map[uint64]int, len(adjacency))
+	for source := range adjacency {
+		if _, visited := counts[source]; visited {
+			continue
+		}
+		component := []uint64{source}
+		counts[source] = 0
+		for index := 0; index < len(component); index++ {
+			for _, neighbor := range adjacency[component[index]] {
+				if _, visited := counts[neighbor]; visited {
+					continue
+				}
+				counts[neighbor] = 0
+				component = append(component, neighbor)
+			}
+		}
+		for _, id := range component {
+			counts[id] = len(component) - 1
+		}
+	}
+	result := make(map[uint64]int, len(sources))
+	for _, source := range sources {
+		result[source] = counts[source]
+	}
+	return result
 }
 
 // Reach computes all containers reachable from the given source via BFS.
