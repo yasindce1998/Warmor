@@ -154,7 +154,7 @@ func parseStaticTable(data []byte, eventType uint32) (rules []compiler.StaticRul
 		}
 		key := fmt.Sprintf("%d/%s", port, pattern)
 		if seen[key] {
-			continue // first match wins, including custom exports
+			return nil, false, fmt.Errorf("duplicate static identity")
 		}
 		seen[key] = true
 		rules = append(rules, compiler.StaticRule{

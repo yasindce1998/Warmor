@@ -128,7 +128,7 @@ func TestExactKeysCapacityAndDefensiveCopies(t *testing.T) {
 			t.Fatal("finite port endpoint rejected", err)
 		}
 	}
-	if _, err := ValidateRule(api.EventTypeProcess, compiler.StaticRule{Event: "process", Pattern: strings.Repeat("x", MaxPatternBytes)}); err != nil {
+	if _, err := ValidateRule(api.EventTypeProcess, compiler.StaticRule{Event: "process", Pattern: strings.Repeat("x", 127)}); err != nil {
 		t.Fatal("path length endpoint rejected", err)
 	}
 	m.Domains[1].Rules = append(m.Domains[1].Rules, compiler.StaticRule{Event: "network", Pattern: "2001:db8::1", Port: 444})
@@ -160,7 +160,7 @@ func TestBinaryStaticPathBoundaryDeclinesTruncationAliases(t *testing.T) {
 			m := goodModule()
 			m.Encoding = encoding
 			m.Domains[0].Rules[0].Pattern = strings.Repeat("x", n)
-			wantValid := encoding == EncodingJSON || n < 128
+			wantValid := n < 128
 			if valid := m.Validate(m.ModuleSHA256) == nil; valid != wantValid {
 				t.Fatalf("encoding=%s length=%d valid=%v", encoding, n, valid)
 			}

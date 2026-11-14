@@ -1,5 +1,5 @@
 // Package policyhost provides an opt-in supervised backend. It never imports
-// the WASM runtime. It is not wired into the enforcer's concrete evaluator.
+// the WASM runtime. The enforcer's experimental adapter owns its lifecycle.
 package policyhost
 
 import (

@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -17,6 +16,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/cache"
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/container"
+	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/escape"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
@@ -24,6 +24,8 @@ import (
 	"github.com/yasindce1998/warmor/internal/logging"
 	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/internal/platform"
+	"github.com/yasindce1998/warmor/internal/policyhost"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/internal/streaming"
 	"github.com/yasindce1998/warmor/internal/version"
 	"github.com/yasindce1998/warmor/internal/wasm"
@@ -77,6 +79,12 @@ type Options struct {
 	// AtomicGenerations opts into experimental Linux generation activation.
 	// Off by default pending supported-kernel combined VM validation.
 	AtomicGenerations bool
+	// SupervisedBackend explicitly opts into the experimental pinned child
+	// backend. Requires PolicyVerifyKey; nil preserves the in-process default.
+	SupervisedBackend *policyhost.Config
+	// ExpectedAssignment enables strict signed-assignment activation. The
+	// caller owns assignment verification and the sole durable agentstore commit.
+	ExpectedAssignment *assignment.Policy
 
 	// AttackGraph enables the node-side intelligence chain: MITRE
 	// correlation, the per-container attack graph and blast-radius
@@ -116,16 +124,20 @@ type Enforcer struct {
 	evaluatorMu sync.RWMutex
 	// An event holds the drain barrier through cache lookup, evaluation,
 	// persistence, action and reporting. Reload/close retire only drained pools.
-	activationMu  sync.Mutex
-	eventMu       sync.RWMutex
-	closed        bool
-	evaluator     *wasm.PolicyEvaluator
-	pool          *wasm.Pool
-	cache         *cache.DecisionCache
-	actionHandler *ActionHandler
-	logger        *logging.Logger
-	metricsServer *metrics.Server
-	policyMap     PolicyMapSyncer
+	activationMu     sync.Mutex
+	eventMu          sync.RWMutex
+	closed           bool
+	evaluator        Evaluator
+	backend          *policyBackend
+	supervisor       *policyhost.Supervisor
+	signedAssignment bool
+	kernelEnforce    bool
+	pool             *wasm.Pool
+	cache            *cache.DecisionCache
+	actionHandler    *ActionHandler
+	logger           *logging.Logger
+	metricsServer    *metrics.Server
+	policyMap        PolicyMapSyncer
 	// decisionMu orders persisting decisions (decision cache and kernel
 	// map) against the reset on reload: persistDecision holds it shared,
 	// ReloadPolicy holds it exclusively while clearing both.
@@ -170,8 +182,6 @@ var newPlatform = platform.New
 
 // New creates a new enforcer instance with Phase 2 features
 func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, error) {
-	hostname, _ := os.Hostname()
-
 	if opts == nil {
 		opts = &Options{}
 	}
@@ -186,11 +196,28 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		}
 	}
 	opts = &effective
+	if opts.ExpectedAssignment != nil && opts.AtomicGenerations {
+		return nil, errors.New("signed assignments with atomic generations are unsupported until one commit/recovery model is validated")
+	}
 	if opts.AtomicGenerations && (runtime.GOOS != "linux" || opts.SkipLSM || !opts.RequireLSM) {
 		return nil, errors.New("atomic generations require Linux --require-lsm without --no-lsm")
 	}
 	if opts.AtomicGenerations && wasm.IsYAMLPolicy(policyPath) {
 		return nil, errors.New("atomic generations require a compiled WASM startup policy")
+	}
+	var supervisor *policyhost.Supervisor
+	if opts.SupervisedBackend != nil {
+		if len(opts.PolicyVerifyKey) != ed25519.PublicKeySize || wasm.IsYAMLPolicy(policyPath) {
+			return nil, errors.New("supervised backend requires a verification key and compiled signed WASM")
+		}
+		var err error
+		supervisor, err = policyhost.New(*opts.SupervisedBackend)
+		if err != nil {
+			return nil, fmt.Errorf("supervised backend: %w", err)
+		}
+	}
+	if opts.ExpectedAssignment != nil && len(opts.PolicyVerifyKey) != ed25519.PublicKeySize {
+		return nil, errors.New("signed assignment mode requires an artifact verification key")
 	}
 
 	port := opts.MetricsPort
@@ -231,7 +258,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	// Verify the policy signature before acquiring any platform resource, so
 	// an unsigned or tampered policy never gets as far as loading BPF.
 	var verifiedPolicy []byte
-	if opts.PolicyVerifyKey != nil {
+	if opts.PolicyVerifyKey != nil && supervisor == nil {
 		data, err := ReadVerifiedPolicy(policyPath, opts.PolicyVerifyKey)
 		if err != nil {
 			return nil, fmt.Errorf("verify policy: %w", err)
@@ -252,6 +279,19 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	var unixWatch []string
 	if escapeDetector != nil {
 		unixWatch = escape.RuntimeSockets
+	}
+	var backend *policyBackend
+	if supervisor != nil {
+		backend, err = startSupervisedBackend(ctx, supervisor, policyPath, opts.PolicyVerifyKey)
+		if err != nil {
+			return nil, err
+		}
+		// Any startup failure before ownership transfer retires/reaps our child.
+		defer func() {
+			if backend != nil {
+				backend.close()
+			}
+		}()
 	}
 
 	// Initialize the platform-specific monitor (eBPF on Linux, ETW on
@@ -292,61 +332,57 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		}
 	}
 
-	// Create WASM runtime with compilation cache
-	logger.LogInfo("Creating WASM runtime...")
-	wasmRuntime, err := wasm.NewRuntime(ctx, wasm.RuntimeConfig{
-		CacheDir: wasm.DefaultCacheDir(),
-		PoolSize: runtime.NumCPU(),
-	})
-	if err != nil {
-		plat.Close()
-		return nil, fmt.Errorf("create WASM runtime: %w", err)
-	}
-	logger.LogInfo("✓ WASM runtime created (compilation cache enabled)")
+	// Supervised readiness includes child-observed metadata and precedes any
+	// kernel preparation. This branch never constructs a parent WASM runtime.
+	if supervisor == nil {
+		// Create WASM runtime with compilation cache
+		logger.LogInfo("Creating WASM runtime...")
+		wasmRuntime, err := wasm.NewRuntime(ctx, wasm.RuntimeConfig{
+			CacheDir: wasm.DefaultCacheDir(),
+			PoolSize: runtime.NumCPU(),
+		})
+		if err != nil {
+			plat.Close()
+			return nil, fmt.Errorf("create WASM runtime: %w", err)
+		}
+		logger.LogInfo("✓ WASM runtime created (compilation cache enabled)")
 
-	// Load policy (supports both .wasm and .yaml/.yml)
+		// Load policy (supports both .wasm and .yaml/.yml)
+		pid := policyID(policyPath)
+		logger.LogInfo(fmt.Sprintf("Loading policy from: %s", policyPath))
+		if verifiedPolicy != nil {
+			if err := wasmRuntime.LoadPolicyBytes(ctx, verifiedPolicy); err != nil {
+				wasmRuntime.Close(ctx)
+				plat.Close()
+				return nil, fmt.Errorf("load policy: %w", err)
+			}
+		} else if wasm.IsYAMLPolicy(policyPath) {
+			logger.LogInfo("Detected YAML policy, compiling...")
+			if err := wasmRuntime.LoadPolicyFromYAML(ctx, policyPath); err != nil {
+				metrics.RecordPolicyLoad(pid, err)
+				wasmRuntime.Close(ctx)
+				plat.Close()
+				return nil, fmt.Errorf("load YAML policy: %w", err)
+			}
+		} else {
+			if err := wasmRuntime.LoadPolicy(ctx, policyPath); err != nil {
+				metrics.RecordPolicyLoad(pid, err)
+				wasmRuntime.Close(ctx)
+				plat.Close()
+				return nil, fmt.Errorf("load policy: %w", err)
+			}
+		}
+		logger.LogInfo("✓ Policy loaded")
+
+		backend, err = inProcessBackend(ctx, wasmRuntime, opts.EvalTimeout)
+		metrics.RecordPolicyLoad(pid, err)
+		if err != nil {
+			plat.Close()
+			return nil, fmt.Errorf("create policy pool: %w", err)
+		}
+	}
+	evaluator := backend.evaluator
 	pid := policyID(policyPath)
-	logger.LogInfo(fmt.Sprintf("Loading policy from: %s", policyPath))
-	if verifiedPolicy != nil {
-		if err := wasmRuntime.LoadPolicyBytes(ctx, verifiedPolicy); err != nil {
-			wasmRuntime.Close(ctx)
-			plat.Close()
-			return nil, fmt.Errorf("load policy: %w", err)
-		}
-	} else if wasm.IsYAMLPolicy(policyPath) {
-		logger.LogInfo("Detected YAML policy, compiling...")
-		if err := wasmRuntime.LoadPolicyFromYAML(ctx, policyPath); err != nil {
-			metrics.RecordPolicyLoad(pid, err)
-			wasmRuntime.Close(ctx)
-			plat.Close()
-			return nil, fmt.Errorf("load YAML policy: %w", err)
-		}
-	} else {
-		if err := wasmRuntime.LoadPolicy(ctx, policyPath); err != nil {
-			metrics.RecordPolicyLoad(pid, err)
-			wasmRuntime.Close(ctx)
-			plat.Close()
-			return nil, fmt.Errorf("load policy: %w", err)
-		}
-	}
-	logger.LogInfo("✓ Policy loaded")
-
-	// Create instance pool for parallel evaluation
-	poolSize := runtime.NumCPU()
-	logger.LogInfo(fmt.Sprintf("Creating policy instance pool (size=%d)...", poolSize))
-	pool, err := wasm.NewPool(ctx, wasmRuntime, poolSize)
-	metrics.RecordPolicyLoad(pid, err)
-	if err != nil {
-		wasmRuntime.Close(ctx)
-		plat.Close()
-		return nil, fmt.Errorf("create policy pool: %w", err)
-	}
-	logger.LogInfo(fmt.Sprintf("✓ Policy pool created (%d instances)", poolSize))
-
-	// Create pool-backed policy evaluator
-	evaluator := wasm.NewPolicyEvaluator(pool, hostname)
-	evaluator.SetTimeout(opts.EvalTimeout)
-	logger.LogInfo(fmt.Sprintf("✓ Policy evaluation deadline %v", evaluator.Timeout()))
 
 	// Initialize decision cache (10k entries, 5min TTL)
 	decisionCache := cache.NewDecisionCache(10000, 5*time.Minute)
@@ -408,32 +444,43 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	ctx, cancel := context.WithCancel(ctx)
 
 	e := &Enforcer{
-		platform:        plat,
-		wasmRuntime:     wasmRuntime,
-		evaluator:       evaluator,
-		pool:            pool,
-		cache:           decisionCache,
-		actionHandler:   actionHandler,
-		logger:          logger,
-		metricsServer:   metricsServer,
-		policyMap:       policyMapSyncer,
-		pipeline:        pipeline,
-		lineageTracker:  tracker,
-		intelligence:    intel,
-		driftCollector:  driftCollector,
-		netFilter:       netFilter,
-		sandbox:         sandboxMgr,
-		escape:          escapeDetector,
-		containerStarts: cgroups,
-		policyPath:      policyPath,
-		verifyKey:       opts.PolicyVerifyKey,
-		policyID:        pid,
-		evalTimeout:     opts.EvalTimeout,
-		auditMode:       opts.AuditMode,
-		learningMode:    opts.LearningMode,
-		defaultDeny:     opts.DefaultDeny,
-		ctx:             ctx,
-		cancel:          cancel,
+		platform:         plat,
+		wasmRuntime:      backend.runtime,
+		evaluator:        evaluator,
+		pool:             backend.pool,
+		backend:          backend,
+		supervisor:       supervisor,
+		signedAssignment: opts.ExpectedAssignment != nil,
+		kernelEnforce:    caps.LSMEnforcement,
+		cache:            decisionCache,
+		actionHandler:    actionHandler,
+		logger:           logger,
+		metricsServer:    metricsServer,
+		policyMap:        policyMapSyncer,
+		pipeline:         pipeline,
+		lineageTracker:   tracker,
+		intelligence:     intel,
+		driftCollector:   driftCollector,
+		netFilter:        netFilter,
+		sandbox:          sandboxMgr,
+		escape:           escapeDetector,
+		containerStarts:  cgroups,
+		policyPath:       policyPath,
+		verifyKey:        append(ed25519.PublicKey(nil), opts.PolicyVerifyKey...),
+		policyID:         pid,
+		evalTimeout:      opts.EvalTimeout,
+		auditMode:        opts.AuditMode,
+		learningMode:     opts.LearningMode,
+		defaultDeny:      opts.DefaultDeny,
+		ctx:              ctx,
+		cancel:           cancel,
+	}
+	backend = nil // e now owns the complete backend lifetime
+	if opts.ExpectedAssignment != nil {
+		if err := e.checkAssignment(e.evaluator, *opts.ExpectedAssignment); err != nil {
+			_ = e.Close()
+			return nil, err
+		}
 	}
 
 	// Preload the kernel default-deny domains from the policy's static
@@ -810,7 +857,7 @@ func (e *Enforcer) attackGraphMetricsLoop(interval time.Duration) {
 // sound, the kernel policy map. Nothing is stored if the policy that made the
 // decision (generation gen) has been replaced by a reload in the meantime,
 // since the reload has already reset both.
-func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, gen uint64, evaluator *wasm.PolicyEvaluator) {
+func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, gen uint64, evaluator policymeta.Source) {
 	e.decisionMu.RLock()
 	defer e.decisionMu.RUnlock()
 	if e.policyGen.Load() != gen {
@@ -829,7 +876,7 @@ func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, g
 	decisionCache.Put(event, result)
 
 	// Compile decision into BPF policy map for kernel fast-path
-	if e.policyMap != nil && !event.LSMEvent {
+	if e.policyMap != nil && !event.LSMEvent && (e.supervisor == nil || evaluator.LinuxKernelCacheEligible(event.GetType())) {
 		// Failures are counted and rate-limit logged inside; the event
 		// itself is already enforced in userspace.
 		_ = e.syncToPolicyMap(event, result, gen, evaluator.FieldsRead(event.GetType()))
@@ -859,15 +906,22 @@ func (e *Enforcer) annotateContainerStart(event *api.Event) {
 // the event fields into the decision cache: whether they read the PID, and
 // whether they read time (temporal policies), which keeps them out of the
 // cache altogether.
-func setCacheDependencies(c *cache.DecisionCache, evaluator *wasm.PolicyEvaluator) {
+func setCacheDependencies(c *cache.DecisionCache, evaluator policymeta.Source) {
 	c.SetPIDRelevant(pidRelevance(evaluator))
-	c.SetTimeDependent(evaluator.TimeDependent)
+	c.SetTimeDependent(func(t api.EventType) bool {
+		// Preserve legacy semantics, while Host's effective methods refuse
+		// untrusted declarations (including finite raw fields).
+		if _, supervised := evaluator.(*hostEvaluator); supervised {
+			return !evaluator.DecisionCacheEligible(t)
+		}
+		return evaluator.TimeDependent(t)
+	})
 }
 
 // pidRelevance derives the decision cache's PID rule from the policy's
 // fields-read declaration: the PID is only left out of cache keys for event
 // types whose policy has declared it never reads the PID.
-func pidRelevance(evaluator *wasm.PolicyEvaluator) func(api.EventType) bool {
+func pidRelevance(evaluator policymeta.Source) func(api.EventType) bool {
 	return func(t api.EventType) bool {
 		return evaluator.FieldsRead(t)&compiler.FieldBitPID != 0
 	}
@@ -1116,6 +1170,13 @@ func (e *Enforcer) ReloadPolicy() error {
 // misses may allow during rebuild and rollback errors mean degraded enforcement.
 // See docs/design/generation-activation.md before implementing a backend adapter.
 func (e *Enforcer) ActivatePolicy(path string, durableCommit func() error) error {
+	if e.signedAssignment {
+		return errors.New("signed assignment mode refuses generic reload/activation")
+	}
+	return e.activatePolicy(path, nil, durableCommit)
+}
+
+func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, durableCommit func() error) error {
 	e.activationMu.Lock()
 	defer e.activationMu.Unlock()
 	e.eventMu.RLock()
@@ -1125,29 +1186,32 @@ func (e *Enforcer) ActivatePolicy(path string, durableCommit func() error) error
 		return errors.New("enforcer closed")
 	}
 	if e.generations != nil {
+		if expected != nil {
+			return errors.New("signed assignments with atomic generations are unsupported")
+		}
 		return e.activateGeneration(path, durableCommit)
 	}
 	e.logger.LogInfo(fmt.Sprintf("Reloading policy from: %s", path))
 
 	pid := policyID(e.policyPath)
-	newRuntime, newPool, err := e.loadPolicyPath(path)
+	newBackend, err := e.candidateBackend(path, nil)
 	metrics.RecordPolicyLoad(pid, err)
 	if err != nil {
 		return err
 	}
 
-	// Create new evaluator
-	hostname, _ := os.Hostname()
-	newEvaluator := wasm.NewPolicyEvaluator(newPool, hostname)
-	newEvaluator.SetTimeout(e.evalTimeout)
+	newEvaluator := newBackend.evaluator
 	activated := false
 	defer func() {
 		if !activated {
-			newEvaluator.Close(e.ctx)
-			newPool.Close(e.ctx)
-			newRuntime.Close(e.ctx)
+			newBackend.close()
 		}
 	}()
+	if expected != nil {
+		if err := e.checkAssignment(newEvaluator, *expected); err != nil {
+			return err
+		}
+	}
 
 	e.eventMu.Lock()
 	defer e.eventMu.Unlock()
@@ -1168,12 +1232,11 @@ func (e *Enforcer) ActivatePolicy(path string, durableCommit func() error) error
 
 	// Atomic swap with mutex protection
 	e.evaluatorMu.Lock()
-	oldEvaluator := e.evaluator
-	oldPool := e.pool
-	oldRuntime := e.wasmRuntime
+	oldBackend := e.ownedBackend()
 	e.evaluator = newEvaluator
-	e.pool = newPool
-	e.wasmRuntime = newRuntime
+	e.pool = newBackend.pool
+	e.wasmRuntime = newBackend.runtime
+	e.backend = newBackend
 	e.policyID = pid
 	e.policyGen.Add(1)
 	e.evaluatorMu.Unlock()
@@ -1183,15 +1246,7 @@ func (e *Enforcer) ActivatePolicy(path string, durableCommit func() error) error
 	e.updateMapEntries()
 
 	// Clean up old resources
-	if oldEvaluator != nil {
-		oldEvaluator.Close(e.ctx)
-	}
-	if oldPool != nil {
-		oldPool.Close(e.ctx)
-	}
-	if oldRuntime != nil {
-		oldRuntime.Close(e.ctx)
-	}
+	oldBackend.close()
 
 	metrics.SetPolicyInfo(e.policyPath, version.Version)
 	e.logger.LogInfo("✓ Policy reloaded successfully")
@@ -1314,25 +1369,13 @@ func (e *Enforcer) Close() error {
 
 	// Clean up enforcer resources
 	e.evaluatorMu.Lock()
-	evaluator := e.evaluator
-	pool := e.pool
-	rt := e.wasmRuntime
+	backend := e.ownedBackend()
 	e.evaluatorMu.Unlock()
 
-	if evaluator != nil {
-		evaluator.Close(e.ctx)
-	}
-	if pool != nil {
-		pool.Close(e.ctx)
-	}
-	if rt != nil {
-		rt.Close(e.ctx)
-	}
+	backend.close()
 	if e.generations != nil {
 		for _, state := range e.generations.states {
-			if state.pool != pool {
-				closeEvaluationGeneration(state)
-			}
+			closeEvaluationGeneration(state)
 		}
 	}
 	if e.platform != nil {

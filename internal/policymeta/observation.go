@@ -5,11 +5,12 @@ package policymeta
 import (
 	"encoding/hex"
 	"errors"
-	"github.com/yasindce1998/warmor/internal/policybuild"
 	"net/netip"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/yasindce1998/warmor/internal/kernelmap"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -132,7 +133,7 @@ func ValidateRule(t api.EventType, r StaticRule) (RuleKey, error) {
 	}
 	switch t {
 	case api.EventTypeProcess:
-		if r.Event != "process" || r.Port != 0 {
+		if r.Event != "process" || r.Port != 0 || len(r.Pattern) > kernelmap.MaxPolicyPathBytes {
 			return RuleKey{}, ErrMetadata
 		}
 	case api.EventTypeNetwork:

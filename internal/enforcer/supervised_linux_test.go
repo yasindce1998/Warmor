@@ -1,0 +1,297 @@
+//go:build linux
+
+package enforcer
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/yasindce1998/warmor/internal/crypto/assignment"
+	"github.com/yasindce1998/warmor/internal/platform"
+	"github.com/yasindce1998/warmor/internal/policybuild"
+	"github.com/yasindce1998/warmor/internal/policyhost"
+	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
+	"github.com/yasindce1998/warmor/pkg/api"
+)
+
+// Only kernel/platform publication is faked. Every host is the actual standalone
+// cmd/warmor-policy-host, never a test-binary worker or host-wide monitor.
+var supervisedBuild sync.Once
+var supervisedExecutable, supervisedDigest string
+var supervisedBuildErr error
+
+func supervisedConfig(t *testing.T) policyhost.Config {
+	t.Helper()
+	supervisedBuild.Do(func() {
+		dir, err := os.MkdirTemp("/tmp/opencode", "supervised-integration-")
+		if err != nil {
+			supervisedBuildErr = err
+			return
+		}
+		supervisedExecutable = filepath.Join(dir, "warmor-policy-host")
+		cmd := exec.Command("go", "build", "-p", "2", "-o", supervisedExecutable, "../../cmd/warmor-policy-host")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			supervisedBuildErr = errors.New(string(out))
+			return
+		}
+		data, err := os.ReadFile(supervisedExecutable)
+		if err != nil {
+			supervisedBuildErr = err
+			return
+		}
+		sum := sha256.Sum256(data)
+		supervisedDigest = hex.EncodeToString(sum[:])
+	})
+	if supervisedBuildErr != nil {
+		t.Fatal(supervisedBuildErr)
+	}
+	c := DefaultSupervisedConfig(supervisedExecutable, supervisedDigest, 200*time.Millisecond)
+	c.LoadTimeout = time.Second
+	return c
+}
+
+func signedCandidate(t *testing.T, key ed25519.PrivateKey, data []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "module.wasm")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".sig", ed25519.Sign(key, data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func supervisedEnforcer(t *testing.T, module []byte, c policyhost.Config, atomic bool) (*Enforcer, *generationKernel, ed25519.PrivateKey) {
+	t.Helper()
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := &generationKernel{}
+	old := newPlatform
+	newPlatform = func(platform.Config) (platform.Platform, error) { return &generationTestPlatform{k: k}, nil }
+	t.Cleanup(func() { newPlatform = old })
+	e, err := New(context.Background(), signedCandidate(t, key, module), &Options{AuditMode: true, RequireLSM: atomic,
+		AtomicGenerations: atomic, PolicyVerifyKey: pub, SupervisedBackend: &c})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	if atomic {
+		if err := e.finishGeneration(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if e.pool != nil || e.wasmRuntime != nil || e.backend.runtime != nil || e.backend.pool != nil {
+		t.Fatal("supervised backend constructed a parent runtime/pool")
+	}
+	return e, k, key
+}
+
+func TestSupervisedGenerationRetainsHostUntilCapturedLeaseDrains(t *testing.T) {
+	c := supervisedConfig(t)
+	e, k, key := supervisedEnforcer(t, wasmtest.ConstPolicy(0, nil), c, true)
+	oldHost := e.evaluator.(*hostEvaluator)
+	oldEvent := &api.Event{UID: 1000, Filename: "/same"}
+	if !e.captureGeneration(oldEvent) {
+		t.Fatal("capture refused")
+	}
+	entered := make(chan struct{})
+	k.drain = func(context.Context) error { close(entered); return nil }
+	done := make(chan error, 1)
+	path := signedCandidate(t, key, wasmtest.ConstPolicy(1, nil))
+	go func() { done <- e.ActivatePolicy(path, nil) }()
+	<-entered
+	if r, err := oldHost.Evaluate(context.Background(), &api.Event{}); err != nil || r.Action != api.ActionAllow {
+		t.Fatalf("old host retired before lease drain: %+v %v", r, err)
+	}
+	e.handleEvent(oldEvent)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldHost.Evaluate(context.Background(), &api.Event{}); !errors.Is(err, policyhost.ErrClosed) {
+		t.Fatalf("old host not retired after lease drain: %v", err)
+	}
+	e.handleEvent(&api.Event{UID: 1000, Filename: "/same"})
+	if s := e.GetStats(); s.Allowed != 1 || s.AuditDenied != 1 {
+		t.Fatalf("wrong generation decision/cache %+v", s)
+	}
+}
+
+func TestSupervisedCompileDeadlinePreservesConcurrentActiveGeneration(t *testing.T) {
+	c := supervisedConfig(t)
+	c.LoadTimeout = 100 * time.Millisecond
+	e, k, key := supervisedEnforcer(t, wasmtest.ConstPolicy(0, nil), c, true)
+	old, gen := e.evaluator, e.policyGen.Load()
+	path := signedCandidate(t, key, wasmtest.CompileHeavy())
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- e.ActivatePolicy(path, nil) }()
+	// Real active-generation evaluations run while candidate compilation owns
+	// activationMu. No event/decision/dispatch fence may be held during load.
+	tick := time.NewTicker(2 * time.Millisecond)
+	defer tick.Stop()
+	processed := uint64(0)
+	var err error
+wait:
+	for {
+		select {
+		case err = <-done:
+			break wait
+		case <-tick.C:
+			e.handleEvent(&api.Event{UID: 1000, Filename: "/good"})
+			processed++
+		case <-time.After(c.InitializationTimeout + time.Second):
+			t.Fatal("candidate load blocked the daemon")
+		}
+	}
+	var failure *policyhost.Failure
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &failure) || failure.Phase != "load" {
+		t.Fatalf("expected real child compilation deadline, got %v", err)
+	}
+	if time.Since(start) > c.InitializationTimeout+time.Second || e.evaluator != old || e.policyGen.Load() != gen || len(k.prepared) != 1 {
+		t.Fatal("candidate failure changed generation or exceeded hard bound")
+	}
+	if processed < 10 || e.GetStats().Allowed != processed {
+		t.Fatal("active work did not continue")
+	}
+	// Immediate next activation needs the same bounded second host slot; it
+	// proves the killed compiler was reaped/released before failure returned.
+	if err := e.ActivatePolicy(signedCandidate(t, key, wasmtest.ConstPolicy(0, nil)), nil); err != nil {
+		t.Fatal("compiler child leaked host capacity", err)
+	}
+}
+
+func TestSupervisedPendingCommitRetainsBothHostsAndReusesExactCandidate(t *testing.T) {
+	c := supervisedConfig(t)
+	e, k, key := supervisedEnforcer(t, wasmtest.ConstPolicy(0, nil), c, true)
+	old := e.evaluator
+	path := signedCandidate(t, key, wasmtest.ConstPolicy(1, nil))
+	commitErr := errors.New("directory barrier failed")
+	calls := 0
+	err := e.ActivatePolicy(path, func() error { calls++; return commitErr })
+	if !errors.Is(err, ErrActivationPending) || e.evaluator == old || calls != 1 {
+		t.Fatal("live commit confused with rollback", err)
+	}
+	if r, err := old.Evaluate(context.Background(), &api.Event{}); err != nil || r.Action != api.ActionAllow {
+		t.Fatal("old host closed during uncertain commit", err)
+	}
+	current := e.evaluator
+	commitErr = nil
+	if err := e.ActivatePolicy(path, func() error { t.Error("substituted retained callback"); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || e.evaluator != current || len(k.prepared) != 2 {
+		t.Fatal("recovery respawned host or prepared another kernel generation")
+	}
+	if _, err := old.Evaluate(context.Background(), &api.Event{}); !errors.Is(err, policyhost.ErrClosed) {
+		t.Fatal("resolved old host not retired", err)
+	}
+}
+
+func TestSupervisedInvalidCandidateNeverPreparesKernelOrCommits(t *testing.T) {
+	c := supervisedConfig(t)
+	e, k, key := supervisedEnforcer(t, wasmtest.ConstPolicy(0, nil), c, true)
+	old, gen := e.evaluator, e.policyGen.Load()
+	for _, module := range [][]byte{[]byte("signed but malformed WASM"), wasmtest.ConstPolicy(1, nil)} {
+		path := signedCandidate(t, key, module)
+		if len(module) != len("signed but malformed WASM") {
+			if err := os.WriteFile(path+".sig", []byte("bad signature"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		called := false
+		if err := e.ActivatePolicy(path, func() error { called = true; return nil }); err == nil || called {
+			t.Fatal("invalid candidate reached durable commit")
+		}
+		if e.evaluator != old || e.policyGen.Load() != gen || len(k.prepared) != 1 {
+			t.Fatal("invalid candidate reached kernel preparation")
+		}
+	}
+}
+
+func TestSupervisedWorkerFailureIsNoncacheableAndNeverRespawns(t *testing.T) {
+	c := supervisedConfig(t)
+	e, _, key := supervisedEnforcer(t, wasmtest.LoopOnUIDPolicy(), c, true)
+	failed := e.evaluator
+	e.handleEvent(&api.Event{UID: 0, Filename: "/spin"})
+	for range 3 {
+		e.handleEvent(&api.Event{UID: 1000, Filename: "/would-allow"})
+	}
+	if e.evaluator != failed || e.currentDecisionCache().Stats().Size != 0 {
+		t.Fatal("worker automatically respawned or error cached")
+	}
+	if s := e.GetStats(); s.AuditDenied != 4 || s.Allowed != 0 {
+		t.Fatalf("worker failure was not fail-closed %+v", s)
+	}
+	if err := e.ActivatePolicy(signedCandidate(t, key, wasmtest.ConstPolicy(0, nil)), nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSupervisedEffectiveTrustAndMetadataBeforeKernelPrepare(t *testing.T) {
+	module := wasmtest.DeclaredPolicy(0)
+	for _, trusted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "untrusted", true: "attested"}[trusted], func(t *testing.T) {
+			c := supervisedConfig(t)
+			if trusted {
+				c.TrustedDeclarationDigests = []string{assignment.Digest(module)}
+			}
+			e, k, _ := supervisedEnforcer(t, module, c, true)
+			if !e.evaluator.Metadata().Domains[0].Eligible || e.evaluator.StaticRulesProcess().Eligible != trusted {
+				t.Fatal("effective static trust confused with raw observations")
+			}
+			e.defaultDeny = true
+			spec, err := e.generationSpec(e.evaluator)
+			if trusted && (err != nil || len(spec.DefaultDeny) != 2) || !trusted && err == nil {
+				t.Fatal("incomplete or untrusted static domain admitted", err)
+			}
+			e.handleEvent(&api.Event{UID: 1000, Filename: "/same"})
+			if cached := e.currentDecisionCache().Stats().Size != 0; cached != trusted {
+				t.Fatal("cache did not use effective eligibility")
+			}
+			if len(k.prepared) != 1 {
+				t.Fatal("unexpected prepare")
+			}
+		})
+	}
+}
+
+func TestSupervisedAssignmentUsesChildObservedBuildAndRejectsAtomicCombination(t *testing.T) {
+	module, err := policybuild.Append(wasmtest.DeclaredPolicy(0), policybuild.Metadata{Compiler: "reviewed-build", DefaultAction: "allow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := supervisedConfig(t)
+	e, _, key := supervisedEnforcer(t, module, c, false)
+	want := assignment.Policy{SHA256: assignment.Digest(module), ABI: 5, Compiler: "reviewed-build", Posture: assignment.Posture{Mode: "audit", DefaultAction: "allow"}}
+	if err := e.checkAssignment(e.evaluator, want); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*assignment.Policy){func(p *assignment.Policy) { p.ABI = 4 }, func(p *assignment.Policy) { p.Compiler = "other" }, func(p *assignment.Policy) { p.Posture.DefaultAction = "deny" }, func(p *assignment.Policy) { p.Posture.RequireDefaultDeny = true }} {
+		bad := want
+		mutate(&bad)
+		called := false
+		if err := e.ActivateAssignment(signedCandidate(t, key, module), bad, func() error { called = true; return nil }); !errors.Is(err, assignment.ErrCompatibility) || called {
+			t.Fatal("assignment mismatch reached commit", err)
+		}
+	}
+	called := false
+	if err := e.ActivateAssignment(signedCandidate(t, key, module), want, func() error { called = true; return nil }); err != nil || !called {
+		t.Fatal("matching child metadata refused", err)
+	}
+	if _, err := New(context.Background(), "unused.wasm", &Options{ExpectedAssignment: &want, AtomicGenerations: true, SupervisedBackend: &c}); err == nil {
+		t.Fatal("unsupported signed+atomic+host mode accepted")
+	}
+}

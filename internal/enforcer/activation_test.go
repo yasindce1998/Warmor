@@ -24,7 +24,7 @@ func TestActivationWaitsForEvaluationAndCacheHit(t *testing.T) {
 			isolateCacheDir(t)
 			e, _ := newTestEnforcer(t, testEnforcerOpts{audit: true, poolSize: 1, policyWasm: wasmtest.ConstPolicy(0, &[3]uint32{})})
 			oldPool := e.pool
-			e.evaluator.SetTimeout(5 * time.Second)
+			e.evaluator.(*wasm.PolicyEvaluator).SetTimeout(5 * time.Second)
 			event := &api.Event{PID: 0, UID: 1000, Filename: "/bin/test"}
 			var release func()
 			if mode == "evaluation" {

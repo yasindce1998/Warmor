@@ -127,7 +127,7 @@ func TestMaximumEscapedMetadataFitsBoundedFrame(t *testing.T) {
 	for i := range policymeta.MaxStaticRules {
 		// Legal non-NUL control bytes need six-byte JSON escapes. The cap
 		// must admit the full contract, not only pleasant printable paths.
-		pattern := fmt.Sprintf("%08d", i) + strings.Repeat("\x01", policymeta.MaxPatternBytes-8)
+		pattern := fmt.Sprintf("%08d", i) + strings.Repeat("\x01", 127-8)
 		domain.Rules = append(domain.Rules, compiler.StaticRule{Event: "process", Pattern: pattern})
 	}
 	m := policymeta.Observe(strings.Repeat("a", 64), 5, policymeta.EncodingJSON, [3]uint32{compiler.FieldBitPath, 0, 0}, domain, policymeta.StaticDomain{})
