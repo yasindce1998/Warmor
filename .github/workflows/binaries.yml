@@ -7,6 +7,22 @@ on:
       version:
         required: true
         type: string
+      runner:
+        required: true
+        type: string
+      goos:
+        required: true
+        type: string
+      goarch:
+        required: true
+        type: string
+    outputs:
+      name:
+        value: ${{ jobs.build.outputs.name }}
+      id:
+        value: ${{ jobs.build.outputs.id }}
+      digest:
+        value: ${{ jobs.build.outputs.digest }}
 
 permissions:
   contents: read
@@ -17,26 +33,11 @@ env:
 jobs:
   build:
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            goos: linux
-            goarch: amd64
-          - runner: ubuntu-24.04-arm
-            goos: linux
-            goarch: arm64
-          - runner: windows-2025
-            goos: windows
-            goarch: amd64
-          - runner: macos-15-intel
-            goos: darwin
-            goarch: amd64
-          - runner: macos-15
-            goos: darwin
-            goarch: arm64
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      name: binaries-${{ inputs.goos }}-${{ inputs.goarch }}
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
     defaults:
       run:
         shell: bash
@@ -50,8 +51,8 @@ jobs:
           go-version: '1.26.11'
       - name: Verify native runner and exact source
         env:
-          EXPECTED_OS: ${{ matrix.goos }}
-          EXPECTED_ARCH: ${{ matrix.goarch }}
+          EXPECTED_OS: ${{ inputs.goos }}
+          EXPECTED_ARCH: ${{ inputs.goarch }}
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(go env GOOS)" = "$EXPECTED_OS"
@@ -65,14 +66,15 @@ jobs:
       - name: Build and smoke-test archive payload
         env:
           VERSION: ${{ inputs.version }}
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+          GOOS: ${{ inputs.goos }}
+          GOARCH: ${{ inputs.goarch }}
         run: |
           export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           bash scripts/release-build.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
         with:
-          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: binaries-${{ inputs.goos }}-${{ inputs.goarch }}
           path: |
             dist/*.tar.gz
             dist/*.zip

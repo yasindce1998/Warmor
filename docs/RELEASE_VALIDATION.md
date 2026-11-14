@@ -49,3 +49,37 @@ publication. This is a change-validation record, not a successful release.
 `ci.yml` was intentionally not changed; source chart versions/defaults are
 owned by the coordinating chart task. Re-run packaged-chart tests after those
 changes are integrated.
+
+## Independent-review follow-up
+
+All four requested findings are covered by local regression tests:
+
+- **Windows CRLF archive path:** `release-build.sh` constructs `.zip`/`.tar.gz`
+  filenames in Bash instead of capturing Python `print`. A Windows-target
+  packaging smoke test uses a Python shim that emits actual CRLF and executes
+  the extraction/checksum/CLI steps with tiny executable payload stubs. It is
+  not a native Windows runtime test, but reproduces the shell-path failure.
+- **Independent artifact integrity:** producers expose upload IDs and ZIP
+  SHA-256 digests through job outputs, rather than inside downloaded manifests.
+  Publishers verify raw ZIP bytes before extracting/loading/signing/pushing.
+  Tests replace both payload and its self-consistent checksum file and require
+  a hard failure with no published extraction directory; missing/duplicate
+  receipts and partial transfer failures also fail closed. ZIPs are requested
+  by immutable producer ID, not a mutable artifact name or most-recent run.
+- **Maintained branch matching:** full ref-name tests reject misleading nested
+  `origin/feature/origin/main` and `origin/feature/origin/release-*` refs while
+  accepting the exact maintained refs.
+- **Moved tag:** local bare-remote tests verify both lightweight and annotated
+  tags, then move or delete them and require failure. The remote peeled tag is
+  checked again at publication/signing boundaries. Immutable protected tag
+  rules remain mandatory to close the unavoidable check-to-use race; no remote
+  ruleset or release was changed by these tests.
+
+The updated 19-test Python suite, actionlint (including the extracted reusable
+`release-image.yml`), Bash syntax, `git diff --check`, and the full
+`GOMAXPROCS=2 GOTOOLCHAIN=go1.26.11 go test -mod=readonly -race -count=1 ./...`
+suite pass. Native Windows,
+macOS/ARM64 hosted runs, raw GitHub artifact transfer, OIDC/registry publication,
+and the external SDK/driver infrastructure remain unverified here. The separate
+dependency-fix branch is not modified or silently folded into this release
+branch; integration and a passing rescan remain the coordinator's responsibility.

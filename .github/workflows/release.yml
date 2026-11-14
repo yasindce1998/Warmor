@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - '.github/workflows/binaries.yml'
+      - '.github/workflows/release-image.yml'
       - 'go.mod'
       - 'go.sum'
       - 'deploy/helm/**'
@@ -51,7 +52,8 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
             test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
-            git branch -r --contains "$GITHUB_SHA" | grep -Eq 'origin/(main|release-[^ ]+)$'
+            bash scripts/release-check-ref.sh branch
+            bash scripts/release-check-ref.sh tag
             version="${GITHUB_REF_NAME#v}"
           else
             version="0.0.0-ci.${GITHUB_SHA}"
@@ -78,7 +80,7 @@ jobs:
         run: |
           python3 -m unittest discover -s tests/release -v
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= \
-            .github/workflows/release.yml .github/workflows/binaries.yml .github/workflows/macos-ci.yml
+            .github/workflows/release.yml .github/workflows/binaries.yml .github/workflows/release-image.yml .github/workflows/macos-ci.yml
           go mod download
           go mod verify
       - name: Build Rust policies
@@ -99,16 +101,76 @@ jobs:
           trivy fs --scanners vuln --pkg-types library --severity HIGH,CRITICAL \
             --ignore-unfixed --exit-code 1 --timeout 10m policies/
 
-  binaries:
+  binary-linux-amd64:
     needs: metadata
     uses: ./.github/workflows/binaries.yml
     with:
       version: ${{ needs.metadata.outputs.version }}
+      runner: ubuntu-24.04
+      goos: linux
+      goarch: amd64
+
+  binary-linux-arm64:
+    needs: metadata
+    uses: ./.github/workflows/binaries.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: ubuntu-24.04-arm
+      goos: linux
+      goarch: arm64
+
+  binary-windows-amd64:
+    needs: metadata
+    uses: ./.github/workflows/binaries.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: windows-2025
+      goos: windows
+      goarch: amd64
+
+  binary-darwin-amd64:
+    needs: metadata
+    uses: ./.github/workflows/binaries.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: macos-15-intel
+      goos: darwin
+      goarch: amd64
+
+  binary-darwin-arm64:
+    needs: metadata
+    uses: ./.github/workflows/binaries.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: macos-15
+      goos: darwin
+      goarch: arm64
+
+  # Explicit producer jobs avoid matrix outputs overwriting one another.
+  binaries:
+    needs: [binary-linux-amd64, binary-linux-arm64, binary-windows-amd64, binary-darwin-amd64, binary-darwin-arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      receipts: ${{ steps.receipts.outputs.receipts }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: receipts
+        env:
+          PRODUCERS: ${{ toJSON(needs) }}
+        run: python3 scripts/release-receipts.py
 
   chart:
     needs: metadata
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      name: chart
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -123,96 +185,60 @@ jobs:
           IMAGE_REPOSITORY: ghcr.io/${{ needs.metadata.outputs.repository }}
         run: bash scripts/release-chart.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
         with:
           name: chart
           path: dist/*.tgz
           if-no-files-found: error
           retention-days: 7
 
-  images:
+  image-daemon-amd64:
     needs: metadata
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
-        target: [daemon, controller]
-    runs-on: ${{ matrix.runner }}
+    uses: ./.github/workflows/release-image.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: ubuntu-24.04
+      target: daemon
+
+  image-daemon-arm64:
+    needs: metadata
+    uses: ./.github/workflows/release-image.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: ubuntu-24.04-arm
+      target: daemon
+
+  image-controller-amd64:
+    needs: metadata
+    uses: ./.github/workflows/release-image.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: ubuntu-24.04
+      target: controller
+
+  image-controller-arm64:
+    needs: metadata
+    uses: ./.github/workflows/release-image.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      runner: ubuntu-24.04-arm
+      target: controller
+
+  images:
+    needs: [image-daemon-amd64, image-daemon-arm64, image-controller-amd64, image-controller-arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      receipts: ${{ steps.receipts.outputs.receipts }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Native image metadata
-        id: meta
+      - id: receipts
         env:
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ needs.metadata.outputs.version }}
-        run: |
-          case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) exit 1 ;; esac
-          echo "arch=$arch" >> "$GITHUB_OUTPUT"
-          echo "tag=warmor-${TARGET}:${VERSION}-${arch}" >> "$GITHUB_OUTPUT"
-          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-        with:
-          version: v0.39.0
-          driver-opts: image=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
-      - name: Build once without registry writes
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: deploy/Dockerfile
-          target: ${{ matrix.target }}
-          platforms: linux/${{ steps.meta.outputs.arch }}
-          load: true
-          push: false
-          provenance: false
-          tags: ${{ steps.meta.outputs.tag }}
-          build-args: VERSION=${{ needs.metadata.outputs.version }}
-          labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ needs.metadata.outputs.version }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-      - name: Smoke-test actual image and baked policy
-        env:
-          IMAGE: ${{ steps.meta.outputs.tag }}
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ needs.metadata.outputs.version }}
-        run: |
-          docker run --rm "$IMAGE" --version 2>&1 | grep -F -- "$VERSION"
-          if [[ "$TARGET" == daemon ]]; then
-            docker run --rm "$IMAGE" --validate-policy /etc/warmor/policy.wasm
-          else
-            docker run --rm --entrypoint cargo "$IMAGE" --version
-            docker run --rm --entrypoint rustup "$IMAGE" target list --installed | grep -Fx wasm32-unknown-unknown
-          fi
-      - name: Install pinned scanner
-        run: bash scripts/release-install-trivy.sh
-      - name: Gate fixable high/critical vulnerabilities and retain exact image
-        env:
-          IMAGE: ${{ steps.meta.outputs.tag }}
-          TARGET: ${{ matrix.target }}
-          ARCH: ${{ steps.meta.outputs.arch }}
-        run: |
-          trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --timeout 10m "$IMAGE"
-          mkdir -p dist
-          trivy image --format spdx-json --output "dist/${TARGET}-${ARCH}.spdx.json" --timeout 10m "$IMAGE"
-          docker image inspect "$IMAGE" --format '{{.Id}}' > "dist/${TARGET}-${ARCH}.image-id"
-          docker save "$IMAGE" -o "dist/${TARGET}-${ARCH}.tar"
-          (cd dist && sha256sum ./* > IMAGE_SHA256SUMS)
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: image-${{ matrix.target }}-${{ steps.meta.outputs.arch }}
-          path: dist/
-          if-no-files-found: error
-          retention-days: 7
-      - name: Retain per-architecture SBOMs separately from large image archives
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: sbom-${{ matrix.target }}-${{ steps.meta.outputs.arch }}
-          path: dist/*.spdx.json
-          if-no-files-found: error
-          retention-days: 7
+          PRODUCERS: ${{ toJSON(needs) }}
+        run: python3 scripts/release-receipts.py
 
   # No registry/release writes until every exact-commit gate passes. PRs stop here.
   publish-images:
@@ -222,16 +248,22 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      actions: read
       packages: write
-    strategy:
-      matrix:
-        target: [daemon, controller]
-        arch: [amd64, arm64]
+    outputs:
+      name: promotion
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          name: image-${{ matrix.target }}-${{ matrix.arch }}
-          path: image
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Enforce producer artifact IDs and ZIP digests before image use
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT_RECEIPTS: ${{ needs.images.outputs.receipts }}
+        run: python3 scripts/release-artifacts.py verified-images
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -239,29 +271,35 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Push tested image without rebuilding
         env:
-          TARGET: ${{ matrix.target }}
-          ARCH: ${{ matrix.arch }}
           VERSION: ${{ needs.metadata.outputs.version }}
           REPOSITORY: ${{ needs.metadata.outputs.repository }}
         run: |
-          (cd image && sha256sum -c IMAGE_SHA256SUMS)
-          docker load -i "image/${TARGET}-${ARCH}.tar"
-          source="warmor-${TARGET}:${VERSION}-${ARCH}"
-          test "$(docker image inspect "$source" --format '{{.Id}}')" = "$(cat "image/${TARGET}-${ARCH}.image-id")"
-          suffix=""
-          if [[ "$TARGET" == controller ]]; then suffix=-controller; fi
-          image="ghcr.io/${REPOSITORY}${suffix}:build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
-          docker tag "$source" "$image"
-          docker push "$image"
-          mkdir -p references
-          docker image inspect "$image" --format '{{join .RepoDigests "\n"}}' \
-            | grep -E "^ghcr.io/${REPOSITORY}${suffix}@sha256:[a-f0-9]{64}$" \
-            > "references/${TARGET}-${ARCH}.reference"
-          test "$(wc -l < "references/${TARGET}-${ARCH}.reference")" -eq 1
+          mkdir promotion
+          for target in daemon controller; do
+            for arch in amd64 arm64; do
+              payload="verified-images/image-${target}-${arch}"
+              (cd "$payload" && sha256sum -c IMAGE_SHA256SUMS)
+              docker load -i "$payload/${target}-${arch}.tar"
+              source="warmor-${target}:${VERSION}-${arch}"
+              test "$(docker image inspect "$source" --format '{{.Id}}')" = "$(cat "$payload/${target}-${arch}.image-id")"
+              suffix=""
+              if [[ "$target" == controller ]]; then suffix=-controller; fi
+              image="ghcr.io/${REPOSITORY}${suffix}:build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arch}"
+              docker tag "$source" "$image"
+              bash scripts/release-check-ref.sh tag
+              docker push "$image"
+              docker image inspect "$image" --format '{{join .RepoDigests "\n"}}' \
+                | grep -E "^ghcr.io/${REPOSITORY}${suffix}@sha256:[a-f0-9]{64}$" \
+                > "promotion/${target}-${arch}.reference"
+              test "$(wc -l < "promotion/${target}-${arch}.reference")" -eq 1
+              cp "$payload/${target}-${arch}.spdx.json" promotion/
+            done
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
         with:
-          name: reference-${{ matrix.target }}-${{ matrix.arch }}
-          path: references/*.reference
+          name: promotion
+          path: promotion/
           if-no-files-found: error
           retention-days: 7
 
@@ -272,6 +310,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      actions: read
       packages: write
       id-token: write
       attestations: write
@@ -280,25 +319,20 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: binaries-*
-          merge-multiple: true
-          path: release
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: chart
-          path: release
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: sbom-*
-          merge-multiple: true
-          path: release
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: reference-*
-          merge-multiple: true
-          path: references
+      - name: Enforce producer artifact IDs and ZIP digests before signing/promotion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BINARY_RECEIPTS: ${{ needs.binaries.outputs.receipts }}
+          CHART_RECEIPT: ${{ toJSON(needs.chart.outputs) }}
+          PROMOTION_RECEIPT: ${{ toJSON(needs.publish-images.outputs) }}
+        run: |
+          export ARTIFACT_RECEIPTS
+          ARTIFACT_RECEIPTS=$(python3 -c 'import json,os; print(json.dumps(json.loads(os.environ["BINARY_RECEIPTS"]) + [json.loads(os.environ["CHART_RECEIPT"]),json.loads(os.environ["PROMOTION_RECEIPT"])]))')
+          python3 scripts/release-artifacts.py verified-downloads
+          mkdir release references
+          cp verified-downloads/binaries-*/* verified-downloads/chart/* release/
+          cp verified-downloads/promotion/*.spdx.json release/
+          cp verified-downloads/promotion/*.reference references/
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           version: v0.39.0
@@ -340,6 +374,7 @@ jobs:
             suffix=""
             if [[ "$target" == controller ]]; then suffix=-controller; fi
             image="ghcr.io/${REPOSITORY}${suffix}"
+            bash scripts/release-check-ref.sh tag
             docker buildx imagetools create -t "$image:$VERSION" \
               "$(cat "references/${target}-amd64.reference")" \
               "$(cat "references/${target}-arm64.reference")"
@@ -347,6 +382,8 @@ jobs:
             echo "$target=$digest" >> "$GITHUB_OUTPUT"
             echo "$image@$digest" >> release/IMAGES.txt
           done
+      - name: Revalidate remote tag immediately before image attestations
+        run: bash scripts/release-check-ref.sh tag
       - name: Attest daemon image
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
@@ -376,6 +413,8 @@ jobs:
           trivy rootfs --format spdx-json --output release/binaries.spdx.json --timeout 10m payloads/
           cp docs/RELEASE_SUPPORT.md release/
           (cd release && sha256sum ./* > SHA256SUMS)
+      - name: Revalidate remote tag immediately before signing
+        run: bash scripts/release-check-ref.sh tag
       - name: Sign archives, SBOMs, chart and checksum manifest
         id: provenance
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
@@ -406,7 +445,9 @@ jobs:
           VERSION: ${{ needs.metadata.outputs.version }}
           REPOSITORY: ${{ needs.metadata.outputs.repository }}
         run: |
+          bash scripts/release-check-ref.sh tag
           helm push "release/warmor-${VERSION}.tgz" "oci://ghcr.io/$REPOSITORY/charts"
           args=(--verify-tag --title "$GITHUB_REF_NAME" --generate-notes --notes-file docs/RELEASE_SUPPORT.md)
           if [[ "$VERSION" == *-* ]]; then args+=(--prerelease); fi
+          bash scripts/release-check-ref.sh tag
           gh release create "$GITHUB_REF_NAME" release/* "${args[@]}"

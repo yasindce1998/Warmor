@@ -1,0 +1,110 @@
+name: Release image (build only)
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+    outputs:
+      name:
+        value: ${{ jobs.build.outputs.name }}
+      id:
+        value: ${{ jobs.build.outputs.id }}
+      digest:
+        value: ${{ jobs.build.outputs.digest }}
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    outputs:
+      name: image-${{ inputs.target }}-${{ steps.meta.outputs.arch }}
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Native image metadata
+        id: meta
+        env:
+          TARGET: ${{ inputs.target }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) exit 1 ;; esac
+          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+          echo "tag=warmor-${TARGET}:${VERSION}-${arch}" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.39.0
+          driver-opts: image=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
+      - name: Build once without registry writes
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: ${{ inputs.target }}
+          platforms: linux/${{ steps.meta.outputs.arch }}
+          load: true
+          push: false
+          provenance: false
+          tags: ${{ steps.meta.outputs.tag }}
+          build-args: VERSION=${{ inputs.version }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ inputs.version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+      - name: Smoke-test actual image and baked policy
+        env:
+          IMAGE: ${{ steps.meta.outputs.tag }}
+          TARGET: ${{ inputs.target }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          docker run --rm "$IMAGE" --version 2>&1 | grep -F -- "$VERSION"
+          if [[ "$TARGET" == daemon ]]; then
+            docker run --rm "$IMAGE" --validate-policy /etc/warmor/policy.wasm
+          else
+            docker run --rm --entrypoint cargo "$IMAGE" --version
+            docker run --rm --entrypoint rustup "$IMAGE" target list --installed | grep -Fx wasm32-unknown-unknown
+          fi
+      - name: Install pinned scanner
+        run: bash scripts/release-install-trivy.sh
+      - name: Gate fixable high/critical vulnerabilities and retain exact image
+        env:
+          IMAGE: ${{ steps.meta.outputs.tag }}
+          TARGET: ${{ inputs.target }}
+          ARCH: ${{ steps.meta.outputs.arch }}
+        run: |
+          trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --timeout 10m "$IMAGE"
+          mkdir -p dist
+          trivy image --format spdx-json --output "dist/${TARGET}-${ARCH}.spdx.json" --timeout 10m "$IMAGE"
+          docker image inspect "$IMAGE" --format '{{.Id}}' > "dist/${TARGET}-${ARCH}.image-id"
+          docker save "$IMAGE" -o "dist/${TARGET}-${ARCH}.tar"
+          (cd dist && sha256sum ./* > IMAGE_SHA256SUMS)
+      # One upload/receipt binds both the tested image and its native SBOM.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
+        with:
+          name: image-${{ inputs.target }}-${{ steps.meta.outputs.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7

@@ -29,7 +29,10 @@ done
 cp LICENSE "$out/"
 cp docs/RELEASE_SUPPORT.md "$out/RELEASE_SUPPORT.md"
 # Test the extracted bytes of the final archive, not just build-directory files.
-archive="$(python3 scripts/release-package.py "$out" "${SOURCE_DATE_EPOCH:?set SOURCE_DATE_EPOCH}" "$GOOS")"
+# Python's print uses CRLF on Windows. Never derive a shell filename from it.
+python3 scripts/release-package.py "$out" "${SOURCE_DATE_EPOCH:?set SOURCE_DATE_EPOCH}" "$GOOS"
+archive="${out}.tar.gz"
+if [[ "$GOOS" == windows ]]; then archive="${out}.zip"; fi
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 mkdir "$stage/archives"

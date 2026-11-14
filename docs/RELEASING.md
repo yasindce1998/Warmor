@@ -6,6 +6,27 @@ longer publish `latest`, moving minor tags or a repeatedly overwritten chart.
 Do not use a tag as an instruction to deploy or upgrade any production cluster.
 The workflow performs **no deployment**.
 
+### Mandatory repository prerequisites
+
+Before enabling publication, configure and verify a repository ruleset matching
+`v*` that **prohibits tag updates and deletions**, restricts tag creation to
+authorized release maintainers/automation, and does not allow a publishing actor
+or administrator bypass to silently retarget a release. Protect `main` and the
+maintained `release-*` branches with required reviews/tests. GitHub immutable
+release assets/tags should also be enabled where available, but their protection
+starts at release publication and does not replace the tag ruleset during builds.
+
+The workflow matches complete `refs/remotes/origin/main` or
+`refs/remotes/origin/release-*` ref names, rejecting suffix lookalikes such as
+`origin/feature/origin/main`. It queries the remote tag again before staging image
+pushes, final manifest promotion, attestations, chart push and GitHub release
+creation. Annotated tags are peeled and lightweight tags are compared directly
+to `GITHUB_SHA`; moved/deleted tags fail closed. `gh release --verify-tag` alone
+only checks existence and is not treated as a commit-identity check. Revalidation
+is **not atomic with registry/GitHub operations**: only enforced immutable tag
+rules close the remaining check-to-use window. This local task does not configure
+or claim to have verified remote repository rulesets.
+
 ## Gates and artifact identity
 
 The tag's exact commit is checked out explicitly in every build. Publication
@@ -25,7 +46,17 @@ and execute those extracted bytes. A stale output directory fails closed rather
 than accidentally including a removed binary on a rerun.
 
 Container images are saved and uploaded only after testing; publishing downloads
-and verifies those saved files and image IDs rather than rebuilding. Final
+and verifies those saved files and image IDs rather than rebuilding. Each
+explicit producer job exposes the immutable `upload-artifact` **artifact ID and
+ZIP SHA-256** through job/reusable-workflow outputs. Aggregators validate complete
+receipts without downloading payloads; explicit jobs avoid ambiguous matrix
+output overwrites. Publishers fetch by those IDs using the GitHub API and fail
+on a ZIP hash mismatch **before extraction, image loading, signing or pushing**.
+No downloaded checksum file, API-reported current digest, or warning-only
+`download-artifact` check is accepted as the independent expected digest. The
+promotion artifact (registry digest references plus the verified native SBOMs)
+uses the same independently checked producer-output handoff. Receipts are not
+stored inside the downloaded ZIP they authenticate. Final
 multi-architecture manifests refer to the tested architectures. Archive and
 chart downloads are the same retained artifacts. Architecture manifests are
 promoted by registry digest, not by re-resolving a staging tag. Actions are
