@@ -96,7 +96,7 @@ func (p *LinuxPlatform) Ready() error {
 	if p.ebpfLoader == nil {
 		return fmt.Errorf("platform not loaded")
 	}
-	if p.config.LSMEnforce && !p.lsmEnabled {
+	if (p.config.LSMEnforce || p.config.RequireLSM) && !p.lsmEnabled {
 		return fmt.Errorf("requested LSM enforcement is inactive")
 	}
 	p.scope.RLock()

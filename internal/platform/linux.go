@@ -49,6 +49,9 @@ type LinuxPlatform struct {
 }
 
 func NewLinuxPlatform(config LinuxConfig) (Platform, error) {
+	if config.SkipLSM && config.RequireLSM {
+		return nil, fmt.Errorf("cannot skip LSM when LSM is required")
+	}
 	if config.CgroupRoot == "" {
 		config.CgroupRoot = "/sys/fs/cgroup"
 	}

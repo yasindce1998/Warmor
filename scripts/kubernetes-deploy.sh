@@ -36,7 +36,9 @@ fi
 for tool in helm kubectl sha256sum; do
   command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 1; }
 done
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/warmor-deploy.XXXXXXXX")
+TEMP_ROOT="${TMPDIR:-/tmp}"
+if [[ -z "${TMPDIR:-}" && -d /tmp/opencode && -w /tmp/opencode ]]; then TEMP_ROOT=/tmp/opencode; fi
+WORK=$(mktemp -d "$TEMP_ROOT/warmor-deploy.XXXXXXXX")
 trap 'rm -f "$WORK/policy.wasm" "$WORK/configmap.yaml" "$WORK/rendered.yaml"; rmdir "$WORK"' EXIT
 case "$POLICY" in
   *.wasm) cp -- "$POLICY" "$WORK/policy.wasm" ;;

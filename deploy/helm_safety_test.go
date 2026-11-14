@@ -165,3 +165,27 @@ func TestHelmRejectsUnsafeAndInvalidValues(t *testing.T) {
 		})
 	}
 }
+
+func TestHelmRenderedAgentArgumentsExist(t *testing.T) {
+	flags := daemonFlags(t)
+	for _, doc := range renderChart(t) {
+		if doc["kind"] != "DaemonSet" {
+			continue
+		}
+		spec := object(doc, "spec", "template", "spec")
+		for _, kind := range []string{"containers", "initContainers"} {
+			for _, item := range spec[kind].([]interface{}) {
+				for _, value := range item.(map[string]interface{})["args"].([]interface{}) {
+					arg := value.(string)
+					if !strings.HasPrefix(arg, "-") {
+						continue
+					}
+					name := strings.SplitN(strings.TrimLeft(arg, "-"), "=", 2)[0]
+					if !flags[name] {
+						t.Fatalf("rendered unknown daemon argument: %q", arg)
+					}
+				}
+			}
+		}
+	}
+}

@@ -103,3 +103,38 @@ func TestDeployScriptRejectsUnsafeRequestsBeforeTools(t *testing.T) {
 		}
 	}
 }
+
+func TestDeployCompileOrValidationFailureCannotReachClusterTools(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// The helper may check command presence but must not invoke these after
+	// a compiler or validator error, even when a live context was specified.
+	marker := filepath.Join(dir, "cluster-called")
+	for _, tool := range []string{"helm", "kubectl"} {
+		write(tool, "#!/bin/sh\ntouch \"$CLUSTER_MARKER\"\nexit 95\n")
+	}
+	compiler := write("compile", "#!/bin/sh\nif [ \"$FAIL_AT\" = compile ]; then exit 96; fi\ncp \"$FIXTURE\" \"$2\"\n")
+	validator := write("validate", "#!/bin/sh\nexit 97\n")
+	root, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, failure := range []string{"compile", "validate"} {
+		cmd := exec.Command("bash", "scripts/kubernetes-deploy.sh", "--mode", "audit", "--policy", "deploy/default-policy.yaml")
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "DRY_RUN=false", "KUBE_CONTEXT=must-never-be-used", "CLUSTER_MARKER="+marker,
+			"FAIL_AT="+failure, "WARMOR_COMPILE="+compiler, "WARMOR_DAEMON="+validator, "FIXTURE="+filepath.Join(root, "internal/wasm/testdata/allow_policy.wasm"))
+		if out, err := cmd.CombinedOutput(); err == nil {
+			t.Fatalf("accepted failed %s: %s", failure, out)
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("%s failure reached cluster tooling", failure)
+		}
+	}
+}
