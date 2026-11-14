@@ -137,6 +137,59 @@ func TestRejectYAMLTagsThatHideVariableReferences(t *testing.T) {
 	}
 }
 
+func TestPreflightRejectsTrailingYAMLBeforeExpansion(t *testing.T) {
+	first := yamlPolicy("deny", "x", "allow")
+	// Small syntax-only witness: never pass this trailing alias document to
+	// compiler.Parse or any YAML decoder targeting interface/map values.
+	aliases := "values: &values [" + strings.Repeat("x,", 15) + "x]\nrepeated: [" + strings.Repeat("*values,", 31) + "*values]\n"
+	for name, tail := range map[string]string{
+		"mapping":            "ignored: true\n",
+		"aliases":            aliases,
+		"merge":              "<<: {hidden: [x, y]}\n",
+		"binary":             "!!binary JHRhcmdldA==\n",
+		"depth":              strings.Repeat("[", 40) + "x" + strings.Repeat("]", 40) + "\n",
+		"empty":              "",
+		"comment-only":       "# empty second document\n",
+		"null":               "null\n",
+		"third-document":     "---\nignored: true\n",
+		"malformed":          "[\n",
+		"trailing-after-end": "...\n[\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw := []byte(first + "---\n" + tail)
+			if len(raw) > 4096 {
+				t.Fatal("trailing-document witness exceeded bounded input size")
+			}
+			// A zero budget would reject even the first ordinary node if visited.
+			// Requiring the document error proves rejection occurs BEFORE budget
+			// traversal, and NewBundle must return that same pre-compiler error.
+			budget := expansionBudget{}
+			if err := preflightSource(raw, &budget); !errors.Is(err, errYAMLDocuments) {
+				t.Fatal("trailing YAML did not fail before expansion", err)
+			}
+			if budget != (expansionBudget{}) {
+				t.Fatal("trailing YAML charged expansion budget")
+			}
+			doc, _ := fixture()
+			doc.Additions = nil
+			*doc.Baseline = source("system", "baseline", string(raw))
+			if _, err := NewBundle(mustManifest(t, doc), map[digest.Digest][]byte{digest.FromBytes(raw): raw}); !errors.Is(err, errYAMLDocuments) {
+				t.Fatal("trailing YAML reached compiler parsing", err)
+			}
+		})
+	}
+	for _, raw := range []string{first, "---\n" + first, first + "# trailing comment\n", first + "...\n# trailing comment\n"} {
+		budget := expansionBudget{values: 65536, bytes: MaxBundleBytes}
+		if err := preflightSource([]byte(raw), &budget); err != nil {
+			t.Fatal("valid single YAML document rejected", err)
+		}
+	}
+	budget := expansionBudget{}
+	if err := preflightSource(bytes.Repeat([]byte(" "), MaxArtifactBytes+1), &budget); err == nil {
+		t.Fatal("oversized YAML stream accepted")
+	}
+}
+
 func TestDecodeExactSchemaNames(t *testing.T) {
 	doc, _ := fixture()
 	doc.Additions[0].Source.RuleModes = map[string]string{"rule": "audit", "Rule": "enforce"}
@@ -260,6 +313,26 @@ func FuzzPreflightRepeatedVariables(f *testing.F) {
 		err := preflightSource(raw, &budget)
 		if u*n > 1024 && !errors.Is(err, errExpansionBudget) {
 			t.Fatal("repeated variable expansion escaped global node budget", err)
+		}
+	})
+}
+
+func FuzzPreflightRejectsTrailingYAML(f *testing.F) {
+	for _, tail := range []string{"", "# comment\n", "x: &x [a,b]\ny: [*x,*x]\n", "<<: {x: y}\n", "!!binary JHRhcmdldA==\n", "[", "---\n"} {
+		f.Add([]byte(tail))
+	}
+	first := []byte(yamlPolicy("deny", "x", "allow") + "---\n")
+	f.Fuzz(func(t *testing.T, tail []byte) {
+		if len(tail) > 4096 {
+			t.Skip()
+		}
+		raw := append(bytes.Clone(first), tail...)
+		budget := expansionBudget{}
+		if err := preflightSource(raw, &budget); err == nil {
+			t.Fatal("accepted trailing YAML document or syntax")
+		}
+		if budget != (expansionBudget{}) {
+			t.Fatal("trailing YAML reached expansion traversal")
 		}
 	})
 }

@@ -1,9 +1,11 @@
 package manifest
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/opencontainers/go-digest"
@@ -98,9 +100,21 @@ func preflightSource(raw []byte, budget *expansionBudget) error {
 	// compiler.Parse intentionally supplies an allow default for legacy sources;
 	// this contract requires it to be explicit instead. Do not expose YAML values
 	// or parser diagnostics, which may contain sensitive operands, to callers.
+	if len(raw) == 0 || len(raw) > MaxArtifactBytes {
+		return errors.New("accepted policy source byte budget invalid")
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
 	var node yaml.Node
-	if yaml.Unmarshal(raw, &node) != nil || len(node.Content) != 1 || node.Content[0].Kind != yaml.MappingNode {
+	if decoder.Decode(&node) != nil || len(node.Content) != 1 || node.Content[0].Kind != yaml.MappingNode {
 		return errors.New("invalid accepted policy YAML")
+	}
+	// yaml.Unmarshal(Node) accepts only the first document. Check the COMPLETE
+	// stream before charging expansion or calling compiler.Parse, whose trailing
+	// Decode(new(any)) would otherwise materialize unchecked aliases. Node-only
+	// decoding does not resolve aliases, merges or binary values in the tail.
+	var trailing yaml.Node
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return errYAMLDocuments
 	}
 	explicit := false
 	for i := 0; i < len(node.Content[0].Content); i += 2 {
@@ -147,6 +161,7 @@ func parseSource(raw []byte, s Source) (*compiler.Policy, error) {
 }
 
 var (
+	errYAMLDocuments   = errors.New("accepted policy requires exactly one YAML document")
 	errYAMLMerge       = errors.New("YAML merge keys unsupported")
 	errExpansionBudget = errors.New("source expansion budget exceeded or YAML aliases unsupported")
 )

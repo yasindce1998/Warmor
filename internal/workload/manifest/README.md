@@ -52,6 +52,12 @@ preflight. JSON schema keys require exact spelling, but labels and rule-mode
 map keys remain case-sensitive user data (`app` and `App` are distinct).
 Binary, custom and other non-policy YAML tags are rejected as well: decoding
 them must not create variable references invisible to syntax preflight.
+Preflight bounds source bytes and requires exactly one YAML document, decoding
+both the first document and the EOF probe into `yaml.Node` only. Any second
+document (including an empty document) or malformed trailing input is rejected
+before expansion-budget traversal or compiler parsing; the EOF probe must never
+decode into `any`, where trailing aliases could materialize unchecked values.
+Single-document markers, comments and an explicit `...` end marker remain valid.
 The bundle enforces these limits conservatively, including duplicate content
 referenced by distinct sources. Resource-limited/asynchronous compilation and
 node-local selected-set cache quotas are still integration responsibilities.
@@ -184,3 +190,11 @@ each passed a short bounded fuzz run. Full Go 1.26.11 tests, full-repo
 golangci-lint, and workload race tests with required real Cargo also passed.
 The large allocation specimens from review were not executed. These fixes
 require independent re-review; passing tests alone does not close that gate.
+
+The trailing-document follow-up adds bounded alias/merge/binary/deep/empty-tail
+regressions and a fifth fuzz target. Tests assert that rejected streams do not
+even charge the expansion budget and that `NewBundle` returns the preflight
+framing error. A 10-second trailing-stream fuzz run passed, as did Go 1.26.11
+full-repo lint and workload race tests with required real Cargo. No compiler
+files were changed; this framing check protects bundles independently of any
+separate compiler parser hardening. Independent re-review is still required.
