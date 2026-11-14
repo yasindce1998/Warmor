@@ -225,9 +225,6 @@ func runDaemon(stop <-chan struct{}) {
 		}
 	}
 
-	// Policy updates from the server and file changes both trigger a reload.
-	reloadCh := make(chan struct{}, 1)
-
 	ringSize, err := parseByteSize(*lsmRingSize)
 	if err != nil {
 		log.Fatalf("❌ --lsm-ringbuf-size: %v", err)
@@ -302,7 +299,7 @@ func runDaemon(stop <-chan struct{}) {
 			}
 		}
 		var err error
-		policyClient, err = newPolicyClient(clientCfg, policyUpdateHandler(*policyPath, reloadCh))
+		policyClient, err = newPolicyClient(clientCfg, policyUpdateHandler(*policyPath, enf.ActivatePolicy))
 		if err != nil {
 			log.Fatalf("❌ Policy server: %v", err)
 		}
@@ -327,8 +324,11 @@ func runDaemon(stop <-chan struct{}) {
 	sigChan := make(chan os.Signal, 1)
 	notifySignals(sigChan)
 
-	// Start policy file watcher (active on Windows; no-op on Unix where SIGHUP is used)
-	stopWatcher := startPolicyWatcher(*policyPath, reloadCh)
+	// Fleet mode owns activation; do not run a second competing file writer.
+	stopWatcher := func() {}
+	if policyClient == nil {
+		stopWatcher = watchPolicyActivation(*policyPath, enf.ReloadPolicy, policyWatchInterval)
+	}
 	defer stopWatcher()
 
 	if policyClient != nil {
@@ -352,6 +352,8 @@ func runDaemon(stop <-chan struct{}) {
 				log.Println("📥 Received reload signal, reloading policy...")
 				if err := enf.ReloadPolicy(); err != nil {
 					log.Printf("❌ Failed to reload policy: %v", err)
+				} else if policyClient != nil {
+					policyClient.InvalidateActiveRevision()
 				}
 				log.Println("")
 			} else if isShutdownSignal(sig) {
@@ -366,14 +368,6 @@ func runDaemon(stop <-chan struct{}) {
 			log.Println("📥 Service stop requested")
 			shutdown(enf)
 			return
-
-		case <-reloadCh:
-			log.Println("")
-			log.Println("📥 Policy file changed, reloading...")
-			if err := enf.ReloadPolicy(); err != nil {
-				log.Printf("❌ Failed to reload policy: %v", err)
-			}
-			log.Println("")
 
 		case <-statsTicker.C:
 			log.Println("")

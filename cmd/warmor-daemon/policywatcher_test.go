@@ -33,7 +33,9 @@ func TestPolicyWatcher_ReloadsOnChange(t *testing.T) {
 	// Give the watcher goroutine time to record the initial mtime before
 	// the test changes it, otherwise the change can race the first stat.
 	time.Sleep(100 * time.Millisecond)
-	touchFuture(t, path)
+	if err := os.WriteFile(path, []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-reloadCh:
 	case <-time.After(2 * time.Second):

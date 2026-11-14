@@ -15,6 +15,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/yasindce1998/warmor/internal/crypto"
+	"github.com/yasindce1998/warmor/internal/enforcer"
 	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/internal/policyserver"
 )
@@ -178,7 +179,16 @@ func TestSignedPolicyDistributionEndToEnd(t *testing.T) {
 			}
 			return err
 		},
-	}, policyUpdateHandler(policyPath, reloadCh))
+	}, policyUpdateHandler(policyPath, func(path string, commit func() error) error {
+		if _, err := enforcer.ValidatePolicy(context.Background(), path, pub); err != nil {
+			return err
+		}
+		if err := commit(); err != nil {
+			return err
+		}
+		reloadCh <- struct{}{}
+		return nil
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,13 +272,13 @@ func TestSignedPolicyDistributionEndToEnd(t *testing.T) {
 	}
 
 	// 5. A correctly signed new version is applied again.
-	upload("v5.wasm", tampered, sk.SignPolicyFile(tampered), false)
+	upload("v5.wasm", good, sk.SignPolicyFile(good), false)
 	select {
 	case <-reloadCh:
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for the re-signed policy")
 	}
-	if got, _ := os.ReadFile(policyPath); !bytes.Equal(got, tampered) {
+	if got, _ := os.ReadFile(policyPath); !bytes.Equal(got, good) {
 		t.Fatal("re-signed policy not written")
 	}
 }

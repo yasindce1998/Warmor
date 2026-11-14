@@ -3,12 +3,9 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
-	"os"
 
 	"github.com/yasindce1998/warmor/internal/crypto"
 	"github.com/yasindce1998/warmor/internal/enforcer"
@@ -82,39 +79,30 @@ func verifyDownload(pub ed25519.PublicKey) func(*policyserver.PolicyAssignment, 
 	}
 }
 
-// writeDownloadedPolicy stores a verified (or, without --verify-key,
-// accepted) download at path, with its signature at path+".sig" so later
-// reloads from disk can verify it again. The signature is written first:
-// if the process stops in between, the old module fails verification
-// against the new signature and is refused rather than a new module
-// running unverified. Without a signature any stale .sig is removed.
+// writeDownloadedPolicy publishes an immutable revision. Production activation
+// uses policyUpdateHandler to prepare the runtime before publication.
 func writeDownloadedPolicy(path string, a *policyserver.PolicyAssignment, data []byte) error {
-	sigPath := crypto.PolicySignaturePath(path)
-	if len(a.Signature) > 0 {
-		if err := writePolicyFile(sigPath, crypto.EncodePolicySignature(a.Signature)); err != nil {
-			return fmt.Errorf("write signature: %w", err)
-		}
-	} else if err := os.Remove(sigPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("remove stale signature: %w", err)
+	r, err := stagePolicyRevision(path, a, data)
+	if err != nil {
+		return err
 	}
-	return writePolicyFile(path, data)
+	defer r.discard()
+	return r.commit()
 }
 
-// policyUpdateHandler returns the policy client's OnUpdate callback: it
-// stores the download (already vetted by verifyDownload) at policyPath and
-// signals a reload. The reload reads the file back and, with --verify-key,
-// verifies it again before loading.
-func policyUpdateHandler(policyPath string, reloadCh chan<- struct{}) func(*policyserver.PolicyAssignment, []byte) error {
+// policyUpdateHandler waits for actual activation and durable publication.
+func policyUpdateHandler(policyPath string, activate func(string, func() error) error) func(*policyserver.PolicyAssignment, []byte) error {
 	return func(a *policyserver.PolicyAssignment, data []byte) error {
-		if err := writeDownloadedPolicy(policyPath, a, data); err != nil {
-			log.Printf("❌ Failed to write policy %s v%d: %v", a.PolicyID, a.Version, err)
+		r, err := stagePolicyRevision(policyPath, a, data)
+		if err == nil {
+			defer r.discard()
+			err = activate(r.modulePath, r.commit)
+		}
+		if err != nil {
+			log.Printf("❌ Failed to activate policy %s v%d: %v", a.PolicyID, a.Version, err)
 			return err
 		}
-		log.Printf("📥 Received policy %s v%d from server", a.PolicyID, a.Version)
-		select {
-		case reloadCh <- struct{}{}:
-		default:
-		}
-		return fmt.Errorf("activation acknowledgement not yet wired")
+		log.Printf("✓ Activated policy %s v%d (%s)", a.PolicyID, a.Version, a.WASMHash)
+		return nil
 	}
 }
