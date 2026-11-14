@@ -267,7 +267,9 @@ func FromAPIEvent(event *api.Event, result *api.ActionResult) *SecurityEvent {
 		se.Reason = result.Reason
 		se.Cached = result.Cached
 		se.AuditOnly = result.Audit
-		se.Enforced = result.Action == api.ActionDeny && !result.Audit
+		se.Enforced = result.Enforced
+		se.EnforcementAttempted = result.EnforcementAttempted
+		se.EnforcementError = result.EnforcementError
 		se.LatencyUS = result.Latency.Microseconds()
 	}
 

@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/pkg/api"
+	"golang.org/x/sys/unix"
 )
 
 // spawnSleeper starts a throwaway child process that the test may kill.
 func spawnSleeper(t *testing.T) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command("sleep", "60")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot spawn sleep: %v", err)
 	}
@@ -48,26 +50,69 @@ func waitKilled(t *testing.T, cmd *exec.Cmd) {
 	}
 }
 
-func TestTerminateProcess_KillsChild(t *testing.T) {
+func verifiedChildEvent(t *testing.T, cmd *exec.Cmd) *api.Event {
+	t.Helper()
+	if err := verifySignalingNamespaces(); err != nil {
+		t.Skipf("verified signaling unavailable: %v", err)
+	}
+	fd, err := unix.PidfdOpen(cmd.Process.Pid, 0)
+	if err != nil {
+		t.Skipf("pidfds unavailable: %v", err)
+	}
+	_ = unix.Close(fd)
+	start, err := readProcessStartTicks(uint32(cmd.Process.Pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hz, err := readClockTicks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	upper, err := startTickUpperNS(start, hz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now, err := monotonicNowNS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eventBoot := signalingClockBaseline.eventBootLower(now); upper > eventBoot && upper-eventBoot > uint64(100*time.Millisecond) {
+		t.Skip("conservative clock check unavailable for young child after additional suspend")
+	}
+	for signalingClockBaseline.eventBootLower(now) <= upper {
+		time.Sleep(time.Millisecond)
+		now, err = monotonicNowNS()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &api.Event{PID: uint32(cmd.Process.Pid), KernelTimestampNS: now, Timestamp: time.Now()}
+}
+
+func TestTerminateEventProcess_KillsIsolatedChild(t *testing.T) {
 	cmd := spawnSleeper(t)
-	if err := terminateProcess(uint32(cmd.Process.Pid)); err != nil {
-		t.Fatalf("terminateProcess: %v", err)
+	event := verifiedChildEvent(t, cmd)
+	if attempted, err := terminateEventProcess(event); !attempted || err != nil {
+		t.Fatalf("terminateEventProcess = %v, %v", attempted, err)
 	}
 	waitKilled(t, cmd)
 }
 
-func TestTerminateProcess_NonexistentPID(t *testing.T) {
+func TestTerminateEventProcess_ExitedChild(t *testing.T) {
 	cmd := spawnSleeper(t)
-	pid := uint32(cmd.Process.Pid)
+	event := verifiedChildEvent(t, cmd)
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait() // reaped: PID no longer exists
 
-	err := terminateProcess(pid)
+	attempted, err := terminateEventProcess(event)
 	if err == nil {
 		t.Fatal("expected error killing a reaped PID")
 	}
 	if !errors.Is(err, syscall.ESRCH) {
 		t.Errorf("expected ESRCH, got %v", err)
+	}
+	if attempted {
+		t.Error("exited child must not reach signal syscall")
 	}
 }
 
@@ -75,7 +120,7 @@ func TestActionHandler_DenyKillsProcess(t *testing.T) {
 	cmd := spawnSleeper(t)
 	handler := NewActionHandler(false)
 
-	event := &api.Event{PID: uint32(cmd.Process.Pid), Comm: "sleep", Filename: "/usr/bin/sleep"}
+	event := verifiedChildEvent(t, cmd)
 	result := &api.ActionResult{Action: api.ActionDeny, Reason: "test deny"}
 	if err := handler.Enforce(context.Background(), event, result); err != nil {
 		t.Fatalf("Enforce: %v", err)
@@ -85,18 +130,22 @@ func TestActionHandler_DenyKillsProcess(t *testing.T) {
 	if got := handler.GetStats().Denied; got != 1 {
 		t.Errorf("Denied = %d, want 1", got)
 	}
+	if !result.EnforcementAttempted || !result.Enforced || result.EnforcementError != "" {
+		t.Fatalf("incorrect successful outcome: %+v", result)
+	}
 }
 
-func TestActionHandler_DenyAlreadyExitedProcessIsNotError(t *testing.T) {
+func TestActionHandler_DenyAlreadyExitedProcessReportsRefusal(t *testing.T) {
 	cmd := spawnSleeper(t)
-	pid := uint32(cmd.Process.Pid)
+	event := verifiedChildEvent(t, cmd)
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait()
 
 	handler := NewActionHandler(false)
-	err := handler.Enforce(context.Background(), &api.Event{PID: pid}, &api.ActionResult{Action: api.ActionDeny})
-	if err != nil {
-		t.Errorf("deny on exited process should be tolerated, got %v", err)
+	result := &api.ActionResult{Action: api.ActionDeny}
+	err := handler.Enforce(context.Background(), event, result)
+	if err == nil || result.Enforced || result.EnforcementAttempted || result.EnforcementError == "" {
+		t.Errorf("exited process must report refused enforcement: result=%+v err=%v", result, err)
 	}
 }
 
@@ -119,15 +168,17 @@ func TestHandleEvent_SandboxViolationKillsProcess(t *testing.T) {
 	pid := uint32(cmd.Process.Pid)
 
 	e, _ := newTestEnforcer(t, testEnforcerOpts{})
+	event := verifiedChildEvent(t, cmd)
 	if err := e.Sandbox().ApplySandbox(pid, "network-deny"); err != nil {
 		t.Fatal(err)
 	}
-	e.handleEvent(&api.Event{
-		PID:     pid,
-		Comm:    "sleep",
-		Network: &api.NetworkEvent{BaseEvent: api.BaseEvent{Type: api.EventTypeNetwork}, RemoteAddr: "8.8.8.8"},
-	})
+	event.Comm = "sleep"
+	event.Network = &api.NetworkEvent{BaseEvent: api.BaseEvent{Type: api.EventTypeNetwork}, RemoteAddr: "8.8.8.8"}
+	e.handleEvent(event)
 	waitKilled(t, cmd)
+	if stats := e.GetStats(); stats.EnforcementAttempted != 1 || stats.EnforcementSucceeded != 1 || stats.EnforcementFailed != 0 || stats.EnforcementRefused != 0 {
+		t.Fatalf("lost outcomes: %+v", stats)
+	}
 }
 
 func TestReloadPolicy_RuntimeCreationError(t *testing.T) {
