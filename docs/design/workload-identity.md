@@ -5,6 +5,10 @@
 This design prepares production-readiness work packages C/D. It does **not**
 enable `WarmorPolicy.spec.selector`. Such policies must remain Pending until
 publication, agent activation, kernel routing, and real-node tests below pass.
+The reviewed baseline holds non-empty selectors Pending but treats an explicitly
+empty `{}` selector as node-wide; this preparation package does not fix that
+controller behavior. The controller-safety integration must reject all explicitly
+supplied selectors before this invariant can be claimed for every selector.
 The existing HTTP JSON `/events` containerd monitor is not a runtime protocol
 and must not be used for this path. This package never opens runtime sockets.
 
