@@ -14,13 +14,13 @@ Conditional assignment requests include `if_policy_id`, `if_version`, and
 instead of an ambiguous 304, but must still upgrade their client-side comparison.
 New clients retry legacy-server 304 responses with an unconditional request.
 
-`revisionstore.go` integrates with the fleet store's `RegisterAgentChecked` and
-`mutateLocked` transaction APIs when that branch is present; on the foundation
-alone it uses an explicitly ephemeral fallback. The combined integration tests
-are behind `fleetintegration` (run after integrating fleet commits `5874b6e` and
-`3e39f07`). They verify acknowledgement restart recovery and persistence-failure
-rollback, including registration errors. The activation branch itself does not
-make `NewStore` or `NewServer` durable; deploy the fleet persistent-store wiring.
+Registration uses `RegisterAgentChecked`, and revision heartbeats use the same
+`mutateLocked` transaction boundary as fleet management changes. Neither path
+discards persistence errors or falls back to an unchecked API. The default test
+suite verifies acknowledgement restart recovery and persistence-failure rollback,
+including registration errors. `NewStore` and `NewServer` without an injected
+store remain ephemeral; production startup requires the persistent-store wiring
+described in [POLICY_SERVER_STATE.md](../POLICY_SERVER_STATE.md).
 
 ## Server-managed disk layout
 

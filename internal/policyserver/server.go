@@ -262,7 +262,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := registeredAgent(s.store, &req)
+	agent, err := s.store.RegisterAgentChecked(&req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
