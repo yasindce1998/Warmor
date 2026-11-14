@@ -707,6 +707,8 @@ func TestHandleEvent_NetFilterAllowedAddressGoesToPolicy(t *testing.T) {
 	e, _ := newTestEnforcer(t, testEnforcerOpts{
 		netFilter: &NetFilterConfig{BlockCIDRs: []string{"10.0.0.0/8"}},
 	})
+	// Exercise policy/cache routing, not the production 50ms latency bound.
+	e.evaluator.SetTimeout(5 * time.Second)
 
 	e.handleEvent(&api.Event{
 		PID:     0,
@@ -715,8 +717,8 @@ func TestHandleEvent_NetFilterAllowedAddressGoesToPolicy(t *testing.T) {
 		Network: &api.NetworkEvent{BaseEvent: api.BaseEvent{Type: api.EventTypeNetwork}, RemoteAddr: "8.8.8.8", RemotePort: 53},
 	})
 
-	if got := e.GetStats().Allowed; got != 1 {
-		t.Errorf("Allowed = %d, want 1", got)
+	if stats := e.GetStats(); stats.Allowed != 1 || stats.Denied != 0 || stats.Logged != 0 {
+		t.Errorf("stats = %+v, want exactly 1 allowed", stats)
 	}
 	if e.cache.Stats().Size != 1 {
 		t.Error("non-blocked connection should be evaluated by policy and cached")
@@ -1279,8 +1281,14 @@ func TestClose_Minimal(t *testing.T) {
 func TestReloadPolicy_SwapsEvaluatorAndClearsCache(t *testing.T) {
 	isolateCacheDir(t)
 	e, _ := newTestEnforcer(t, testEnforcerOpts{})
+	// Seed a real allowed decision without imposing the latency-test budget.
+	// The replacement evaluator and timeout/fail-closed tests are unchanged.
+	e.evaluator.SetTimeout(5 * time.Second)
 
 	e.handleEvent(&api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"})
+	if stats := e.GetStats(); stats.Allowed != 1 || stats.Denied != 0 || stats.Logged != 0 {
+		t.Fatalf("precondition: stats = %+v, want exactly 1 allowed", stats)
+	}
 	if e.cache.Stats().Size != 1 {
 		t.Fatal("precondition: expected cached decision")
 	}
