@@ -14,7 +14,7 @@ import (
 type BuildOptions struct {
 	// Context bounds toolchain checks and compilation. Nil preserves the
 	// historical unbounded CLI behavior for existing callers.
-	Context context.Context
+	Context    context.Context
 	OutputPath string
 	RustOnly   bool
 	Verbose    bool

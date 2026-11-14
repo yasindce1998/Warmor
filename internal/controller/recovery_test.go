@@ -384,3 +384,66 @@ func TestReconcile_SourceBudgetInvalidatesEditWithoutDroppingAcceptedPolicy(t *t
 		t.Fatal("oversize edit changed prior publication")
 	}
 }
+
+func TestReconcile_ImmutablePublicationPreservesAcceptedState(t *testing.T) {
+	_, restore := stubCompile(t)
+	defer restore()
+	api := newFakeAPI()
+	cr := testCR("alpha", nil)
+	api.addCR(cr)
+	ctl := newTestController(t, api, Options{})
+	reconcile(t, ctl)
+	immutable := true
+	cm := api.configMaps[testConfigMap]
+	cm.Immutable = &immutable
+	before := cm.Data[SnapshotDataKey]
+	cr.Metadata.Generation++
+	cr.Spec.DefaultAction = "deny"
+	if _, err := ctl.Reconcile(context.Background()); err == nil {
+		t.Fatal("immutable publication unexpectedly changed")
+	}
+	if cm.Data[SnapshotDataKey] != before || api.configMapPUTs != 0 || cr.Status.AcceptedGeneration != 1 {
+		t.Fatal("immutable ConfigMap changed accepted state")
+	}
+	requireCondition(t, cr.Status, "Compiled", "True", "Compiled")
+	requireCondition(t, cr.Status, "Published", "False", "PublicationFailed")
+}
+
+func TestReconcile_SnapshotsExcludeUnrelatedCRMetadataAndStatus(t *testing.T) {
+	_, restore := stubCompile(t)
+	defer restore()
+	api := newFakeAPI()
+	cr := testCR("alpha", nil)
+	cr.Metadata.Annotations = map[string]string{"example.com/token": "secret-annotation-value"}
+	cr.Metadata.Labels = map[string]string{"private": "secret-label-value"}
+	cr.Status = &WarmorPolicyStatus{LastApplied: "fake-legacy-application", NodesApplied: 99}
+	api.addCR(cr)
+	reconcile(t, newTestController(t, api, Options{}))
+	raw := api.configMaps[testConfigMap].Data[SnapshotDataKey]
+	for _, forbidden := range []string{"secret-annotation-value", "secret-label-value", "fake-legacy-application", "nodesApplied", "resourceVersion"} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("source snapshot copied unrelated metadata/status: %q", forbidden)
+		}
+	}
+	if cr.Status.LastApplied != "" || cr.Status.NodesApplied != 0 {
+		t.Fatal("legacy application claims carried forward without acknowledgement")
+	}
+}
+
+func TestReconcile_WatchScopeChangeDoesNotSilentlyDropAcceptedSources(t *testing.T) {
+	_, restore := stubCompile(t)
+	defer restore()
+	api := newFakeAPI()
+	api.addCR(testCR("alpha", nil))
+	ctl := newTestController(t, api, Options{})
+	reconcile(t, ctl)
+	ctl = newTestController(t, api, Options{})
+	ctl.opts.Namespace = ""
+	if _, err := ctl.Reconcile(context.Background()); err == nil {
+		t.Fatal("changed watch scope silently adopted old snapshot")
+	}
+	if api.configMapPUTs != 0 {
+		t.Fatal("watch scope change replaced previous publication")
+	}
+	requireCondition(t, api.policies["warmor-system/alpha"].Status, "Published", "False", "SnapshotUnavailable")
+}
