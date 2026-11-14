@@ -28,13 +28,15 @@ var procNtSetSecurityObject = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtS
 // protected owner-only DACL is queried/verified afterward by protect.
 // https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetsecurityobject
 // https://learn.microsoft.com/windows/win32/secauthz/automatic-propagation-of-inheritable-aces
-func setRecordingDACL(h windows.Handle, sd *windows.SECURITY_DESCRIPTOR) error {
+func (s *recordingSecurity) setRecordingDACL(h windows.Handle) error {
 	if err := procNtSetSecurityObject.Find(); err != nil {
 		return fmt.Errorf("private recording requires NtSetSecurityObject: %w", err)
 	}
 	status, _, _ := procNtSetSecurityObject.Call(uintptr(h),
-		uintptr(windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION), uintptr(unsafe.Pointer(sd)))
-	runtime.KeepAlive(sd)
+		uintptr(windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION), uintptr(unsafe.Pointer(s.sd)))
+	// Keeping only sd is insufficient with x/sys v0.43.0: the descriptor's
+	// native-written pointers lack Go write barriers. Root its ACL and SID too.
+	runtime.KeepAlive(s)
 	// NTSTATUS, not GetLastError: all non-success statuses fail closed. There
 	// is no fallback to an API that could traverse or mutate children.
 	if status := windows.NTStatus(status); status != windows.STATUS_SUCCESS {

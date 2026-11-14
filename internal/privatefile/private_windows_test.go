@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"unsafe"
@@ -566,4 +568,74 @@ func TestWindowsDirectoryHandlesPinAncestors(t *testing.T) {
 	if err := os.Rename(parent, parent+".moved"); err == nil {
 		t.Fatal("directory could be swapped while handles were checked")
 	}
+}
+
+func TestWindowsSecurityBundleSurvivesConcurrentGC(t *testing.T) {
+	// Native SetDACL/SetOwner in the pinned x/sys version do not issue Go
+	// write barriers. Force marking while bundles are constructed and used,
+	// including creation before protect can replace an incorrectly created ACL.
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				runtime.GC()
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-stopped
+	}()
+	t.Run("workers", func(t *testing.T) {
+		for worker := 0; worker < 4; worker++ {
+			t.Run(strconv.Itoa(worker), func(t *testing.T) {
+				t.Parallel()
+				parent := t.TempDir()
+				for iteration := 0; iteration < 16; iteration++ {
+					exerciseWindowsSecurityBundle(t, filepath.Join(parent, strconv.Itoa(iteration), "events"))
+				}
+			})
+		}
+	})
+}
+
+func exerciseWindowsSecurityBundle(t *testing.T, path string) {
+	t.Helper()
+	s, err := currentSecurity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A forced completed cycle between construction and native use also tests
+	// that the descriptor is not its ACL/SID's only remaining GC reference.
+	runtime.GC()
+	root, parts, err := recordingPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirs, err := s.directory(root, parts[:len(parts)-1], true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeDirectories(dirs)
+	h, err := openRelative(dirs[len(dirs)-1], parts[len(parts)-1],
+		windows.FILE_APPEND_DATA|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC,
+		windows.FILE_CREATE, windows.FILE_NON_DIRECTORY_FILE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+	// This check deliberately precedes the hardening call: a stale ACL at
+	// creation must not be hidden by a subsequent correct NtSetSecurityObject.
+	assertOwnerDACL(t, path)
+	assertOwnerDACL(t, filepath.Dir(path))
+	runtime.GC()
+	if err := s.protect(h); err != nil {
+		t.Fatal(err)
+	}
+	assertOwnerDACL(t, path)
 }

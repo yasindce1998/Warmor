@@ -31,6 +31,11 @@ const (
 type recordingSecurity struct {
 	user *windows.SID
 	sd   *windows.SECURITY_DESCRIPTOR
+	// x/sys v0.43.0 SetDACL/SetOwner install Go pointers through Windows,
+	// without Go write barriers (go.dev/issue/73199). Keep explicit typed
+	// references in this bundle before invoking either setter, and keep the
+	// entire bundle alive through every native use of the absolute descriptor.
+	acl *windows.ACL
 }
 
 func currentSecurity() (*recordingSecurity, error) {
@@ -53,16 +58,18 @@ func currentSecurity() (*recordingSecurity, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = sd.SetOwner(u.User.Sid, false); err != nil {
+	s := &recordingSecurity{user: u.User.Sid, sd: sd, acl: acl}
+	defer runtime.KeepAlive(s)
+	if err = s.sd.SetOwner(s.user, false); err != nil {
 		return nil, err
 	}
-	if err = sd.SetDACL(acl, true, false); err != nil {
+	if err = s.sd.SetDACL(s.acl, true, false); err != nil {
 		return nil, err
 	}
-	if err = sd.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
+	if err = s.sd.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
 		return nil, err
 	}
-	return &recordingSecurity{user: u.User.Sid, sd: sd}, nil
+	return s, nil
 }
 
 // recordingPath excludes device/UNC namespaces, drive-relative paths, alternate
@@ -123,14 +130,17 @@ func safeComponent(name string) bool {
 	return true
 }
 
-func openRelative(parent windows.Handle, name string, access, disposition, options, share uint32, sd *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
+func openRelative(parent windows.Handle, name string, access, disposition, options, share uint32, security *recordingSecurity) (windows.Handle, error) {
 	n, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return windows.InvalidHandle, err
 	}
 	oa := windows.OBJECT_ATTRIBUTES{
-		RootDirectory: parent, ObjectName: n, SecurityDescriptor: sd,
+		RootDirectory: parent, ObjectName: n,
 		Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	if security != nil {
+		oa.SecurityDescriptor = security.sd
 	}
 	oa.Length = uint32(unsafe.Sizeof(oa))
 	var h windows.Handle
@@ -139,7 +149,7 @@ func openRelative(parent windows.Handle, name string, access, disposition, optio
 		options|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
 	// Older Windows versions/filesystems which cannot enforce these flags fail
 	// closed: do not retry without the no-reparse guarantee.
-	runtime.KeepAlive(sd)
+	runtime.KeepAlive(security)
 	if err != nil {
 		return windows.InvalidHandle, err
 	}
@@ -182,7 +192,7 @@ func (s *recordingSecurity) protect(h windows.Handle) error {
 	if !windows.EqualSid(owner, s.user) {
 		return fmt.Errorf("recording is not owned by current user")
 	}
-	if err := setRecordingDACL(h, s.sd); err != nil {
+	if err := s.setRecordingDACL(h); err != nil {
 		return err
 	}
 	// Fail closed on filesystems which ignore protection or ACL replacement.
@@ -305,7 +315,7 @@ func (s *recordingSecurity) directory(root string, parts []string, privateLeaf, 
 		}
 		next, openErr := openRelative(h, part, a, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE, share, nil)
 		if openErr == windows.STATUS_OBJECT_NAME_NOT_FOUND && create {
-			next, openErr = openRelative(h, part, a, windows.FILE_CREATE, windows.FILE_DIRECTORY_FILE, share, s.sd)
+			next, openErr = openRelative(h, part, a, windows.FILE_CREATE, windows.FILE_DIRECTORY_FILE, share, s)
 			if openErr == windows.STATUS_OBJECT_NAME_COLLISION {
 				next, openErr = openRelative(h, part, a, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE, share, nil)
 			}
@@ -354,7 +364,7 @@ func OpenAppend(path string, privateDir, createDirs bool) (*os.File, error) {
 	defer closeDirectories(dirs)
 	access := uint32(windows.FILE_GENERIC_WRITE&^windows.FILE_WRITE_DATA | windows.FILE_READ_ATTRIBUTES | windows.WRITE_DAC)
 	h, err := openRelative(dirs[len(dirs)-1], parts[len(parts)-1], access, windows.FILE_OPEN_IF,
-		windows.FILE_NON_DIRECTORY_FILE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, s.sd)
+		windows.FILE_NON_DIRECTORY_FILE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, s)
 	if err != nil {
 		return nil, err
 	}
