@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -76,7 +77,7 @@ func TestWindowsOpenAppendOwnerDACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	assertOwnerDACL(t, store)
 	assertOwnerDACL(t, path)
 	if _, err := f.WriteString("first"); err != nil {
@@ -165,10 +166,10 @@ func TestWindowsOpenAppendRejectsUnsafePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{target, hard, directoryFile, target + ":stream", target + ".", target + " ",
-		`\\.\NUL`, `\\?\` + target, `\\localhost\c$\events`, filepath.Join(dir, "NUL"), filepath.Join(dir, "COM1.txt")} {
+		`\\.\NUL`, `\\?\` + target, `\\localhost\c$\events`, filepath.Join(dir, "NUL"), filepath.Join(dir, "NUL.txt"), filepath.Join(dir, "COM1.txt")} {
 		t.Run(path, func(t *testing.T) {
 			if f, err := OpenAppend(path, false, false); err == nil {
-				f.Close()
+				_ = f.Close()
 				t.Fatal("accepted unsafe recording")
 			}
 		})
@@ -200,11 +201,14 @@ func TestWindowsOpenAppendRejectsReparsePoints(t *testing.T) {
 	createJunction(t, junction, dir)
 	for _, path := range []string{link, filepath.Join(alias, "new"), filepath.Join(alias, "nested", "new"), filepath.Join(junction, "new")} {
 		if f, err := OpenAppend(path, true, true); err == nil {
-			f.Close()
+			_ = f.Close()
 			t.Fatalf("accepted reparse point %s", path)
 		}
+		if after := securityString(t, target); after != before {
+			t.Fatalf("rejected %q changed target ACL:\nbefore: %s\nafter:  %s", path, before, after)
+		}
 	}
-	if data, err := os.ReadFile(target); err != nil || string(data) != "keep" || securityString(t, target) != before {
+	if data, err := os.ReadFile(target); err != nil || string(data) != "keep" {
 		t.Fatalf("reparse target changed: %q %v", data, err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "nested")); !os.IsNotExist(err) {
@@ -228,7 +232,7 @@ func createJunction(t *testing.T, path, target string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer windows.CloseHandle(h)
+	defer func() { _ = windows.CloseHandle(h) }()
 	substitute, err := windows.UTF16FromString(`\??\` + target)
 	if err != nil {
 		t.Fatal(err)
@@ -291,11 +295,16 @@ func TestWindowsOpenAppendRejectsForeignOwnership(t *testing.T) {
 				filePath = filepath.Join(path, "events")
 			}
 			if f, err := OpenAppend(filePath, true, false); err == nil {
-				f.Close()
+				_ = f.Close()
 				t.Fatal("accepted foreign owner")
 			}
-			if securityString(t, path) != before {
-				t.Fatal("changed foreign-owned ACL")
+			if after := securityString(t, path); after != before {
+				t.Fatalf("changed foreign-owned ACL:\nbefore: %s\nafter:  %s", before, after)
+			}
+			if !directory {
+				if data, err := os.ReadFile(path); err != nil || string(data) != "keep" {
+					t.Fatalf("changed foreign-owned contents: %q %v", data, err)
+				}
 			}
 		})
 	}
@@ -321,7 +330,7 @@ func TestWindowsOpenAppendRejectsWritableAncestors(t *testing.T) {
 	}
 	before := securityString(t, shared)
 	if f, err := OpenAppend(filepath.Join(shared, "private", "events"), true, true); err == nil {
-		f.Close()
+		_ = f.Close()
 		t.Fatal("accepted writable ancestor")
 	}
 	if securityString(t, shared) != before {
@@ -338,7 +347,7 @@ func TestWindowsRotateChecksDescriptorAndNeverOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if _, err := f.WriteString("original"); err != nil {
 		t.Fatal(err)
 	}
@@ -385,13 +394,61 @@ func TestWindowsPathValidation(t *testing.T) {
 	}
 }
 
+func TestWindowsReservedNamesRejectedBeforeFilesystemMutation(t *testing.T) {
+	dir := t.TempDir()
+	rootSecurity := securityString(t, dir)
+	names := []string{"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+	for _, prefix := range []string{"COM", "LPT"} {
+		for _, digit := range []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"} {
+			names = append(names, prefix+digit)
+		}
+	}
+	for _, base := range names {
+		for _, name := range []string{base, strings.ToLower(base) + ".txt", base + ".tar.gz", base + " .log", base + ".", base + " "} {
+			t.Run(name, func(t *testing.T) {
+				for _, path := range []string{filepath.Join(dir, name), filepath.Join(dir, name, "events")} {
+					if _, _, err := recordingPath(path); err == nil {
+						t.Fatalf("accepted reserved component %q", path)
+					}
+					if f, err := OpenAppend(path, true, true); err == nil {
+						_ = f.Close()
+						t.Fatalf("opened reserved component %q", path)
+					}
+				}
+			})
+		}
+	}
+	for _, name := range []string{"file\x00suffix", "file\x01suffix", "file\x1fsuffix", "file\xff", "file.", "file ", "file:stream"} {
+		path := filepath.Join(dir, name)
+		if _, _, err := recordingPath(path); err == nil {
+			t.Fatalf("accepted invalid Win32 component %q", path)
+		}
+		if f, err := OpenAppend(path, true, true); err == nil {
+			_ = f.Close()
+			t.Fatalf("opened invalid Win32 component %q", path)
+		}
+	}
+	// No invalid name can create a private parent or even tighten the root.
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("rejected names mutated fixture: %v %v", entries, err)
+	}
+	if after := securityString(t, dir); after != rootSecurity {
+		t.Fatalf("rejected names changed fixture ACL:\nbefore: %s\nafter:  %s", rootSecurity, after)
+	}
+	for _, name := range []string{"events.ndjson", ".events", "COM10.txt", "LPT10", "CONSOLE", "NUL-data", "雪.log"} {
+		if !safeComponent(name) {
+			t.Fatalf("rejected ordinary recording name %q", name)
+		}
+	}
+}
+
 func TestWindowsHandleInfoRejectsSpecialFiles(t *testing.T) {
 	var read, write windows.Handle
 	if err := windows.CreatePipe(&read, &write, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	defer windows.CloseHandle(read)
-	defer windows.CloseHandle(write)
+	defer func() { _ = windows.CloseHandle(read) }()
+	defer func() { _ = windows.CloseHandle(write) }()
 	if _, err := handleInfo(write, false); err == nil {
 		t.Fatal("accepted pipe as a regular recording")
 	}

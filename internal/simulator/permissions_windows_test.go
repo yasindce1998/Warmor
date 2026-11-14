@@ -72,7 +72,7 @@ func TestWindowsEventStorePrivateRecordings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	legacy := filepath.Join(dir, "events-2001-01-01.ndjson")
 	if err := os.WriteFile(legacy, []byte("old secret"), 0644); err != nil {
 		t.Fatal(err)

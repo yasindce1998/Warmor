@@ -106,7 +106,7 @@ func TestWindowsFileSinkRejectsUnsafeArchivesAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sink, err := NewFileSink(path, 1); err == nil {
-		sink.Close()
+		_ = sink.Close()
 		t.Fatal("accepted linked legacy archive")
 	}
 	path = filepath.Join(dir, "rotate")
@@ -114,7 +114,7 @@ func TestWindowsFileSinkRejectsUnsafeArchivesAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sink.Close()
+	defer func() { _ = sink.Close() }()
 	if err := sink.Write(context.Background(), sampleEvent(1)); err != nil {
 		t.Fatal(err)
 	}

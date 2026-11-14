@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode/utf8"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -96,8 +97,31 @@ func recordingPath(path string) (string, []string, error) {
 }
 
 func safeComponent(name string) bool {
-	return name != "." && name != ".." && filepath.IsLocal(name) &&
-		!strings.ContainsAny(name, "\\/:*?\"<>|\x00") && !strings.HasSuffix(name, ".") && !strings.HasSuffix(name, " ")
+	if name == "" || name == "." || name == ".." || !utf8.ValidString(name) ||
+		strings.ContainsAny(name, "\\/:*?\"<>|") || strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") {
+		return false
+	}
+	for _, c := range name {
+		if c < 32 { // Win32 forbids NUL and the remaining ASCII control characters.
+			return false
+		}
+	}
+	// Do not delegate device-name policy to filepath.IsLocal: newer Windows
+	// releases allow some reserved bases with extensions. Recordings must be
+	// unambiguous to Win32 readers on every supported release, not just NT opens.
+	base, _, _ := strings.Cut(name, ".")
+	base = strings.ToUpper(strings.TrimRight(base, " "))
+	switch base {
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
+		return false
+	}
+	if strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT") {
+		switch base[3:] {
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³":
+			return false
+		}
+	}
+	return true
 }
 
 func openRelative(parent windows.Handle, name string, access, disposition, options, share uint32, sd *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
@@ -280,10 +304,12 @@ func (s *recordingSecurity) directory(root string, parts []string, privateLeaf, 
 		a := access
 		sharing := share
 		if leaf && privateLeaf {
-			a |= windows.WRITE_DAC
-			// SetSecurityInfo may otherwise propagate inheritance changes to
-			// existing children. Exclusive directory sharing suppresses that
-			// traversal: only this checked, owned directory is tightened.
+			// SetSecurityInfo documents that a handle opened with
+			// MAXIMUM_ALLOWED does not propagate ACEs to children. Exclusive
+			// sharing alone proved insufficient on native Windows: tightening
+			// a private parent changed rejected foreign/reparse target ACLs.
+			// Required rights remain explicit so a restricted grant fails closed.
+			a |= windows.WRITE_DAC | windows.MAXIMUM_ALLOWED
 			sharing = 0
 		}
 		next, openErr := openRelative(h, part, a, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE, sharing, nil)
