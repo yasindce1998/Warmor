@@ -315,6 +315,13 @@ poison behavior unchanged from `6ff5a5d`. No collector flags, automatic actions,
 or full sensor-loss claim are added. Main's VM evidence belongs to its reviewed
 commit; local package/race validation here is not a new kernel VM execution.
 
+Post-refresh validation passed sequentially on Linux/amd64 with
+`GOTOOLCHAIN=go1.26.11`, `GOMAXPROCS=2` and package concurrency `-p 2`:
+`go test -count=1 -timeout=10m -p 2 ./...`, the same full suite with `-race`,
+`go vet -p 2 ./...`, and golangci-lint v1.64.8 with concurrency 2. Manifest,
+signed activation, telemetry and ordinary integration-package tests all pass.
+No native kernel VM or Windows/macOS runtime rerun is implied by this evidence.
+
 ## Original integration proposal and acceptance checklist
 
 The original analyzer-only hardening described below added no heartbeat field,
