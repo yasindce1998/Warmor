@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
@@ -30,7 +32,18 @@ type RuntimeConfig struct {
 	// declared minimum exceeds it fails to compile; memory.grow beyond it
 	// fails inside the policy.
 	MemoryLimitPages uint32
+
+	// InitializationTimeout bounds guest execution during load-time probing,
+	// pool construction and replacement (start, ABI exports and allocations).
+	// It is also passed to compilation, but is NOT a hard compilation deadline:
+	// wazero decoding, validation and some compiler work are not interruptible.
+	// Non-positive values use the default. See docs/design/wasm-compilation-isolation.md.
+	InitializationTimeout time.Duration
 }
+
+// DefaultInitializationTimeout is the guest-initialization budget. It is not
+// an OS-enforced CPU/memory limit for module decoding or compilation.
+const DefaultInitializationTimeout = 5 * time.Second
 
 // DefaultMemoryLimitPages is the default per-instance memory cap (16 MiB),
 // ample for generated policies (64 KiB heap + 1 MiB stack).
@@ -46,11 +59,12 @@ func DefaultCacheDir() string {
 
 // Runtime wraps the WASM runtime
 type Runtime struct {
-	runtime  wazero.Runtime
-	module   wazero.CompiledModule
-	config   wazero.ModuleConfig
-	cache    wazero.CompilationCache
-	poolSize int
+	runtime     wazero.Runtime
+	module      wazero.CompiledModule
+	config      wazero.ModuleConfig
+	cache       wazero.CompilationCache
+	poolSize    int
+	initTimeout time.Duration
 	// cacheDir is RuntimeConfig.CacheDir; compiled YAML policies are kept
 	// under it (see LoadPolicyFromYAML).
 	cacheDir string
@@ -72,11 +86,16 @@ func NewRuntime(ctx context.Context, cfgs ...RuntimeConfig) (*Runtime, error) {
 	if memPages == 0 {
 		memPages = DefaultMemoryLimitPages
 	}
-	// Close-on-context-done makes a cancelled or timed-out context abort a
-	// running policy (e.g. an infinite loop) instead of hanging the caller;
-	// see PolicyEvaluator's per-evaluation deadline.
+	initTimeout := cfg.InitializationTimeout
+	if initTimeout <= 0 {
+		initTimeout = DefaultInitializationTimeout
+	}
+	// Close-on-context-done bounds guest initialization as well as evaluation:
+	// a cancelled or timed-out call closes the module and aborts infinite loops.
 	runtimeCfg := wazero.NewRuntimeConfig().
 		WithMemoryLimitPages(memPages).
+		// Policy execution needs no attacker-supplied DWARF metadata.
+		WithDebugInfoEnabled(false).
 		WithCloseOnContextDone(true)
 
 	var compilationCache wazero.CompilationCache
@@ -113,11 +132,12 @@ func NewRuntime(ctx context.Context, cfgs ...RuntimeConfig) (*Runtime, error) {
 	}
 
 	return &Runtime{
-		runtime:  r,
-		config:   wazero.NewModuleConfig(),
-		cache:    compilationCache,
-		poolSize: poolSize,
-		cacheDir: cfg.CacheDir,
+		runtime:     r,
+		config:      wazero.NewModuleConfig(),
+		cache:       compilationCache,
+		poolSize:    poolSize,
+		initTimeout: initTimeout,
+		cacheDir:    cfg.CacheDir,
 	}, nil
 }
 
@@ -134,7 +154,13 @@ func (r *Runtime) LoadPolicy(ctx context.Context, path string) error {
 		return fmt.Errorf("policy file too large: %d bytes (max %d)", info.Size(), MaxPolicySize)
 	}
 
-	wasmBytes, err := os.ReadFile(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open policy file: %w", err)
+	}
+	defer file.Close()
+	// Bound the actual read too: the file can change between stat and open.
+	wasmBytes, err := io.ReadAll(io.LimitReader(file, MaxPolicySize+1))
 	if err != nil {
 		return fmt.Errorf("read policy file: %w", err)
 	}
@@ -152,11 +178,23 @@ func (r *Runtime) LoadPolicyBytes(ctx context.Context, wasmBytes []byte) error {
 	if len(wasmBytes) > MaxPolicySize {
 		return fmt.Errorf("policy too large: %d bytes (max %d)", len(wasmBytes), MaxPolicySize)
 	}
-
-	// Compile module
+	ctx, cancel := context.WithTimeout(ctx, r.initTimeout)
+	defer cancel()
+	if err := preflightModule(ctx, wasmBytes); err != nil {
+		return fmt.Errorf("policy preflight: %w", err)
+	}
+	// This is synchronous by design: racing CompileModule against a timer
+	// would abandon non-interruptible work in a goroutine. The context is
+	// NOT a hard wall-time/RSS bound on the compiler itself.
 	compiled, err := r.runtime.CompileModule(ctx, wasmBytes)
 	if err != nil {
 		return fmt.Errorf("compile module: %w", err)
+	}
+	// Compilation may ignore cancellation; this rejects its late result but
+	// does not retroactively bound the CPU/RSS/time it already consumed.
+	if err := ctx.Err(); err != nil {
+		_ = compiled.Close(context.Background())
+		return fmt.Errorf("compilation exceeded initialization budget: %w", err)
 	}
 
 	if err := r.validateModule(ctx, compiled); err != nil {
@@ -175,16 +213,28 @@ func (r *Runtime) validateModule(ctx context.Context, compiled wazero.CompiledMo
 	if err := validateCompiledModule(compiled); err != nil {
 		return err
 	}
-	if _, ok := compiled.ExportedFunctions()[exportABIVersion]; !ok {
-		return nil
-	}
-	probe, err := r.runtime.InstantiateModule(ctx, compiled, r.config.WithName(""))
+	probe, err := r.instantiatePolicy(ctx, compiled, r.config.WithName(""))
 	if err != nil {
 		return fmt.Errorf("instantiate module: %w", err)
 	}
 	defer probe.Close(ctx)
-	_, err = checkABIVersion(ctx, probe)
-	return err
+	return nil
+}
+
+// instantiatePolicy is the single bounded entry point for guest creation.
+// Never run start, abi_version or malloc on an unbounded caller context,
+// including the first instance and direct NewPolicy callers.
+func (r *Runtime) instantiatePolicy(ctx context.Context, compiled wazero.CompiledModule, config wazero.ModuleConfig) (*Policy, error) {
+	if compiled == nil {
+		return nil, fmt.Errorf("runtime has no compiled module")
+	}
+	ctx, cancel := context.WithTimeout(ctx, r.initTimeout)
+	defer cancel()
+	instance, err := r.runtime.InstantiateModule(ctx, compiled, config)
+	if err != nil {
+		return nil, err
+	}
+	return initPolicy(ctx, r, instance)
 }
 
 // LoadPolicyFromYAML compiles a YAML policy to WASM and loads it.
