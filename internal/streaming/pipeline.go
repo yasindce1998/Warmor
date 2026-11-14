@@ -243,6 +243,11 @@ func (p *Pipeline) transform(event *api.Event, result *api.ActionResult) *Securi
 func FromAPIEvent(event *api.Event, result *api.ActionResult) *SecurityEvent {
 	// Own the snapshot, including mutable payloads, before handing it to sinks.
 	input := *event
+	// Live dispatch ownership is not policy input. Custom sinks receive this
+	// snapshot too: never let recording/export retain or complete a generation
+	// lease, or signal an internal reader fence. The numeric capture ID remains.
+	input.GenerationContext = nil
+	input.DispatchBarrier = nil
 	if event.Process != nil {
 		process := *event.Process
 		process.Args = slices.Clone(event.Process.Args)

@@ -74,6 +74,10 @@ func TestMain_ValidatePolicy(t *testing.T) {
 		{"bad yaml", []string{"--validate-policy", badYAML}, 1, "", "policy INVALID"},
 		{"missing", []string{"--validate-policy", filepath.Join(dir, "nope.wasm")}, 1, "", "policy INVALID"},
 		{"bad key", []string{"--verify-key", garbage, "--validate-policy", signed}, 1, "", "--verify-key"},
+		{"host validator forbidden", []string{"--experimental-supervised-policy-host", "--validate-policy", unsigned}, 1, "", "do not combine with supervised backend flags"},
+		{"host path validator forbidden", []string{"--policy-host", "/not-executed", "--validate-policy", unsigned}, 1, "", "do not combine with supervised backend flags"},
+		{"host pin validator forbidden", []string{"--policy-host-sha256", strings.Repeat("a", 64), "--validate-policy", unsigned}, 1, "", "do not combine with supervised backend flags"},
+		{"host declaration validator forbidden", []string{"--policy-declaration-digests", strings.Repeat("b", 64), "--validate-policy", unsigned}, 1, "", "do not combine with supervised backend flags"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
