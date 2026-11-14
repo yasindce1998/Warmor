@@ -3,6 +3,7 @@
 package privatefile
 
 import (
+	"bytes"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -50,16 +51,21 @@ func assertOwnerDACL(t *testing.T, path string) {
 
 func securityString(t *testing.T, path string) string {
 	t.Helper()
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return sd.String()
+	// Return the exact native descriptor bytes, not a provider-derived SDDL
+	// view. On legacy (non-auto-inherited) DACLs, SE_FILE_OBJECT synthesizes
+	// INHERITED_ACE flags by comparing the current parent. Tightening only the
+	// parent changes that view even though no child bytes changed. Comparing
+	// native bytes is stronger: it includes control bits, owner/group, ACE
+	// order/flags/masks and descriptor data without filtering any differences.
+	// The native run's evidence is retained by the phase regression below;
+	// see also MS-DTYP 2.5.3.5 (Setting the INHERITED_ACE Flag).
+	h := monitorSecurity(t, path)
+	return string(storedSecurity(t, h))
 }
 
 // Keep a read-control-only handle to distinguish a stored descriptor change
-// from inheritance metadata derived by a named SE_FILE_OBJECT query. This is
-// diagnostic evidence, not a replacement for the strict named-ACL assertions.
+// from inheritance metadata derived by a named SE_FILE_OBJECT query. This also
+// permits exact stored-descriptor comparisons across parent ACL changes.
 func monitorSecurity(t *testing.T, path string) windows.Handle {
 	t.Helper()
 	p, err := windows.UTF16PtrFromString(path)
@@ -76,7 +82,7 @@ func monitorSecurity(t *testing.T, path string) windows.Handle {
 	return h
 }
 
-func traceSecurityPhase(t *testing.T, phase, path string, h windows.Handle) {
+func storedSecurity(t *testing.T, h windows.Handle) []byte {
 	t.Helper()
 	// NtQuerySecurityObject is the raw handle query, without the Win32
 	// SE_FILE_OBJECT provider's parent/child inheritance interpretation.
@@ -91,8 +97,22 @@ func traceSecurityPhase(t *testing.T, phase, path string, h windows.Handle) {
 		uintptr(windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION),
 		uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf))*unsafe.Sizeof(buf[0]), uintptr(unsafe.Pointer(&needed)))
 	if status := windows.NTStatus(status); status != windows.STATUS_SUCCESS {
-		t.Fatalf("ACL phase=%s NtQuerySecurityObject: %v (needed %d)", phase, status, needed)
+		t.Fatalf("NtQuerySecurityObject: %v (needed %d)", status, needed)
 	}
+	if needed == 0 || uintptr(needed) > uintptr(len(buf))*unsafe.Sizeof(buf[0]) {
+		t.Fatalf("invalid native descriptor size: %d", needed)
+	}
+	result := bytes.Clone(unsafe.Slice((*byte)(unsafe.Pointer(&buf[0])), int(needed)))
+	runtime.KeepAlive(buf)
+	return result
+}
+
+func traceSecurityPhase(t *testing.T, phase, path string, h windows.Handle) {
+	t.Helper()
+	data := storedSecurity(t, h)
+	// Keep pointer-aligned storage for the native descriptor accessors.
+	buf := make([]uintptr, (len(data)+int(unsafe.Sizeof(uintptr(0)))-1)/int(unsafe.Sizeof(uintptr(0))))
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(&buf[0])), len(data)), data)
 	raw := (*windows.SECURITY_DESCRIPTOR)(unsafe.Pointer(&buf[0]))
 	control, _, err := raw.Control()
 	if err != nil {
@@ -111,7 +131,12 @@ func traceSecurityPhase(t *testing.T, phase, path string, h windows.Handle) {
 		}
 		t.Logf("ACL phase=%s path=%q handle-kind=%d control=%#x descriptor=%s", phase, path, kind, control, sd.String())
 	}
-	t.Logf("ACL phase=%s path=%q named=%s", phase, path, securityString(t, path))
+	named, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("ACL phase=%s path=%q named=%s", phase, path, named.String())
 }
 
 func TestWindowsParentTighteningSecurityQueryPhases(t *testing.T) {
@@ -161,7 +186,42 @@ func TestWindowsParentTighteningSecurityQueryPhases(t *testing.T) {
 		traceSecurityPhase(t, phase+"-handles-closed", path, h)
 	}
 	if after := securityString(t, path); after != before {
-		t.Fatalf("phase probe child ACL changed:\nbefore: %s\nafter:  %s", before, after)
+		t.Fatalf("phase probe child stored descriptor changed:\nbefore: %x\nafter:  %x", before, after)
+	}
+}
+
+func TestWindowsStoredDescriptorOracleDetectsACEFlags(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events")
+	f, err := OpenAppend(path, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	h := windows.Handle(f.Fd())
+	before := storedSecurity(t, h)
+	s, err := currentSecurity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Change only the stored INHERITED_ACE flag, leaving the SID and full
+	// access mask identical. A comparator that merely masked flags or checked
+	// effective rights would miss this mutation and fail this regression.
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;ID;FA;;;" + s.user.String() + ")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := &recordingSecurity{sd: sd} // self-relative: no backing Go pointers
+	if err := changed.setRecordingDACL(h); err != nil {
+		t.Fatal(err)
+	}
+	if after := storedSecurity(t, h); bytes.Equal(after, before) {
+		t.Fatal("exact descriptor oracle missed an ACE-flag-only mutation")
+	}
+	if err := s.protect(h); err != nil {
+		t.Fatal(err)
+	}
+	if restored := storedSecurity(t, h); !bytes.Equal(restored, before) {
+		t.Fatalf("restored descriptor differs:\nbefore: %x\nafter:  %x", before, restored)
 	}
 }
 
@@ -341,7 +401,7 @@ func TestWindowsPrivateDirectoryPreservesInheritedChildACLs(t *testing.T) {
 		assertOwnerDACL(t, store)
 		for path, want := range before {
 			if got := securityString(t, path); got != want {
-				t.Fatalf("private directory update changed child %s:\nbefore: %s\nafter:  %s", path, want, got)
+				t.Fatalf("private directory update changed child %s:\nbefore: %x\nafter:  %x", path, want, got)
 			}
 		}
 	}
@@ -412,7 +472,7 @@ func TestWindowsOpenAppendRejectsReparsePoints(t *testing.T) {
 		}
 		traceSecurityPhase(t, "after-OpenAppend-"+path, target, monitor)
 		if after := securityString(t, target); after != before {
-			t.Fatalf("rejected %q changed target ACL:\nbefore: %s\nafter:  %s", path, before, after)
+			t.Fatalf("rejected %q changed target stored descriptor:\nbefore: %x\nafter:  %x", path, before, after)
 		}
 	}
 	if data, err := os.ReadFile(target); err != nil || string(data) != "keep" {
@@ -513,7 +573,7 @@ func TestWindowsOpenAppendRejectsForeignOwnership(t *testing.T) {
 			}
 			traceSecurityPhase(t, "foreign-after-production", path, monitor)
 			if after := securityString(t, path); after != before {
-				t.Fatalf("changed foreign-owned ACL:\nbefore: %s\nafter:  %s", before, after)
+				t.Fatalf("changed foreign-owned stored descriptor:\nbefore: %x\nafter:  %x", before, after)
 			}
 			if !directory {
 				if data, err := os.ReadFile(path); err != nil || string(data) != "keep" {
@@ -647,7 +707,7 @@ func TestWindowsReservedNamesRejectedBeforeFilesystemMutation(t *testing.T) {
 		t.Fatalf("rejected names mutated fixture: %v %v", entries, err)
 	}
 	if after := securityString(t, dir); after != rootSecurity {
-		t.Fatalf("rejected names changed fixture ACL:\nbefore: %s\nafter:  %s", rootSecurity, after)
+		t.Fatalf("rejected names changed fixture stored descriptor:\nbefore: %x\nafter:  %x", rootSecurity, after)
 	}
 	for _, name := range []string{"events.ndjson", ".events", "COM10.txt", "LPT10", "CONSOLE", "NUL-data", "雪.log"} {
 		if !safeComponent(name) {
