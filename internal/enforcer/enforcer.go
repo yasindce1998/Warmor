@@ -179,6 +179,7 @@ type Enforcer struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
+	stopOnce        sync.Once
 	processing      atomic.Bool
 }
 
@@ -1225,6 +1226,9 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, dura
 	if closed {
 		return errors.New("enforcer closed")
 	}
+	if err := e.ctx.Err(); err != nil {
+		return err
+	}
 	if e.generations != nil {
 		if expected != nil {
 			return errors.New("signed assignments with atomic generations are unsupported")
@@ -1363,30 +1367,32 @@ func eventTypeToSandboxAction(event *api.Event) string {
 // Stop stops the enforcer
 func (e *Enforcer) Stop() {
 	e.logger.LogInfo("Stopping enforcer...")
-	e.cancel()
-
-	// Stop the platform monitor so it stops delivering events.
-	if e.platform != nil {
-		_ = e.platform.Stop()
-	}
-
-	e.wg.Wait()
-	e.releaseQueuedGenerationEvents()
+	e.stopProcessing()
 	e.logger.LogInfo("✓ Enforcer stopped")
 }
 
-// Close cleans up resources
-func (e *Enforcer) Close() error {
-	e.activationMu.Lock()
-	defer e.activationMu.Unlock()
-	if e.generations != nil {
-		e.cancel()
+// Cancel before acquiring activationMu: an activation may hold it while waiting
+// for a reader fence, host I/O, or an old work lease. Stop only readers/workers;
+// the backend and kernel maps/hooks remain owned until Close drains eventMu.
+// Once also serializes concurrent Stop/Close queue draining and platform access.
+func (e *Enforcer) stopProcessing() {
+	e.stopOnce.Do(func() {
+		if e.cancel != nil {
+			e.cancel()
+		}
 		if e.platform != nil {
 			_ = e.platform.Stop()
 		}
 		e.wg.Wait()
 		e.releaseQueuedGenerationEvents()
-	}
+	})
+}
+
+// Close cleans up resources
+func (e *Enforcer) Close() error {
+	e.stopProcessing()
+	e.activationMu.Lock()
+	defer e.activationMu.Unlock()
 	e.eventMu.Lock()
 	defer e.eventMu.Unlock()
 	if e.closed {

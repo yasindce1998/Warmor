@@ -224,6 +224,9 @@ func (e *Enforcer) finishGeneration() error {
 			return errors.Join(ErrActivationPending, ctx.Err())
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(ErrActivationPending, err)
+	}
 	if err := g.kernel.AcknowledgeDrain(p.old.id); err != nil {
 		return errors.Join(ErrActivationPending, err)
 	}

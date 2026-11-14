@@ -206,24 +206,25 @@ func (l *Loader) ClearCgroupFilter() error {
 	return l.SetCgroupFilter(nil)
 }
 
-// InterruptReaders wakes idle readers without detaching protection.
-func (l *Loader) InterruptReaders() {
-	for _, rd := range []*ringbuf.Reader{l.processReader, l.fileReader, l.networkReader} {
-		if rd != nil {
-			_ = rd.Close()
-		}
-	}
-}
-
-func (l *Loader) Close() error {
+// StopReaders interrupts pending reads without detaching hooks or closing maps.
+// The platform must do this before waiting for monitor goroutines to exit.
+// ringbuf.Reader.Close is idempotent and safe alongside a blocked Read.
+func (l *Loader) StopReaders() error {
 	var errs []error
-
 	for _, rd := range []*ringbuf.Reader{l.processReader, l.fileReader, l.networkReader} {
 		if rd != nil {
 			if err := rd.Close(); err != nil {
 				errs = append(errs, err)
 			}
 		}
+	}
+	return errors.Join(errs...)
+}
+
+func (l *Loader) Close() error {
+	var errs []error
+	if err := l.StopReaders(); err != nil {
+		errs = append(errs, err)
 	}
 
 	for _, lnk := range []link.Link{l.execveLink, l.openatLink, l.connectLink} {

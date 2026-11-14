@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,10 +24,23 @@ type generationStream struct {
 	reads    chan generationRead
 	flushes  atomic.Int32
 	flushErr error
+	stopOnce sync.Once
+	stopped  chan struct{}
 }
 
-func (s *generationStream) ReadLSMEvent() (*ebpf.Event, error) { r := <-s.reads; return r.event, r.err }
-func (s *generationStream) FlushLSMEvents() error              { s.flushes.Add(1); return s.flushErr }
+func (s *generationStream) ReadLSMEvent() (*ebpf.Event, error) {
+	select {
+	case r := <-s.reads:
+		return r.event, r.err
+	case <-s.stopped:
+		return nil, ringbuf.ErrClosed
+	}
+}
+func (s *generationStream) FlushLSMEvents() error { s.flushes.Add(1); return s.flushErr }
+func (s *generationStream) StopReaders() error {
+	s.stopOnce.Do(func() { close(s.stopped) })
+	return nil
+}
 
 func generationPlatform(t *testing.T) (*LinuxPlatform, *generationStream, chan *api.Event) {
 	t.Helper()
@@ -38,15 +52,15 @@ func generationPlatform(t *testing.T) (*LinuxPlatform, *generationStream, chan *
 	if !ok {
 		t.Fatal("not Linux")
 	}
-	s := &generationStream{reads: make(chan generationRead, 32)}
+	s := &generationStream{reads: make(chan generationRead, 32), stopped: make(chan struct{})}
 	ch := make(chan *api.Event, 32)
 	lp.lsmEvents, lp.eventChan = s, ch
 	lp.wg.Add(1)
 	go lp.monitorLSMEvents(context.Background())
 	t.Cleanup(func() {
-		lp.stopOnce.Do(func() { close(lp.stopChan) })
-		s.reads <- generationRead{err: ringbuf.ErrClosed}
-		lp.wg.Wait()
+		if err := lp.Stop(); err != nil {
+			t.Error(err)
+		}
 	})
 	return lp, s, ch
 }
@@ -234,5 +248,70 @@ func TestGenerationScopedQueueLeaseSurvivesReconciliationAndOrdersFence(t *testi
 	}
 	if err := g.Drain(ctx); !errors.Is(err, readerErr) || stream.flushes.Load() != 1 {
 		t.Fatal("reader failure silently acknowledged/overlapped drain", err)
+	}
+}
+
+func TestGenerationStopInterruptsBlockedReaderAndDrain(t *testing.T) {
+	for _, blockedDelivery := range []bool{false, true} {
+		t.Run(fmt.Sprint("delivery=", blockedDelivery), func(t *testing.T) {
+			p, stream, _ := generationPlatform(t)
+			var released atomic.Int32
+			captured := make(chan struct{})
+			if blockedDelivery {
+				p.eventChan = make(chan *api.Event)
+				p.SetEventCapture(func(e *api.Event) bool {
+					e.GenerationContext = api.NewGenerationContext(17, func() { released.Add(1) })
+					close(captured)
+					return true
+				})
+				stream.reads <- generationRead{event: &ebpf.Event{Hook: "exec", PolicyGeneration: 17}}
+				select {
+				case <-captured:
+				case <-time.After(time.Second):
+					t.Fatal("reader did not capture blocked delivery")
+				}
+			}
+			g := &linuxPolicyGenerations{p: p}
+			drain := make(chan error, 1)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			go func() { drain <- g.Drain(ctx) }()
+			for stream.flushes.Load() == 0 {
+				select {
+				case <-ctx.Done():
+					t.Fatal("no pending flush")
+				default:
+					time.Sleep(time.Millisecond)
+				}
+			}
+			done := make(chan error, 1)
+			go func() { done <- p.Stop() }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Stop joined before interrupting LSM reader/delivery")
+			}
+			if err := <-drain; err == nil {
+				t.Fatal("shutdown falsely acknowledged pending drain")
+			}
+			if blockedDelivery && released.Load() != 1 {
+				t.Fatal("shutdown leaked canceled-delivery lease")
+			}
+			if err := g.Drain(context.Background()); err == nil || stream.flushes.Load() != 1 {
+				t.Fatal("stopped reader started a fresh flush", err)
+			}
+		})
+	}
+}
+
+func TestGenerationCanceledDrainDoesNotStartFlush(t *testing.T) {
+	p, stream, _ := generationPlatform(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := (&linuxPolicyGenerations{p: p}).Drain(ctx); !errors.Is(err, context.Canceled) || stream.flushes.Load() != 0 {
+		t.Fatal("canceled drain touched reader", err)
 	}
 }

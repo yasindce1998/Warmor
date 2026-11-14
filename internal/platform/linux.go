@@ -38,12 +38,22 @@ type LinuxConfig struct {
 	CgroupReconcileInterval time.Duration
 }
 
+type tracepointMonitor interface {
+	ReadProcessEvent() (*ebpf.Event, error)
+	ReadFileEvent() (*ebpf.Event, error)
+	ReadNetworkEvent() (*ebpf.Event, error)
+	ReplaceCgroupFilter([]uint64) error
+	StopReaders() error
+	Close() error
+}
+
 type LinuxPlatform struct {
-	ebpfLoader    *ebpf.Loader
+	ebpfLoader    tracepointMonitor
 	lsmLoader     *ebpf.LSMLoader
 	eventChan     chan<- *api.Event
 	stopChan      chan struct{}
 	stopOnce      sync.Once
+	stopErr       error
 	wg            sync.WaitGroup
 	config        LinuxConfig
 	lsmEnabled    bool
@@ -61,6 +71,7 @@ type LinuxPlatform struct {
 type lsmEventStream interface {
 	ReadLSMEvent() (*ebpf.Event, error)
 	FlushLSMEvents() error
+	StopReaders() error
 }
 
 func NewLinuxPlatform(config LinuxConfig) (Platform, error) {
@@ -628,6 +639,10 @@ func (p *LinuxPlatform) PolicyGenerations() PolicyGenerations {
 func (g *linuxPolicyGenerations) Drain(ctx context.Context) error {
 	p := g.p
 	p.drainMu.Lock()
+	if err := p.drainStatus(ctx); err != nil {
+		p.drainMu.Unlock()
+		return err
+	}
 	if p.readerErr != nil {
 		err := p.readerErr
 		p.drainMu.Unlock()
@@ -647,6 +662,10 @@ func (g *linuxPolicyGenerations) Drain(ctx context.Context) error {
 	select {
 	case <-fence:
 		p.drainMu.Lock()
+		if err := p.drainStatus(ctx); err != nil {
+			p.drainMu.Unlock()
+			return err
+		}
 		if p.drainPending == fence {
 			p.drainPending = nil
 		}
@@ -661,6 +680,18 @@ func (g *linuxPolicyGenerations) Drain(ctx context.Context) error {
 		err := p.readerErr
 		p.drainMu.Unlock()
 		return err
+	}
+}
+
+func (p *LinuxPlatform) drainStatus(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-p.stopChan:
+		return errors.New("LSM reader stopped before drain")
+	default:
+		return nil
 	}
 }
 
@@ -714,19 +745,29 @@ func (p *LinuxPlatform) lossVerb() string {
 func (p *LinuxPlatform) Stop() error {
 	p.stopOnce.Do(func() {
 		close(p.stopChan)
+		// Readers can be idle forever (including ReadLSMEvent's deadline
+		// retry loop). Interrupt them before waiting, but keep enforcement
+		// hooks/maps alive until Close finishes the resource lifecycle.
+		var errs []error
 		if p.ebpfLoader != nil {
-			p.ebpfLoader.InterruptReaders()
+			errs = append(errs, p.ebpfLoader.StopReaders())
 		}
-		if p.lsmLoader != nil {
-			p.lsmLoader.InterruptReader()
+		if p.lsmEvents != nil {
+			errs = append(errs, p.lsmEvents.StopReaders())
+		} else if p.lsmLoader != nil {
+			errs = append(errs, p.lsmLoader.StopReaders())
 		}
+		p.stopErr = errors.Join(errs...)
 	})
 	p.wg.Wait()
-	return nil
+	return p.stopErr
 }
 
 func (p *LinuxPlatform) Close() error {
 	var errs []error
+	if err := p.Stop(); err != nil {
+		errs = append(errs, err)
+	}
 	if p.lsmLoader != nil {
 		if err := p.lsmLoader.Close(); err != nil {
 			errs = append(errs, err)

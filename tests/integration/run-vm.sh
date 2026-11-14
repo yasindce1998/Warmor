@@ -23,7 +23,11 @@ STATUS="$ARTIFACTS/$PHASE-status.txt"
 # QUIT obtains Go stacks if vimto is stuck before guest tests start. The whole
 # command process group (including QEMU) is bounded; no --foreground or retry.
 # Capture stderr too: boot/transport failures must reach the retained artifact.
-if LC_ALL=C GOTRACEBACK=all timeout --verbose --signal=QUIT --kill-after=15s "$LIMIT" "$@" 2>&1 | tee "$LOG"; then
+# Actions supplies a pipe already at EOF as stdin. Passing that directly to
+# QEMU disconnects the virtio stdio port before guest output can be written.
+# vimto v0.4.0 recognizes /dev/null and substitutes its own held-open pipe;
+# use that path explicitly, as go test -exec does in the lower-level LSM gate.
+if LC_ALL=C GOTRACEBACK=all timeout --verbose --signal=QUIT --kill-after=15s "$LIMIT" "$@" </dev/null 2>&1 | tee "$LOG"; then
   echo 'exit=0' >> "$STATUS"
 else
   code=$?
