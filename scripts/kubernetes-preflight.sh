@@ -18,7 +18,7 @@ if [[ -r "$KERNEL_ROOT/btf/vmlinux" ]]; then echo "BTF: readable"; else echo "BT
 if [[ -r "$CGROUP_ROOT/cgroup.controllers" ]]; then
   read_if_present "cgroup v2 controllers" "$CGROUP_ROOT/cgroup.controllers"
 else echo "cgroup v2: NOT confirmed at $CGROUP_ROOT"; fi
-for hierarchy in kubepods.slice kubepods; do
+for hierarchy in kubepods.slice kubepods kubelet.slice/kubelet-kubepods.slice kubelet/kubepods; do
   if [[ -d "$CGROUP_ROOT/$hierarchy" ]]; then echo "Pod hierarchy visible: $CGROUP_ROOT/$hierarchy"; fi
 done
 read_if_present "Self cgroup namespace path" "$PROC_ROOT/self/cgroup"

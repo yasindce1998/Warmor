@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -236,15 +237,94 @@ func TestDiscoverPodCgroups_CgroupfsKubepods(t *testing.T) {
 	}
 }
 
+func TestDiscoverPodCgroups_KubeletRootLayouts(t *testing.T) {
+	for _, tc := range []struct {
+		name, base, qos, guaranteed, burstable string
+	}{
+		{"kind-systemd", "kubelet.slice/kubelet-kubepods.slice", "kubelet-kubepods-burstable.slice", "kubelet-kubepods-podabcd.slice", "kubelet-kubepods-burstable-podabcd_1234.slice"},
+		{"kubelet-cgroupfs", "kubelet/kubepods", "burstable", "podabcd-1234", "poddef0-5678"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			base := filepath.Join(root, filepath.FromSlash(tc.base))
+			pod := filepath.Join(base, tc.qos, tc.burstable)
+			podDirs := []string{
+				filepath.Join(base, tc.guaranteed),
+				pod,
+				filepath.Join(pod, "cri-containerd-abcd.scope"),
+				filepath.Join(pod, "crio-def0.scope", "nested-child"),
+				filepath.Join(pod, "crio-def0.scope"),
+			}
+			for _, path := range append(podDirs,
+				filepath.Join(root, "system.slice", "poddead"), // outside the selected pod hierarchy
+				filepath.Join(root, "kubelet.slice", "host-service.scope"),
+				filepath.Join(base, tc.qos, "host-service.scope")) {
+				if err := os.MkdirAll(path, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ids, err := DiscoverPodCgroups(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := make(map[uint64]bool)
+			for _, path := range podDirs {
+				id, err := ResolveCgroupID(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want[id] = true
+			}
+			if len(ids) != len(want) {
+				t.Fatalf("nested hierarchy lost pod/descendant IDs: got %v, want %v", ids, want)
+			}
+			for _, id := range ids {
+				if !want[id] {
+					t.Fatalf("scope included parent/QoS/host ID %d", id)
+				}
+			}
+		})
+	}
+}
+
+func TestDiscoverPodCgroups_KubeletRootStillFailsWithoutPodHierarchy(t *testing.T) {
+	for _, layout := range []string{"kubelet.slice", "kubelet", "kubelet.slice/kubelet-kubepods.slice", "kubelet/kubepods"} {
+		t.Run(layout, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, filepath.FromSlash(layout))
+			if strings.Contains(layout, "/") {
+				if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, nil, 0644); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Mkdir(path, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if ids, err := DiscoverPodCgroups(root); err == nil {
+				t.Fatalf("missing/non-directory nested pod hierarchy must fail, got %v", ids)
+			}
+		})
+	}
+}
+
 func TestIsPodCgroupDir(t *testing.T) {
 	for name, want := range map[string]bool{
 		"kubepods-pod9f8e7d6c_1234_4abc_8def_0123456789ab.slice":            true,
 		"kubepods-besteffort-pod9f8e7d6c_1234_4abc_8def_0123456789ab.slice": true,
 		"kubepods-burstable-podabcd.slice":                                  true,
+		"kubelet-kubepods-podabcd.slice":                                    true,
+		"kubelet-kubepods-besteffort-podabcd_1234.slice":                    true,
+		"kubelet-kubepods-burstable-podabcd.slice":                          true,
 		"pod9f8e7d6c-1234-4abc-8def-0123456789ab":                           true,
 		"kubepods-besteffort.slice":                                         false,
 		"kubepods-burstable.slice":                                          false,
 		"kubepods.slice":                                                    false,
+		"kubelet-kubepods.slice":                                            false,
+		"kubelet-kubepods-besteffort.slice":                                 false,
+		"kubelet-kubepods-burstable.slice":                                  false,
+		"arbitrary-kubepods-podabcd.slice":                                  false,
 		"besteffort":                                                        false,
 		"cri-containerd-0123.scope":                                         false,
 		"0123456789abcdef":                                                  false,

@@ -13,12 +13,21 @@ import (
 )
 
 func TestCgroupDiscoveryPodChurn(t *testing.T) {
+	testCgroupDiscoveryPodChurn(t, "kubepods.slice", "kubepods-podabcd.slice", "kubepods-poddef0.slice")
+}
+
+func TestCgroupDiscoveryKindKubeletRootPodChurn(t *testing.T) {
+	testCgroupDiscoveryPodChurn(t, "kubelet.slice/kubelet-kubepods.slice", "kubelet-kubepods-podabcd.slice", "kubelet-kubepods-poddef0.slice")
+}
+
+func testCgroupDiscoveryPodChurn(t *testing.T, hierarchy, firstPod, nextPod string) {
+	t.Helper()
 	root := t.TempDir()
-	base := filepath.Join(root, "kubepods.slice")
-	if err := os.Mkdir(base, 0755); err != nil {
+	base := filepath.Join(root, filepath.FromSlash(hierarchy))
+	if err := os.MkdirAll(base, 0755); err != nil {
 		t.Fatal(err)
 	}
-	p := &LinuxPlatform{config: LinuxConfig{CgroupRoot: root}, scope: cgroupScope{enabled: true}}
+	p := &LinuxPlatform{ebpfLoader: &ebpf.Loader{}, stopChan: make(chan struct{}), config: LinuxConfig{CgroupRoot: root, CgroupFilter: []string{"auto"}, CgroupReconcileInterval: time.Second}, scope: cgroupScope{enabled: true}}
 	var written []uint64
 	write := func(ids []uint64) error { written = append([]uint64(nil), ids...); return nil }
 	if err := p.reconcileCgroups(ebpf.DiscoverPodCgroups, write); err != nil {
@@ -27,7 +36,10 @@ func TestCgroupDiscoveryPodChurn(t *testing.T) {
 	if p.scope.contains(123) || len(written) != 0 {
 		t.Fatal("empty scope expanded to host")
 	}
-	pod := filepath.Join(base, "kubepods-podabcd.slice")
+	if err := p.Ready(); err != nil {
+		t.Fatalf("valid empty pod hierarchy not locally ready: %v", err)
+	}
+	pod := filepath.Join(base, firstPod)
 	child := filepath.Join(pod, "cri-containerd-123.scope")
 	if err := os.MkdirAll(child, 0755); err != nil {
 		t.Fatal(err)
@@ -38,6 +50,12 @@ func TestCgroupDiscoveryPodChurn(t *testing.T) {
 	id, _ := ebpf.ResolveCgroupID(child)
 	if !p.scope.contains(id) || len(written) != 2 {
 		t.Fatal("new child not covered", written)
+	}
+	for _, path := range []string{root, base} {
+		parentID, err := ebpf.ResolveCgroupID(path)
+		if err != nil || p.scope.contains(parentID) {
+			t.Fatalf("scope widened to parent %s: %v", path, err)
+		}
 	}
 	if err := os.Remove(child); err != nil {
 		t.Fatal(err)
@@ -53,7 +71,7 @@ func TestCgroupDiscoveryPodChurn(t *testing.T) {
 	}
 	// Recreate a different pod/container after deletion: both exact IDs are
 	// rediscovered instead of relying on the previous parent's cached ID.
-	recreated := filepath.Join(base, "kubepods-poddef0.slice", "crio-456.scope")
+	recreated := filepath.Join(base, nextPod, "crio-456.scope")
 	if err := os.MkdirAll(recreated, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +81,9 @@ func TestCgroupDiscoveryPodChurn(t *testing.T) {
 	newID, err := ebpf.ResolveCgroupID(recreated)
 	if err != nil || !p.scope.contains(newID) || len(written) != 2 {
 		t.Fatal("recreated container not covered", written, err)
+	}
+	if err := p.Ready(); err != nil {
+		t.Fatalf("healthy nested discovery withdrew local readiness: %v", err)
 	}
 }
 func TestCgroupFailuresRetainScopeAndWithdrawReadiness(t *testing.T) {

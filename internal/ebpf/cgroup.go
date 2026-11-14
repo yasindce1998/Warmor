@@ -41,9 +41,10 @@ func ResolveCgroupIDs(paths []string) ([]uint64, error) {
 
 // podCgroupDirRe matches the per-pod cgroup directory names kubelet creates:
 // systemd driver "kubepods-pod<uid>.slice" / "kubepods-<qos>-pod<uid>.slice"
+// (prefixed "kubelet-" when kubelet's cgroupRoot is /kubelet, as in kind)
 // (uid dashes escaped to underscores), cgroupfs driver "pod<uid>". QoS-class
 // slices such as "kubepods-besteffort.slice" deliberately do not match.
-var podCgroupDirRe = regexp.MustCompile(`^(kubepods(-[a-z]+)?-pod[0-9a-fA-F_]+\.slice|pod[0-9a-fA-F-]+)$`)
+var podCgroupDirRe = regexp.MustCompile(`^((kubelet-)?kubepods(-[a-z]+)?-pod[0-9a-fA-F_]+\.slice|pod[0-9a-fA-F-]+)$`)
 
 func isPodCgroupDir(name string) bool {
 	return podCgroupDirRe.MatchString(name)
@@ -62,6 +63,11 @@ func discoverPodCgroups(cgroupRoot string, resolve func(string) (uint64, error))
 	kubepodsDirs := []string{
 		filepath.Join(cgroupRoot, "kubepods.slice"),
 		filepath.Join(cgroupRoot, "kubepods"),
+		// kind configures kubelet cgroupRoot=/kubelet. systemd encodes
+		// ancestor names in each slice component; cgroupfs uses plain dirs.
+		// These are explicit layouts, not a recursive search of host cgroups.
+		filepath.Join(cgroupRoot, "kubelet.slice", "kubelet-kubepods.slice"),
+		filepath.Join(cgroupRoot, "kubelet", "kubepods"),
 	}
 
 	var baseDir string

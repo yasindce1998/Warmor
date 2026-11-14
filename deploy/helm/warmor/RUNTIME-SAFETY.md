@@ -13,6 +13,12 @@ exclusion model is implemented by this chart.
 - Discover exact pod directory **and all descendant container cgroup IDs** every
   `daemon.cgroupReconcileInterval` (default 1s). New workloads may run before
   discovery. Explicit cgroup paths are exact IDs, not recursive selectors.
+  Recognized hierarchies under the configured host cgroup v2 mount are
+  `kubepods.slice`, `kubepods`, `kubelet.slice/kubelet-kubepods.slice` (kind's
+  systemd `cgroupRoot: /kubelet`) and `kubelet/kubepods` (cgroupfs). Parent and
+  QoS cgroups are not added to scope; only pod directories and descendants are.
+  Other custom kubelet cgroup roots are unsupported: discovery errors rather
+  than recursively searching arbitrary host cgroups or expanding to the host.
 - Empty existing kubepods hierarchy means cover nobody, never the host. Missing
   hierarchy, unreadable cgroup v2 root, or initial filter-write failure prevents
   startup. Runtime discovery/write failures retain last accepted userspace scope
