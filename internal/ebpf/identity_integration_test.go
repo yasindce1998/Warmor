@@ -29,6 +29,21 @@ func identityTestLoader(t *testing.T) (*LSMLoader, uint64) {
 	if err != nil || filepath.Base(init) != "vimto" {
 		t.Fatal("exact-identity enforcement tests require the disposable vimto VM")
 	}
+	ports, err := filepath.Glob("/sys/class/virtio-ports/*/name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, path := range ports {
+		name, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[strings.TrimSpace(string(name))] = true
+	}
+	if !seen["ctrl"] || !seen["stdio"] {
+		t.Fatal("exact-identity enforcement tests require vimto private control/stdio ports")
+	}
 	requireRoot(t)
 	requireLSM(t)
 	cgid, err := GetPIDCgroupID(uint32(os.Getpid()))
