@@ -1,0 +1,171 @@
+# Supervised policy host: opt-in backend contract
+
+Status: **implemented and tested as an optional Linux API, not the enforcer's
+default backend or a completed isolation release gate**. The existing concrete
+`*wasm.PolicyEvaluator` remains unchanged. No daemon flag enables this backend
+yet. This work starts from `de59b21` and does not integrate activation or release
+packaging changes on other branches.
+
+## Ownership and trust boundary
+
+`internal/policyhost` exposes `Stage`, `StageFile`, `New`, `Supervisor.Start`,
+`Host.Evaluate`, `Host.Digest` and idempotent `Host.Close`. Its dependency tree
+contains neither wazero nor `internal/wasm`. Staging bounds and copies the raw
+bytes and verifies an Ed25519 signature before upload. `StageFile` opens regular
+files without following symlinks (including directory components) and refuses
+special files without blocking on a FIFO. No YAML/Cargo compilation, preflight,
+WASM decoding, native-code cache, or guest export runs in the parent backend.
+Signatures authenticate content only, **not** assignment, scope or rollback.
+The caller must not concurrently mutate supplied inputs while staging/snapshotting.
+
+Build the dedicated executable separately:
+
+```sh
+go build -o /trusted/install/warmor-policy-host ./cmd/warmor-policy-host
+```
+
+An administrator supplies a clean absolute `Config.Executable` path and a
+required lowercase `ExecutableSHA256`. There is no PATH discovery, self-exec,
+`init` interception, test-binary execution mode, policy-selected path/flags or
+automatic fallback. On Linux, descriptor-relative `O_NOFOLLOW` opens bind
+validation to the inode executed via `/proc/self/fd/3`. Directories and executable
+must be owned by root or the supervisor's effective UID; group/other writable
+components are refused, except root-owned sticky directories. The file must be
+regular, executable, not setuid/setgid, non-group/other-writable and at most
+128 MiB. Administrators must trust the effective UID and must not modify installed
+executable contents in place; install updates by atomic rename. `/proc` is required.
+The executable digest is a trust pin, not remote build provenance verification.
+
+The child receives only two anonymous IPC pipes and its pinned executable fd
+(closed before receiving configuration). Stderr is `/dev/null`, not a public
+pipe, bounded logging goroutine or daemon log. It inherits no daemon environment,
+tokens, extra descriptors, working directory or writable cache. The sole explicit
+environment entry is `GOMAXPROCS=1`. Host callbacks execute **inside the child**
+against its event snapshot. WASI receives no mounted files, argv, environment,
+network listeners or external command execution capabilities.
+
+## Wire protocol v1
+
+Each frame has a four-byte big-endian nonzero length. Lengths are checked before
+allocation. Structured frames use the exact canonical JSON encoding of the Go
+protocol structs, with all fields present; unknown/duplicate/missing/case-folded
+keys, trailing documents and null scalars are rejected. A missing action cannot
+become a zero-valued allow. Raw module bytes are a separate frame, not base64.
+
+| Frame | Maximum |
+| --- | ---: |
+| Configuration / handshake | 4 KiB |
+| Raw signed module snapshot | 64 MiB |
+| Event | 256 KiB |
+| Result | 8 KiB |
+| Decoded reason | 1 KiB (current guest ABI returns at most 512 bytes) |
+
+Handshake: `configure(limits,version)` → `limited(limits,version)` → raw module
+→ `loading(SHA-256,limits,version)` → `ready(SHA-256,limits,version)`.
+The parent checks the digest and exact resource configuration at both milestones.
+The child acknowledges `limited` **only after every required OS limit succeeds**,
+before reading module bytes. A parent initialization deadline covers all of these
+phases, including compilation that ignores Go contexts. After `loading`, a second
+required `LoadTimeout` nests within the remaining total budget, so slow uploads
+do not make the child-side compilation budget ambiguous.
+
+Evaluation requests/results have monotonically increasing sequence numbers.
+No arbitrary paths, guest pointers, native artifacts or arbitrary error strings
+cross the boundary. Results carry only action, audit and reason; enforcement
+outcomes, cache state, timestamp and latency remain parent-owned. Unknown actions,
+audit on a non-deny, oversized reasons and malformed responses are failures,
+never decisions. Error returns have a nil result: callers **must fail closed and
+must not cache errors**. `Failure.Phase` distinguishes configure/upload/load/evaluate;
+`errors.Is` preserves cancellation/deadline classification. A crash/resource kill
+currently maps to generic host failure, not a detailed metrics taxonomy.
+
+### Unknown-input law
+
+Transport never truncates, normalizes, silently drops observable input, or replaces
+invalid sensor UTF-8. Byte fields use base64 inside JSON so invalid argv reaches
+the existing child callbacks unchanged; the current compiler's unknown-input law
+still applies. Unknown event types, excessive argument counts and oversized event
+snapshots produce errors, not a repaired allow. Nil/empty/missing context is
+preserved. The explicit resolved event type is preserved even when other union
+members are populated. All currently observable ABI/callback fields are included;
+unobservable kernel identity/enforcement fields are deliberately excluded. As in
+the existing evaluator, a missing wall timestamp is stamped on a copy; unknown
+container start remains unknown. ABI 1–5 serialization, binary truncation rules,
+audit translation, reason validation, frees, initialization and declaration reads
+are delegated to the existing runtime **only inside the child**.
+
+## Bounds and lifecycle
+
+No resource setting may be zero or silently default to unbounded behavior:
+
+| Configuration | Accepted range |
+| --- | --- |
+| Address space, `RLIMIT_AS` | 2–16 GiB |
+| Cumulative process CPU, `RLIMIT_CPU` | 1–3600 whole seconds |
+| Guest linear memory | 1–1024 pages of 64 KiB |
+| Process lifetime request count | 1–1,000,000 |
+| Initialization wall deadline | >0 to 1 minute |
+| Child-load wall deadline | >0 to initialization deadline |
+| Evaluation wall deadline | >0 to 5 seconds |
+| Concurrent hosts per supervisor | 1–16 |
+
+The worker also sets hard/soft core size and file size limits to zero, open-file
+limit to 32 and process dumpability to zero. Failure to establish any required
+limit exits without accepting WASM. Linear memory is additionally bounded by
+wazero; address space covers host compilation allocations too. CPU budget is
+**cumulative for the entire host lifetime**, including startup/compilation, not
+per event. Exhausted hosts require a new explicit activation, not auto-retry.
+
+Each supervisor has a bounded host count and no candidate queue. Each host has
+one in-flight evaluation and no internal evaluation queue; saturation returns
+`ErrBusy`. Hosts do not fork or launch subprocesses. Deadline/cancellation,
+protocol error, evaluation failure or `Close` kills only the supervisor-owned
+child, closes its private pipes and waits for `cmd.Wait` to reap it before returning.
+The wait goroutine and cancellation callback are joined, not abandoned compiler
+or I/O goroutines. The final permitted request returns its validated decision and
+retires/reaps the host. Normal idle child exits are also reaped promptly.
+`Pdeathsig=SIGKILL` provides additional Linux parent-death cleanup; it does not
+replace explicit close/reap. Callers own successful hosts and **must close them**.
+
+## Explicit limitations and integration gates
+
+This first backend is a killable resource boundary for **untrusted WASM running
+under a trusted wazero/Go host**, not a sandbox for a compromised native worker:
+
+- `RLIMIT_AS` bounds virtual address space, **not a calibrated resident-memory
+  quota**. Go reserves substantial virtual address space; low limits may cause
+  allocation failure or fatal runtime exit, which is treated as host failure.
+  There is no cgroup `memory.max`/swap quota, CPU bandwidth quota, per-host task
+  quota, namespace/seccomp boundary, privilege/UID drop or process-tree cleanup.
+  Workers cannot create subprocesses through the offered WASM imports, but a
+  native runtime exploit could escape that assumption. Current rlimits do not
+  satisfy the stronger cgroup/native-compromise threat model in
+  `wasm-compilation-isolation.md`.
+- This backend supports Linux with `/proc` only. Windows and macOS reject startup;
+  there is no Job Object or tested equivalent. Cross-compilation is not platform
+  execution validation. Tests do not install host security hooks or alter parent
+  process rlimits.
+- Declarations are read/validated inside the child but not exposed as routing or
+  kernel metadata yet. Until a versioned bounded declaration contract is added,
+  integrations must not enable decision caching or kernel default-deny preloads
+  based on assumptions about fields-read/static rules.
+- The enforcer still owns a concrete in-process evaluator. Interface extraction,
+  atomic verified activation/rollback, checked-out host drain, bounded replacement
+  backoff, failure metrics, expected workload scope and fail-closed enforcement
+  tests remain required **before wiring this backend as the default**.
+- Release artifacts, container/service packaging and installed-host trust/upgrade
+  tests are not provided by this checkpoint. No shipped isolation claim is made.
+
+## Verification
+
+`go test ./internal/policyhost/... ./cmd/warmor-policy-host` builds and launches
+the actual dedicated command. Tests cover signed immutable staging, path/digest
+trust, no runtime dependency in the parent, binary decisions/audit/unknown time,
+guest memory cap, actual Linux rlimits, cumulative CPU kill, loop kill/reap,
+cancellation, crash, bounded capacity/request count and malformed frames. A real
+~7 MiB module with 384 functions and 393,216 conditional add/multiply blocks exercises loading
+under a 100 ms child-load deadline (within a 5 second total initialization cap)
+for repeated candidates, while an independent
+known-good host continues returning decisions. `loading` confirms the bytes
+arrived in the child; the non-interruptible compiler path is not run in the parent.
+These are backend checks, **not the complete packaging/enforcer acceptance suite**.
