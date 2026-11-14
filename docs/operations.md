@@ -36,9 +36,11 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now warmor
 ```
 
-Swap `--audit` for `--lsm-enforce` once you trust the policy. `SIGHUP`
-reloads the policy file; kernel map entries from the old policy are not
-cleared on reload yet.
+Swap `--audit` for `--lsm-enforce` once you trust the policy. In standalone mode,
+`SIGHUP` reloads the policy file; see [activation limits](design/policy-activation.md)
+before relying on reload for continuous kernel protection. With `--server`,
+local `SIGHUP` reload is rejected: publish changes through the policy server so
+one fleet owner controls activation, acknowledgement and failure recovery.
 
 ## Policy server and mTLS
 
