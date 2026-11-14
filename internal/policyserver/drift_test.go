@@ -153,6 +153,9 @@ func TestHeartbeatRejectsInvalidFingerprint(t *testing.T) {
 				return v
 			}(),
 		}},
+		{"negative window", &drift.BehaviorFingerprint{ImageHash: "img", Window: -time.Second}},
+		{"negative rate", &drift.BehaviorFingerprint{ImageHash: "img", Vectors: map[string]float64{"exec:bash": -1}}},
+		{"pattern too long", &drift.BehaviorFingerprint{ImageHash: "img", Vectors: map[string]float64{string(bytes.Repeat([]byte("x"), drift.MaxKeyLength+1)): 1}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,6 +168,50 @@ func TestHeartbeatRejectsInvalidFingerprint(t *testing.T) {
 	// A plain heartbeat (no fingerprint) is still accepted.
 	if code := postHeartbeat(t, ts, "a1", nil); code != http.StatusOK {
 		t.Errorf("plain heartbeat status = %d, want 200", code)
+	}
+}
+
+func TestHeartbeatPatternLimitMatchesDetectorAdmission(t *testing.T) {
+	srv, ts := newDriftTestServer(t)
+	registerAgent(t, ts, "bounded-agent")
+	vectors := make(map[string]float64, MaxFingerprintPatterns+1)
+	for n := range MaxFingerprintPatterns {
+		vectors[fmt.Sprintf("exec:p%d", n)] = 1
+	}
+	if MaxFingerprintPatterns != 1024 {
+		t.Fatalf("unexpected pattern budget %d", MaxFingerprintPatterns)
+	}
+	fp := &drift.BehaviorFingerprint{ImageHash: "accepted", Vectors: vectors}
+	if code := postHeartbeat(t, ts, "bounded-agent", fp); code != http.StatusOK {
+		t.Fatalf("at-limit fingerprint: status %d", code)
+	}
+	if got := srv.drift.AgentCount("accepted"); got != 1 {
+		t.Fatalf("successful heartbeat silently dropped fingerprint: count %d", got)
+	}
+	vectors["exec:overflow"] = 1 // regression: 1,025 used to return 200 but store nothing
+	fp.ImageHash = "rejected"
+	if code := postHeartbeat(t, ts, "bounded-agent", fp); code != http.StatusBadRequest {
+		t.Fatalf("over-limit fingerprint: status %d, want 400", code)
+	}
+	if srv.drift.AgentCount("rejected") != 0 || srv.drift.AgentCount("accepted") != 1 {
+		t.Fatal("rejected update changed last accepted observation")
+	}
+	if code := postHeartbeat(t, ts, "bounded-agent", nil); code != http.StatusOK {
+		t.Fatalf("plain heartbeat: status %d", code)
+	}
+}
+
+func TestHeartbeatUsesConfiguredDetectorAdmission(t *testing.T) {
+	srv, ts := newDriftTestServer(t)
+	srv.drift = drift.NewDetector(drift.DetectorConfig{MaxPatterns: 1})
+	registerAgent(t, ts, "custom-limit")
+	fp := &drift.BehaviorFingerprint{ImageHash: "image", Vectors: map[string]float64{"a": 1, "b": 1}}
+	if code := postHeartbeat(t, ts, "custom-limit", fp); code != http.StatusBadRequest {
+		t.Fatalf("configured detector limit not reported: status %d", code)
+	}
+	delete(fp.Vectors, "b")
+	if code := postHeartbeat(t, ts, "custom-limit", fp); code != http.StatusOK || srv.drift.AgentCount("image") != 1 {
+		t.Fatalf("admissible fingerprint not retained, status %d", code)
 	}
 }
 
