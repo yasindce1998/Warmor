@@ -147,6 +147,7 @@ func main() {
 
 	stats := session.Stats()
 	fmt.Fprintf(os.Stderr, "\nLearning complete: %s\n", stats)
+	fmt.Fprintln(os.Stderr, "warning: learned path/endpoint allows are proposals, not exact behavior or coverage proofs; review argv, identities, flags and missing metadata before deployment")
 
 	if stats.Containers == 0 {
 		fmt.Fprintf(os.Stderr, "error: no events recorded from %s", *eventsPath)

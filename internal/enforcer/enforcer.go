@@ -19,6 +19,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/cache"
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/container"
+	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/escape"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
@@ -34,6 +35,9 @@ import (
 
 // Options configures the enforcer at startup
 type Options struct {
+	// Platform injects an embedded monitor implementation. Nil uses the native
+	// platform. Capability/posture checks still apply; no daemon flag exposes it.
+	Platform                platform.Platform
 	AuditMode               bool
 	LearningMode            bool
 	CgroupFilter            []string
@@ -54,6 +58,9 @@ type Options struct {
 	// <policy>.sig. The policy file is read once, verified, and loaded from
 	// memory; YAML policies are refused.
 	PolicyVerifyKey ed25519.PublicKey
+	// SignedAssignment enables strict artifact/ABI/effective-posture checks at
+	// startup and disables generic reload/activation paths that bypass intent.
+	SignedAssignment *assignment.Policy
 	// EvalTimeout bounds each WASM policy evaluation; an evaluation that
 	// exceeds it is denied (fail closed) and its instance replaced. Zero
 	// means wasm.DefaultEvalTimeout.
@@ -155,19 +162,21 @@ type Enforcer struct {
 	escape         *escape.Detector
 	// containerStarts dates the container of an event's cgroup for
 	// policies that read container age (nil: always unknown).
-	containerStarts containerStarter
-	policyPath      string
-	verifyKey       ed25519.PublicKey
-	evalTimeout     time.Duration
-	policyID        string // metrics label (see policyID()); guarded by evaluatorMu
-	syncFailLog     logLimiter
-	auditMode       bool
-	learningMode    bool
-	defaultDeny     bool
-	ctx             context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
-	processing      atomic.Bool
+	containerStarts  containerStarter
+	policyPath       string
+	verifyKey        ed25519.PublicKey
+	signedAssignment bool
+	evalTimeout      time.Duration
+	policyID         string // metrics label (see policyID()); guarded by evaluatorMu
+	syncFailLog      logLimiter
+	auditMode        bool
+	learningMode     bool
+	defaultDeny      bool
+	kernelEnforce    bool
+	ctx              context.Context
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	processing       atomic.Bool
 }
 
 // newPlatform constructs the platform monitor. It is a variable so tests can
@@ -180,6 +189,12 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 
 	if opts == nil {
 		opts = &Options{}
+	}
+	if opts.AtomicGenerations && opts.SignedAssignment != nil {
+		return nil, errors.New("signed assignments with atomic generations require a separately reviewed activation integration")
+	}
+	if opts.SignedAssignment != nil && len(opts.PolicyVerifyKey) != ed25519.PublicKeySize {
+		return nil, errors.New("signed assignment requires artifact verification key")
 	}
 	// Normalize once before loading any hooks. Audit/learning are global
 	// dry runs, including independent integrity enforcement. Copy options
@@ -266,22 +281,25 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 
 	// Initialize the platform-specific monitor (eBPF on Linux, ETW on
 	// Windows, ESF on macOS).
-	plat, err := newPlatform(platform.Config{
-		CgroupFilter:            opts.CgroupFilter,
-		CgroupRoot:              cgroupRoot,
-		CgroupReconcileInterval: opts.CgroupReconcileInterval,
-		LSMEnforce:              opts.LSMEnforce,
-		RequireLSM:              opts.RequireLSM,
-		SkipLSM:                 opts.SkipLSM,
-		AuditMode:               opts.AuditMode || opts.LearningMode,
+	plat := opts.Platform
+	if plat == nil {
+		plat, err = newPlatform(platform.Config{
+			CgroupFilter:            opts.CgroupFilter,
+			CgroupRoot:              cgroupRoot,
+			CgroupReconcileInterval: opts.CgroupReconcileInterval,
+			LSMEnforce:              opts.LSMEnforce,
+			RequireLSM:              opts.RequireLSM,
+			SkipLSM:                 opts.SkipLSM,
+			AuditMode:               opts.AuditMode || opts.LearningMode,
 
-		IntegrityMode:    opts.IntegrityMode,
-		IntegrityDigests: opts.IntegrityDigests,
-		UnixWatch:        unixWatch,
+			IntegrityMode:    opts.IntegrityMode,
+			IntegrityDigests: opts.IntegrityDigests,
+			UnixWatch:        unixWatch,
 
-		LSMRingBufferSize: opts.LSMRingBufferSize,
-		OnEventLoss:       opts.OnEventLoss,
-	})
+			LSMRingBufferSize: opts.LSMRingBufferSize,
+			OnEventLoss:       opts.OnEventLoss,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("initialize platform: %w", err)
 	}
@@ -354,6 +372,20 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		return nil, fmt.Errorf("create policy pool: %w", err)
 	}
 	logger.LogInfo(fmt.Sprintf("✓ Policy pool created (%d instances)", poolSize))
+	if opts.SignedAssignment != nil {
+		if opts.SignedAssignment.Posture.Mode == "enforce" && !caps.Enforcement {
+			pool.Close(ctx)
+			wasmRuntime.Close(ctx)
+			plat.Close()
+			return nil, fmt.Errorf("%w: platform enforcement unavailable", assignment.ErrCompatibility)
+		}
+		if err := checkAssignment(pool, *opts.SignedAssignment, opts.AuditMode, opts.LearningMode, opts.DefaultDeny, opts.LSMEnforce && opts.RequireLSM && caps.LSMEnforcement, policyMapSyncer); err != nil {
+			pool.Close(ctx)
+			wasmRuntime.Close(ctx)
+			plat.Close()
+			return nil, err
+		}
+	}
 
 	// Create pool-backed policy evaluator
 	evaluator := wasm.NewPolicyEvaluator(pool, hostname)
@@ -423,32 +455,34 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	ctx, cancel := context.WithCancel(ctx)
 
 	e := &Enforcer{
-		platform:        plat,
-		wasmRuntime:     wasmRuntime,
-		evaluator:       evaluator,
-		pool:            pool,
-		cache:           decisionCache,
-		actionHandler:   actionHandler,
-		logger:          logger,
-		metricsServer:   metricsServer,
-		policyMap:       policyMapSyncer,
-		pipeline:        pipeline,
-		lineageTracker:  tracker,
-		intelligence:    intel,
-		driftCollector:  driftCollector,
-		netFilter:       netFilter,
-		sandbox:         sandboxMgr,
-		escape:          escapeDetector,
-		containerStarts: cgroups,
-		policyPath:      policyPath,
-		verifyKey:       opts.PolicyVerifyKey,
-		policyID:        pid,
-		evalTimeout:     opts.EvalTimeout,
-		auditMode:       opts.AuditMode,
-		learningMode:    opts.LearningMode,
-		defaultDeny:     opts.DefaultDeny,
-		ctx:             ctx,
-		cancel:          cancel,
+		platform:         plat,
+		wasmRuntime:      wasmRuntime,
+		evaluator:        evaluator,
+		pool:             pool,
+		cache:            decisionCache,
+		actionHandler:    actionHandler,
+		logger:           logger,
+		metricsServer:    metricsServer,
+		policyMap:        policyMapSyncer,
+		pipeline:         pipeline,
+		lineageTracker:   tracker,
+		intelligence:     intel,
+		driftCollector:   driftCollector,
+		netFilter:        netFilter,
+		sandbox:          sandboxMgr,
+		escape:           escapeDetector,
+		containerStarts:  cgroups,
+		policyPath:       policyPath,
+		verifyKey:        opts.PolicyVerifyKey,
+		signedAssignment: opts.SignedAssignment != nil,
+		policyID:         pid,
+		evalTimeout:      opts.EvalTimeout,
+		auditMode:        opts.AuditMode,
+		learningMode:     opts.LearningMode,
+		defaultDeny:      opts.DefaultDeny,
+		kernelEnforce:    opts.LSMEnforce && opts.RequireLSM && caps.LSMEnforcement,
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 
 	metricsServer.SetReadinessCheck(e.Ready)
@@ -1125,7 +1159,7 @@ func (e *Enforcer) ReloadPolicy() error {
 // ErrActivationPending, retains both evaluators, and must not be acknowledged
 // or compensated by changing a disk pointer alone. Retry the same immutable
 // path; the ORIGINAL hook is retained and must be idempotent. Supply exactly
-// one durable publication authority (agentstore in signed mode), not a chain
+// one durable publication authority, not a chain
 // of independent pointer/store transactions. Nil means no durable publication
 // is requested, as for a standalone reload. No reader/worker-needed lock is held
 // during the hook, but activationMu remains held: it must not reenter activation.
@@ -1135,6 +1169,13 @@ func (e *Enforcer) ReloadPolicy() error {
 // misses may allow during rebuild and rollback errors mean degraded enforcement.
 // See docs/design/generation-activation.md before implementing a backend adapter.
 func (e *Enforcer) ActivatePolicy(path string, durableCommit func() error) error {
+	if e.signedAssignment {
+		return errors.New("signed assignment mode refuses generic reload/activation")
+	}
+	return e.activatePolicy(path, nil, durableCommit)
+}
+
+func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, durableCommit func() error) error {
 	e.activationMu.Lock()
 	defer e.activationMu.Unlock()
 	e.eventMu.RLock()
@@ -1144,6 +1185,9 @@ func (e *Enforcer) ActivatePolicy(path string, durableCommit func() error) error
 		return errors.New("enforcer closed")
 	}
 	if e.generations != nil {
+		if expected != nil || e.signedAssignment {
+			return errors.New("signed assignments with atomic generations require a separately reviewed activation integration")
+		}
 		return e.activateGeneration(path, durableCommit)
 	}
 	e.logger.LogInfo(fmt.Sprintf("Reloading policy from: %s", path))
@@ -1153,6 +1197,13 @@ func (e *Enforcer) ActivatePolicy(path string, durableCommit func() error) error
 	metrics.RecordPolicyLoad(pid, err)
 	if err != nil {
 		return err
+	}
+	if expected != nil {
+		if err := checkAssignment(newPool, *expected, e.auditMode, e.learningMode, e.defaultDeny, e.kernelEnforce, e.policyMap); err != nil {
+			newPool.Close(e.ctx)
+			newRuntime.Close(e.ctx)
+			return err
+		}
 	}
 
 	// Create new evaluator

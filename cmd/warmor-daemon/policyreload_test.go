@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -119,5 +121,33 @@ func TestFleetLocalReloadCannotPublishUntrackedGeneration(t *testing.T) {
 	after, _ := srv.Store().GetAgent("node")
 	if live.Load() != string(dataA) || updates.Load() != 1 || after.PolicyID != before.PolicyID || after.PolicyVersion != before.PolicyVersion || after.PolicyHash != before.PolicyHash || after.ActivationError != "" {
 		t.Fatalf("rejected local reload changed live/acknowledged A: live=%v updates=%d agent=%+v", live.Load(), updates.Load(), after)
+	}
+}
+func TestGenerationAssignmentModesRemainSeparate(t *testing.T) {
+	for _, signed := range []bool{false, true} {
+		for _, generations := range []bool{false, true} {
+			if err := checkGenerationAssignmentMode(signed, generations); (err != nil) != (signed && generations) {
+				t.Fatalf("signed=%v generations=%v: %v", signed, generations, err)
+			}
+		}
+	}
+}
+
+func TestSignedGenerationDaemonRejectsBeforeStartup(t *testing.T) {
+	const helper = "WARMOR_TEST_SIGNED_GENERATION_REJECT"
+	if os.Getenv(helper) == "1" {
+		*signedAssignments, *atomicGenerations = true, true
+		*assignmentConfigPath = "must-not-open.json"
+		runDaemon(nil)
+		t.Fatal("combined signed/generation mode reached daemon startup")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSignedGenerationDaemonRejectsBeforeStartup$")
+	cmd.Env = append(os.Environ(), helper+"=1")
+	output, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if ctx.Err() != nil || !errors.As(err, &exit) || !strings.Contains(string(output), "--signed-assignments cannot be combined with --experimental-atomic-generations") {
+		t.Fatalf("must reject before privilege/config/state/capture side effects: %v output=%s", err, output)
 	}
 }

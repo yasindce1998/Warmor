@@ -5,11 +5,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/crypto"
+	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/platform"
 	"github.com/yasindce1998/warmor/internal/wasm"
@@ -449,6 +452,37 @@ func TestGenerationOptionFailsBeforePlatformSideEffects(t *testing.T) {
 	}
 	if e, err := New(context.Background(), "not-read.yaml", &Options{AtomicGenerations: true, RequireLSM: true}); err == nil || e != nil {
 		t.Fatal("mutable compile-on-reload path admitted")
+	}
+}
+
+func TestGenerationSignedAssignmentRejectedBeforeStartupSideEffects(t *testing.T) {
+	artifact, err := crypto.GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := newPlatform
+	t.Cleanup(func() { newPlatform = original })
+	called := false
+	newPlatform = func(platform.Config) (platform.Platform, error) {
+		called = true
+		return nil, errors.New("unexpected platform construction")
+	}
+	_, err = New(context.Background(), "not-read.wasm", &Options{
+		AtomicGenerations: true, RequireLSM: true, PolicyVerifyKey: artifact.Public,
+		SignedAssignment: &assignment.Policy{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "separately reviewed") || called {
+		t.Fatalf("signed/generation startup reached artifact/platform preparation: %v", err)
+	}
+}
+
+func TestGenerationSignedAssignmentCannotUseLiveFirstCommit(t *testing.T) {
+	e, k := generationEnforcer(t)
+	old := e.evaluator
+	committed := false
+	err := e.ActivateAssignment("not-read.wasm", assignment.Policy{}, func() error { committed = true; return nil })
+	if err == nil || !strings.Contains(err.Error(), "separately reviewed") || committed || e.evaluator != old || len(k.prepared) != 1 || e.generations.pending != nil {
+		t.Fatalf("signed update crossed experimental generation boundary: %v", err)
 	}
 }
 

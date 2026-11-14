@@ -145,15 +145,24 @@ only implement pre-kernel publication or disk-only compensating rollback is
 until a shared reviewed commit/recovery model is implemented. Process restart
 adopts the sole backend's durable pair; no second PR38 pointer should compete.
 
+After integrating main's signed-assignment support, this branch explicitly
+rejects `--signed-assignments --experimental-atomic-generations` before opening
+state or capture. The enforcer also rejects the combined startup options and
+`ActivateAssignment` on a generation-enabled instance before candidate loading,
+kernel preparation or durable commit. Generic reload remains forbidden in signed
+mode, and fleet SIGHUP remains forbidden. The separate signed-generation adapter
+is not imported by this merge; its commit/recovery ownership still needs review.
+
 ### Shared metadata API coordination
 
-This branch deliberately introduces **no** ABI/compiler/posture metadata struct
-and does not create or modify `internal/policymeta`. Read-only inspection found
-the signed integration's `policymeta.Metadata{Compiler,DefaultAction}` custom
-section declaration (`warmor.build.v1`) and the metadata owner's
-`policymeta.Module` runtime observations plus `policymeta.Source`. They represent
-different trust statements and must be unified by their owners, not guessed from
-a third generation-specific metadata document.
+Main's canonical `internal/policybuild.Metadata{Compiler,DefaultAction}` custom
+section declaration (`warmor.build.v1`) is retained unchanged, including compiler
+identity `warmor-yaml/7`. Signed assignment checking uses the actual instantiated
+pool ABI, captured artifact digest and authenticated build declaration, not a
+generation-specific metadata model. This branch introduces no alternative
+ABI/compiler/posture struct or `ModuleClaims`. Proposed `policymeta.Module`
+runtime observations and `policymeta.Source` on another branch are distinct trust
+statements and must be integrated by their owners, not inferred here.
 
 Generation spec building consumes the pre-existing structural surface:
 
