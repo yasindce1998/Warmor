@@ -211,7 +211,35 @@ cgroup filters, integrity, unix watch, loss behavior) is fixed during activation
 
 Integration branch `feat/generation-atomic-activation` began at PR38 `e4203dc` and
 merged main `34a95ea`, PR41 `3bfa8a1`, generation `6060ed2`, dependency main
-`173b118`, strict VM tests `995fde6`, PR41 harness `0d56818`, and main `2c415c9`.
+`173b118`, strict VM tests `995fde6`, PR41 harness `0d56818`, main `2c415c9`, and
+refreshed PR38 `782b45e` (empty content merge, preserving ancestry).
 No merge conflicts, source-branch edits, pushes, PR creation, host enforcement or
 selector enablement were performed. Validation results are recorded in the final
 integration report; this document's test inventory is not VM runtime proof.
+
+### Local checkpoint validation
+
+Final code checkpoint `995bab4`, Linux unprivileged, **Go 1.26.11**,
+`GOMAXPROCS=2`, test/vet package parallelism `-p 2`:
+
+- `go test -p 2 ./...`: pass.
+- `go test -race -p 2 ./...`: pass after all source merges.
+- Focused generation/uncertain-activation race tests, ten repetitions: pass.
+- `go vet -p 2 ./...`: pass.
+- `golangci-lint v1.64.8 run --concurrency 2 --timeout 5m ./...`: pass with
+  repository lint configuration (includes errcheck with assertions).
+- Integration-tagged ebpf/outcomes packages compiled with `-run '^$'`: pass;
+  **no integration test execution** is implied.
+- Windows amd64 enforcer and Darwin arm64 daemon test binaries cross-compiled:
+  pass. No native Windows/Darwin execution is claimed.
+- `git diff --check`: pass. BPF C/embedded objects have no delta from `6060ed2`.
+  `go.mod`/`go.sum` have no delta from dependency merge `173b118`; grpc 1.83.2,
+  x/net 0.62.0, x/sys 0.49.0, x/text 0.43.0 and x/sync 0.24.0 are retained.
+
+Logs are `/tmp/opencode/generation-activation-{full,race,focused-race,lint,vet,`
+`integration-build}.log`. An initial full run exposed the cache test's reflection
+walker not handling the new internal channel fence. It now mutates channels and
+still compares actual policy serialization; no input-coverage check was skipped.
+Subsequent full and race suites pass. No whole-daemon VM, physical crash/power
+loss, host-enforcing run, BPF build regeneration, or native cross-platform test
+was performed by this integration task.
