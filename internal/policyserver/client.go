@@ -19,6 +19,7 @@ import (
 	signed "github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/metrics"
+	"github.com/yasindce1998/warmor/internal/telemetry"
 )
 
 // Client connects to the policy management server for policy distribution.
@@ -41,6 +42,8 @@ type Client struct {
 	signed             bool
 	deploymentSequence uint64
 	envelopeHash       string
+	telemetry          *telemetry.Collector
+	telemetryRevision  telemetry.Revision // published only after OnUpdate succeeds
 }
 
 // MaxWASMDownloadSize bounds a policy module download.
@@ -76,10 +79,19 @@ type ClientConfig struct {
 	// a plain heartbeat. The returned fingerprint's AgentID is overwritten
 	// with the client's own agent ID.
 	Fingerprint func() *drift.BehaviorFingerprint
+	// Telemetry is opt-in. OnUpdate must use the same collector at the drained
+	// enforcer activation boundary. Call AuthorizeTelemetry after registration.
+	// SignedAssignments disables/seals this collector: schema 1 does not bind
+	// signed deployment sequences, envelope authorization or cohort evidence.
+	Telemetry *telemetry.Collector
 }
 
 // NewClient creates a policy server client.
 func NewClient(cfg ClientConfig) *Client {
+	if cfg.SignedAssignments && cfg.Telemetry != nil {
+		cfg.Telemetry.Seal()
+		cfg.Telemetry = nil
+	}
 	transport := &http.Transport{}
 	if cfg.TLSConfig != nil {
 		transport.TLSClientConfig = cfg.TLSConfig
@@ -97,6 +109,7 @@ func NewClient(cfg ClientConfig) *Client {
 		onUpdate:    cfg.OnUpdate,
 		verify:      cfg.Verify,
 		fingerprint: cfg.Fingerprint,
+		telemetry:   cfg.Telemetry,
 		signed:      cfg.SignedAssignments,
 	}
 	if cfg.InitialAssignment != nil {
@@ -196,6 +209,7 @@ func (c *Client) pollOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	c.setTelemetryHeaders(req)
 
 	resp, err := c.do(req)
 	if err != nil {
@@ -207,6 +221,12 @@ func (c *Client) pollOnce(ctx context.Context) error {
 		// Legacy servers compare only version; request a full assignment
 		// instead of trusting a potentially ambiguous 304.
 		if resp.Header.Get(RevisionIdentityHeader) == "1" {
+			// Telemetry-aware servers send 200 when an eligible assignment
+			// exists, even for an unchanged artifact. A plain 304 supplies no
+			// eligible activation/cohort evidence (including older servers).
+			if c.telemetry != nil {
+				c.telemetry.Seal()
+			}
 			return nil
 		}
 		q.Del("if_version")
@@ -214,6 +234,7 @@ func (c *Client) pollOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		c.setTelemetryHeaders(retry)
 		full, err := c.do(retry)
 		if err != nil {
 			return err
@@ -230,9 +251,19 @@ func (c *Client) pollOnce(ctx context.Context) error {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&assignment); err != nil {
 		return err
 	}
+	if len(assignment.Envelope) != 0 || assignment.DeploymentSequence != 0 {
+		if c.telemetry != nil {
+			c.telemetry.Seal()
+		}
+		return fmt.Errorf("signed deployment cannot use legacy assignment/telemetry activation")
+	}
 
 	// A different version (newer, or older after a rollback) is applied.
-	if assignment.PolicyID == id && assignment.Version == version && assignment.WASMHash == digest {
+	telemetryCurrent := assignment.Telemetry == nil || (c.telemetry != nil && c.telemetry.Matches(*assignment.Telemetry, assignment.PolicyID, assignment.Version, assignment.WASMHash))
+	if assignment.PolicyID == id && assignment.Version == version && assignment.WASMHash == digest && telemetryCurrent {
+		if assignment.Telemetry == nil && c.telemetry != nil {
+			c.telemetry.Seal()
+		}
 		return nil
 	}
 	if assignment.PolicyID == "" || assignment.Version <= 0 {
@@ -267,6 +298,10 @@ func (c *Client) pollOnce(ctx context.Context) error {
 	c.policyID = activeID
 	c.policyHash = activeHash
 	c.activationError = ""
+	c.telemetryRevision = telemetry.Revision{}
+	if c.telemetry != nil && assignment.Telemetry != nil && c.telemetry.Matches(*assignment.Telemetry, activeID, activeVersion, activeHash) {
+		c.telemetryRevision = c.telemetry.ActiveRevision()
+	}
 	c.mu.Unlock()
 	return nil
 }
@@ -281,6 +316,10 @@ func (c *Client) InvalidateActiveRevision() {
 		return
 	} // signed mode has no out-of-band reload path
 	c.policyID, c.policyHash, c.policyVersion = "", "", 0
+	c.telemetryRevision = telemetry.Revision{}
+	if c.telemetry != nil {
+		c.telemetry.Seal()
+	}
 }
 
 // fetchWASM downloads a policy version and its raw signature (nil if the
@@ -323,9 +362,13 @@ func (c *Client) fetchWASM(ctx context.Context, policyID string, version int64) 
 // SendHeartbeat sends a heartbeat to the server.
 func (c *Client) SendHeartbeat(ctx context.Context) (err error) {
 	defer func() { metrics.RecordHeartbeat(c.agentID, err) }()
+	// Heartbeat liveness must not wait for OnUpdate. A full activation identity
+	// match below excludes a collector swapped by an in-flight callback, even
+	// when reactivating the same artifact for a different assignment generation.
 	c.mu.Lock()
 	version := c.policyVersion
 	id, digest, activationError := c.policyID, c.policyHash, c.activationError
+	activeTelemetry := c.telemetryRevision
 	sequence, envelopeHash := c.deploymentSequence, c.envelopeHash
 	c.mu.Unlock()
 
@@ -337,6 +380,12 @@ func (c *Client) SendHeartbeat(ctx context.Context) (err error) {
 		ActivationError:    activationError,
 		DeploymentSequence: sequence,
 		EnvelopeHash:       envelopeHash,
+	}
+	if !c.signed && c.telemetry != nil && activationError == "" {
+		snapshot := c.telemetry.Snapshot()
+		if snapshot != nil && snapshot.Revision == activeTelemetry && snapshot.Revision.PolicyID == id && snapshot.Revision.PolicyVersion == version && snapshot.Revision.PolicyHash == digest {
+			req.Telemetry = snapshot
+		}
 	}
 	if c.fingerprint != nil {
 		if fp := c.fingerprint(); fp != nil {

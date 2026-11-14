@@ -202,3 +202,60 @@ framing error. A 10-second trailing-stream fuzz run passed, as did Go 1.26.11
 full-repo lint and workload race tests with required real Cargo. No compiler
 files were changed; this framing check protects bundles independently of any
 separate compiler parser hardening. Independent re-review is still required.
+
+## Compiler 7 compatibility regression coverage
+
+Two compiler-7 compatibility changes are now integrated on main (`ce1d5ab`).
+The original build-claim review at `98d2b90` compared against compiler-6 base
+`2c415c9`: `codegen.go`, `fields.go`, `staticrules.go` and `temporal.go` were then
+unchanged. PR #41 subsequently tightened `staticrules.go` to require complete,
+valid UTF-8 paths of at most 127 bytes and canonical network endpoints. That
+changes static kernel fast-path eligibility, not first-match WASM rule decisions,
+audit-deny values, temporal conditions, input layout/callbacks or ABI selection.
+`exactABI` still predicts 3, or 5 for argv/network operation callbacks; the
+composition/posture semantics and versions remain unchanged.
+
+The separate compiler-7 build change adds the `warmor.build.v1` custom section,
+appended after Cargo compilation and before any artifact signing. It declares compiler
+`warmor-yaml/7` and the typed policy's effective default action. The compiler
+also gained cancellable build/toolchain execution and failed-build cleanup.
+The parser's framing hardening rejects trailing documents before typed decoding;
+the manifest already rejects these independently, along with aliases, merges
+and non-policy tags. It does not extend the accepted manifest source language.
+
+Only literal compiler `7` is accepted, and the runtime compiler must also equal
+the pin. Old `6` and unknown/future versions remain rejected. Tests bind the
+compiler into manifest, selection and compiled-generation content identities,
+including hash-only reconstruction of the old contract; old cache identities
+must not be reused even when source bytes and ABI are unchanged.
+
+Every real Cargo manifest composition test reads the actual artifact section,
+checks `warmor-yaml/7` and the effective default, calls the actual WASM ABI export,
+and compares the loader's bytes/digest/ABI/build declarations via
+`Pool.CheckAssignment`. An expectation of `warmor-yaml/6` must fail. These checks
+run for opposing namespaces, unknown/host handling, default-deny restrictive
+additions, baseline deny versus addition allow, and per-rule audit/temporal/ABI-5
+cases. Build declarations alone are **not** publisher authentication or proof
+of compiler provenance; no signatures, shared source authentication, controller
+publication, activation or selector enforcement are enabled by this change.
+
+PR #41's real Cargo static-boundary specimens remain intact: a complete
+127-byte path and canonical IPv6 endpoint are eligible, while an overlong path
+and noncanonical endpoint export no eligible static rules. All four now also
+run through the same artifact-claim/actual-ABI/loader consistency checks. This
+adds regression coverage to main's existing compiler-7 pin; it does not repeat
+the production compatibility fix or alter static-identity behavior.
+
+Before integration with PR #41, Go 1.26.11 validation passed with
+`GOMAXPROCS=2`, `-p 2` and `WARMOR_REQUIRE_CARGO=1`: workload/compiler/policybuild/
+WASM tests, their race suite, and the full repository suite; full-repo lint and
+the exact Go 1.26.11 formatter also passed. An initial overlapping non-race WASM
+run hit the existing 20 ms timeout-replacement test deadline under load; the
+non-overlapping uncached affected-package rerun passed without test changes.
+These results do not substitute for independent compatibility review.
+
+After merging main `ce1d5ab`, the uncached focused workload/compiler/policybuild/
+WASM tests with required real Cargo passed on Go 1.26.11 (`GOMAXPROCS=2`, `-p 2`),
+as did full-repo lint. All focused race packages passed; WASM needed a standalone
+uncached rerun after an initialization-budget deadline while lint was running.
+No timeouts were weakened and no production behavior changed relative to main.

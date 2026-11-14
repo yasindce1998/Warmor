@@ -33,5 +33,5 @@ func (e *Enforcer) ActivateAssignment(path string, policy assignment.Policy, com
 	if commit == nil {
 		return errors.New("signed assignment requires durable commit")
 	}
-	return e.activatePolicy(path, &policy, commit)
+	return e.activatePolicy(path, &policy, commit, nil)
 }
