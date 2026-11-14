@@ -187,3 +187,7 @@ Cargo required. The two test accessor edits landed before the run built the
 enforcer package; the remaining race/vet/lint phases use settled code `162587d`.
 No production code changed during validation. Logs use
 `/tmp/opencode/supervised-ce1-{full,race,vet,lint}.log`.
+
+- Sequential phase 1, `WARMOR_REQUIRE_CARGO=1 go test -count=1 -p 2 ./...`:
+  pass, including the imported compiler-7 static identity and private evidence
+  helper tests. No skip/timeout assertion or production limit was relaxed.
