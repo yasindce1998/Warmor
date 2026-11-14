@@ -333,7 +333,7 @@ func TestHandleEvent_PolicyAllow(t *testing.T) {
 	// Test allow/cache semantics, not the production 50ms latency bound. Keep
 	// evaluation bounded without turning hosted-runner scheduling into a deny.
 	// The looping-policy timeout and fail-closed tests retain their own budgets.
-	e.evaluator.SetTimeout(5 * time.Second)
+	inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 
 	event := &api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls", CgroupID: 7}
 	e.handleEvent(event)
