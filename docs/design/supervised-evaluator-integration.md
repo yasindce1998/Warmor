@@ -96,3 +96,41 @@ and event-loss tests, native non-Linux execution, restart/power-loss continuity,
 and the combined signed/atomic commit model remain open. No host-wide enforcing
 run or BPF feature/object change is claimed here. Validation commands/results
 are recorded at the final checkpoint, not inferred from this test inventory.
+
+### Local checkpoint validation
+
+Code checkpoint `480d5d6`, Linux unprivileged, **Go 1.26.11**, `GOMAXPROCS=2`,
+package parallelism **`-p 2`**:
+
+- `go test -p 2 ./...`: pass.
+- `go test -race -p 2 ./...`: pass.
+- `go test -race -p 2 ./internal/enforcer -run 'TestSupervised|TestGeneration'
+  -count=5`: pass, including real compiler-deadline and concurrent active work.
+- `go vet -p 2 ./...`: pass.
+- `golangci-lint v1.64.8 run --concurrency 2 --timeout 5m ./...`: pass. The lint
+  executable itself was built with Go 1.27.2; analysis ran with Go 1.26.11 selected.
+- `WARMOR_REQUIRE_CARGO=1 go test -p 2 ./internal/policyhost ./internal/wasm
+  -run 'TestCompiled|TestReal.*(Compiler|Cargo)|TestGenerated' -count=1`: pass;
+  actual compiler-generated metadata/decision parity tests did not skip.
+- Windows amd64 enforcer and Darwin arm64 daemon test binaries cross-compiled
+  successfully at `c1dc1dd`; no native non-Linux execution is claimed.
+- `git diff --check`: pass. No BPF C/embedded object or `go.mod`/`go.sum` delta
+  from generation base `22cc85e`. PR41 transport follow-up `0e3a2e` is not included;
+  this integration makes no claim to its separate VM evidence.
+
+Base is `22cc85e`. It contained no PR45 implementation; host base `de4065d`, lint
+fix `f394546`, metadata `d68d0af`/`48d5c41`/`c7ff006`, FD fix `84a8176`, and signed
+assignment/store dependency `d869cb5` were cherry-picked. The single real source
+conflict in `internal/wasm/staticrules.go` retained PR41's 127-byte path/UTF-8 and
+canonical endpoint validation while adopting canonical metadata types. Custom
+duplicate exports now decline optimization under the reviewed metadata contract;
+compiler-generated first-match deduplication is unchanged. Fleet sole-owner fix
+`359c75c` is included as `db63155`, preserving standalone reload and rejecting
+fleet local reload before the enforcer callback.
+
+Logs: `/tmp/opencode/supervised-{full,race,focused-race,vet,lint,cargo,`
+`cross-windows,cross-darwin}.log`. Early test failures caught fixture expectations
+for the older 254-byte JSON allowance and duplicate-export deduplication; these
+were corrected to assert the integrated conservative contract, not skipped.
+No original branch/main edits, pushes, PR/merge actions, host-wide enforcing
+tests, BPF regeneration or whole-daemon VM execution were performed.

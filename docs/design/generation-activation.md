@@ -147,20 +147,22 @@ adopts the sole backend's durable pair; no second PR38 pointer should compete.
 
 ### Shared metadata API coordination
 
-This branch deliberately introduces **no** ABI/compiler/posture metadata struct
-and does not create or modify `internal/policymeta`. Read-only inspection found
+The original generation checkpoint deliberately introduced **no**
+ABI/compiler/posture metadata struct. Its read-only inspection found
 the signed integration's `policymeta.Metadata{Compiler,DefaultAction}` custom
 section declaration (`warmor.build.v1`) and the metadata owner's
 `policymeta.Module` runtime observations plus `policymeta.Source`. They represent
 different trust statements and must be unified by their owners, not guessed from
-a third generation-specific metadata document.
+a third generation-specific metadata document. The supervised integration now
+uses the metadata owner's canonical observation/source types and separate
+`policybuild` build claims, rather than introducing a third metadata document.
 
 Generation spec building consumes the pre-existing structural surface:
 
 ```go
 type staticRulesSource interface {
-    StaticRulesProcess() wasm.StaticDomain
-    StaticRulesNetwork() wasm.StaticDomain
+    StaticRulesProcess() policymeta.StaticDomain
+    StaticRulesNetwork() policymeta.StaticDomain
 }
 // wasm.StaticDomain: { Eligible bool; Rules []compiler.StaticRule }
 ```
@@ -168,8 +170,8 @@ type staticRulesSource interface {
 The metadata branch aliases `wasm.StaticDomain = policymeta.StaticDomain`, so
 these two method signatures remain compatible. Its `policymeta.Source` also
 exposes `Metadata() Module`, field/temporal/age queries, and
-`DecisionCacheEligible`/`LinuxKernelCacheEligible`. Future supervised evaluator
-wiring should use that source's **effective trusted methods**, not raw observed
+`DecisionCacheEligible`/`LinuxKernelCacheEligible`. Supervised evaluator
+wiring uses that source's **effective trusted methods**, not raw observed
 flags or a signed build declaration as cache authorization. The later adapter in
 `supervised-evaluator-integration.md` extracts the Evaluate/Close/Source interface
 and complete backend lifetime owner. The default retains in-process pool/runtime;
