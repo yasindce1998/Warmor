@@ -33,6 +33,17 @@ jobs:
       - name: Build portable tools/stubs (not the cgo ESF backend)
         run: CGO_ENABLED=0 go build ./...
 
+      # Must execute on Darwin: cross-building cannot validate waitid ownership
+      # or XNU's zombie-only process-group EPERM behavior.
+      - name: Native Darwin compiler subprocess regressions
+        run: CGO_ENABLED=0 go test -short -count=3 ./internal/compiler
+
+      - name: Install Rust WASM target for native compiler contracts
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Native Darwin actual Cargo and WASM contracts
+        run: CGO_ENABLED=0 WARMOR_REQUIRE_CARGO=1 go test -count=1 ./internal/compiler ./internal/wasm ./cmd/warmor-compile
+
       # Go's race detector requires cgo. Enabling cgo here would also compile
       # the unverified ESF code, so do not claim a race/native backend test.
       - name: Run portable tests without race detector
