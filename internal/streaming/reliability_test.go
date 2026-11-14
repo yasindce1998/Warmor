@@ -168,12 +168,20 @@ func TestSyslogWriteDeadlineCancellationAndClose(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			writer, reader := net.Pipe() // reader deliberately never reads
 			defer reader.Close()
-			s := &SyslogSink{conn: writer, timeout: 50 * time.Millisecond}
+			entered := make(chan struct{})
+			s := &SyslogSink{conn: writeObservedConn{Conn: writer, entered: entered}, timeout: 50 * time.Millisecond}
 			defer s.Close()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan error, 1)
 			go func() { done <- s.Write(ctx, sampleEvent(1)) }()
+			// Exercise interruption after SyslogSink has installed its deadline
+			// and cancellation callback, not cancellation before Write starts.
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("syslog did not enter connection Write")
+			}
 			if mode == "cancel" {
 				cancel()
 			}
@@ -193,6 +201,16 @@ func TestSyslogWriteDeadlineCancellationAndClose(t *testing.T) {
 			}
 		})
 	}
+}
+
+type writeObservedConn struct {
+	net.Conn
+	entered chan struct{}
+}
+
+func (c writeObservedConn) Write(data []byte) (int, error) {
+	close(c.entered)
+	return c.Conn.Write(data)
 }
 
 type shortWriteConn struct{ net.Conn }
