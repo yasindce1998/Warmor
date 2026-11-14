@@ -49,9 +49,10 @@ exec tracepoint captures at most 16 arguments of 63 bytes each; LSM exec events
 do not carry argv yet. Rules cannot inspect arguments the sensor did not capture.
 Callback inputs longer than 16 KiB or containing invalid UTF-8 are treated as
 unknown, not silently truncated again. Rule order and action still apply:
-allow rules require a definite match, while deny/log rules conservatively match
-when their conditions could hold. An audit-deny stays audit-only; an earlier
-matching allow is not overridden by a later unreadable argv rule. Known unrelated
+nonblocking allow/log/audit rules require a definite match, while enforcing deny
+rules conservatively match when their conditions could hold. An uncertain audit
+or log rule is skipped, so it cannot suppress a later enforcing denial or default
+deny. An earlier definite match retains first-match precedence. Known unrelated
 conditions can still rule a match out.
 
 Policies using YAML `args` or network `operation` declare **ABI 5**, which adds
