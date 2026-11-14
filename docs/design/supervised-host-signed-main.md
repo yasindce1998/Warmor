@@ -128,6 +128,8 @@ Settled code checkpoint **`809a3ad`**:
 - `WARMOR_REQUIRE_CARGO=1 go test -count=1 -p 2 ./...`: pass, fresh full execution
   after the manifest compatibility correction; no passing claim for the earlier
   compiler-pin failure.
+- `WARMOR_REQUIRE_CARGO=1 go test -race -count=1 -p 2 ./...`: pass on the same
+  settled code checkpoint, including standalone signed and Host/manifest tests.
 - Focused signed relay/bootstrap/gates, pool identity, compiler claims, real Host
   compile deadline and metadata parity tests under `-race -count=3`: pass.
 - Complete manifest tests with `WARMOR_REQUIRE_CARGO=1 -race -count=1`: pass after
