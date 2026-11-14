@@ -1,10 +1,140 @@
 # Canary telemetry: acknowledged-revision aggregate contract
 
-**Status: proposed integration contract, not a shipped rollout gate.**
+**Status: opt-in report-only foundations implemented; not a shipped rollout gate.**
 
-This document accompanies analyzer-only hardening. It adds no heartbeat field,
+## Implemented foundations (schema 1)
+
+`internal/telemetry` now supplies a bounded one-active-revision collector and
+versioned snapshot contract. `internal/policyserver/telemetry_store.go` supplies
+the separate bounded aggregate/cursor persistence domain and report-only
+analyzer. `telemetry_http.go` verifies authenticated agent identity and the
+durable fleet acknowledgement without changing its semantics or the fleet
+snapshot schema. The older proposal below remains the safety contract and
+enablement checklist, not a statement that automatic rollback is available.
+
+- Opt in by supplying `ServerConfig.Telemetry` and `ClientConfig.Telemetry`.
+  There are **no daemon flags, automatic session negotiation, evaluator loop,
+  or rollout actuators** in this change. An embedding integration must register,
+  explicitly call `Client.AuthorizeTelemetry`, and use the **same collector**
+  with `Enforcer.ActivatePolicyTelemetry` inside its existing verified/durable
+  activation callback. Ordinary `ActivatePolicy`/local reload seals telemetry;
+  failed activation keeps the previous collector. Do not replace an activation
+  callback with a telemetry-only callback.
+- `POST /api/v1/telemetry/session` authorizes a new incarnation for the actual
+  non-admin authenticated agent. Re-registration does not renew or reset leases.
+  Agent tokens and verified mTLS identity work; insecure mode and admin tokens
+  cannot impersonate telemetry sources. Leases expire and require explicit
+  reauthorization, a policy poll, successful activation, and a fresh bootstrap.
+  Missing/revoked/old-epoch leases are not silently repaired during ingestion.
+- A policy poll with `X-Warmor-Telemetry-Epoch` and
+  `X-Warmor-Telemetry-Session` receives optional `PolicyAssignment.telemetry`:
+  `{epoch, session_id, assignment_revision}`. The latter is a monotonic integer
+  **within one authorized source session**, not a policy version or durable
+  fleet-global revision. Same artifact plus different assignment revision must
+  invoke successful activation again. Each activation gets a fresh random ID;
+  sequences remain monotonic across activation changes within the session.
+- `HeartbeatRequest.telemetry` is one optional schema-1 snapshot. Policy hash
+  reuses `policy_hash` semantics; no competing artifact identity is introduced.
+  The server records the ordinary artifact acknowledgement durably first, then
+  checks exact policy ID/version/hash, no activation error, freshness, session,
+  assignment revision, activation identity and sequence. It binds source to
+  the authenticated principal, never a payload agent ID/cohort. Telemetry errors
+  return a conflict but do not undo or invent an ordinary acknowledgement.
+  A failed/mismatched ordinary acknowledgement immediately suspends and clears
+  that source's evidence; recovery rebaselines before admitting new intervals.
+- Both telemetry support and an active non-audit rollout are required to issue
+  an eligible assignment. Old agents/servers and absent telemetry remain fully
+  supported but provide **zero canary evidence**. New clients without a session
+  still use ordinary acknowledgement behavior. Same-artifact conditional 304s
+  are suppressed only when telemetry assignment metadata must be delivered.
+- Immutable server-side assignment evidence stores rollout generation and
+  historical cohort beside the cursor. A bounded domain includes rollout,
+  policy metadata, registered agent labels, and latest durable management audit
+  sequence. Changes conservatively create a fresh random generation, even an
+  observed A -> B -> A; this intentionally over-invalidates on unrelated
+  management changes. Active-generation assignment revisions never reuse an
+  old activation. Old-generation intervals advance only the source cursor and
+  contribute to neither new cohort. No report supplies its own cohort.
+- Each source has exactly 128 aggregate buckets, one desired assignment, one
+  acknowledged activation and one cursor, not an unbounded history. The
+  registered eligible roster is independently retained per configured rollout,
+  including offline/unleased agents. Reports require all assigned sources plus
+  independently configured positive minima in **both** cohorts. A single busy
+  agent cannot masquerade as fleet coverage. Unknown rollouts cannot be
+  recreated by reports. Terminal cleanup removes evidence but retains session
+  high-water until revocation/expiry.
+- First report of a session/activation is cursor-only even if nonzero. Duplicate
+  and stale reports never contribute; conflicting equal sequences and invalid
+  cumulative/delta counters fail atomically. Sequence gaps are allowed only for
+  cumulative counters within the configured reporting gap. Ineligible/historical
+  and long-gap intervals reseed without attributing backlog. Higher unchanged
+  counters add zero. Checked `uint64` arithmetic never enters the legacy
+  analyzer's `int` counters or loops over `RecordDecision`.
+- Cursor, immutable attribution, quality state and aggregate contribution are
+  serialized into **one** bounded telemetry snapshot and published only after a
+  successful synced write/rename/directory sync. A precommit persistence failure
+  leaves both sides unchanged; ambiguous post-rename durability poisons the
+  writer. Every reopen rotates server epoch, revokes all sessions, and discards
+  windows/cursors together. There is deliberately **no cross-restart evidence
+  continuity promise**. Configuration survives but full fresh warm-up is required.
+- Receipt time uses an epoch-local monotonic elapsed timeline, not agent wall
+  time. Deltas enter the bucket containing the *previous* receipt, so their
+  whole interval expires conservatively (at most one bucket width early).
+  Reporting gap is exposed as the decision-time approximation bound. Positive
+  observation time is checked independently for both cohorts.
+- Config requires finite `[0,1]` delta, positive samples/sources/warm-up, a
+  one-second to 24-hour window, bounded positive gap, and a bounded lease.
+  Configured limits cap sources (10,000), rollouts (1,024), roster, snapshot bytes
+  (64 MiB), IDs (128 bytes), heartbeat body (1 MiB), and one report per request.
+  Capacity rejects rather than silently evicting an active cursor. Expired
+  leases may be replaced but a new session always bootstraps. The snapshot
+  implementation is bounded copy-on-write, not intended for high-throughput
+  fleet deployment without capacity/performance measurement.
+- `GET /api/v1/admin/telemetry?rollout_id=...` refreshes authoritative assignment
+  generation/roster and returns epoch, population, generation, per-cohort totals,
+  denied counts, fresh sources versus assigned sources, reporting-gap bound,
+  observation age, quality/pending reason and `report_only: true`. The new
+  aggregate analyzer has **no automatic rollback setting or abort reference**.
+  The legacy trusted-local analyzer is unchanged and is not fed remote events.
+
+### Population and trust limits
+
+`userspace-policy-decisions-v1` counts finalized successful userspace policy
+allow/deny decisions in enforcement mode, **one count per event**, including
+each userspace cache hit (not cache insertion, lifetime metrics, or cached
+`ActionResult` outcome metadata). It measures decisions, **not proven kill/block
+success**. Evaluation errors/timeouts increment `errors`, never `denied`.
+Audit/learning/log/other non-enforced decisions increment `excluded` when they
+reach this population. Known collector loss is exposed with `RecordLoss`; errors,
+excluded decisions, loss or overflow make the affected retained buckets pending.
+Kernel verdicts/default-deny fast paths, independent network/sandbox/escape
+filters and learning-mode bypasses are **outside** this population. Sensor loss
+is not completely measured or automatically wired to every sensor yet.
+
+Authentication establishes which enrolled node reported counters, not their
+truth. A compromised runtime/sensor/agent can lie about **its own** counters,
+activation, mode and loss, or reacquire its own lease. It cannot submit another
+agent's totals or manufacture another authenticated source. There is no remote
+attestation, kernel proof, cryptographic execution receipt, independent loss
+oracle, or Sybil-resistant enrollment here. Those limitations must remain
+explicit when interpreting report-only health.
+
+### Remaining automatic-rollout gate
+
+Before shipping any automatic action: wire production daemon/server lifecycle
+and sensor quality; validate trusted enrollment/attestation assumptions and the
+chosen decision population; test capacity and observability; enforce management
+generation checks at the action boundary; audit/report accepted control-plane
+abort separately from **baseline activation convergence**; and exercise real
+end-to-end activation, rollback, offline/failed-revert nodes and restart gates.
+Do not enable the existing local analyzer's `AutoRollback` with remote data.
+
+## Original integration proposal and acceptance checklist
+
+The original analyzer-only hardening described below added no heartbeat field,
 HTTP endpoint, telemetry ingestion library, evaluator loop, automatic rollback
-flag, or rollout persistence change. Manual rollout operation is unchanged.
+flag, or rollout persistence change. The implemented foundations above supersede
+those absence claims for the opt-in aggregate path. Manual rollout operation is unchanged.
 In particular, heartbeat liveness, a download, and a desired assignment are
 **not** evidence that a policy was activated. Automatic fleet rollback must stay
 disabled until the activation acknowledgement and the integration gates below
@@ -229,8 +359,9 @@ windows and cursors; late reports cannot recreate a rollout.
    publish abort-requested separately from fleet-revert-confirmed. Never mark a
    fleet rollback complete until baseline activation acknowledgements converge.
 
-No step above is completed by this analyzer patch. Do not claim the automatic
-rollout safety gate is shipped when cherry-picking it.
+The original analyzer patch completed none of these integration steps. The
+opt-in foundations now implement parts of steps 1 and 3–4 as specified above;
+they do **not** complete the automatic rollout safety gate.
 
 ## Required integration acceptance tests
 

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/drift"
+	"github.com/yasindce1998/warmor/internal/telemetry"
 )
 
 // Policy represents a versioned WASM policy with targeting rules.
@@ -67,6 +68,9 @@ type HeartbeatRequest struct {
 	// keep sending plain heartbeats. The server trusts the authenticated
 	// request identity, not Fingerprint.AgentID.
 	Fingerprint *drift.BehaviorFingerprint `json:"fingerprint,omitempty"`
+	// Telemetry is optional evidence, never a substitute for the activation
+	// acknowledgement above. Legacy agents contribute no canary evidence.
+	Telemetry *telemetry.Snapshot `json:"telemetry,omitempty"`
 }
 
 // PolicyAssignment is returned to an agent with its applicable policy.
@@ -79,7 +83,8 @@ type PolicyAssignment struct {
 	// Signature is the raw ed25519 signature over the WASM bytes, filled in
 	// by Client from the SignatureHeader of the WASM download. Empty when
 	// the policy is unsigned.
-	Signature []byte `json:"-"`
+	Signature []byte                `json:"-"`
+	Telemetry *telemetry.Assignment `json:"telemetry,omitempty"`
 }
 
 // SignatureHeader carries the base64 ed25519 signature of a policy version
