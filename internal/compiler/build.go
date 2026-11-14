@@ -1,7 +1,7 @@
 package compiler
 
 import (
-	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,9 +10,13 @@ import (
 )
 
 type BuildOptions struct {
+	// Context bounds toolchain lifetime. Nil leaves the overall CLI build
+	// without a deadline; tool discovery always has its own short timeout.
+	Context    context.Context
 	OutputPath string
 	RustOnly   bool
-	Verbose    bool
+	// Verbose prints bounded tool output after the command completes.
+	Verbose bool
 }
 
 type BuildResult struct {
@@ -22,6 +26,12 @@ type BuildResult struct {
 }
 
 func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
+	if opts.Context == nil {
+		opts.Context = context.Background()
+	}
+	if err := opts.Context.Err(); err != nil {
+		return nil, err
+	}
 	rustSource, err := GenerateRust(policy)
 	if err != nil {
 		return nil, fmt.Errorf("generate rust: %w", err)
@@ -31,7 +41,7 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 		return &BuildResult{RustSource: rustSource}, nil
 	}
 
-	if err := checkCargo(); err != nil {
+	if err := checkCargoContext(opts.Context); err != nil {
 		return nil, err
 	}
 
@@ -39,6 +49,12 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			os.RemoveAll(crateDir)
+		}
+	}()
 
 	srcDir := filepath.Join(crateDir, "src")
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
@@ -59,6 +75,7 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 		return nil, fmt.Errorf("cargo build: %w", err)
 	}
 
+	succeeded = true
 	return &BuildResult{
 		WasmPath:   wasmPath,
 		RustSource: rustSource,
@@ -67,18 +84,23 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 }
 
 func checkCargo() error {
+	return checkCargoContext(context.Background())
+}
+
+func checkCargoContext(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, toolCheckTimeout)
+	defer cancel()
 	_, err := exec.LookPath("cargo")
 	if err != nil {
 		return fmt.Errorf("cargo not found in PATH. Install Rust from https://rustup.rs and run: rustup target add wasm32-unknown-unknown")
 	}
 
-	cmd := exec.Command("rustup", "target", "list", "--installed")
-	output, err := cmd.Output()
+	output, err := runTool(ctx, exec.Command("rustup", "target", "list", "--installed"))
 	if err != nil {
 		return fmt.Errorf("failed to check rust targets (is rustup installed?): %w", err)
 	}
 
-	if !strings.Contains(string(output), "wasm32-unknown-unknown") {
+	if !strings.Contains(output.stdout, "wasm32-unknown-unknown") {
 		return fmt.Errorf("wasm32-unknown-unknown target not installed. Run: rustup target add wasm32-unknown-unknown")
 	}
 
@@ -91,16 +113,14 @@ func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) 
 	cmd.Dir = crateDir
 	cmd.Env = append(os.Environ(), "CARGO_TARGET_DIR="+filepath.Join(crateDir, "target"))
 
-	var stderr bytes.Buffer
+	output, err := runTool(opts.Context, cmd)
 	if opts.Verbose {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-	} else {
-		cmd.Stderr = &stderr
+		fmt.Fprint(os.Stdout, output.stdout)
+		fmt.Fprint(os.Stderr, output.stderr)
 	}
 
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("cargo build failed: %w\n%s", err, stderr.String())
+	if err != nil {
+		return "", fmt.Errorf("cargo build failed: %w\n%s", err, output.stderr)
 	}
 
 	safeName := crateIdentifier(policyName)
@@ -127,6 +147,9 @@ func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) 
 	data, err := os.ReadFile(builtPath)
 	if err != nil {
 		return "", fmt.Errorf("read built wasm: %w", err)
+	}
+	if opts.Context != nil && opts.Context.Err() != nil {
+		return "", opts.Context.Err()
 	}
 	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
 		return "", fmt.Errorf("write output wasm: %w", err)
