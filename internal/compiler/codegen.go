@@ -671,7 +671,9 @@ func formatAnyOfBinary(fieldExpr, field string, value interface{}) string {
 	}
 	vals := make([]string, 0, len(items))
 	for _, item := range items {
-		vals = append(vals, rustString(item.(string)))
+		// GenerateRust validates operand types before reaching codegen.
+		s, _ := item.(string)
+		vals = append(vals, rustString(s))
 	}
 	return fmt.Sprintf("any_of_str(%s, &[%s])", fieldExpr, strings.Join(vals, ", "))
 }
@@ -688,7 +690,9 @@ func formatNoneOfBinary(fieldExpr, field string, value interface{}) string {
 	}
 	vals := make([]string, 0, len(items))
 	for _, item := range items {
-		vals = append(vals, rustString(item.(string)))
+		// GenerateRust validates operand types before reaching codegen.
+		s, _ := item.(string)
+		vals = append(vals, rustString(s))
 	}
 	return fmt.Sprintf("none_of_str(%s, &[%s])", fieldExpr, strings.Join(vals, ", "))
 }
