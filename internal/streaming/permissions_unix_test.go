@@ -66,7 +66,7 @@ func TestFileRecordingPermissionsUmask022(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fresh.Close()
+	defer func() { _ = fresh.Close() }()
 	info, _ := os.Stat(filepath.Join(dir, "fresh"))
 	if info.Mode().Perm() != 0600 {
 		t.Fatal(info.Mode())
@@ -81,7 +81,7 @@ func TestFileRecordingPermissionsUmask022(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s, err := NewFileSink(link, 0); err == nil {
-		s.Close()
+		_ = s.Close()
 		t.Fatal("followed symlink")
 	}
 	hard := filepath.Join(dir, "hard")
@@ -89,7 +89,7 @@ func TestFileRecordingPermissionsUmask022(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s, err := NewFileSink(hard, 0); err == nil {
-		s.Close()
+		_ = s.Close()
 		t.Fatal("accepted hardlink")
 	}
 	alias := filepath.Join(dir, "alias")
@@ -97,7 +97,7 @@ func TestFileRecordingPermissionsUmask022(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s, err := NewFileSink(filepath.Join(alias, "new"), 0); err == nil {
-		s.Close()
+		_ = s.Close()
 		t.Fatal("followed symlink directory")
 	}
 	shared := filepath.Join(dir, "shared")
@@ -108,7 +108,7 @@ func TestFileRecordingPermissionsUmask022(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s, err := NewFileSink(filepath.Join(shared, "new"), 0); err == nil {
-		s.Close()
+		_ = s.Close()
 		t.Fatal("accepted other-user-writable parent")
 	}
 	fifo := filepath.Join(dir, "fifo")
@@ -116,7 +116,7 @@ func TestFileRecordingPermissionsUmask022(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s, err := NewFileSink(fifo, 0); err == nil {
-		s.Close()
+		_ = s.Close()
 		t.Fatal("accepted nonregular recording")
 	}
 	archiveLog := filepath.Join(dir, "archive-log")
@@ -124,7 +124,7 @@ func TestFileRecordingPermissionsUmask022(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s, err := NewFileSink(archiveLog, 0); err == nil {
-		s.Close()
+		_ = s.Close()
 		t.Fatal("followed legacy archive symlink")
 	}
 	// A swapped active path must not redirect rotation/reopening into a target.
@@ -132,7 +132,7 @@ func TestFileRecordingPermissionsUmask022(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rotating.Close()
+	defer func() { _ = rotating.Close() }()
 	if err := rotating.Write(context.Background(), event); err != nil {
 		t.Fatal(err)
 	}

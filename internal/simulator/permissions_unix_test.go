@@ -40,12 +40,14 @@ func TestEventStorePermissionsUmask022(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.Close()
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
 	oldInfo, _ := os.Stat(old)
 	if oldInfo.Mode().Perm() != 0600 {
 		t.Fatal("legacy daily recording not secured")
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	for _, path := range []string{filepath.Dir(dir), dir} {
 		info, _ := os.Stat(path)
 		if info.Mode().Perm() != 0700 {
@@ -107,7 +109,7 @@ func TestEventStorePermissionsUmask022(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s, err := NewEventStore(alias); err == nil {
-		s.Close()
+		_ = s.Close()
 		t.Fatal("followed store directory symlink")
 	}
 }

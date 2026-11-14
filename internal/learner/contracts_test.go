@@ -72,6 +72,45 @@ func TestLearnRefusesUnmatchableLongPath(t *testing.T) {
 	}
 }
 
+func TestLearnValidatesRecordingEvidence(t *testing.T) {
+	ctx := context.Background()
+	for name, event := range map[string]*streaming.SecurityEvent{
+		"nil":                    nil,
+		"future schema":          {SchemaVersion: streaming.EventSchemaVersion + 1},
+		"negative schema":        {SchemaVersion: -1},
+		"missing snapshot":       {SchemaVersion: 2, EventType: "exec", Filename: "/tool"},
+		"missing legacy path":    {EventType: "file"},
+		"missing legacy addr":    {EventType: "network", Protocol: "tcp", RemotePort: 443},
+		"missing legacy proto":   {EventType: "bind", LocalPort: 80},
+		"missing typed path":     streaming.FromAPIEvent(&api.Event{Process: &api.ProcessEvent{}}, nil),
+		"missing operation":      streaming.FromAPIEvent(&api.Event{Type: api.EventTypeNetwork, Network: &api.NetworkEvent{Protocol: "tcp", RemoteAddr: "::1", RemotePort: 443}}, nil),
+		"unknown snapshot":       {SchemaVersion: 2, PolicyInput: &api.Event{Filename: "/tool"}, InputIssues: []streaming.InputIssue{{Field: "policy_input", State: "unknown"}}},
+		"unknown endpoint port":  {EventType: "bind", Protocol: "tcp", LocalPort: 80, InputIssues: []streaming.InputIssue{{Field: "network.local_port", State: "unknown"}}},
+		"unsupported typed hook": streaming.FromAPIEvent(&api.Event{Hook: "future", Process: &api.ProcessEvent{Filename: "/tool"}}, nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := NewRecorder(nil)
+			if err := r.Write(ctx, event); err == nil {
+				t.Fatal("accepted invalid recording evidence")
+			}
+			if len(r.Profiles()) != 0 {
+				t.Fatal("invalid evidence changed profiles")
+			}
+		})
+	}
+	// The evaluator snapshot wins over separately editable summaries and
+	// supplies the cgroup used by the recording filter.
+	r := NewRecorder([]uint64{42})
+	event := streaming.FromAPIEvent(&api.Event{CgroupID: 42, Process: &api.ProcessEvent{Filename: "/actual", Args: []string{}}}, nil)
+	event.Filename, event.CgroupID = "/summary", 99
+	if err := r.Write(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	if p := r.Profiles()[42]; p == nil || p.Execs["/actual"] != 1 || p.Execs["/summary"] != 0 {
+		t.Fatalf("learned editable summaries: %+v", p)
+	}
+}
+
 // Exercise actual Rust/WASM compilation and evaluation, not only YAML shape.
 func TestRecordLearnCompileReplay(t *testing.T) {
 	if !compiler.CargoAvailable() {
@@ -173,7 +212,7 @@ func compileAndReplay(t *testing.T, data []byte, recorded []*streaming.SecurityE
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer runtime.Close(ctx)
+	defer func() { _ = runtime.Close(ctx) }()
 	if err := runtime.LoadPolicy(ctx, built.WasmPath); err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +222,7 @@ func compileAndReplay(t *testing.T, data []byte, recorded []*streaming.SecurityE
 	}
 	ev := wasm.NewPolicyEvaluator(pool, "test")
 	ev.SetTimeout(10 * time.Second)
-	defer ev.Close(ctx)
+	defer func() { _ = ev.Close(ctx) }()
 	res, err := simulator.Replay(ctx, recorded, ev)
 	if err != nil {
 		t.Fatal(err)

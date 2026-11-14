@@ -74,7 +74,7 @@ func NewFileSink(path string, maxBytes int64) (*FileSink, error) {
 	// archives on startup; do not follow links or chmod unrelated sibling files.
 	archives, err := os.ReadDir(filepath.Dir(path))
 	if err != nil {
-		s.file.Close()
+		_ = s.file.Close()
 		return nil, err
 	}
 	for _, entry := range archives {
@@ -85,11 +85,11 @@ func NewFileSink(path string, maxBytes int64) (*FileSink, error) {
 		archive := filepath.Join(filepath.Dir(path), entry.Name())
 		f, err := privatefile.OpenAppend(archive, false, false)
 		if err != nil {
-			s.file.Close()
+			_ = s.file.Close()
 			return nil, fmt.Errorf("secure existing event archive: %w", err)
 		}
 		if err := f.Close(); err != nil {
-			s.file.Close()
+			_ = s.file.Close()
 			return nil, err
 		}
 	}

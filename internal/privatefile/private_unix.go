@@ -35,28 +35,28 @@ func directory(path string, privateLeaf, create bool) (int, error) {
 				next, err = unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 			}
 		}
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		if err != nil {
 			return -1, err
 		}
 		fd = next
 		var st unix.Stat_t
 		if err := unix.Fstat(fd, &st); err != nil {
-			unix.Close(fd)
+			_ = unix.Close(fd)
 			return -1, err
 		}
 		leaf := i == len(parts)-1
 		if privateLeaf && leaf {
 			if st.Uid != uint32(os.Geteuid()) {
-				unix.Close(fd)
+				_ = unix.Close(fd)
 				return -1, fmt.Errorf("recording directory is not owned by current user")
 			}
 			if err := unix.Fchmod(fd, 0700); err != nil {
-				unix.Close(fd)
+				_ = unix.Close(fd)
 				return -1, err
 			}
 		} else if (st.Uid != 0 && st.Uid != uint32(os.Geteuid())) || (st.Mode&0022 != 0 && st.Mode&unix.S_ISVTX == 0) || (leaf && st.Mode&0022 != 0) {
-			unix.Close(fd)
+			_ = unix.Close(fd)
 			return -1, fmt.Errorf("untrusted recording directory %s", path)
 		}
 	}
@@ -71,7 +71,7 @@ func OpenAppend(path string, privateDir, createDirs bool) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(dir)
+	defer func() { _ = unix.Close(dir) }()
 	fd, err := unix.Openat(dir, filepath.Base(path), unix.O_WRONLY|unix.O_APPEND|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0600)
 	if err != nil {
 		return nil, err
@@ -85,7 +85,7 @@ func OpenAppend(path string, privateDir, createDirs bool) (*os.File, error) {
 		}
 	}
 	if err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, err
 	}
 	return os.NewFile(uintptr(fd), path), nil
@@ -102,7 +102,7 @@ func Rotate(path, archive string, file *os.File) error {
 	if err != nil {
 		return err
 	}
-	defer unix.Close(dir)
+	defer func() { _ = unix.Close(dir) }()
 	var actual, expected unix.Stat_t
 	if err := unix.Fstat(int(file.Fd()), &expected); err != nil {
 		return err

@@ -89,13 +89,33 @@ func (r *Recorder) Write(_ context.Context, event *streaming.SecurityEvent) erro
 	if r.filter != nil && !r.filter[event.CgroupID] {
 		return nil
 	}
+	if event.PolicyInput != nil {
+		switch event.PolicyInput.Hook {
+		case "", "exec", "file", "connect", "bind", "listen", "mount", "ptrace", "connect_unix":
+		default:
+			return fmt.Errorf("cannot learn unsupported event hook %q", event.PolicyInput.Hook)
+		}
+	}
 	for _, issue := range issues {
 		if issue.State == "redacted" || issue.State == "truncated" {
 			return fmt.Errorf("cannot learn from %s input %s", issue.State, issue.Field)
 		}
 		switch issue.Field {
-		case "filename", "process.filename", "file.path", "network.operation", "network.protocol", "network.remote_addr":
+		case "policy_input", "filename", "process.filename", "file.path", "network", "network.operation", "network.protocol", "network.remote_addr", "network.remote_port", "network.local_port":
 			return fmt.Errorf("cannot learn from incomplete target input %s", issue.Field)
+		}
+	}
+	switch event.EventType {
+	case "exec", "file":
+		if event.Filename == "" {
+			return fmt.Errorf("cannot learn from missing target path")
+		}
+	case "network", "bind", "listen":
+		if event.Protocol == "" || (event.EventType == "network" && event.RemoteAddr == "") {
+			return fmt.Errorf("cannot learn from missing network endpoint or protocol")
+		}
+		if event.PolicyInput != nil && (event.PolicyInput.Network == nil || event.PolicyInput.Network.Operation == "") {
+			return fmt.Errorf("cannot learn from missing network operation")
 		}
 	}
 

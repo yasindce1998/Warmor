@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -67,3 +68,35 @@ func TestReplayIncompleteEvidenceAndVersion(t *testing.T) {
 		t.Fatal("accepted unknown future schema")
 	}
 }
+
+func TestLegacyReplayEstimatesAndValidation(t *testing.T) {
+	ev := newTestEvaluator(t)
+	for _, version := range []int{0, 1, 2} {
+		event := &streaming.SecurityEvent{SchemaVersion: version, EventType: "bind", Protocol: "tcp", LocalPort: 80, Decision: "deny"}
+		input := securityEventToAPIEvent(event)
+		if input.Hook != "bind" || input.Network == nil || input.Network.Operation != "connect" {
+			t.Fatalf("historical evaluator fallback lost: %+v", input)
+		}
+		res, err := Replay(context.Background(), []*streaming.SecurityEvent{event}, ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.WouldAllow != 1 || res.IncompleteEvents != 1 || len(res.Warnings) == 0 {
+			t.Fatalf("schema %d missing estimate warning: %+v", version, res)
+		}
+	}
+	for _, event := range []*streaming.SecurityEvent{nil, {SchemaVersion: -1}, {SchemaVersion: streaming.EventSchemaVersion + 1}} {
+		if _, err := Replay(context.Background(), []*streaming.SecurityEvent{event}, ev); err == nil {
+			t.Fatal("accepted unsupported recorded event")
+		}
+	}
+	// A writer failure must not appear to be a successfully emitted report.
+	want := errors.New("report destination failed")
+	if err := FormatText(failingReportWriter{want}, &SimulationResult{IncompleteEvents: 1}); !errors.Is(err, want) {
+		t.Fatalf("report error = %v, want %v", err, want)
+	}
+}
+
+type failingReportWriter struct{ err error }
+
+func (w failingReportWriter) Write([]byte) (int, error) { return 0, w.err }

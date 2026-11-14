@@ -18,6 +18,13 @@ func FormatJSON(w io.Writer, result *SimulationResult) error {
 
 // FormatText writes a human-readable simulation report.
 func FormatText(w io.Writer, result *SimulationResult) error {
+	var output strings.Builder
+	formatText(&output, result)
+	_, err := io.WriteString(w, output.String())
+	return err
+}
+
+func formatText(w *strings.Builder, result *SimulationResult) {
 	fmt.Fprintf(w, "Policy Simulation Report\n")
 	fmt.Fprintf(w, "========================\n\n")
 	fmt.Fprintf(w, "Events replayed: %d\n", result.TotalEvents)
@@ -75,8 +82,6 @@ func FormatText(w io.Writer, result *SimulationResult) error {
 			fmt.Fprintf(w, "No new allows — all previously-denied events remain denied.\n\n")
 		}
 	}
-
-	return nil
 }
 
 func pct(n, total int) float64 {

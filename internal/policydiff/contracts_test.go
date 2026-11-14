@@ -37,3 +37,18 @@ func TestDiffImplicitDefaultAndInsertion(t *testing.T) {
 		t.Fatalf("false change: %+v", r)
 	}
 }
+
+func TestDiffReportsVariableAdditionRemovalAndTemporalChange(t *testing.T) {
+	a := &policymerge.PolicyYAML{Variables: map[string]any{"removed": "old"}, Rules: []policymerge.RuleYAML{{Name: "window", Event: "process", Action: "deny"}}}
+	b := &policymerge.PolicyYAML{Variables: map[string]any{"added": "new"}, Rules: []policymerge.RuleYAML{{Name: "window", Event: "process", Action: "deny", Temporal: map[string]any{"max_container_age": "5m"}}}}
+	r := Diff(a, b)
+	if len(r.Variables) != 2 || len(r.Changed) != 1 {
+		t.Fatalf("missing semantic notices: %+v", r)
+	}
+	output := FormatDetailed(r, "a", "b")
+	for _, want := range []string{`Variable added: <absent> -> "new"`, `Variable removed: "old" -> <absent>`, "temporal none ->", "not a proof of decision equivalence"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("missing %q in %s", want, output)
+		}
+	}
+}

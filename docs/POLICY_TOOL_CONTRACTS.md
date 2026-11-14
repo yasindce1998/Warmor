@@ -84,6 +84,14 @@ inputs incomplete before JSON replaces bytes. The learner refuses incomplete
 target paths/endpoints. Replay/learning do not prove coverage of unobserved
 behavior, workload identities, future events, or real kernel enforcement.
 
+Recorded `enforced`, `enforcement_attempted`, `enforcement_error`, `audit_only`,
+and `kernel_enforced` describe the **historical action outcome**, independently
+of `decision`. They survive private file/store recording unchanged. Replay
+compares policy decisions only: a refused/failed termination or audit denial is
+still a recorded deny, not evidence that the operation was actually prevented.
+Replay never sends signals or changes the recorded outcome. Candidate decisions
+do not predict whether a live termination would succeed.
+
 ## Diff and merge
 
 Files are validated with the real compiler parser before diff/merge loads them.

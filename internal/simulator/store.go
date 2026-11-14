@@ -40,7 +40,7 @@ func NewEventStore(dir string) (*EventStore, error) {
 	// leave previously captured credentials exposed after an upgrade.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		s.file.Close()
+		_ = s.file.Close()
 		return nil, err
 	}
 	for _, entry := range entries {
@@ -52,11 +52,11 @@ func NewEventStore(dir string) (*EventStore, error) {
 		}
 		f, err := privatefile.OpenAppend(filepath.Join(dir, entry.Name()), true, false)
 		if err != nil {
-			s.file.Close()
+			_ = s.file.Close()
 			return nil, fmt.Errorf("secure existing event recording: %w", err)
 		}
 		if err := f.Close(); err != nil {
-			s.file.Close()
+			_ = s.file.Close()
 			return nil, err
 		}
 	}
