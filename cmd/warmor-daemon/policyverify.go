@@ -103,14 +103,19 @@ func (s policyRevisionStager) updateHandler(policyPath string, activate func(str
 	var pendingID string
 	return func(a *policyserver.PolicyAssignment, data []byte) error {
 		id := fmt.Sprintf("%s/%d/%s", a.PolicyID, a.Version, a.WASMHash)
-		if pending != nil && id != pendingID {
-			return fmt.Errorf("%w: resolve previous revision before accepting a new assignment", enforcer.ErrActivationPending)
+		if pending != nil {
+			// Resolve the old live commit even if the desired assignment has
+			// changed. Never acknowledge that recovery as the NEW assignment.
+			if err := activate(pending.modulePath, pending.commit); err != nil {
+				return err
+			}
+			pending.discard()
+			pending = nil
+			if id == pendingID {
+				return nil
+			}
 		}
-		r := pending
-		var err error
-		if r == nil {
-			r, err = s.stage(policyPath, a, data)
-		}
+		r, err := s.stage(policyPath, a, data)
 		if err == nil {
 			err = activate(r.modulePath, r.commit)
 			if errors.Is(err, enforcer.ErrActivationPending) {

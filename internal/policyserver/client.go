@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -234,7 +235,19 @@ func (c *Client) pollOnce(ctx context.Context) error {
 	if c.onUpdate == nil {
 		return fmt.Errorf("policy activation callback is required")
 	}
+	// The callback may cross an irreversible live kernel commit before its
+	// durable/drain work finishes. While it runs, neither old nor new identity
+	// is a safe active acknowledgement. Restore old only for precommit failure.
+	c.mu.Lock()
+	c.policyID, c.policyHash, c.policyVersion = "", "", 0
+	c.mu.Unlock()
 	if err := c.onUpdate(&assignment, wasmData); err != nil {
+		var uncertain interface{ ActivationUncertain() bool }
+		if !errors.As(err, &uncertain) || !uncertain.ActivationUncertain() {
+			c.mu.Lock()
+			c.policyID, c.policyHash, c.policyVersion = id, digest, version
+			c.mu.Unlock()
+		}
 		return fmt.Errorf("activate policy %s v%d: %w", activeID, activeVersion, err)
 	}
 
