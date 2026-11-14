@@ -1,6 +1,7 @@
 package policyserver
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"net/http"
@@ -10,6 +11,33 @@ import (
 
 	"github.com/yasindce1998/warmor/internal/crypto"
 )
+
+type principalKey struct{}
+
+// authenticatedPrincipal is server-derived; body/query identities must
+// never override it. Certificates use their verified leaf CommonName,
+// matching the certificates issued by warmor's current tooling.
+type authenticatedPrincipal struct {
+	subject string
+	admin   bool
+}
+
+func authorizeAgent(w http.ResponseWriter, r *http.Request, agentID string) bool {
+	p, ok := r.Context().Value(principalKey{}).(authenticatedPrincipal)
+	if !ok {
+		unauthorized(w, "authenticated agent identity required")
+		return false
+	}
+	if p.admin {
+		// Admin token or explicitly unauthenticated development mode.
+		return true
+	}
+	if p.subject != agentID {
+		http.Error(w, "agent identity does not match authenticated principal", http.StatusForbidden)
+		return false
+	}
+	return true
+}
 
 // JWT roles accepted by the server.
 const (
@@ -68,8 +96,14 @@ func (s *Server) requireRuntime(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) requireAuth(allowCert bool, roles []string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if allowCert && r.TLS != nil && len(r.TLS.VerifiedChains) > 0 {
-			next(w, r)
+		if allowCert && r.Header.Get("Authorization") == "" && r.TLS != nil && len(r.TLS.VerifiedChains) > 0 {
+			chain := r.TLS.VerifiedChains[0]
+			if len(chain) == 0 || chain[0].Subject.CommonName == "" {
+				unauthorized(w, "client certificate must have an agent identity CommonName")
+				return
+			}
+			p := authenticatedPrincipal{subject: chain[0].Subject.CommonName}
+			next(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
 			return
 		}
 
@@ -77,7 +111,8 @@ func (s *Server) requireAuth(allowCert bool, roles []string, next http.HandlerFu
 			// Without a JWT secret there is no way to present credentials
 			// other than a client certificate.
 			if s.insecure {
-				next(w, r)
+				p := authenticatedPrincipal{admin: true}
+				next(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
 				return
 			}
 			unauthorized(w, "authentication required")
@@ -100,8 +135,13 @@ func (s *Server) requireAuth(allowCert bool, roles []string, next http.HandlerFu
 			http.Error(w, strings.Join(roles, " or ")+" role required", http.StatusForbidden)
 			return
 		}
+		if claims.Subject == "" {
+			unauthorized(w, "token subject is required")
+			return
+		}
 
-		next(w, r)
+		p := authenticatedPrincipal{subject: claims.Subject, admin: claims.Role == RoleAdmin}
+		next(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
 	}
 }
 

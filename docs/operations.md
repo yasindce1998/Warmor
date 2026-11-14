@@ -54,6 +54,18 @@ file. The server refuses to start without authentication. Supported modes:
 
 Mutual TLS between agents and the policy server:
 
+**Agent identity is credential-bound:** a JWT's `sub`, or the verified client
+certificate's CommonName, must exactly equal `--agent-id` (hostname if omitted).
+Use a unique credential per node. Shared generic certificates/tokens that
+previously registered under arbitrary IDs must be replaced before upgrading.
+The starter certificate produced by the TUI has CommonName `warmor-agent`; it
+identifies only that agent ID, not an entire fleet. Admin JWTs retain administrative
+cross-agent access. An agent can download only its currently assigned revision.
+Registration labels are still agent-reported, not attested workload identity.
+When both an Authorization header and a client certificate are supplied, the
+bearer token determines API identity/role; an invalid token is not bypassed by
+falling back to the certificate.
+
 ```bash
 # Server (agents authenticate with client certificates; the admin API
 # requires an admin JWT signed with --jwt-secret)
@@ -71,7 +83,8 @@ warmor-daemon \
   --server https://warmor-server:8443 \
   --tls-cert ./certs/agent-01.crt \
   --tls-key ./certs/agent-01.key \
-  --tls-ca ./certs/ca.crt
+  --tls-ca ./certs/ca.crt \
+  --agent-id agent-01  # certificate CommonName must be agent-01
 ```
 
 `--ca-cert`, `--tls-cert` and `--tls-key` must be supplied as a consistent

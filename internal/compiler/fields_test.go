@@ -71,3 +71,20 @@ func TestFieldBit_EveryConditionFieldHasABit(t *testing.T) {
 		t.Error("unknown fields must map to FieldsUnknown")
 	}
 }
+
+func TestGeneratedABIRequiresCallbackSupportOnlyWhenUsed(t *testing.T) {
+	for _, tc := range []struct{ event, field, value, version string }{
+		{"process", "path", "/bin/tool", "3"},
+		{"process", "args", "--flag", "5"},
+		{"network", "operation", "connect", "5"},
+	} {
+		p := &Policy{Name: "abi", Version: 1, Rules: []Rule{{Name: "r", Event: tc.event, Action: "deny", Conditions: Conditions{All: []Condition{{Field: tc.field, Operator: "eq", Value: tc.value}}}}}}
+		src, err := GenerateRust(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(src, "fn abi_version() -> u32 {\n    "+tc.version) {
+			t.Fatalf("%s policy has wrong ABI declaration", tc.field)
+		}
+	}
+}

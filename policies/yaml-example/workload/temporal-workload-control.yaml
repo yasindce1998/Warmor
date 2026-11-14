@@ -32,10 +32,9 @@ rules:
     conditions:
       all:
         - path: { any_of: $init_only_binaries }
-    time_constraints:
+    temporal:
       max_container_age: 60s
-      action_outside_window: deny
-    action: allow
+    action: deny
     reason: "Package install allowed only during container initialization"
 
   # Database maintenance only during off-hours (02:00-05:00 UTC)
@@ -44,13 +43,11 @@ rules:
     conditions:
       all:
         - path: { any_of: $maintenance_tools }
-    time_constraints:
+    temporal:
       time_of_day:
-        start: "02:00"
-        end: "05:00"
-        timezone: "UTC"
-      action_outside_window: deny
-    action: allow
+        start: { hour: 2, minute: 0 }
+        end: { hour: 5, minute: 0 }
+    action: deny
     reason: "Database maintenance restricted to 02:00-05:00 UTC window"
 
   # Cron jobs restricted to weekdays only
@@ -59,35 +56,31 @@ rules:
     conditions:
       all:
         - path: { any_of: $cron_binaries }
-    time_constraints:
+    temporal:
       days_of_week: ["monday", "tuesday", "wednesday", "thursday", "friday"]
-      action_outside_window: deny
-    action: allow
+    action: deny
     reason: "Cron execution restricted to weekdays"
 
-  # Block all new network connections after container is 5 minutes old
-  # (short-lived init containers should not make new connections after startup)
+  # Log new network connections after the first 5 minutes (not a blocking rule).
   - name: init-container-network-lockdown
     event: network
     conditions:
       all:
         - remote_port: { gt: 0 }
-    time_constraints:
+    temporal:
       max_container_age: 300s
-      action_outside_window: log
-    action: allow
+    action: log
     reason: "Network activity after init period (potential compromise)"
 
-  # Block process forking after initial startup (immutable workload pattern)
+  # Block temp-path executions after initial startup (not a fork hook).
   - name: immutable-after-startup
     event: process
     conditions:
       all:
         - path: { glob: "/tmp/**" }
-    time_constraints:
+    temporal:
       max_container_age: 30s
-      action_outside_window: deny
-    action: allow
+    action: deny
     reason: "Temp execution blocked after startup window"
 
 default_action: allow

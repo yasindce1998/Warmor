@@ -1,7 +1,9 @@
 package compiler
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -18,8 +20,13 @@ func ParseFile(path string) (*Policy, error) {
 
 func Parse(data []byte) (*Policy, error) {
 	var raw rawPolicy
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse YAML: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, fmt.Errorf("parse YAML: expected exactly one YAML document")
 	}
 
 	policy := &Policy{
@@ -131,8 +138,6 @@ func parseCondition(entry map[string]interface{}, variables map[string]interface
 		value = v
 	}
 
-	value = resolveVariables(value, variables)
-
 	cond := &Condition{Field: field}
 
 	switch v := value.(type) {
@@ -145,7 +150,11 @@ func parseCondition(entry map[string]interface{}, variables map[string]interface
 		cond.Value = val
 	default:
 		cond.Operator = "eq"
-		cond.Value = value
+		var err error
+		cond.Value, err = resolveVariables(value, variables)
+		if err != nil {
+			return nil, fmt.Errorf("field %q: %w", field, err)
+		}
 	}
 
 	return cond, nil
@@ -157,7 +166,11 @@ func extractOperator(m map[string]interface{}, variables map[string]interface{})
 	}
 
 	for op, val := range m {
-		val = resolveVariables(val, variables)
+		var err error
+		val, err = resolveVariables(val, variables)
+		if err != nil {
+			return "", nil, err
+		}
 		switch op {
 		case "eq", "not", "any_of", "none_of", "glob", "gt", "lt", "gte", "lte", "starts_with", "contains":
 			return op, val, nil
@@ -168,23 +181,42 @@ func extractOperator(m map[string]interface{}, variables map[string]interface{})
 	return "", nil, fmt.Errorf("empty operator")
 }
 
-func resolveVariables(value interface{}, variables map[string]interface{}) interface{} {
+func resolveVariables(value interface{}, variables map[string]interface{}) (interface{}, error) {
+	return resolveVariable(value, variables, make(map[string]bool))
+}
+
+func resolveVariable(value interface{}, variables map[string]interface{}, visiting map[string]bool) (interface{}, error) {
 	switch v := value.(type) {
 	case string:
+		if strings.HasPrefix(v, "$$") {
+			return v[1:], nil // Explicit escape for a literal leading dollar.
+		}
 		if strings.HasPrefix(v, "$") {
 			varName := v[1:]
-			if resolved, ok := variables[varName]; ok {
-				return resolved
+			resolved, ok := variables[varName]
+			if !ok {
+				return nil, fmt.Errorf("undefined variable %q (use $$ for a literal leading dollar)", varName)
 			}
+			if visiting[varName] {
+				return nil, fmt.Errorf("cyclic variable reference %q", varName)
+			}
+			visiting[varName] = true
+			result, err := resolveVariable(resolved, variables, visiting)
+			delete(visiting, varName)
+			return result, err
 		}
-		return v
+		return v, nil
 	case []interface{}:
 		resolved := make([]interface{}, len(v))
 		for i, item := range v {
-			resolved[i] = resolveVariables(item, variables)
+			var err error
+			resolved[i], err = resolveVariable(item, variables, visiting)
+			if err != nil {
+				return nil, fmt.Errorf("[%d]: %w", i, err)
+			}
 		}
-		return resolved
+		return resolved, nil
 	default:
-		return value
+		return value, nil
 	}
 }

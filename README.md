@@ -119,7 +119,7 @@ no Rust crate under `policies/` does yet.
 
 ### Policy Engine
 
-- **YAML DSL** — Declarative rules with glob matching, variables and conditions, compiled by `warmor-compile` (needs `cargo` and the `wasm32-unknown-unknown` target). Unknown keys are silently ignored, so check rules with `--rust-only` if in doubt.
+- **YAML DSL** — Declarative rules with glob matching, variables and conditions, compiled by `warmor-compile` (needs `cargo` and the `wasm32-unknown-unknown` target). Validation rejects unknown keys, unresolved variables, duplicate rule names, invalid operand types and numeric overflow. YAML argv and network-operation rules use ABI 5; upgrade agents before deploying newly compiled policies using those fields.
 - **Rust WASM** — Full Rust policies compiled to `wasm32-unknown-unknown` for complex logic
 - **Hot-Reload** — SIGHUP swaps the WASM module without a restart. Kernel map entries from the old policy are not cleared yet.
 - **Two-Tier Cache** — A userspace decision cache, plus the kernel policy map for exec and connect decisions

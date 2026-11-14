@@ -57,9 +57,10 @@ func TestRenderPolicy_RejectsInvalidActions(t *testing.T) {
 func TestRenderPolicy_NamespacesVariables(t *testing.T) {
 	cr := testCR("alpha", func(s *WarmorPolicySpec) {
 		s.Variables = map[string]any{"blocked_bins": []any{"/usr/bin/nc"}}
+		s.Variables["alias"] = "$blocked_bins"
 		s.Rules[0].Conditions.All = []map[string]any{
-			{"path": map[string]any{"any_of": "$blocked_bins"}},
-			{"comm": "$unknown_stays_literal"},
+			{"path": map[string]any{"any_of": "$alias"}},
+			{"comm": "$$unknown_stays_literal"},
 		}
 	})
 	rendered, err := renderPolicy(cr)
@@ -77,11 +78,11 @@ func TestRenderPolicy_NamespacesVariables(t *testing.T) {
 	if !ok {
 		t.Fatalf("path condition = %T, want a map", rendered.Rules[0].Conditions.All[0]["path"])
 	}
-	if glob["any_of"] != "$alpha__blocked_bins" {
+	if glob["any_of"] != "$alpha__alias" {
 		t.Errorf("any_of = %v, want the namespaced reference", glob["any_of"])
 	}
 	comm := rendered.Rules[0].Conditions.All[1]["comm"]
-	if comm != "$unknown_stays_literal" {
+	if comm != "$$unknown_stays_literal" {
 		t.Errorf("unknown $ref = %v, want it untouched", comm)
 	}
 

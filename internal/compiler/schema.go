@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/yasindce1998/warmor/internal/temporal"
 )
@@ -69,7 +70,12 @@ func (p *Policy) Validate() error {
 	if !isValidAction(p.DefaultAction) {
 		return fmt.Errorf("invalid default_action %q (must be allow, deny, or log)", p.DefaultAction)
 	}
+	names := make(map[string]bool, len(p.Rules))
 	for i, rule := range p.Rules {
+		if names[rule.Name] {
+			return fmt.Errorf("rule[%d]: duplicate rule name %q", i, rule.Name)
+		}
+		names[rule.Name] = true
 		if err := rule.Validate(); err != nil {
 			return fmt.Errorf("rule[%d] %q: %w", i, rule.Name, err)
 		}
@@ -129,6 +135,67 @@ func (c *Condition) Validate(eventType string) error {
 	if !found {
 		return fmt.Errorf("field %q is not valid for event type %q", c.Field, eventType)
 	}
+	switch c.Operator {
+	case "eq", "not", "any_of", "none_of":
+	case "gt", "lt", "gte", "lte":
+		if !isNumericField(c.Field) {
+			return fmt.Errorf("operator %q is not supported for string field %q", c.Operator, c.Field)
+		}
+	case "glob", "starts_with", "contains":
+		if isNumericField(c.Field) {
+			return fmt.Errorf("operator %q is not supported for numeric field %q", c.Operator, c.Field)
+		}
+	default:
+		return fmt.Errorf("unknown operator %q", c.Operator)
+	}
+	if c.Operator == "any_of" || c.Operator == "none_of" {
+		var items []interface{}
+		switch v := c.Value.(type) {
+		case []interface{}:
+			items = v
+		case []string:
+			for _, s := range v {
+				items = append(items, s)
+			}
+		}
+		if len(items) == 0 {
+			return fmt.Errorf("field %q: %s requires a non-empty list", c.Field, c.Operator)
+		}
+		for i, item := range items {
+			if err := validateConditionValue(c.Field, item); err != nil {
+				return fmt.Errorf("%s[%d]: %w", c.Operator, i, err)
+			}
+		}
+		return nil
+	}
+	return validateConditionValue(c.Field, c.Value)
+}
+
+func validateConditionValue(field string, value interface{}) error {
+	if !isNumericField(field) {
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("field %q requires a string, got %v", field, value)
+		}
+		return nil
+	}
+	maxValue := uint64(math.MaxUint32)
+	if field == "remote_port" || field == "local_port" {
+		maxValue = math.MaxUint16
+	}
+	valid := false
+	switch n := value.(type) {
+	case int:
+		valid = n >= 0 && uint64(n) <= maxValue
+	case int64:
+		valid = n >= 0 && uint64(n) <= maxValue
+	case uint64:
+		valid = n <= maxValue
+	case float64:
+		valid = n >= 0 && n <= float64(maxValue) && math.Trunc(n) == n
+	}
+	if !valid {
+		return fmt.Errorf("field %q requires an unsigned integer in [0, %d], got %v", field, maxValue, value)
+	}
 	return nil
 }
 
@@ -156,4 +223,4 @@ func isValidEvent(event string) bool {
 // Version identifies the YAML-to-WASM compiler. Bump it whenever the output
 // for an unchanged YAML policy changes (codegen, ABI or build settings), so
 // cached compiled policies are rebuilt.
-const Version = "4"
+const Version = "5"

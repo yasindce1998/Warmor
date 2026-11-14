@@ -21,15 +21,17 @@ import (
 //	4  adds process context: JSON cgroup_id (all types), parent_comm and
 //	   args (PROCESS) and direction (NETWORK); see ProcessContextABIVersion
 //	   and docs/design/abi-v4-process-context.md
+//	5  adds argv host callback (field 15) and zero-capacity string-length
+//	   queries, used by compiled YAML args/network operation conditions
 //
-// All versions use the same wire format; versions 3 and 4 only fill bytes
-// that were padding and add JSON keys, and only for modules declaring
-// them. The host rejects anything outside this range so a policy built
+// The binary struct layout is unchanged; versions 3 and 4 fill padding/add
+// JSON keys, and version 5 extends host callbacks. The host rejects anything
+// outside this range so a policy built
 // for a future, incompatible contract fails loudly at load time instead
 // of silently mis-evaluating every event.
 const (
 	MinABIVersion uint32 = 1
-	MaxABIVersion uint32 = 4
+	MaxABIVersion uint32 = 5
 )
 
 // ProcessContextABIVersion is the first policy ABI version whose modules

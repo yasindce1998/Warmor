@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"context"
+	"strings"
 
 	"github.com/tetratelabs/wazero"
 	wazeroapi "github.com/tetratelabs/wazero/api"
@@ -33,6 +34,7 @@ const (
 	FieldOperation  uint32 = 12
 	FieldProtocol   uint32 = 13
 	FieldRemoteAddr uint32 = 14
+	FieldArgs       uint32 = 15
 )
 
 func registerHostCallbacks(ctx context.Context, r wazero.Runtime) error {
@@ -102,11 +104,17 @@ func hostGetFieldStr(ctx context.Context, m wazeroapi.Module, fieldID, bufPtr, b
 		if event.Network != nil {
 			value = event.Network.RemoteAddr
 		}
+	case FieldArgs:
+		value = eventArgs(event)
 	default:
 		return 0
 	}
 
-	if len(value) == 0 {
+	// A zero-capacity call queries the required byte length without writing.
+	if bufLen == 0 {
+		return uint32(len(value))
+	}
+	if value == "" {
 		return 0
 	}
 
@@ -119,6 +127,15 @@ func hostGetFieldStr(ctx context.Context, m wazeroapi.Module, fieldID, bufPtr, b
 		return 0
 	}
 	return uint32(len(data))
+}
+
+// YAML args conditions use the space-joined argv, including argv[0]. This
+// is not shell parsing: quotes and argument boundaries are not synthesized.
+func eventArgs(event *api.Event) string {
+	if event.Process == nil {
+		return ""
+	}
+	return strings.Join(event.Process.Args, " ")
 }
 
 func getEventPath(event *api.Event) string {

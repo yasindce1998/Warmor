@@ -166,6 +166,17 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	if opts == nil {
 		opts = &Options{}
 	}
+	// Normalize once before loading any hooks. Audit/learning are global
+	// dry runs, including independent integrity enforcement. Copy options
+	// so the caller's requested posture remains unchanged.
+	effective := *opts
+	if effective.AuditMode || effective.LearningMode {
+		effective.LSMEnforce = false
+		if effective.IntegrityMode == "enforce" {
+			effective.IntegrityMode = "audit"
+		}
+	}
+	opts = &effective
 
 	port := opts.MetricsPort
 	if port == 0 {
@@ -184,6 +195,9 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	}
 	logger := logging.NewLogger(logLevel)
 	logger.LogStartup(policyPath)
+	if opts.AuditMode || opts.LearningMode {
+		logger.LogInfo("Dry-run posture: kernel blocking and userspace termination disabled; integrity checks audit-only")
+	}
 
 	// Initialize network filter if configured. This only validates config,
 	// so do it before acquiring the platform, WASM runtime, pool or pipeline
@@ -232,6 +246,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		LSMEnforce:   opts.LSMEnforce,
 		RequireLSM:   opts.RequireLSM,
 		SkipLSM:      opts.SkipLSM,
+		AuditMode:    opts.AuditMode || opts.LearningMode,
 
 		IntegrityMode:    opts.IntegrityMode,
 		IntegrityDigests: opts.IntegrityDigests,

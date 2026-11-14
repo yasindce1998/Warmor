@@ -120,7 +120,7 @@ func (e *Enforcer) preloadDomain(dd defaultDenySyncer, eventType uint8, name str
 // the global (cgroup_id = 0) domain, keyed exactly as the BPF programs look
 // it up.
 func (e *Enforcer) preloadStaticRule(r compiler.StaticRule) error {
-	audit := r.Audit
+	audit := r.Audit || e.auditMode || e.learningMode
 	action := r.Action // 0 allow, 1 deny — the policy map's encoding
 
 	switch r.Event {

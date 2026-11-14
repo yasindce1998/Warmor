@@ -165,7 +165,7 @@ func TestPolicyClientWithMTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cc, ck, err := ca.IssueCert(crypto.CertConfig{CommonName: "agent", ValidFor: time.Hour})
+	cc, ck, err := ca.IssueCert(crypto.CertConfig{CommonName: "agent-1", ValidFor: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -79,6 +79,21 @@ func TestCapabilitiesBeforeLoad(t *testing.T) {
 	}
 }
 
+func TestAuditConfigDisablesKernelBlocking(t *testing.T) {
+	p, err := New(Config{AuditMode: true, LSMEnforce: true, RequireLSM: true, IntegrityMode: "enforce"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lp, ok := p.(*LinuxPlatform)
+	if !ok {
+		t.Fatalf("platform has type %T, want *LinuxPlatform", p)
+	}
+	cfg := lp.config
+	if cfg.LSMEnforce || cfg.IntegrityMode != "audit" || !cfg.RequireLSM {
+		t.Fatalf("audit config = %+v", cfg)
+	}
+}
+
 func TestCapabilitiesReflectLSMState(t *testing.T) {
 	p := &LinuxPlatform{stopChan: make(chan struct{}), lsmEnabled: true}
 	if !p.Capabilities().LSMEnforcement {

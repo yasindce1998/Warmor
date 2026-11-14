@@ -37,6 +37,7 @@ func PolicyInputs(event *api.Event, temporal bool) [][]byte {
 	}
 	for _, s := range []string{
 		event.Comm, getEventPath(event), getEventOperation(event),
+		eventArgs(event),
 		networkField(event, func(n *api.NetworkEvent) string { return n.Protocol }),
 		networkField(event, func(n *api.NetworkEvent) string { return n.RemoteAddr }),
 	} {
