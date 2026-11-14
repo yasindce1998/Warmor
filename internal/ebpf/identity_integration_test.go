@@ -51,7 +51,11 @@ func identityTestLoader(t *testing.T) (*LSMLoader, uint64) {
 		t.Fatalf("resolve test scope: %d %v", cgid, err)
 	}
 	l := loadLSMOrSkip(t)
-	t.Cleanup(func() { l.Close() })
+	t.Cleanup(func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("close identity test loader: %v", err)
+		}
+	})
 	if err := l.SetCgroupFilter([]uint64{cgid}); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +90,11 @@ func TestLSM_ExactExecCollisionFirstMatchDefaultDenyAndScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove identity fixture: %v", err)
+		}
+	})
 	a, b := collidingExecPaths(t, dir)
 	bin, err := os.ReadFile("/bin/true")
 	if err != nil {
@@ -137,7 +145,11 @@ rules:
 	if err := pm.defaultDenyMap.Put(DefaultDenyKey{CgroupID: cgid, EventType: EventTypeExec}, uint8(DefaultDenyModeDeny)); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { pm.ClearDefaultDeny() })
+	t.Cleanup(func() {
+		if err := pm.ClearDefaultDeny(); err != nil {
+			t.Errorf("clear default-deny fixture: %v", err)
+		}
+	})
 	for i := 0; i < 2; i++ {
 		if err := exec.Command(a).Run(); err != nil {
 			t.Fatalf("first-match allow failed: %v", err)
@@ -174,7 +186,11 @@ func TestLSM_ExactAuditDeniesAreNotKernelRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove audit fixture: %v", err)
+		}
+	})
 	path := filepath.Join(dir, "audited")
 	bin, err := os.ReadFile("/bin/true")
 	if err != nil {
@@ -228,7 +244,11 @@ func TestLSM_ExactEndpointCollisionDefaultDeny(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer ln.Close()
+		t.Cleanup(func() {
+			if err := ln.Close(); err != nil {
+				t.Errorf("close collision listener: %v", err)
+			}
+		})
 	}
 	pm := l.PolicyMap()
 	if err := pm.SetEndpointRule(0, EventTypeNetwork, "127.1.156.58", 8644, ActionAllow, false); err != nil {
@@ -240,17 +260,25 @@ func TestLSM_ExactEndpointCollisionDefaultDeny(t *testing.T) {
 	if err := pm.defaultDenyMap.Put(DefaultDenyKey{CgroupID: cgid, EventType: EventTypeNetwork}, uint8(DefaultDenyModeDeny)); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { pm.ClearDefaultDeny() })
+	t.Cleanup(func() {
+		if err := pm.ClearDefaultDeny(); err != nil {
+			t.Errorf("clear endpoint default-deny fixture: %v", err)
+		}
+	})
 	for i := 0; i < 2; i++ {
 		conn, err := net.DialTimeout("tcp4", a, time.Second)
 		if err != nil {
 			t.Fatalf("colliding allow failed: %v", err)
 		}
-		conn.Close()
+		if err := conn.Close(); err != nil {
+			t.Fatal(err)
+		}
 		for _, addr := range []string{b, "127.1.156.58:8645"} {
 			conn, err := net.DialTimeout("tcp4", addr, time.Second)
 			if conn != nil {
-				conn.Close()
+				if err := conn.Close(); err != nil {
+					t.Error(err)
+				}
 			}
 			if !errors.Is(err, syscall.EPERM) {
 				t.Fatalf("connect %s = %v, want kernel EPERM", addr, err)
@@ -283,7 +311,11 @@ func TestLSM_TruncatedExecCannotHitExactAllow(t *testing.T) {
 	if err := pm.defaultDenyMap.Put(DefaultDenyKey{CgroupID: cgid, EventType: EventTypeExec}, uint8(DefaultDenyModeDeny)); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { pm.ClearDefaultDeny() })
+	t.Cleanup(func() {
+		if err := pm.ClearDefaultDeny(); err != nil {
+			t.Errorf("clear truncated-path default-deny fixture: %v", err)
+		}
+	})
 	if err := exec.Command(path).Run(); !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("truncated exec = %v, want EPERM", err)
 	}
@@ -304,8 +336,16 @@ func TestLSM_ExactIPv6AndMappedEndpointIdentities(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer ln.Close()
-			port := uint16(ln.Addr().(*net.TCPAddr).Port)
+			t.Cleanup(func() {
+				if err := ln.Close(); err != nil {
+					t.Errorf("close endpoint listener: %v", err)
+				}
+			})
+			addr, ok := ln.Addr().(*net.TCPAddr)
+			if !ok {
+				t.Fatalf("endpoint listener has unexpected address type %T", ln.Addr())
+			}
+			port := uint16(addr.Port)
 			connect := func(length uintptr) error {
 				// Force sockaddr_in6, including for mapped IPv4; net.Dial
 				// would otherwise select an IPv4 socket automatically.
@@ -313,7 +353,11 @@ func TestLSM_ExactIPv6AndMappedEndpointIdentities(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				defer syscall.Close(fd)
+				defer func() {
+					if err := syscall.Close(fd); err != nil {
+						t.Errorf("close IPv6 test socket: %v", err)
+					}
+				}()
 				var address [28]byte
 				binary.NativeEndian.PutUint16(address[:2], syscall.AF_INET6)
 				binary.BigEndian.PutUint16(address[2:4], port)

@@ -131,11 +131,13 @@ rules:
 			t.Fatal(err)
 		}
 		if err := rt.LoadPolicy(context.Background(), filepath.Join(dir, name+".wasm")); err != nil {
-			rt.Close(context.Background())
+			_ = rt.Close(context.Background()) // Preserve the policy load failure.
 			t.Fatal(err)
 		}
 		validatePreparedPolicy(t, name, rt)
-		rt.Close(context.Background())
+		if err := rt.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 		t.Logf("compiled and runtime-validated %s.wasm", name)
 	}
 	mustWrite(t, filepath.Join(dir, "watched-file"), []byte("readable without daemon\n"), 0644)
@@ -149,7 +151,11 @@ func validatePreparedPolicy(t *testing.T, name string, rt *wasm.Runtime) {
 		t.Fatal(err)
 	}
 	evaluator := wasm.NewPolicyEvaluator(pool, "outcome-prepare")
-	defer evaluator.Close(ctx)
+	defer func() {
+		if err := evaluator.Close(ctx); err != nil {
+			t.Errorf("close prepared policy evaluator: %v", err)
+		}
+	}()
 	check := func(kind api.EventType, path string, uid uint32, action api.Action, audit bool) {
 		t.Helper()
 		event := &api.Event{Type: kind, UID: uid, PID: 123, Filename: path}
@@ -246,7 +252,9 @@ func newFixture(t *testing.T) *outcomeFixture {
 	}
 	f.fd = fd
 	t.Cleanup(func() {
-		fd.Close()
+		if err := fd.Close(); err != nil {
+			t.Errorf("close fixture cgroup: %v", err)
+		}
 		markers, _ := os.ReadDir(filepath.Join(f.work, "markers"))
 		for _, marker := range markers {
 			data, err := os.ReadFile(filepath.Join(f.work, "markers", marker.Name()))
@@ -321,7 +329,7 @@ func (f *outcomeFixture) runAudited(t *testing.T, d *daemonProcess, binary, mark
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer input.Close()
+	defer func() { _ = input.Close() }() // Also closed after the release byte.
 	output, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -378,7 +386,7 @@ func waitCommand(cmd *exec.Cmd, timeout time.Duration) error {
 		return err
 	case <-time.After(timeout):
 		_ = cmd.Process.Kill()
-		<-done
+		_ = <-done // Reap cleanup only; its signal is never outcome evidence.
 		// Never return the cleanup SIGKILL as the daemon's termination proof.
 		return fmt.Errorf("timed out after %s (harness killed the child for cleanup)", timeout)
 	}
@@ -410,8 +418,15 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = listener.Close()
+		t.Fatalf("metrics listener has unexpected address type %T", listener.Addr())
+	}
+	port := addr.Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
 	d := &daemonProcess{
 		metrics: fmt.Sprintf("http://127.0.0.1:%d/metrics", port),
 		events:  filepath.Join(f.dir, name+".ndjson"), log: filepath.Join(f.dir, name+".log"),
@@ -426,7 +441,7 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 	d.cmd = exec.Command(filepath.Join(f.dir, "warmor-daemon"), append(args, flags...)...)
 	d.cmd.Stdout, d.cmd.Stderr = log, log
 	if err := d.cmd.Start(); err != nil {
-		log.Close()
+		_ = log.Close() // Preserve the daemon startup failure.
 		t.Fatal(err)
 	}
 	go func() { d.done <- d.cmd.Wait() }()
@@ -439,10 +454,12 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 			}
 		case <-time.After(outcomeTimeout):
 			_ = d.cmd.Process.Kill()
-			<-d.done
+			_ = <-d.done // Reap after timeout; the timeout remains a failure.
 			t.Errorf("daemon shutdown timed out (log %s)", d.log)
 		}
-		log.Close()
+		if err := log.Close(); err != nil {
+			t.Errorf("close daemon log: %v", err)
+		}
 		if t.Failed() {
 			data, _ := os.ReadFile(d.log)
 			t.Logf("daemon log (%s):\n%s", d.log, data)
@@ -469,7 +486,7 @@ func (d *daemonProcess) scrape() string {
 	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return ""

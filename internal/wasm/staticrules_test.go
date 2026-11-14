@@ -84,7 +84,11 @@ rules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rt.Close(ctx)
+	defer func() {
+		if err := rt.Close(ctx); err != nil {
+			t.Errorf("close static policy runtime: %v", err)
+		}
+	}()
 	if err := rt.LoadPolicyFromYAML(ctx, file); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +96,11 @@ rules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer policy.Close(ctx)
+	defer func() {
+		if err := policy.Close(ctx); err != nil {
+			t.Errorf("close static policy: %v", err)
+		}
+	}()
 	process := readStaticDomain(ctx, policy, 0)
 	network := readStaticDomain(ctx, policy, 2)
 	if !process.Eligible || len(process.Rules) != 3 || process.Rules[0].Action != 0 || process.Rules[1].Action != 1 ||
@@ -195,7 +203,11 @@ rules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rt.Close(ctx)
+	defer func() {
+		if err := rt.Close(ctx); err != nil {
+			t.Errorf("close YAML policy runtime: %v", err)
+		}
+	}()
 	if err := rt.LoadPolicyFromYAML(ctx, yamlPath); err != nil {
 		t.Fatalf("LoadPolicyFromYAML: %v", err)
 	}
@@ -203,7 +215,11 @@ rules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close(ctx)
+	defer func() {
+		if err := pool.Close(ctx); err != nil {
+			t.Errorf("close YAML policy pool: %v", err)
+		}
+	}()
 
 	// The glob rule makes the process domain ineligible; the network
 	// domain is eligible.
