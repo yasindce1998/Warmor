@@ -79,6 +79,41 @@ rules:
 	}
 }
 
+func TestStaticRulesResolvedPathsStayLiteralAndBounded(t *testing.T) {
+	// Static tables must use the parser's resolved value without cleaning paths
+	// or applying IP-style canonicalization to literal bprm filenames.
+	for _, path := range []string{"/opt/../bin/tool", "./tool", "/opt//tool", "/opt/café/tool", "/" + strings.Repeat("é", 63), "/" + strings.Repeat("é", 64), "/bin/tool\x00other"} {
+		t.Run(fmt.Sprintf("%q", path), func(t *testing.T) {
+			p := parsePolicyForTest(t, fmt.Sprintf(`name: resolved-path
+version: 1
+default_action: deny
+variables:
+  executable: %q
+rules:
+  - name: exact
+    event: process
+    conditions:
+      all:
+        - path: {eq: "$executable"}
+    action: allow
+`, path))
+			rules, why := StaticRules(p)
+			if len(path) > 127 || strings.ContainsRune(path, 0) {
+				if len(rules) != 0 || why["process"] == "" {
+					t.Fatalf("unsafe resolved path eligible: %+v %v", rules, why)
+				}
+				return
+			}
+			if len(rules) != 1 || rules[0].Pattern != path || len(why) != 0 {
+				t.Fatalf("resolved literal path changed: %+v %v", rules, why)
+			}
+			if _, err := GenerateRust(p); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func parsePolicyForTest(t *testing.T, yaml string) *Policy {
 	t.Helper()
 	p, err := Parse([]byte(yaml))

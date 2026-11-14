@@ -24,7 +24,7 @@ Host requirements: Linux amd64/arm64, Go from `go.mod`, Rust with `wasm32-unknow
 CGO_ENABLED=0 go install lmb.io/vimto@v0.4.0
 rustup target add wasm32-unknown-unknown
 # After changing BPF sources, regenerate embedded bindings with clang/libbpf:
-BPF2GO_CFLAGS=-D__TARGET_ARCH_x86 go generate ./internal/ebpf
+BPF2GO_CFLAGS='-D__TARGET_ARCH_x86 -mcpu=v1' go generate ./internal/ebpf
 bash tests/integration/run-outcomes.sh
 ```
 
@@ -53,7 +53,9 @@ bash tests/integration/run-outcomes.sh --build-only
 
 ## CI, evidence and limits
 
-`.github/workflows/enforcement-outcomes.yml` is a dedicated gate, independent of the existing workflows. It regenerates BPF bindings from the tested revision before building, then executes the outcome suite inside vimto. Logs, source policy YAML, validated WASM, build revision/toolchain information, guest kernel/LSM information, markers, NDJSON events, metrics snapshots and SHA-256 artifact hashes are retained in `tests/integration/artifacts/run.*`. Binaries and caches are not uploaded. A nonzero exit remains a failed job even when evidence is uploaded.
+`.github/workflows/enforcement-outcomes.yml` is a dedicated gate, independent of the existing workflows. It regenerates BPF bindings from the tested revision with the v1 instruction baseline before building. The runner first loads/attaches the generated objects through the VM verifier and requires non-skipped exact-identity exec/connect `EPERM` tests, then executes the whole-daemon outcome suite in a fresh vimto VM. Both runs execute the exact prepared test binaries, not a later rebuild. Hashes identify the daemon, test binaries, validated WASM, all 22 embedded BPF objects, generated Go bindings, and C sources; the outcome guest verifies the manifest before enforcement. Logs, source policy YAML, build revision/toolchain information, guest kernel/LSM information, daemon process/capability status, markers, NDJSON events, metrics snapshots and hashes are retained in `tests/integration/artifacts/run.*`. Binaries and caches are not uploaded. A nonzero exit remains a failed job even when evidence is uploaded.
+
+The nonroot termination gate assumes the daemon retains the ability to signal uid 65534 (normally `CAP_KILL`), alongside the capabilities needed to load/attach BPF. Root UID alone is insufficient evidence. Integrate and re-run the signaling/pidfd work after PR #31 lands; this branch intentionally does not import that separate batch. Capability absence, signal permission errors, pidfd failures, and cleanup kills must remain failures, never skips or substitutes for actual SIGKILL and attributed enforcement.
 
 The suite does **not** yet prove atomic successful policy activation, map-write-failure rollback, no-gap switching, restart persistence, packet-level network prevention, or protection of operations outside the tested exec/file cases. The current reload test uses only today's supported SIGHUP/invalid-candidate APIs; kernel publication fault injection belongs with the activation implementation. Startup readiness here means the event loop/metrics are reachable and the exec default-deny domain has become active; it is not proof that startup had no enforcement gap.
 

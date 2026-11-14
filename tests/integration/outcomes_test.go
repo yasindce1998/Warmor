@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -451,6 +452,14 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 		data, _ := os.ReadFile(d.log)
 		return strings.Contains(string(data), "warmor is running") && strings.Contains(d.scrape(), "warmor_ebpf_loader_status 1")
 	})
+	// Preserve effective/permitted capability masks for nonroot-signal failure
+	// diagnosis. Root identity alone is not proof of CAP_KILL; neither a missing
+	// capability nor future pidfd integration may turn SIGKILL into a skip.
+	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", d.cmd.Process.Pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(f.dir, name+"-process-status.txt"), status, 0644)
 	return d
 }
 
@@ -537,6 +546,7 @@ func (f *outcomeFixture) activePolicy(t *testing.T, name, source string) string 
 
 func TestDaemonOutcomes(t *testing.T) {
 	requireOutcomeVM(t) // Must precede any daemon start or BPF operation.
+	verifyPreparedHashes(t)
 	t.Cleanup(func() {
 		if !t.Failed() {
 			mustWrite(t, filepath.Join(artifactDir(t), "outcome-success.txt"), []byte("whole-daemon outcomes passed in vimto\n"), 0644)
@@ -629,4 +639,25 @@ func TestDaemonOutcomes(t *testing.T) {
 		// is asynchronous containment, not synchronous file-open prevention.
 		mustWrite(t, filepath.Join(f.dir, "termination.metrics"), []byte(d.scrape()), 0644)
 	})
+}
+
+func verifyPreparedHashes(t *testing.T) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(artifactDir(t), "SHA256SUMS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		digest, path, ok := strings.Cut(line, "  ")
+		if !ok || !filepath.IsAbs(path) {
+			t.Fatalf("invalid prepared artifact digest: %q", line)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprintf("%x", sha256.Sum256(content)) != digest {
+			t.Fatalf("prepared artifact changed after build: %s", path)
+		}
+	}
 }

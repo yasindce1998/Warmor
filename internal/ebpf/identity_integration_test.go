@@ -23,6 +23,12 @@ import (
 // never against an operator's host. No daemon is started.
 func identityTestLoader(t *testing.T) (*LSMLoader, uint64) {
 	t.Helper()
+	// An opt-in alone must never authorize these enforcing tests on a host.
+	// The existing lower-level CI also runs inside vimto.
+	init, err := os.Readlink("/proc/1/exe")
+	if err != nil || filepath.Base(init) != "vimto" {
+		t.Fatal("exact-identity enforcement tests require the disposable vimto VM")
+	}
 	requireRoot(t)
 	requireLSM(t)
 	cgid, err := GetPIDCgroupID(uint32(os.Getpid()))

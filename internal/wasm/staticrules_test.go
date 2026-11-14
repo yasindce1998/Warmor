@@ -21,7 +21,13 @@ func staticTestTable(pattern string, action byte, port uint16) []byte {
 // Exercise the real compiled evaluator and its static exports together: exact
 // identity changes must not change declaration-order first-match or defaults.
 func TestCompiledStaticCollisionsAndLengthBoundary(t *testing.T) {
-	if testing.Short() || !compiler.CargoAvailable() {
+	if !compiler.CargoAvailable() {
+		if os.Getenv("WARMOR_REQUIRE_CARGO") == "1" {
+			t.Fatal("cargo and wasm32-unknown-unknown target are required")
+		}
+		t.Skip("needs cargo and wasm32-unknown-unknown target")
+	}
+	if testing.Short() {
 		t.Skip("needs cargo and wasm32-unknown-unknown target")
 	}
 	a, b := "/opt/warmor/collision-000079bb", "/opt/warmor/collision-00044848"
@@ -141,7 +147,13 @@ func TestParseStaticTableIdentityContractAndFirstMatch(t *testing.T) {
 // Rust toolchain and checks the module's static-rules declaration
 // round-trips through the export ABI.
 func TestCompiledYAMLStaticRules(t *testing.T) {
-	if testing.Short() || !compiler.CargoAvailable() {
+	if !compiler.CargoAvailable() {
+		if os.Getenv("WARMOR_REQUIRE_CARGO") == "1" {
+			t.Fatal("cargo and wasm32-unknown-unknown target are required")
+		}
+		t.Skip("needs cargo and the wasm32-unknown-unknown target")
+	}
+	if testing.Short() {
 		t.Skip("needs cargo and the wasm32-unknown-unknown target")
 	}
 	ctx := context.Background()

@@ -18,6 +18,9 @@ import (
 func requireRoot(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() != 0 {
+		if os.Getenv("WARMOR_REQUIRE_BPF_LSM") == "1" {
+			t.Fatal("BPF-LSM verifier/outcome gate requires root in the VM")
+		}
 		t.Skip("requires root")
 	}
 }
@@ -25,6 +28,9 @@ func requireRoot(t *testing.T) {
 func requireLSM(t *testing.T) {
 	t.Helper()
 	if !IsLSMSupported() {
+		if os.Getenv("WARMOR_REQUIRE_BPF_LSM") == "1" {
+			t.Fatal("BPF-LSM verifier/outcome gate requires an active BPF LSM")
+		}
 		t.Skip("kernel does not have CONFIG_BPF_LSM enabled")
 	}
 }
@@ -34,11 +40,11 @@ func loadLSMOrSkip(t *testing.T) *LSMLoader {
 	loader, err := LoadLSM()
 	if err != nil {
 		errStr := err.Error()
-		if strings.Contains(errStr, "header padding") ||
+		if os.Getenv("WARMOR_REQUIRE_BPF_LSM") != "1" && (strings.Contains(errStr, "header padding") ||
 			strings.Contains(errStr, "non-zero trailer") ||
 			strings.Contains(errStr, "non-zero byte") ||
 			strings.Contains(errStr, "parsing .BTF") ||
-			strings.Contains(errStr, "load kernel spec") {
+			strings.Contains(errStr, "load kernel spec")) {
 			t.Skipf("kernel BTF incompatible with cilium/ebpf library: %v", err)
 		}
 		t.Fatalf("LoadLSM failed: %v", err)

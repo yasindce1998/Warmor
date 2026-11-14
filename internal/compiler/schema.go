@@ -223,4 +223,4 @@ func isValidEvent(event string) bool {
 // Version identifies the YAML-to-WASM compiler. Bump it whenever the output
 // for an unchanged YAML policy changes (codegen, ABI or build settings), so
 // cached compiled policies are rebuilt.
-const Version = "5"
+const Version = "6"

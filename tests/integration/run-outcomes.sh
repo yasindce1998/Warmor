@@ -10,8 +10,7 @@ usage() {
   echo 'Optional: VIMTO=/path/to/vimto KERNEL=/absolute/vmlinuz-or-OCI-reference'
 }
 BUILD_ONLY=false
-# When Go invokes the suite through -exec, vimto sees a Go test binary, not
-# this script. Both artifact binaries and repository paths stay on shared disk.
+# vimto executes the exact prepared, hashed test binaries, not a second build.
 case "${1:-}" in
   --build-only) BUILD_ONLY=true ;;
   --help|-h) usage; exit 0 ;;
@@ -43,6 +42,7 @@ export CGO_ENABLED=0
 export WARMOR_OUTCOME_ARTIFACTS="$ARTIFACTS"
 go build -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon
 go test -c -tags integration -o "$ARTIFACTS/outcomes.test" ./tests/integration
+go test -c -tags integration -o "$ARTIFACTS/kernel.test" ./internal/ebpf
 WARMOR_OUTCOME_PREPARE=1 "$ARTIFACTS/outcomes.test" \
   -test.v -test.run '^TestPrepareOutcomeArtifacts$' | tee "$ARTIFACTS/build.log"
 {
@@ -51,18 +51,27 @@ WARMOR_OUTCOME_PREPARE=1 "$ARTIFACTS/outcomes.test" \
   go version
   rustc --version
   echo "kernel=$KERNEL"
+  echo 'BPF objects below are the exact go:embed inputs used by both binaries.'
 } > "$ARTIFACTS/build-info.txt"
-sha256sum "$ARTIFACTS/warmor-daemon" "$ARTIFACTS/outcomes.test" \
-  "$ARTIFACTS/"*.wasm > "$ARTIFACTS/SHA256SUMS"
+sha256sum "$ARTIFACTS/warmor-daemon" "$ARTIFACTS/outcomes.test" "$ARTIFACTS/kernel.test" \
+  "$ARTIFACTS/"*.wasm "$ROOT"/internal/ebpf/*_bpf*.o \
+  "$ROOT"/internal/ebpf/*_bpf*.go "$ROOT"/bpf/*.bpf.c "$ROOT"/bpf/*.h > "$ARTIFACTS/SHA256SUMS"
 if "$BUILD_ONLY"; then
   echo 'BUILD ONLY: artifacts validated; no kernel prevention or termination claim.'
   exit 0
 fi
 
 # No sudo, host daemon, Docker, kind, kubectl, or host enforcement fallback.
-WARMOR_OUTCOME_VM=1 "$VIMTO" -kernel "$KERNEL" -- \
-  go test -v -count=1 -tags integration -timeout 180s \
-  -run '^TestDaemonOutcomes$' ./tests/integration | tee "$ARTIFACTS/outcomes.log"
+WARMOR_OUTCOME_VM=1 WARMOR_REQUIRE_BPF_LSM=1 "$VIMTO" -kernel "$KERNEL" exec -- \
+  "$ARTIFACTS/kernel.test" -test.v -test.count=1 -test.timeout=120s \
+  -test.run '^TestLSM_(LoadAndAttach|ExactExecCollisionFirstMatchDefaultDenyAndScope|ExactEndpointCollisionDefaultDeny|TruncatedExecCannotHitExactAllow|ExactIPv6AndMappedEndpointIdentities)$' \
+  | tee "$ARTIFACTS/verifier.log"
+for test in LoadAndAttach ExactExecCollisionFirstMatchDefaultDenyAndScope ExactEndpointCollisionDefaultDeny TruncatedExecCannotHitExactAllow ExactIPv6AndMappedEndpointIdentities; do
+  grep -q -- "^--- PASS: TestLSM_${test} " "$ARTIFACTS/verifier.log"
+done
+WARMOR_OUTCOME_VM=1 "$VIMTO" -kernel "$KERNEL" exec -- \
+  "$ARTIFACTS/outcomes.test" -test.v -test.count=1 -test.timeout=180s \
+  -test.run '^TestDaemonOutcomes$' | tee "$ARTIFACTS/outcomes.log"
 # A skipped/mis-selected suite must not turn a successful go-test exit into
 # enforcement proof. The guest writes this only after every outcome/cleanup.
 grep -qx 'whole-daemon outcomes passed in vimto' "$ARTIFACTS/outcome-success.txt"
