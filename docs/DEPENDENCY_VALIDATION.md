@@ -1,6 +1,6 @@
 # Dependency security validation — 2026-11-14
 
-Validated on branch `fix/vulnerability-dependency-updates`, created from a fresh
+Initially validated on branch `fix/vulnerability-dependency-updates`, created from a fresh
 fetch of `origin/main` at `9ea4594`. This task changes dependency pins/checksums
 and this record only; no release-workflow documents or source code are changed.
 
@@ -113,4 +113,36 @@ This validates the dependency graph, **not** all workload feature code or the
 eventual merged source. The coordinator must resolve textual go.mod/go.sum
 conflicts with these maxima and rerun full tests/scans on the integrated tree.
 
-No pushes, PRs, merges, tags, releases or deployments were performed.
+## Integrated CRI source validation
+
+After PR #35 and #37 merged, the actual integrated source was rescanned, not
+only an isolated manifest. The earlier union result above did not exercise
+the new CRI imports. That scan found six reachable advisories in `x/net` and
+gRPC, plus package/module findings; the earlier clean result must not be used
+as evidence for this integrated source.
+
+The final union retains all Kubernetes pins and protobuf, and selects:
+
+| Module | Integrated pin | Reason |
+| --- | --- | --- |
+| `google.golang.org/grpc` | `v1.83.2` | Fixes GO-2026-6348/6061/4762/6441; GO-2026-6443 also affects `v1.83.1`, so that intermediate candidate was rejected |
+| `golang.org/x/net` | `v0.62.0` | Fixes GO-2026-6617/6612/6611/6603/6610 and module findings GO-2026-6866/6860 |
+| `golang.org/x/sync` | `v0.24.0` | Required minimum selected by the fixed dependency graph |
+| `golang.org/x/sys` | `v0.49.0` | Required minimum; newer than the CRI branch's `v0.46.0`, not a downgrade |
+| `golang.org/x/text` | `v0.43.0` | Required minimum, retaining the prior security fixes |
+| `google.golang.org/genproto/googleapis/rpc` | `v0.0.0-20260526163538-3dc84a4a5aaa` | Required gRPC dependency |
+
+Published fixed versions were verified with `go list -m -json` and the Go
+advisories, including [GO-2026-6348](https://vuln.go.dev/ID/GO-2026-6348.json),
+[GO-2026-6443](https://vuln.go.dev/ID/GO-2026-6443.json) and
+[GO-2026-6866](https://vuln.go.dev/ID/GO-2026-6866.json). All are compatible with
+the tested Go 1.26.11 toolchain.
+
+On the final integrated source (main through `d3b057a` plus these pins), Linux
+AMD64, Windows AMD64 and portable Darwin ARM64 verbose source scans report
+**No vulnerabilities found**, including package/module-only findings. The full
+required-Cargo race suite passes. No findings were suppressed. Scanner/database
+versions are the same as recorded above; these results do not replace image/OS
+or native-platform validation. PR #36 requires fresh CI for this changed head.
+
+No tags, releases or deployments were performed.
