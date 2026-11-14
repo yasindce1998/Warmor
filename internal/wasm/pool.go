@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/tetratelabs/wazero"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 )
 
 // ErrPoolClosed is returned by Get after the pool has been closed.
@@ -29,6 +30,7 @@ type Pool struct {
 	// (compiler.StaticRulesExport), read once from the first instance.
 	staticProcess StaticDomain
 	staticNetwork StaticDomain
+	metadata      policymeta.Module
 
 	// mu serialises Put against Close so no instance is returned to the
 	// channel after it has been drained.
@@ -68,6 +70,11 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 			p.temporal = policy.temporal()
 			p.staticProcess = readStaticDomain(ctx, policy, 0)
 			p.staticNetwork = readStaticDomain(ctx, policy, 2)
+			encoding := policymeta.EncodingJSON
+			if policy.useBinaryABI {
+				encoding = policymeta.EncodingBinary
+			}
+			p.metadata = policymeta.Observe(runtime.moduleDigest, policy.abiVersion, encoding, p.fields, p.staticProcess, p.staticNetwork)
 		}
 		if policy.instance.IsClosed() || ctx.Err() != nil {
 			policy.Close(ctx)

@@ -9,6 +9,7 @@ import (
 	wazeroapi "github.com/tetratelabs/wazero/api"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 )
 
 // staticRulesTimeout bounds the declaration calls made at pool creation.
@@ -18,10 +19,7 @@ const staticRulesTimeout = 5 * time.Second
 // from the module's compiler.StaticRulesExport table: whether the domain is
 // eligible (its policy-map entries can be a complete allowlist) and the
 // rules to preload. See docs/design/kernel-default-deny.md.
-type StaticDomain struct {
-	Eligible bool
-	Rules    []compiler.StaticRule
-}
+type StaticDomain = policymeta.StaticDomain
 
 // readStaticDomain queries the module's static-rules table for one event
 // type (0 process, 2 network). Anything other than a clean answer (no
@@ -52,7 +50,7 @@ func readStaticDomain(ctx context.Context, p *Policy, eventType uint32) StaticDo
 		return out
 	}
 	size := uint32(res[0])
-	if size == 0 || size > 4<<20 {
+	if size == 0 || size > policymeta.MaxStaticTableBytes {
 		return out
 	}
 
@@ -104,7 +102,13 @@ func parseStaticTable(data []byte, eventType uint32) (rules []compiler.StaticRul
 		return nil, false, fmt.Errorf("empty table")
 	}
 	if data[0] == 0 {
+		if len(data) != 1 {
+			return nil, false, fmt.Errorf("ineligible table has trailing entries")
+		}
 		return nil, false, nil
+	}
+	if data[0] != 1 || eventType != 0 && eventType != 2 {
+		return nil, false, fmt.Errorf("invalid eligibility or domain")
 	}
 	eventName := "process"
 	if eventType == 2 {
@@ -113,6 +117,9 @@ func parseStaticTable(data []byte, eventType uint32) (rules []compiler.StaticRul
 
 	i := 1
 	for i < len(data) {
+		if len(rules) >= policymeta.MaxStaticRules {
+			return nil, false, fmt.Errorf("too many static rules")
+		}
 		if i+6 > len(data) {
 			return nil, false, fmt.Errorf("truncated entry header at %d", i)
 		}
@@ -121,7 +128,7 @@ func parseStaticTable(data []byte, eventType uint32) (rules []compiler.StaticRul
 		port := binary.LittleEndian.Uint16(data[i+2 : i+4])
 		plen := int(binary.LittleEndian.Uint16(data[i+4 : i+6]))
 		i += 6
-		if plen < 0 || i+plen > len(data) {
+		if plen == 0 || plen > policymeta.MaxPatternBytes || i+plen > len(data) {
 			return nil, false, fmt.Errorf("truncated pattern at %d", i)
 		}
 		pattern := string(data[i : i+plen])

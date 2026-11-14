@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/policyhost/protocol"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/internal/wasm"
 )
 
@@ -66,7 +67,11 @@ func Run(in io.Reader, out io.Writer) error {
 	eval.SetTimeout(time.Minute)
 	c.Kind = "ready"
 	c.Digest = hex.EncodeToString(digest[:])
-	if err := protocol.Send(out, c, protocol.MaxControl); err != nil {
+	metadata := pool.Metadata()
+	if err := metadata.Validate(c.Digest); err != nil {
+		return policymeta.ErrMetadata
+	}
+	if err := protocol.Send(out, protocol.Ready{Control: c, Metadata: metadata}, protocol.MaxMetadata); err != nil {
 		return err
 	}
 	for sequence := uint64(1); ; sequence++ {
