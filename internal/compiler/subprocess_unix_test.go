@@ -102,6 +102,48 @@ func TestToolCleanupDoesNotKillOtherOwnedProcess(t *testing.T) {
 	}
 }
 
+func TestToolExitProbePreservesWaitStatus(t *testing.T) {
+	cmd := toolTestCommand(t, "nonzero")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = killOwnedToolGroup(cmd.Process.Pid); _ = cmd.Wait() }()
+	awaitToolExit(t, cmd.Process.Pid)
+	// Probing twice must leave the child waitable and preserve its exit code.
+	if exited, err := toolChildExited(cmd.Process.Pid); err != nil || !exited {
+		t.Fatalf("second non-reaping exit probe: exited=%v err=%v", exited, err)
+	}
+	if err := killOwnedToolGroup(cmd.Process.Pid); err != nil {
+		t.Fatalf("zombie-only group cleanup: %v", err)
+	}
+	if err := cmd.Wait(); err == nil || cmd.ProcessState.ExitCode() != 7 {
+		t.Fatalf("lost exit status: %v, %v", cmd.ProcessState, err)
+	}
+	if _, err := toolChildExited(cmd.Process.Pid); !errors.Is(err, syscall.ECHILD) {
+		t.Fatalf("reaped leader must not count as owned: %v", err)
+	}
+	if err := killOwnedToolGroup(cmd.Process.Pid); !errors.Is(err, syscall.ECHILD) {
+		t.Fatalf("cleanup must reject externally reaped leader: %v", err)
+	}
+}
+
+func awaitToolExit(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		exited, err := toolChildExited(pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exited {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("owned tool did not exit")
+}
+
 func awaitToolPIDs(t *testing.T, dir string, n int) []int {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

@@ -9,14 +9,28 @@ Verbose mode prints only that bounded capture after completion; it no longer
 streams arbitrary output into a potentially blocking consumer during execution.
 
 On **Linux and Darwin**, each command starts a fresh process group. Cancellation,
-output overflow, setup failure, and ordinary parent exit all trigger SIGKILL of
-that owned group **before** reaping the parent. Linux observes exit with
-`waitid(WNOWAIT)`; Darwin uses `kqueue(EVFILT_PROC, NOTE_EXIT)`. Keeping the leader
-unreaped reserves the group ID until signaling finishes. We never discover and
-kill an arbitrary group, signal group zero, or fall back to positive-PID tree
-enumeration. If an outside reaper takes ownership (`ECHILD`), we report failure
-without signaling a potentially reused group ID. Applications must not reap
-compiler children behind `os/exec`.
+output overflow and ordinary parent exit trigger SIGKILL of that owned group
+**before** reaping the parent. Linux and Darwin observe exit with native
+`waitid(WNOWAIT)` and recheck wait ownership immediately before signaling.
+Keeping the leader unreaped reserves the group ID until signaling finishes. We
+never discover and kill an arbitrary group, signal group zero, or fall back to
+positive-PID tree enumeration. A failed ownership probe (including `ECHILD`)
+reports failure without signaling a potentially reused group ID. Darwin checks `P_NOCLDWAIT`
+before `Start` and again before cleanup, rejecting SIGCHLD `SIG_IGN` and
+`SA_NOCLDWAIT` without changing the application's signal disposition. Unlike a
+kqueue `ESRCH` notification, `waitid` checks that the PID is still our child.
+On Darwin, SIGKILL can return `EPERM` for a group consisting only of zombies.
+We accept that result only after an owned-group kernel query finds no live
+member, includes our unreaped child leader, and a second wait probe succeeds.
+Permission errors for live members and inspection failures remain errors.
+
+**Exclusive-reaper precondition:** applications must not reap compiler children
+behind `os/exec` or change auto-reap signal settings while a tool runs. The
+Darwin auto-reap check enforces the detectable pre-start configuration; it
+cannot lock out arbitrary application threads, native signal handlers, or
+external waiters in the same process. A concurrent reaper between the final
+ownership probe and signaling is unsupported, not made safe by `WNOWAIT`.
+No global signal disposition is installed or changed by the compiler.
 
 Go's pipe-copy goroutines write only to bounded, nonblocking internal capture
 writers and are joined before return. A one-second pipe wait closes inherited
