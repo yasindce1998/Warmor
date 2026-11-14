@@ -2,14 +2,6 @@
 
 #include "warmor_lsm.h"
 
-static __always_inline __u32 hash_port(__u16 port)
-{
-	__u32 hash = 2166136261u;
-	hash ^= (port & 0xFF); hash *= 16777619u;
-	hash ^= ((port >> 8) & 0xFF); hash *= 16777619u;
-	return hash;
-}
-
 SEC("lsm/socket_listen")
 int BPF_PROG(lsm_listen_check, struct socket *sock, int backlog)
 {
@@ -24,13 +16,13 @@ int BPF_PROG(lsm_listen_check, struct socket *sock, int backlog)
 
 	__u16 family = BPF_CORE_READ(sock, sk, __sk_common.skc_family);
 
-	__u32 hash = hash_port(port);
-
 	struct policy_key key = {
 		.cgroup_id = cgid,
-		.rule_hash = hash,
 		.event_type = EVENT_TYPE_LISTEN,
+		.family = family,
 	};
+	key.port[0] = port >> 8;
+	key.port[1] = port & 255;
 
 	struct policy_value *val = bpf_map_lookup_elem(&policy_map, &key);
 	if (!val) {

@@ -14,21 +14,18 @@ int BPF_PROG(lsm_mount_check, const char *dev_name, const struct path *path,
 	if (!type)
 		return 0;
 
-	char type_buf[64];
+	char type_buf[64] = {};
 	int len = bpf_probe_read_kernel_str(type_buf, sizeof(type_buf), type);
 	if (len <= 0)
 		return 0;
 
-	__u32 hash = fnv1a_hash(type_buf, len);
-
 	struct policy_key key = {
 		.cgroup_id = cgid,
-		.rule_hash = hash,
 		.event_type = EVENT_TYPE_MOUNT,
 	};
+	__builtin_memcpy(key.path, type_buf, sizeof(type_buf));
 
-	// A full buffer means the string may have been truncated, and the hash
-	// would then cover only a prefix shared with other strings. Never consult
+	// A full buffer means the string may have been truncated. Never consult
 	// the policy map for it; let userspace evaluate the event instead.
 	struct policy_value *val = 0;
 	if (len < (int)sizeof(type_buf)) {

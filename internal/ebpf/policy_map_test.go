@@ -68,7 +68,7 @@ func TestClear_ReturnsDeleteErrors(t *testing.T) {
 	m := &PolicyMapManager{policyMap: b}
 	_ = m.SetRule(1, EventTypeExec, "/bin/a", ActionDeny, false)
 	_ = m.SetRule(1, EventTypeExec, "/bin/b", ActionDeny, false)
-	stuck := PolicyKey{CgroupID: 1, RuleHash: HashPattern("/bin/a"), EventType: EventTypeExec}
+	stuck := mustStringKey(t, 1, EventTypeExec, "/bin/a")
 	boom := errors.New("EPERM")
 	b.deleteErr[stuck] = boom
 
@@ -86,7 +86,7 @@ func TestClear_IgnoresVanishedKeysButReportsIterErrors(t *testing.T) {
 	b := newFakeBackend()
 	m := &PolicyMapManager{policyMap: b}
 	_ = m.SetRule(1, EventTypeExec, "/bin/a", ActionDeny, false)
-	k := PolicyKey{CgroupID: 1, RuleHash: HashPattern("/bin/a"), EventType: EventTypeExec}
+	k := mustStringKey(t, 1, EventTypeExec, "/bin/a")
 	// Simulate LRU eviction between iteration and delete.
 	b.deleteErr[k] = fmt.Errorf("lookup: %w", ebpf.ErrKeyNotExist)
 	if err := m.Clear(); err != nil {

@@ -2,30 +2,6 @@
 
 #include "warmor_lsm.h"
 
-static __always_inline __u32 hash_ipv4_endpoint(__u32 addr, __u16 port)
-{
-	__u32 hash = 2166136261u;
-	hash ^= (addr & 0xFF); hash *= 16777619u;
-	hash ^= ((addr >> 8) & 0xFF); hash *= 16777619u;
-	hash ^= ((addr >> 16) & 0xFF); hash *= 16777619u;
-	hash ^= ((addr >> 24) & 0xFF); hash *= 16777619u;
-	hash ^= (port & 0xFF); hash *= 16777619u;
-	hash ^= ((port >> 8) & 0xFF); hash *= 16777619u;
-	return hash;
-}
-
-static __always_inline __u32 hash_ipv6_endpoint(const __u8 *addr, __u16 port)
-{
-	__u32 hash = 2166136261u;
-	for (int i = 0; i < 16; i++) {
-		hash ^= (__u32)addr[i];
-		hash *= 16777619u;
-	}
-	hash ^= (port & 0xFF); hash *= 16777619u;
-	hash ^= ((port >> 8) & 0xFF); hash *= 16777619u;
-	return hash;
-}
-
 SEC("lsm/socket_bind")
 int BPF_PROG(lsm_bind_check, struct socket *sock, struct sockaddr *address, int addrlen)
 {
@@ -35,9 +11,9 @@ int BPF_PROG(lsm_bind_check, struct socket *sock, struct sockaddr *address, int 
 		return 0;
 
 	__u16 family = 0;
-	bpf_probe_read_kernel(&family, sizeof(family), &address->sa_family);
+	if (addrlen < 2 || bpf_probe_read_kernel(&family, sizeof(family), &address->sa_family))
+		return 0;
 
-	__u32 hash = 0;
 	__u16 port = 0;
 	__u32 addr_v4 = 0;
 	__u8 addr_v6[16] = {};
@@ -48,10 +24,10 @@ int BPF_PROG(lsm_bind_check, struct socket *sock, struct sockaddr *address, int 
 			__u16 sin_port;
 			__u32 sin_addr;
 		} sin;
-		bpf_probe_read_kernel(&sin, sizeof(sin), address);
+		if (addrlen < 16 || bpf_probe_read_kernel(&sin, sizeof(sin), address))
+			return 0;
 		port = sin.sin_port;
 		addr_v4 = sin.sin_addr;
-		hash = hash_ipv4_endpoint(addr_v4, port);
 	} else if (family == 10) { // AF_INET6
 		struct sockaddr_in6 {
 			__u16 sin6_family;
@@ -59,19 +35,19 @@ int BPF_PROG(lsm_bind_check, struct socket *sock, struct sockaddr *address, int 
 			__u32 sin6_flowinfo;
 			__u8  sin6_addr[16];
 		} sin6;
-		bpf_probe_read_kernel(&sin6, sizeof(sin6), address);
+		if (addrlen < 28 || bpf_probe_read_kernel(&sin6, sizeof(sin6), address))
+			return 0;
 		port = sin6.sin6_port;
 		__builtin_memcpy(addr_v6, sin6.sin6_addr, 16);
-		hash = hash_ipv6_endpoint(addr_v6, port);
 	} else {
 		return 0;
 	}
 
 	struct policy_key key = {
 		.cgroup_id = cgid,
-		.rule_hash = hash,
 		.event_type = EVENT_TYPE_BIND,
 	};
+	endpoint_key(&key, family, port, addr_v4, addr_v6);
 
 	struct policy_value *val = bpf_map_lookup_elem(&policy_map, &key);
 	if (!val) {

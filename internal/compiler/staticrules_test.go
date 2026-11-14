@@ -1,10 +1,83 @@
 package compiler
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestStaticRulesExactIdentityContract(t *testing.T) {
+	for _, n := range []int{127, 128, 129, 254, 255} {
+		p := parsePolicyForTest(t, fmt.Sprintf(`name: lengths
+version: 1
+default_action: deny
+rules:
+  - name: exact
+    event: process
+    conditions:
+      all:
+        - path: %q
+    action: allow
+`, "/"+strings.Repeat("x", n-1)))
+		rules, why := StaticRules(p)
+		if n == 127 {
+			if len(rules) != 1 || len(why) != 0 {
+				t.Fatalf("127 bytes must be complete: %v %v", rules, why)
+			}
+		} else if len(rules) != 0 || why["process"] == "" {
+			t.Fatalf("%d-byte path eligible: %v %v", n, rules, why)
+		}
+	}
+	for _, addr := range []string{"2001:0db8::1", "2001:DB8::1", "::ffff:192.0.2.1"} {
+		p := parsePolicyForTest(t, fmt.Sprintf(`name: endpoint
+version: 1
+default_action: deny
+rules:
+  - name: noncanonical
+    event: network
+    conditions:
+      all:
+        - remote_addr: %q
+        - remote_port: 80
+    action: allow
+`, addr))
+		rules, why := StaticRules(p)
+		if len(rules) != 0 || why["network"] == "" {
+			t.Fatalf("noncanonical %s eligible: %v %v", addr, rules, why)
+		}
+	}
+}
+
+func TestStaticRulesCollidingPathsPreserveFirstMatch(t *testing.T) {
+	p := parsePolicyForTest(t, `name: collision
+version: 1
+default_action: deny
+rules:
+  - name: first
+    event: process
+    conditions:
+      all:
+        - path: /opt/warmor/collision-000079bb
+    action: allow
+  - name: collision
+    event: process
+    conditions:
+      all:
+        - path: /opt/warmor/collision-00044848
+    action: deny
+  - name: shadowed
+    event: process
+    conditions:
+      all:
+        - path: /opt/warmor/collision-000079bb
+    action: deny
+`)
+	rules, why := StaticRules(p)
+	if len(why) != 0 || len(rules) != 2 || rules[0].Action != 0 || rules[1].Action != 1 || rules[0].Pattern == rules[1].Pattern {
+		t.Fatalf("first-match semantics lost: %+v %v", rules, why)
+	}
+}
 
 func parsePolicyForTest(t *testing.T, yaml string) *Policy {
 	t.Helper()

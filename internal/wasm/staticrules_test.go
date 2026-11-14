@@ -5,11 +5,40 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 )
+
+func staticTestTable(pattern string, action byte, port uint16) []byte {
+	return append([]byte{action, 0, byte(port), byte(port >> 8), byte(len(pattern)), byte(len(pattern) >> 8)}, pattern...)
+}
+
+func TestParseStaticTableIdentityContractAndFirstMatch(t *testing.T) {
+	for _, p := range []string{"", strings.Repeat("x", 128), strings.Repeat("x", 254), "a\x00b", "a\xff"} {
+		if _, eligible, err := parseStaticTable(append([]byte{1}, staticTestTable(p, 0, 0)...), 0); eligible || err == nil {
+			t.Fatalf("accepted incomplete process identity %q", p)
+		}
+	}
+	for _, p := range []string{"2001:0db8::1", "::ffff:192.0.2.1", "fe80::1%eth0"} {
+		if _, eligible, err := parseStaticTable(append([]byte{1}, staticTestTable(p, 0, 80)...), 2); eligible || err == nil {
+			t.Fatalf("accepted noncanonical endpoint %q", p)
+		}
+	}
+	if _, eligible, err := parseStaticTable([]byte{2}, 0); eligible || err == nil {
+		t.Fatal("accepted invalid eligibility")
+	}
+	a, b := "/opt/warmor/collision-000079bb", "/opt/warmor/collision-00044848"
+	table := append([]byte{1}, staticTestTable(a, 0, 0)...)
+	table = append(table, staticTestTable(b, 1, 0)...)
+	table = append(table, staticTestTable(a, 1, 0)...)
+	rules, eligible, err := parseStaticTable(table, 0)
+	if err != nil || !eligible || len(rules) != 2 || rules[0].Action != 0 || rules[1].Action != 1 {
+		t.Fatalf("first-match: %+v %v %v", rules, eligible, err)
+	}
+}
 
 // TestCompiledYAMLStaticRules builds a YAML allowlist policy with the real
 // Rust toolchain and checks the module's static-rules declaration
