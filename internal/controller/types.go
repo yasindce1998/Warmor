@@ -108,6 +108,7 @@ type WarmorPolicyStatus struct {
 	DesiredDigest      string            `json:"desiredDigest,omitempty"`
 	PublishedDigest    string            `json:"publishedDigest,omitempty"`
 	LastPublished      string            `json:"lastPublished,omitempty"`
+	ReceiptExpiresAt   string            `json:"receiptExpiresAt,omitempty"`
 
 	// rendered carries the validated policy between Reconcile steps. It
 	// is unexported, so it is never serialized to the API server.

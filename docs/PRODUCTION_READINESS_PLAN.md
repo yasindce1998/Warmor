@@ -544,17 +544,27 @@ the old baseline. They are not whole-system enforcement certification.
   baseline/LKG/audit/UID 65534 SIGKILL/clean-stop passes. Private guest recording
   fixture `54d9ea5` and compiler compatibility change `5a0bf5a` were independently
   reviewed. The earlier `5aa4556` VM run is historical, not current-head proof.
-- **Still unmerged:** #47 acknowledged canary telemetry, #48 shared Host metadata,
+- **Main advanced to `971471e` for the PR #57 reconciliation:** #47 acknowledged
+  canary telemetry APIs/embedded collector have merged, but not an automatic
+  rollout actuator or telemetry-derived controller Applied proof. #54 compiler-7
+  compatibility and #56 deterministic test fixtures are retained. This merge
+  needs its own checks; old `40de5eb` CI is not new-head validation.
+- **Still unmerged in that main snapshot:** #48 shared Host metadata,
   #51 kernel generations, #52 compiler
   subprocess bounds, #53 supervised enforcer Host integration, authenticated
-  node application receipts and capture-quality accounting. #41 does not prove
+  node application receipts (present only as explicit opt-in PR #57 integration
+  here) and capture-quality accounting. #41 does not prove
   these integrations or full multi-node/workload isolation.
 - **Merged #49 is explicit opt-in standalone signed activation:** `agentstore`
   `assignment.json` is its sole durable publication/startup authority, not a
   chained legacy pointer commit. It is not combined with generation activation
   or supervised Host. Default evaluator compilation remains in-process.
 - **No workload-enforcement claim:** selectors (including `{}`) remain Pending;
-  CRs report Published, `Applied=Unknown`, not authenticated node application.
+  CRs report Published, `Applied=Unknown` by default. Explicit receipt mode can
+  report Applied only with fresh exact-publication evidence from every required
+  authorized daemon pod; consumers must enforce `receiptExpiresAt`. Receipts are
+  authenticated self-reports, not attestation, live-cluster acceptance or proof
+  of enforcement. Fleet/signed-intent mode is explicitly incompatible.
   Identity/coordinator/manifest preparation is not daemon/kernel routing.
 - **Resolved regression:** main `98d2b90` had manifest/compiler **6/7** mismatch
   and rejected construction. #41's reviewed `5a0bf5a` explicitly restores

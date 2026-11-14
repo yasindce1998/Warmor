@@ -1,6 +1,6 @@
 # Warmor Feature Status
 
-**Source snapshot:** merged `main` at [`ce1d5ab`](https://github.com/yasindce1998/Warmor/commit/ce1d5abd5a5ad8d78829c3001ff5eb8228964a57), checked 2026-11-14.
+**Source snapshot:** main at [`971471e`](https://github.com/yasindce1998/Warmor/commit/971471e2ff0b257fd58a695651aa7d67b451a3f0), plus the PR #57 receipt integration being reconciled here, checked 2026-11-14. PR #57's previously reviewed head is `40de5eb`; its green checks do not validate this new merge head. This source description is not a claim of fresh remote CI or release clearance.
 
 This page distinguishes merged implementation from pending work and deployment
 evidence. **Warmor is not production-ready; no release is cleared by this status
@@ -28,8 +28,11 @@ and acceptance gates; its dated findings must not be read as current status.
 - Reload drains userspace event handling and guards stale cache/map writes, but
   the legacy kernel map rebuild is **not generation-atomic**. Default-deny misses
   may allow during rebuilding; rollback can leave degraded kernel state.
-- CRs report **Published, not Applied**; `Applied=Unknown`, `Ready=False` awaits
-  authenticated node acknowledgement. All non-nil selectors, including `{}`, stay
+- CRs report **Published, not Applied by default**; `Applied=Unknown`, `Ready=False`
+  awaits acknowledgement. Explicit receipt mode can report Applied only for a
+  fresh exact-publication set from every required authorized daemon pod; consumers
+  must honor `receiptExpiresAt`. These are self-reports, not attestation or
+  prevention proof. All non-nil selectors, including `{}`, stay
   **Pending**. Library identity/manifest work does not enable workload routing.
 - **Resolved since `98d2b90`:** the earlier merged regression had
   [`manifest.SupportedCompilerVersion`](../internal/workload/manifest/manifest.go)
@@ -47,7 +50,7 @@ and acceptance gates; its dated findings must not be read as current status.
 
 ### Merged readiness milestones (all dated 2026-11-14)
 
-This is the merged subset of PRs #28–50, not a declaration that their larger
+This is the merged subset of PRs #28–50 (with later main reconciliation noted), not a declaration that their larger
 readiness work packages are complete. Evidence details live in the linked PRs
 and focused documents, not in a new measurement or test run for this page.
 
@@ -63,15 +66,15 @@ and focused documents, not in a new measurement or test run for this page.
 | [#39](https://github.com/yasindce1998/Warmor/pull/39), [#40](https://github.com/yasindce1998/Warmor/pull/40) | Private recording/tool contracts; controller last-known-good publication and Kubernetes runtime safety | Incomplete capture is not replay equivalence; publication/local readiness is not per-node applied proof |
 | [#41](https://github.com/yasindce1998/Warmor/pull/41) | Exact scoped kernel keys, truthful audit/refusal encoding, idle-reader shutdown, real-daemon VM outcome gate; compiler-7 manifest compatibility | Reviewed head `1ea758e` and current-head VM evidence above; private recording fixture `54d9ea5` retained. Literal path identity is not inode/content/mount-namespace identity; no generation-atomic or multi-node isolation claim |
 | [#43](https://github.com/yasindce1998/Warmor/pull/43) | Historical readiness progress checkpoint | Superseded for current merged/open status by this snapshot |
+| [#47](https://github.com/yasindce1998/Warmor/pull/47) | Merged optional acknowledged userspace-decision telemetry and bounded server gate APIs | Library/embedded activation and submission wiring; no automatic rollout actuator, no telemetry-derived controller Applied proof, signed attribution remains disabled |
 
-**Not shipped in this snapshot:** acknowledged canary telemetry
-[#47](https://github.com/yasindce1998/Warmor/pull/47),
-shared policy-host declaration metadata [#48](https://github.com/yasindce1998/Warmor/pull/48),
+**Not shipped in main `971471e`:** shared policy-host declaration metadata [#48](https://github.com/yasindce1998/Warmor/pull/48),
 generation-atomic activation [#51](https://github.com/yasindce1998/Warmor/pull/51),
 compiler subprocess cleanup/output bounds [#52](https://github.com/yasindce1998/Warmor/pull/52),
 and supervised enforcer Host integration [#53](https://github.com/yasindce1998/Warmor/pull/53).
-Authenticated node application receipts and capture-quality accounting are also
-unmerged work. Neither pending branch code nor a successful job on another
+Authenticated node application receipts are reachable here only as explicit
+opt-in PR #57 integration, not yet a merged-main/live-cluster acceptance claim;
+capture-quality accounting remains unmerged work. Neither pending branch code nor a successful job on another
 commit closes a main release gate.
 
 ## Status legend
@@ -165,7 +168,8 @@ commit closes a main release gate.
 | mTLS, JWT (HMAC and EdDSA libraries; server uses HMAC) | Shipped | Agent requests require ID matching JWT subject or certificate CommonName; downloads are assignment-limited; cross-runtime binding mutation is refused; admins retain cross-agent access | Migrate generic/shared credentials. Registration labels are still agent-reported, not attested runtime scope |
 | Daemon policy download and activation | Partial | Full `(policy ID, version, digest)` comparison; failed activation is retried without advancing active identity. POSIX immutable module/signature revisions preserve a bootable last-known-good pair. Acknowledgement follows drained activation and durable publication | Heartbeat identity is authenticated **self-report**, not an attested node application receipt. Windows `--server` is explicitly refused. Kernel activation is not generation-atomic; revision GC is not implemented. Fallback seed remains incompatible with `--verify-key` |
 | Percentage rollouts (A/B, consistent hashing) | Shipped | Create, ramp, complete and abort through the admin API (`warmorctl`'s Rollouts tab is view-only) | Ramping is manual |
-| Canary auto-rollback (deny-rate analyzer) | Library-only | `CanaryAnalyzer` exists with tests | Nothing feeds it decisions and nothing calls it. **There is no automatic rollback.** |
+| Acknowledged decision telemetry / canary analysis | Partial: opt-in APIs and embedded collector | Bounded per-activation userspace allow/deny/error populations, authenticated session/assignment fences and server-side gate APIs; cache hits count as events | Not successful enforcement, kernel traffic or full capture quality; daemon receipt mode does not allocate a collector or lease. No automatic rollout actuator; signed deployment telemetry is sealed pending a signed attribution contract. See [telemetry contract](design/canary-acknowledged-telemetry.md) |
+| Canary auto-rollback (deny-rate analyzer) | Library-only actuator | `CanaryAnalyzer` and optional acknowledged telemetry gate APIs exist with tests | No end-to-end automatic rollout/rollback owner. **There is no automatic rollback.** |
 | Drift observations / z-score comparison | Partial: local collection ships | `--drift` collects bounded host event-type+comm rates over a rolling ten-minute window. Periodic maintenance expires idle state independently of attack graphs and heartbeats. The daemon omits fingerprints without real workload identity; `--drift-image-key` is deprecated and ignored. Server comparator, authenticated `/api/v1/admin/drift`, and unlabelled `warmor_drift_*` totals remain available for identified integrations. See [design and migration](design/fleet-drift.md) | Daemon fleet submission is withheld pending runtime-backed identity and per-workload collection; no policy-hash fallback. Server fingerprints are in memory and lost on restart |
 | `warmorctl` TUI | Shipped | Tabs for dashboard, agents, policies, rollouts and certs. The Certs tab generates a CA, certs and a signing key (keys `g` and `s`). | There is no non-interactive `warmorctl certs generate` or `warmorctl agents list` subcommand |
 | `warmor-server policy sign` | Missing | None | Use `warmor-policy-bundle --sign-key` |
@@ -176,7 +180,7 @@ commit closes a main release gate.
 | Feature | Status | What works today | Known gaps |
 |---------|--------|------------------|------------|
 | Helm chart `deploy/helm/warmor` | Partial; audit-first smoke path | Baked WASM, runtime init validation, policy watcher, chart schema/posture checks, probes, image digest overrides and Linux/amd64 scheduling. Default `auditMode: true`, `cgroupFilter: auto`; enforcement requires explicit node-wide confirmation. kind script checks install/readiness/metrics and CR **Published** | kind is installation/reconciliation evidence, not BPF-LSM workload isolation or verified termination. Real-node CNI/capability/namespace/architecture tests remain. Auto includes system/Warmor pods; hostNetwork policy is CNI-dependent. Webhook enablement is rejected until a handler exists |
-| `WarmorPolicy` controller (`controller.enabled`) | Partial: publication only | Validates/compiles accepted unscoped CRs into one node-wide artifact, verifies actual bytes/build identity and publishes artifact plus accepted-source journal together. Invalid edits retain prior accepted contributions across restart; deletion removes them. Reports Validated/Compiled/**Published**, with desired/published digests | **Not every-node enforcement:** `Applied=Unknown`, CR `Ready=False`, no active-digest/node-count assertion; legacy `Active` no longer emitted. All non-nil selectors stay **Pending**, retaining any old accepted unscoped source. Off by default, single writer/no leader election, unsigned mutable ConfigMap. All-namespace mode remains single-tenant/admin-only. Apply updated CRD separately before upgrade. See [controller contract](design/warmorpolicy-controller.md) |
+| `WarmorPolicy` controller (`controller.enabled`) | Partial: publication default; receipt opt-in in this integration | Validates/compiles accepted unscoped CRs into one node-wide artifact; publishes bytes, accepted sources and optional nonreusable publication epoch atomically. Invalid edits retain prior accepted contributions. Default remains Validated/Compiled/**Published** with `Applied=Unknown`, `Ready=False` | Explicit authenticated receipts can set Active/Applied only for every required authorized node with fresh exact-epoch/digest/ABI/build-claim evidence; enforce `receiptExpiresAt`. Self-report, **not every-node enforcement/attestation**. All non-nil selectors remain **Pending**. Off by default, single writer/no leader election, unsigned mutable ConfigMap; TLS/token/roster provisioning and updated CRD required. Fleet/signed-intent combination is rejected. See [receipt boundaries](design/authenticated-node-receipts.md) |
 | `deploy/kubernetes/warmor-daemonset.yaml` | Experimental | A raw (non-Helm) DaemonSet for server-managed agents: real daemon flags, mTLS certs from a secret, policies persisted under `/var/lib/warmor` and bootstrapped from the image's baked policy via `--policy-fallback` | Not exercised by CI (the Helm chart is the tested path); the mTLS secret and a reachable `warmor-server` must exist first |
 | `warmor-oci-hook` (CRI-O / OCI hook) | Experimental | Posts start/stop bindings to the policy server | Not the verified CRI coordinator or a workload-routing path; stored bindings do not enable per-container enforcement. Use only within its documented trust/development limits |
 | Per-container policy, containerd integration (`--containerd-socket`, `--per-container-policy`) | Missing | `internal/container` (runtime detection, containerd monitor) is library-only | No flags exist |
@@ -231,7 +235,8 @@ remain the acceptance criteria, not a claim that no hardening has started. In
 particular: configure and verify missing remote protection; review and validate
 pending generation/Host work against the existing gates without losing exact-key,
 outcome or standalone signed activation guarantees; prove real workload routing
-and authenticated application receipts; complete capture/loss, rollback, soak,
+and real-cluster receipt acceptance (the opt-in self-report implementation here
+is not that evidence); complete capture/loss, rollback, soak,
 multi-node and native-platform validation.
 Existing CI formatting, VM attach/IMA and release artifact checks are useful
 partial gates, not proof that these remaining gates passed.
