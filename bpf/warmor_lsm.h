@@ -101,6 +101,8 @@ struct warmor_event {
 	// the target task's cgroup id. Zero for every other hook.
 	char  aux[64];
 	__u64 aux_id;
+	// 0 = legacy/unversioned hook; otherwise the immutable policy snapshot ID.
+	__u64 policy_generation;
 };
 
 // Shared policy map — all LSM programs reference the same map via BTF.
@@ -237,11 +239,104 @@ struct {
 	__type(value, __u8);
 } default_deny SEC(".maps");
 
+// Opt-in generation state. A single map-in-map replacement publishes rules,
+// default-deny domains and their generation ID together. The inner HASH is
+// deliberately not LRU: eviction must not remove a static allowlist or marker.
+// No populated inner map is retained by the legacy loader. Linux 6.1 needs no newer
+// kfuncs, dynamic inner-map sizes, or nested map-in-map support for this layout.
+// Reserved family 255 cannot be produced by an exact rule; event_type 255 is
+// the generation-ID marker, other event types mark default-deny domains.
+#define GENERATION_MARKER_FAMILY 255
+#define GENERATION_ID_EVENT 255
+#define GENERATION_MAP_MAX_ENTRIES 65536
+struct generation_value {
+	struct policy_value policy;
+	__u64 generation;
+};
+
+struct generation_policy_map {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, GENERATION_MAP_MAX_ENTRIES);
+	__type(key, struct policy_key);
+	__type(value, struct generation_value);
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__array(values, struct generation_policy_map);
+} active_generation SEC(".maps");
+
+struct policy_snapshot {
+	void *map;
+	__u64 generation;
+	__u8 default_deny;
+};
+
+// Called once, BEFORE constructing the hook's large exact key, so its marker
+// scratch key's stack storage can be reused. Never reread active_generation
+// during a hook: an exact-rule miss and default-deny must use the SAME map.
+static __always_inline struct policy_snapshot snapshot_policy(__u64 cgid, __u8 event_type)
+{
+	__u32 zero = 0;
+	struct policy_snapshot snapshot = {};
+	snapshot.map = bpf_map_lookup_elem(&active_generation, &zero);
+	if (!snapshot.map)
+		return snapshot; // legacy mode, until explicitly activated
+
+	struct policy_key marker = {
+		.event_type = GENERATION_ID_EVENT,
+		.family = GENERATION_MARKER_FAMILY,
+	};
+	struct generation_value *value = bpf_map_lookup_elem(snapshot.map, &marker);
+	// A published map must have metadata. Corruption fails closed on misses;
+	// userspace never publishes such a map and never deletes marker entries.
+	if (!value || !value->generation) {
+		snapshot.default_deny = DEFAULT_DENY_MODE_DENY;
+		return snapshot;
+	}
+	snapshot.generation = value->generation;
+	marker.cgroup_id = cgid;
+	marker.event_type = event_type;
+	value = bpf_map_lookup_elem(snapshot.map, &marker);
+	if (!value) {
+		marker.cgroup_id = 0;
+		value = bpf_map_lookup_elem(snapshot.map, &marker);
+	}
+	if (value)
+		snapshot.default_deny = value->policy.action;
+	return snapshot;
+}
+
+static __always_inline struct policy_value *lookup_policy(
+		struct policy_snapshot *snapshot, struct policy_key *key)
+{
+	if (snapshot->map) {
+		struct generation_value *value = bpf_map_lookup_elem(snapshot->map, key);
+		if (!value) {
+			key->cgroup_id = 0;
+			value = bpf_map_lookup_elem(snapshot->map, key);
+		}
+		return value ? &value->policy : 0;
+	}
+	struct policy_value *value = bpf_map_lookup_elem(&policy_map, key);
+	if (!value) {
+		key->cgroup_id = 0;
+		value = bpf_map_lookup_elem(&policy_map, key);
+	}
+	return value;
+}
+
 // Lookup the default-deny marking for a cgroup+event type, cgroup-specific
 // first then the global (cgroup_id = 0) domain, like the policy map. Returns
 // the DEFAULT_DENY_MODE_* byte, or 0 when the domain is not marked.
-static __always_inline __u8 lookup_default_deny(__u64 cgid, __u8 event_type)
+static __always_inline __u8 lookup_default_deny(struct policy_snapshot *snapshot,
+		__u64 cgid, __u8 event_type)
 {
+	if (snapshot->map)
+		return snapshot->default_deny;
 	struct default_deny_key ddkey = {
 		.cgroup_id = cgid,
 		.event_type = event_type,
@@ -300,8 +395,8 @@ static __always_inline int lost_verdict(void)
 // Emit an LSM event with hook-specific extras (see warmor_event.aux).
 // Returns 1 if the event was queued, 0 if the ring was full (counted in
 // lsm_drops).
-static __always_inline int emit_lsm_event_aux(
-	__u8 event_type, __u8 decision,
+static __always_inline int emit_lsm_event_aux_generation(
+	__u64 generation, __u8 event_type, __u8 decision,
 	const char *filename, int filename_len,
 	__u64 cgroup_id, __u16 family,
 	__u16 remote_port, __u32 remote_addr_v4,
@@ -349,6 +444,7 @@ static __always_inline int emit_lsm_event_aux(
 	if (aux)
 		bpf_probe_read_kernel_str(&event->aux, sizeof(event->aux), aux);
 	event->aux_id = aux_id;
+	event->policy_generation = generation;
 
 	bpf_ringbuf_submit(event, submit_flags(decision));
 	return 1;
@@ -362,8 +458,19 @@ static __always_inline int emit_lsm_event(
 	__u16 remote_port, __u32 remote_addr_v4,
 	const __u8 *remote_addr_v6)
 {
-	return emit_lsm_event_aux(event_type, decision, filename, filename_len, cgroup_id,
+	return emit_lsm_event_aux_generation(0, event_type, decision, filename, filename_len, cgroup_id,
 				  family, remote_port, remote_addr_v4, remote_addr_v6, 0, 0);
+}
+
+static __always_inline int emit_lsm_event_generation(
+	__u64 generation, __u8 event_type, __u8 decision,
+	const char *filename, int filename_len,
+	__u64 cgroup_id, __u16 family,
+	__u16 remote_port, __u32 remote_addr_v4,
+	const __u8 *remote_addr_v6)
+{
+	return emit_lsm_event_aux_generation(generation, event_type, decision, filename, filename_len,
+		cgroup_id, family, remote_port, remote_addr_v4, remote_addr_v6, 0, 0);
 }
 
 // Force BTF type emission for bpf2go -type flag

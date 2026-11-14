@@ -12,6 +12,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	ciliumebpf "github.com/cilium/ebpf"
@@ -31,23 +32,24 @@ import (
 
 // LSMEvent matches struct warmor_event in warmor_lsm.h
 type LSMEvent struct {
-	PID          uint32
-	UID          uint32
-	GID          uint32
-	Comm         [16]byte
-	Filename     [256]byte
-	_            [4]byte
-	Timestamp    uint64
-	CgroupID     uint64
-	EventType    uint8
-	Decision     uint8
-	RemotePort   uint16
-	RemoteAddrV4 uint32
-	RemoteAddrV6 [16]byte
-	Family       uint16
-	_            [6]byte
-	Aux          [64]byte
-	AuxID        uint64
+	PID              uint32
+	UID              uint32
+	GID              uint32
+	Comm             [16]byte
+	Filename         [256]byte
+	_                [4]byte
+	Timestamp        uint64
+	CgroupID         uint64
+	EventType        uint8
+	Decision         uint8
+	RemotePort       uint16
+	RemoteAddrV4     uint32
+	RemoteAddrV6     [16]byte
+	Family           uint16
+	_                [6]byte
+	Aux              [64]byte
+	AuxID            uint64
+	PolicyGeneration uint64
 }
 
 // ToEvent converts an LSMEvent to a unified Event.
@@ -61,6 +63,7 @@ func (e *LSMEvent) ToEvent() Event {
 		Timestamp:         bootTimeToWallClock(e.Timestamp),
 		KernelTimestampNS: e.Timestamp,
 		CgroupID:          e.CgroupID,
+		PolicyGeneration:  e.PolicyGeneration,
 
 		LSMHook:     e.EventType,
 		LSMDecision: e.Decision,
@@ -176,6 +179,8 @@ type LSMLoader struct {
 	// defaultDenyMap is the kernel default-deny domain map (see
 	// docs/design/kernel-default-deny.md); managed through policyMap.
 	defaultDenyMap *ciliumebpf.Map
+	generationOnce sync.Once
+	generations    *GenerationManager
 
 	// integrity is nil until EnableIntegrity loads lsm_integrity.
 	integrity *integrityProgram
@@ -419,6 +424,7 @@ func (l *LSMLoader) sharedMaps() map[string]*ciliumebpf.Map {
 		"lsm_cfg":           l.execObjs.LsmCfg,
 		"unix_watch":        l.execObjs.UnixWatch,
 		"default_deny":      l.execObjs.DefaultDeny,
+		"active_generation": l.execObjs.ActiveGeneration,
 	}
 }
 
@@ -514,6 +520,28 @@ func (l *LSMLoader) PolicyMap() *PolicyMapManager {
 	return l.policyMap
 }
 
+// PolicyGenerations explicitly opts into the generation API. Merely obtaining
+// it does not change policy: Prepare+Activate are required. Callers must stop
+// legacy map writers and implement the documented evaluator/drain protocol.
+func (l *LSMLoader) PolicyGenerations() *GenerationManager {
+	l.generationOnce.Do(func() {
+		l.generations = &GenerationManager{backend: kernelGenerationBackend{l.execObjs.ActiveGeneration}}
+	})
+	return l.generations
+}
+
+// FlushLSMEvents requests a reader barrier. Keep calling ReadLSMEvent until
+// errors.Is(err, ringbuf.ErrFlushed), then wait for dispatched workers before
+// AcknowledgeDrain. Call AFTER a successful generation Activate; this alone
+// neither switches policy nor waits for kernel producers. Only one reader and
+// one outstanding flush are permitted by the generation integration contract.
+func (l *LSMLoader) FlushLSMEvents() error {
+	if l.lsmReader == nil {
+		return errors.New("LSM event reader not loaded")
+	}
+	return l.lsmReader.Flush()
+}
+
 // SetEnforceMode enables or disables kernel-level blocking.
 func (l *LSMLoader) SetEnforceMode(enabled bool) error {
 	return SetEnforce(l.enforceMap, enabled)
@@ -547,6 +575,11 @@ func (l *LSMLoader) Close() error {
 			if err := lnk.Close(); err != nil {
 				errs = append(errs, err)
 			}
+		}
+	}
+	if l.generations != nil {
+		if err := l.generations.Close(); err != nil {
+			errs = append(errs, err)
 		}
 	}
 

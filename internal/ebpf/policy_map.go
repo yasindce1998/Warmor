@@ -491,8 +491,18 @@ func (k PolicyKey) MarshalBinary() ([]byte, error) {
 // completeness in both the sensor and binary WASM ABI; explicit static-rule
 // writes instead use SetRule/SetEndpointRule. Unknown cgroups are not global.
 func (m *PolicyMapManager) SyncEvent(event *api.Event, action uint8, audit bool) error {
+	key, err := eventPolicyKey(event)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.put(key, generationPolicyValue(action, audit).Policy)
+}
+
+func eventPolicyKey(event *api.Event) (PolicyKey, error) {
 	if event == nil || event.CgroupID == 0 {
-		return fmt.Errorf("missing event scope: %w", ErrNotKernelMatchable)
+		return PolicyKey{}, fmt.Errorf("missing event scope: %w", ErrNotKernelMatchable)
 	}
 	switch event.GetType() {
 	case api.EventTypeProcess:
@@ -506,15 +516,15 @@ func (m *PolicyMapManager) SyncEvent(event *api.Event, action uint8, audit bool)
 		if len(path) > kernelmap.MaxPolicyPathBytes {
 			break
 		}
-		return m.SetRule(event.CgroupID, EventTypeExec, path, action, audit)
+		return stringPolicyKey(event.CgroupID, EventTypeExec, path)
 	case api.EventTypeNetwork:
 		if event.Network == nil || event.Network.Operation != "connect" ||
 			(event.Hook != "" && event.Hook != "connect") {
 			break
 		}
-		return m.SetEndpointRule(event.CgroupID, EventTypeNetwork, event.Network.RemoteAddr, event.Network.RemotePort, action, audit)
+		return endpointPolicyKey(event.CgroupID, EventTypeNetwork, event.Network.RemoteAddr, event.Network.RemotePort)
 	}
-	return fmt.Errorf("incomplete or unsupported event identity: %w", ErrNotKernelMatchable)
+	return PolicyKey{}, fmt.Errorf("incomplete or unsupported event identity: %w", ErrNotKernelMatchable)
 }
 
 // KernelKeyFields reports which event fields (compiler field names) the BPF

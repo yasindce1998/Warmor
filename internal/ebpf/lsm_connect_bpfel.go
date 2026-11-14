@@ -48,6 +48,7 @@ type lsm_connectPolicyValue struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	lsm_connectMapActiveGeneration     = "active_generation"
 	lsm_connectMapDefaultDeny          = "default_deny"
 	lsm_connectMapLsmCfg               = "lsm_cfg"
 	lsm_connectMapLsmCgroupFilter      = "lsm_cgroup_filter"
@@ -113,14 +114,15 @@ type lsm_connectProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type lsm_connectMapSpecs struct {
-	DefaultDeny     *ebpf.MapSpec `ebpf:"default_deny"`
-	LsmCfg          *ebpf.MapSpec `ebpf:"lsm_cfg"`
-	LsmCgroupFilter *ebpf.MapSpec `ebpf:"lsm_cgroup_filter"`
-	LsmDrops        *ebpf.MapSpec `ebpf:"lsm_drops"`
-	LsmEnforce      *ebpf.MapSpec `ebpf:"lsm_enforce"`
-	LsmEvents       *ebpf.MapSpec `ebpf:"lsm_events"`
-	PolicyMap       *ebpf.MapSpec `ebpf:"policy_map"`
-	UnixWatch       *ebpf.MapSpec `ebpf:"unix_watch"`
+	ActiveGeneration *ebpf.MapSpec `ebpf:"active_generation"`
+	DefaultDeny      *ebpf.MapSpec `ebpf:"default_deny"`
+	LsmCfg           *ebpf.MapSpec `ebpf:"lsm_cfg"`
+	LsmCgroupFilter  *ebpf.MapSpec `ebpf:"lsm_cgroup_filter"`
+	LsmDrops         *ebpf.MapSpec `ebpf:"lsm_drops"`
+	LsmEnforce       *ebpf.MapSpec `ebpf:"lsm_enforce"`
+	LsmEvents        *ebpf.MapSpec `ebpf:"lsm_events"`
+	PolicyMap        *ebpf.MapSpec `ebpf:"policy_map"`
+	UnixWatch        *ebpf.MapSpec `ebpf:"unix_watch"`
 }
 
 // lsm_connectVariableSpecs contains global variables before they are loaded into the kernel.
@@ -154,18 +156,20 @@ func (o *lsm_connectObjects) Close() error {
 //
 // It can be passed to loadLsm_connectObjects or ebpf.CollectionSpec.LoadAndAssign.
 type lsm_connectMaps struct {
-	DefaultDeny     *ebpf.Map `ebpf:"default_deny"`
-	LsmCfg          *ebpf.Map `ebpf:"lsm_cfg"`
-	LsmCgroupFilter *ebpf.Map `ebpf:"lsm_cgroup_filter"`
-	LsmDrops        *ebpf.Map `ebpf:"lsm_drops"`
-	LsmEnforce      *ebpf.Map `ebpf:"lsm_enforce"`
-	LsmEvents       *ebpf.Map `ebpf:"lsm_events"`
-	PolicyMap       *ebpf.Map `ebpf:"policy_map"`
-	UnixWatch       *ebpf.Map `ebpf:"unix_watch"`
+	ActiveGeneration *ebpf.Map `ebpf:"active_generation"`
+	DefaultDeny      *ebpf.Map `ebpf:"default_deny"`
+	LsmCfg           *ebpf.Map `ebpf:"lsm_cfg"`
+	LsmCgroupFilter  *ebpf.Map `ebpf:"lsm_cgroup_filter"`
+	LsmDrops         *ebpf.Map `ebpf:"lsm_drops"`
+	LsmEnforce       *ebpf.Map `ebpf:"lsm_enforce"`
+	LsmEvents        *ebpf.Map `ebpf:"lsm_events"`
+	PolicyMap        *ebpf.Map `ebpf:"policy_map"`
+	UnixWatch        *ebpf.Map `ebpf:"unix_watch"`
 }
 
 func (m *lsm_connectMaps) Close() error {
 	return _Lsm_connectClose(
+		m.ActiveGeneration,
 		m.DefaultDeny,
 		m.LsmCfg,
 		m.LsmCgroupFilter,
