@@ -75,6 +75,19 @@ type InputIssue struct {
 	State string `json:"state"` // unknown, truncated, redacted
 }
 
+// SummaryForExport removes the full evaluator snapshot without mutating the
+// recording. General-purpose stdout/webhook exports opt in to sensitive inputs;
+// private file recordings and the simulator store retain them for replay.
+func (e *SecurityEvent) SummaryForExport() *SecurityEvent {
+	if e == nil || e.PolicyInput == nil {
+		return e
+	}
+	copy := *e
+	copy.PolicyInput = nil
+	copy.InputIssues = append(append([]InputIssue(nil), e.InputIssues...), InputIssue{"policy_input", "redacted"})
+	return &copy
+}
+
 // LineageEntry represents one ancestor in the process tree.
 type LineageEntry struct {
 	PID      uint32 `json:"pid"`

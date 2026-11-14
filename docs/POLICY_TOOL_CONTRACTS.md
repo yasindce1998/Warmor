@@ -44,8 +44,33 @@ are rejected. Evaluation errors are counted separately in `evaluation_errors`
 never claim all prior decisions remain unchanged. Preserving input is not proof
 of equivalent live enforcement.
 
-**Sensitive data:** argv can contain passwords/tokens. Version 2 records argv by
-default; protect event files, access, and retention. Redactors **must** remove
+**Sensitive data:** argv can contain passwords/tokens. Private file recordings
+and the simulator event store retain argv for replay. Stdout and JSON webhook
+exports omit the complete `policy_input` by default and mark it redacted;
+programmatic callers must explicitly set `StdoutSink.IncludePolicyInput` or
+`WebhookConfig.IncludePolicyInput` to export it. The daemon does not opt in.
+Custom sinks receive the full event and must implement their own export controls.
+SIEM summaries may themselves contain sensitive paths/reasons: these defaults
+are not a general-purpose secret detector or comprehensive redactor.
+
+On supported Unix platforms, file recordings are created as **0600** regardless
+of a permissive umask. Existing owned, singly-linked regular files (including
+recognized numeric rotation archives) are tightened before recording continues.
+The event store creates directories **0700** and tightens an existing owned store
+directory on initial open and daily reopen. Existing higher-level directories
+are not chmodded; newly created ancestors are 0700. FileSink requires an existing
+trusted parent directory; it never chmods a shared `/var/log` directory.
+Untrusted/writable parent directories, symlink components/files, hard-linked
+files, nonregular files, and files owned by another user are rejected. Reopening
+and rotation use the same descriptor-relative no-follow checks; a failed reopen
+does not continue writing via the old encoder. A platform without these private
+file guarantees fails closed (notably Windows until an ACL implementation exists).
+Operators using symlinked log paths must configure the physical directory path.
+
+Tightening cannot revoke access via descriptors already opened by other users or
+undo previous disclosure: treat credentials captured by older permissive logs as
+potentially compromised and rotate them. Protect event access and retention.
+Redactors **must** remove
 secrets from both `policy_input` and summary fields and append an `input_issues`
 entry with `state: redacted` and the affected field path. Editing only the summary
 leaves secrets in the authoritative snapshot. No automatic redaction CLI is added.
