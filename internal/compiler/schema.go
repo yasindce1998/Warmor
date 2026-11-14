@@ -235,3 +235,7 @@ func isValidEvent(event string) bool {
 // for an unchanged YAML policy changes (codegen, ABI or build settings), so
 // cached compiled policies are rebuilt.
 const Version = "7"
+
+// Identity is embedded in artifact-signed WASM build metadata. Release systems
+// may use a stricter immutable identity for custom toolchains.
+const Identity = "warmor-yaml/" + Version

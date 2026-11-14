@@ -95,13 +95,14 @@ type diskVersion struct {
 }
 
 type storeSnapshot struct {
-	Policies map[string]*Policy                `json:"policies"`
-	Agents   map[string]*Agent                 `json:"agents"`
-	Versions map[string]map[int64]*diskVersion `json:"versions"`
-	Rollouts map[string]*RolloutState          `json:"rollouts"`
-	Bindings map[string]*ContainerBinding      `json:"bindings"`
-	Audit    []AuditEntry                      `json:"audit"`
-	Sequence uint64                            `json:"sequence"`
+	Deployments map[string][]byte                 `json:"deployments,omitempty"`
+	Policies    map[string]*Policy                `json:"policies"`
+	Agents      map[string]*Agent                 `json:"agents"`
+	Versions    map[string]map[int64]*diskVersion `json:"versions"`
+	Rollouts    map[string]*RolloutState          `json:"rollouts"`
+	Bindings    map[string]*ContainerBinding      `json:"bindings"`
+	Audit       []AuditEntry                      `json:"audit"`
+	Sequence    uint64                            `json:"sequence"`
 }
 
 type snapshotEnvelope struct {
@@ -277,6 +278,10 @@ func (s *Store) mutateLocked(action, resource string, fn func() error) error {
 
 func (s *Store) snapshotLocked() storeSnapshot {
 	d := storeSnapshot{Policies: make(map[string]*Policy), Agents: make(map[string]*Agent), Versions: make(map[string]map[int64]*diskVersion), Rollouts: make(map[string]*RolloutState), Bindings: make(map[string]*ContainerBinding), Audit: slices.Clone(s.audit), Sequence: s.sequence}
+	d.Deployments = make(map[string][]byte, len(s.deployments))
+	for id, b := range s.deployments {
+		d.Deployments[id] = slices.Clone(b)
+	}
 	for id, p := range s.policies {
 		d.Policies[id] = clonePolicy(p)
 	}
@@ -303,6 +308,10 @@ func (s *Store) snapshotLocked() storeSnapshot {
 func (s *Store) restoreLocked(d storeSnapshot) {
 	s.policies, s.agents, s.rollouts, s.bindings = d.Policies, d.Agents, d.Rollouts, d.Bindings
 	s.audit, s.sequence = d.Audit, d.Sequence
+	s.deployments = d.Deployments
+	if s.deployments == nil {
+		s.deployments = make(map[string][]byte)
+	}
 	s.versions = make(map[string]map[int64]*policyVersion)
 	for id, vs := range d.Versions {
 		s.versions[id] = make(map[int64]*policyVersion)
@@ -372,6 +381,9 @@ func labelsSizeBound(labels map[string]string) int64 {
 }
 
 func (s *Store) validateLocked(integrity bool) error {
+	if err := s.validateDeploymentsLocked(integrity); err != nil {
+		return err
+	}
 	l := s.limits
 	if s.policies == nil || s.agents == nil || s.rollouts == nil || s.bindings == nil {
 		return errors.New("missing state collections")
@@ -386,6 +398,9 @@ func (s *Store) validateLocked(integrity bool) error {
 	// Conservative metadata bound prevents encoding a huge snapshot before the
 	// exact serialized-size check. JSON string escaping costs at most 6x.
 	estimated := int64(1024 + len(s.audit)*1024)
+	for id, wire := range s.deployments {
+		estimated += 512 + int64(6*len(id)+base64.StdEncoding.EncodedLen(len(wire)))
+	}
 	for _, a := range s.audit {
 		estimated += int64(6 * (len(a.Action) + len(a.Resource)))
 	}
@@ -434,10 +449,10 @@ func (s *Store) validateLocked(integrity bool) error {
 	for id, a := range s.agents {
 		if a == nil || !validStateID(id) || a.ID != id || !validLabels(a.Labels) || len(a.Hostname) > 4096 || !utf8.ValidString(a.Hostname) ||
 			(a.PolicyID != "" && !validStateID(a.PolicyID)) || a.PolicyVersion < 0 ||
-			len(a.PolicyHash) > 64 || !utf8.ValidString(a.PolicyHash) || len(a.ActivationError) > 4096 || !utf8.ValidString(a.ActivationError) {
+			len(a.PolicyHash) > 64 || !utf8.ValidString(a.PolicyHash) || len(a.EnvelopeHash) > 64 || !utf8.ValidString(a.EnvelopeHash) || len(a.ActivationError) > 4096 || !utf8.ValidString(a.ActivationError) {
 			return errors.New("invalid agent")
 		}
-		estimated += 1024 + int64(6*(len(id)+len(a.ID)+len(a.Hostname)+len(a.PolicyID)+len(a.PolicyHash)+len(a.ActivationError))) + labelsSizeBound(a.Labels)
+		estimated += 1024 + int64(6*(len(id)+len(a.ID)+len(a.Hostname)+len(a.PolicyID)+len(a.PolicyHash)+len(a.EnvelopeHash)+len(a.ActivationError))) + labelsSizeBound(a.Labels)
 	}
 	active := make(map[string]bool)
 	for id, r := range s.rollouts {

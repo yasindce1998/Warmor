@@ -25,6 +25,7 @@ func (s *Store) HeartbeatRevision(req HeartbeatRequest) error {
 		cp.PolicyID = req.PolicyID
 		cp.PolicyHash = req.PolicyHash
 		cp.ActivationError = req.ActivationError
+		cp.DeploymentSequence, cp.EnvelopeHash = req.DeploymentSequence, req.EnvelopeHash
 		cp.Status = AgentStatusActive
 		s.agents[req.AgentID] = cp
 		return nil
