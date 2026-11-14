@@ -104,6 +104,8 @@ func trustedExecutable(path, digest string) (*os.File, error) {
 }
 
 func command(f *os.File) *exec.Cmd {
+	// Always enter the descriptor-sanitizing bootstrap with no --serve flag.
+	// ExtraFiles pins the executable; it is NOT an inherited-fd allowlist.
 	cmd := exec.Command("/proc/self/fd/3")
 	cmd.Args = []string{"warmor-policy-host"}
 	cmd.ExtraFiles = []*os.File{f}

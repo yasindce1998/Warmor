@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/policyhost/protocol"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 	"github.com/yasindce1998/warmor/pkg/api"
+	"golang.org/x/sys/unix"
 )
 
 // Build the actual standalone command once; never self-exec a Go test binary,
@@ -122,6 +124,64 @@ func reaped(t *testing.T, h *Host) {
 	var st syscall.WaitStatus
 	if _, err := syscall.Wait4(h.cmd.Process.Pid, &st, syscall.WNOHANG, nil); !errors.Is(err, syscall.ECHILD) {
 		t.Fatalf("child wait = %v", err)
+	}
+}
+
+func TestBootstrapExcludesNonCLOEXECDescriptorAboveNOFILE(t *testing.T) {
+	c := config(t) // build before introducing the deliberately inheritable fd
+	s := supervisor(t, c)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	// F_DUPFD allocates a new owned descriptor, never overwrites fd 100 (which
+	// might belong to another test/runtime). Unlike F_DUPFD_CLOEXEC this is
+	// intentionally inheritable, and exceeds the worker's RLIMIT_NOFILE=32.
+	fd, err := unix.FcntlInt(w.Fd(), unix.F_DUPFD, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if fd >= 0 {
+			_ = unix.Close(fd)
+		}
+	}()
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+	if err != nil || flags&unix.FD_CLOEXEC != 0 {
+		t.Fatal("regression fixture is not inheritable", err)
+	}
+	h := startHost(t, s, wasmtest.ConstPolicy(0, nil))
+	defer h.Close()
+	// The worker is deliberately non-dumpable; prove closure through pipe
+	// lifetime rather than weakening dumpability to inspect /proc/PID/fd.
+	// Sanitization must not close/change any descriptor in the supervisor.
+	if _, err := unix.Write(fd, []byte{7}); err != nil {
+		t.Fatal("bootstrap altered parent's descriptor", err)
+	}
+	var b [1]byte
+	if _, err := r.Read(b[:]); err != nil || b[0] != 7 {
+		t.Fatal("parent pipe corrupted", err)
+	}
+	if err := unix.Close(fd); err != nil {
+		t.Fatal(err)
+	}
+	fd = -1
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// EOF must occur while the worker is alive, not merely after Close kills
+	// it. Poll avoids a blocked read goroutine if this regression returns.
+	poll := []unix.PollFd{{Fd: int32(r.Fd()), Events: unix.POLLIN | unix.POLLHUP}}
+	if _, err := unix.Poll(poll, 1000); err != nil || poll[0].Revents&unix.POLLHUP == 0 {
+		t.Fatal("inherited pipe lacks EOF before worker exit", err)
+	}
+	if n, err := r.Read(b[:]); n != 0 || err != io.EOF {
+		t.Fatalf("pipe EOF: n=%d err=%v", n, err)
+	}
+	if result, err := h.Evaluate(context.Background(), &api.Event{}); err != nil || result.Action != api.ActionAllow {
+		t.Fatalf("fresh worker runtime unusable: %+v %v", result, err)
 	}
 }
 
