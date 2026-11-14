@@ -42,7 +42,7 @@ type policyClientConfig struct {
 // newPolicyClient builds a policy server client. The agent authenticates
 // with an mTLS client certificate (CertFile/KeyFile), a JWT bearer token with
 // the agent role (Token, or WARMOR_SERVER_TOKEN), or both.
-func newPolicyClient(cfg policyClientConfig, onUpdate func(*policyserver.PolicyAssignment, []byte)) (*policyserver.Client, error) {
+func newPolicyClient(cfg policyClientConfig, onUpdate func(*policyserver.PolicyAssignment, []byte) error) (*policyserver.Client, error) {
 	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
 		return nil, fmt.Errorf("--tls-cert and --tls-key must be given together")
 	}
@@ -158,6 +158,10 @@ func writePolicyFile(path string, data []byte) error {
 	}
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
 	}

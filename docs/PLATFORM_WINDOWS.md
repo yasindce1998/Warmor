@@ -133,6 +133,30 @@ Signing:
 `--lsm-enforce` and `--cgroup-filter` have no effect on Windows. The policy
 file is watched and reloaded on change, since Windows has no `SIGHUP`.
 
+### Policy distribution and durable activation
+
+**Daemon fleet publication (`--server`) is not currently supported on Windows.**
+Startup rejects it before fallback seeding, platform initialization or network
+registration. The publication API also rejects it before creating directories,
+replacing aliases or activating/acknowledging a candidate. This restriction is
+intentional: the immutable module/signature publication backend depends on
+atomic revision links and directory fsync; Go's Windows directory `Sync` fails
+with access denied. A write-through rename of one file is not a durable,
+transactional replacement of two independent module/signature files.
+
+Use an existing local `--policy` and `--verify-key` for signed startup and reload.
+Signature validation and the local watcher remain supported; external writers
+must publish consistent signed pairs and a failed verification retains the
+running policy. Arbitrary two-file updates do not gain crash-atomic publication
+from this local workflow. Windows fleet publication needs a separately designed
+and native-tested Windows atomic revision backend; this release does not claim
+one or ignore failed storage barriers to simulate success.
+
+The policy **server** snapshot backend is separate: it uses Windows write-through
+replacement and remains tested for restart recovery. Its parent directory must
+have a private Windows DACL granting access only to the service identity,
+SYSTEM and administrators. POSIX mode `0600` is not a Windows ACL guarantee.
+
 ### Windows service
 
 ```powershell

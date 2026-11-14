@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"log"
 	"net"
 	"net/http"
@@ -122,7 +123,7 @@ func TestServer_PlainHTTPWithJWT(t *testing.T) {
 				t.Errorf("GET %s without token: status %d, want 401", path, resp.StatusCode)
 			}
 		}
-	}, "-jwt-secret", "s3cret")
+	}, "-insecure", "-jwt-secret", "s3cret")
 
 	assertContains(t, "logs", logs, "JWT auth enabled", "shutting down policy server")
 	if strings.Contains(logs, "mTLS enabled") {
@@ -141,7 +142,7 @@ func TestServer_JWTSecretFromEnv(t *testing.T) {
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("status %d, want 401", resp.StatusCode)
 		}
-	})
+	}, "-insecure")
 	assertContains(t, "logs", logs, "JWT auth enabled")
 }
 
@@ -158,6 +159,38 @@ func TestServer_InsecureFlag(t *testing.T) {
 		}
 	}, "-insecure")
 	assertContains(t, "logs", logs, "INSECURE MODE")
+}
+
+func TestServer_StateFileSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	logs := runServer(t, func(addr string) {
+		resp, err := http.Post("http://"+addr+"/api/v1/register", "application/json", strings.NewReader(`{"id":"persisted-node","labels":{"env":"prod"}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("registration status: %d", resp.StatusCode)
+		}
+	}, "-insecure", "-state-file", path)
+	assertContains(t, "logs", logs, "durable policy state")
+	runServer(t, func(addr string) {
+		resp, err := http.Get("http://" + addr + "/api/v1/admin/agents")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var agents []struct {
+			ID     string            `json:"id"`
+			Labels map[string]string `json:"labels"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&agents); err != nil {
+			t.Fatal(err)
+		}
+		if len(agents) != 1 || agents[0].ID != "persisted-node" || agents[0].Labels["env"] != "prod" {
+			t.Fatalf("state not restored: %+v", agents)
+		}
+	}, "-insecure", "-state-file", path)
 }
 
 func TestServer_VerifyKey(t *testing.T) {
@@ -267,7 +300,7 @@ func TestServer_MTLS(t *testing.T) {
 			resp.Body.Close()
 			t.Error("request without client cert should fail")
 		}
-	}, "-ca-cert", p.caCert, "-tls-cert", p.serverCert, "-tls-key", p.serverKey)
+	}, "-ca-cert", p.caCert, "-tls-cert", p.serverCert, "-tls-key", p.serverKey, "-state-file", filepath.Join(t.TempDir(), "state.json"))
 
 	assertContains(t, "logs", logs, "mTLS enabled", "(mTLS)")
 }
@@ -295,7 +328,7 @@ func TestServer_TLSWithoutClientAuth(t *testing.T) {
 				t.Errorf("plaintext request on TLS port: status %d, want 400", resp.StatusCode)
 			}
 		}
-	}, "-tls-cert", p.serverCert, "-tls-key", p.serverKey, "-jwt-secret", "s3cret")
+	}, "-tls-cert", p.serverCert, "-tls-key", p.serverKey, "-jwt-secret", "s3cret", "-state-file", filepath.Join(t.TempDir(), "state.json"))
 	assertContains(t, "logs", logs, "TLS enabled", "(TLS)")
 }
 
@@ -318,6 +351,10 @@ func TestServer_Failures(t *testing.T) {
 		{"bad keypair", []string{"-ca-cert", p.caCert, "-tls-cert", garbage, "-tls-key", p.serverKey}, "configure mTLS"},
 		{"bad addr", []string{"-addr", "127.0.0.1:notaport", "-insecure"}, "policy server:"},
 		{"no auth", nil, "refusing to start without authentication"},
+		{"jwt plaintext", []string{"-jwt-secret", "x"}, "refusing plaintext transport"},
+		{"missing state", []string{"-tls-cert", p.serverCert, "-tls-key", p.serverKey, "-jwt-secret", "x"}, "--state-file is required"},
+		{"bad state directory", []string{"-insecure", "-state-file", filepath.Join(missing, "state.json")}, "open policy state"},
+		{"bad state limit", []string{"-insecure", "-state-max-agents", "-1"}, "state resource limits must be positive"},
 		{"tls without ca or jwt", []string{"-tls-cert", p.serverCert, "-tls-key", p.serverKey}, "refusing to start without authentication"},
 		{"only tls cert", []string{"-tls-cert", p.serverCert, "-jwt-secret", "x"}, "--tls-cert and --tls-key must be given together"},
 		{"only tls key", []string{"-tls-key", p.serverKey, "-jwt-secret", "x"}, "--tls-cert and --tls-key must be given together"},

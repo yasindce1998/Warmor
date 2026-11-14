@@ -69,6 +69,8 @@ type ServerConfig struct {
 	// DriftThreshold is the z-score threshold for fleet drift anomalies
 	// computed from fingerprints in agent heartbeats (0 = library default).
 	DriftThreshold float64
+	// Store injects an already-opened store; the caller owns its lifecycle.
+	Store *Store
 }
 
 // NewServer creates a policy management server.
@@ -80,7 +82,10 @@ func NewServer(cfg ServerConfig) *Server {
 		cfg.StaleThreshold = 90 * time.Second
 	}
 
-	store := NewStore()
+	store := cfg.Store
+	if store == nil {
+		store = NewStore()
+	}
 	if cfg.VerifyKey != nil {
 		store.SetVerifyKey(cfg.VerifyKey)
 	}
@@ -89,7 +94,7 @@ func NewServer(cfg ServerConfig) *Server {
 		rollouts:   NewRolloutManager(store),
 		addr:       cfg.Addr,
 		staleCheck: cfg.StaleThreshold,
-		containers: newContainerStore(),
+		containers: newContainerStore(store),
 		drift:      drift.NewDetector(drift.DetectorConfig{Threshold: cfg.DriftThreshold}),
 		tlsConfig:  cfg.TLSConfig,
 		jwtSecret:  cfg.JWTSecret,
@@ -257,7 +262,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent := s.store.RegisterAgent(&req)
+	agent, err := s.store.RegisterAgentChecked(&req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	writeJSON(w, http.StatusOK, agent)
 }
 
@@ -288,8 +297,12 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.store.Heartbeat(req.AgentID, req.PolicyVersion); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	if err := s.store.HeartbeatRevision(req); err != nil {
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, errAgentNotRegistered) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 
@@ -337,13 +350,15 @@ func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Version-based long-poll: if agent already has this version, return 304.
-	// Any other version (including a newer one after a rollback) is re-sent.
+	w.Header().Set(RevisionIdentityHeader, "1")
+	// A version alone is ambiguous across policies. Legacy clients receive
+	// 200 rather than a potentially incorrect not-modified response.
 	ifVersion := r.URL.Query().Get("if_version")
 	if ifVersion != "" {
-		var v int64
-		_, _ = fmt.Sscanf(ifVersion, "%d", &v)
-		if v == assignment.Version {
+		v, err := strconv.ParseInt(ifVersion, 10, 64)
+		if err == nil && v == assignment.Version &&
+			r.URL.Query().Get("if_policy_id") == assignment.PolicyID &&
+			r.URL.Query().Get("if_hash") == assignment.WASMHash {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}

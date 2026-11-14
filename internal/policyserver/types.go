@@ -29,12 +29,15 @@ type Policy struct {
 
 // Agent represents a registered warmor agent with its labels and status.
 type Agent struct {
-	ID            string            `json:"id"`
-	Hostname      string            `json:"hostname"`
-	Labels        map[string]string `json:"labels"`
-	PolicyVersion int64             `json:"policy_version"`
-	LastHeartbeat time.Time         `json:"last_heartbeat"`
-	Status        AgentStatus       `json:"status"`
+	ID              string            `json:"id"`
+	Hostname        string            `json:"hostname"`
+	Labels          map[string]string `json:"labels"`
+	PolicyVersion   int64             `json:"policy_version"`
+	PolicyID        string            `json:"policy_id,omitempty"`
+	PolicyHash      string            `json:"policy_hash,omitempty"`
+	ActivationError string            `json:"activation_error,omitempty"`
+	LastHeartbeat   time.Time         `json:"last_heartbeat"`
+	Status          AgentStatus       `json:"status"`
 }
 
 type AgentStatus string
@@ -54,8 +57,11 @@ type RegisterRequest struct {
 
 // HeartbeatRequest is sent periodically by agents.
 type HeartbeatRequest struct {
-	AgentID       string `json:"agent_id"`
-	PolicyVersion int64  `json:"policy_version"`
+	AgentID         string `json:"agent_id"`
+	PolicyVersion   int64  `json:"policy_version"`
+	PolicyID        string `json:"policy_id,omitempty"`
+	PolicyHash      string `json:"policy_hash,omitempty"`
+	ActivationError string `json:"activation_error,omitempty"`
 	// Fingerprint is the agent's behavioral fingerprint for fleet drift
 	// detection (see internal/drift). Optional: agents without --drift
 	// keep sending plain heartbeats. The server trusts the authenticated
@@ -80,6 +86,9 @@ type PolicyAssignment struct {
 // on its /api/v1/policy/wasm response, so the module and its signature
 // arrive in one response.
 const SignatureHeader = "X-Warmor-Policy-Signature"
+
+// RevisionIdentityHeader marks full-identity conditional assignment support.
+const RevisionIdentityHeader = "X-Warmor-Revision-Identity"
 
 // Rollout represents a gradual policy rollout configuration.
 type Rollout struct {

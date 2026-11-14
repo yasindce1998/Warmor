@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -33,7 +35,9 @@ func TestPolicyWatcher_ReloadsOnChange(t *testing.T) {
 	// Give the watcher goroutine time to record the initial mtime before
 	// the test changes it, otherwise the change can race the first stat.
 	time.Sleep(100 * time.Millisecond)
-	touchFuture(t, path)
+	if err := os.WriteFile(path, []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-reloadCh:
 	case <-time.After(2 * time.Second):
@@ -72,6 +76,41 @@ func TestPolicyWatcher_StopIsIdempotent(t *testing.T) {
 	stop := watchPolicyFile(path, make(chan struct{}, 1), testWatchInterval)
 	stop()
 	stop() // must not panic or block
+}
+
+func TestPolicyWatcherContentIdentityAndFailedActivationRetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.wasm")
+	writeFile(t, path, "first")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	done := make(chan struct{}, 1)
+	stop := watchPolicyActivation(path, func() error {
+		if calls.Add(1) == 1 {
+			return errors.New("injected load failure")
+		}
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+		return nil
+	}, testWatchInterval)
+	defer stop()
+	writeFile(t, path, "second")
+	older := info.ModTime().Add(-time.Hour)
+	if err := os.Chtimes(path, older, older); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("unchanged bytes not retried after activation failure")
+	}
+	if calls.Load() < 2 {
+		t.Fatal("failed activation not retried")
+	}
 }
 
 func TestSeedPolicyFile(t *testing.T) {

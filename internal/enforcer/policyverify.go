@@ -30,7 +30,12 @@ func ReadVerifiedPolicy(path string, pub ed25519.PublicKey) ([]byte, error) {
 	if wasm.IsYAMLPolicy(path) {
 		return nil, fmt.Errorf("%s: signature verification requires a compiled .wasm policy (YAML policies are compiled at load time and cannot be signed)", path)
 	}
-	data, err := crypto.ReadVerifiedPolicy(pub, path, wasm.MaxPolicySize)
+	// Resolve the immutable revision pointer once for a consistent pair.
+	resolved, err := resolvePolicyRevisionPath(path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := crypto.ReadVerifiedPolicy(pub, resolved, wasm.MaxPolicySize)
 	if err != nil {
 		if errors.Is(err, crypto.ErrPolicyUnsigned) || errors.Is(err, crypto.ErrPolicySignatureInvalid) {
 			metrics.RecordPolicySignatureFailure(metrics.PolicySourceFile)
