@@ -174,7 +174,7 @@ Maintains a container relationship graph (network connections, shared volumes, s
 
 ### Web Dashboard — Shipped (`--dashboard-port`)
 
-Serves a live SSE view of policy evaluations (comm, PID, decision, reason) at `/dashboard` on its own HTTP server. It has **no authentication and listens on all interfaces** — bind it to localhost or keep it behind a firewall.
+Serves a live SSE view of policy evaluations (comm, PID, decision, reason) at `/dashboard` on its own HTTP server. Disabled by default; `--dashboard-port 8080` listens only on **127.0.0.1**. Optional authentication reads a password from `WARMOR_DASHBOARD_TOKEN` or `--dashboard-token-file` (HTTP Basic user: `warmor`, also covers SSE). Remote access requires an explicit `--dashboard-bind` IP; use a trusted TLS/authenticating reverse proxy and restrict access to the plaintext backend. See [dashboard access and reverse-proxy setup](docs/dashboard.md).
 
 ### SIEM / Syslog Sink — Shipped (`--event-sink syslog:`)
 
