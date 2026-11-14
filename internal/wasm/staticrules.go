@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"net"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	wazeroapi "github.com/tetratelabs/wazero/api"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/kernelmap"
 )
 
 // staticRulesTimeout bounds the declaration calls made at pool creation.
@@ -106,11 +110,15 @@ func parseStaticTable(data []byte, eventType uint32) (rules []compiler.StaticRul
 	if data[0] == 0 {
 		return nil, false, nil
 	}
+	if data[0] != 1 || (eventType != 0 && eventType != 2) {
+		return nil, false, fmt.Errorf("invalid eligible byte or event type")
+	}
 	eventName := "process"
 	if eventType == 2 {
 		eventName = "network"
 	}
 
+	seen := map[string]bool{}
 	i := 1
 	for i < len(data) {
 		if i+6 > len(data) {
@@ -130,6 +138,21 @@ func parseStaticTable(data []byte, eventType uint32) (rules []compiler.StaticRul
 		if action > 1 || audit > 1 {
 			return nil, false, fmt.Errorf("invalid action/audit byte")
 		}
+		// Old/custom exports may advertise paths their own binary ABI
+		// evaluates only as prefixes. Revalidate at the trust boundary.
+		if eventType == 0 {
+			if port != 0 || pattern == "" || len(pattern) > kernelmap.MaxPolicyPathBytes ||
+				strings.IndexByte(pattern, 0) >= 0 || !utf8.ValidString(pattern) {
+				return nil, false, fmt.Errorf("incomplete process identity")
+			}
+		} else if ip := net.ParseIP(pattern); ip == nil || ip.String() != pattern {
+			return nil, false, fmt.Errorf("noncanonical endpoint identity")
+		}
+		key := fmt.Sprintf("%d/%s", port, pattern)
+		if seen[key] {
+			continue // first match wins, including custom exports
+		}
+		seen[key] = true
 		rules = append(rules, compiler.StaticRule{
 			Event:   eventName,
 			Action:  action,

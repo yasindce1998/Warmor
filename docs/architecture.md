@@ -294,9 +294,9 @@ Application → Syscall → LSM Hook → Policy Map Lookup
   └─ MISS        → emit to ringbuf → WASM evaluates → decision compiled back into policy map
 ```
 
-Unlike tracepoint-based monitoring, which observes syscalls after they begin, LSM-BPF hooks are **synchronous**. They run inline in the kernel security path and can return `-EPERM` to block an operation before it completes. They do so **only on a map hit**. A miss is allowed (default-allow) and reported.
+Unlike tracepoint-based monitoring, which observes syscalls after they begin, LSM-BPF hooks are **synchronous**. They run inline in the kernel security path and can return `-EPERM` before an operation completes. Known deny entries block in enforcement mode; misses normally allow unless an eligible exec/connect domain has opt-in kernel default-deny enabled.
 
-**What reaches the map on `main`:** the daemon writes WASM decisions into the map only for **exec** (exact path) and **connect** (endpoint) events, and only for tracepoint-origin events. File (the hook sees only the basename), bind, listen, ptrace and mount entries are never written, so those hooks never block. The map is not preloaded from the compiled policy and not cleared on reload; it is an LRU_HASH with 65536 entries, so a full map evicts the least recently used decision instead of failing.
+**What reaches the map:** dynamic WASM decisions are written only for complete, scope-known **exec** (literal path) and **connect** (endpoint) tracepoint events whose decisions depend solely on kernel-key fields. Opt-in `--default-deny` preloads eligible exact compiled allowlists globally, subject to the cgroup filter. Reload clears decisions. File (basename-only), bind, listen, ptrace and mount decisions are not dynamically persisted. The map is an LRU_HASH with 65536 entries: eviction causes a miss (which denies in marked default-deny domains, otherwise allows).
 
 **LSM Programs:**
 - `lsm_exec.bpf.c` — `bprm_check_security` (can block exec on a map hit)
@@ -304,12 +304,16 @@ Unlike tracepoint-based monitoring, which observes syscalls after they begin, LS
 - `lsm_connect.bpf.c` — `socket_connect` (can block connect on a map hit)
 - `lsm_bind.bpf.c`, `lsm_listen.bpf.c`, `lsm_ptrace.bpf.c`, `lsm_mount.bpf.c` — observe only on `main`
 
-**Policy Map (BPF_MAP_TYPE_HASH):**
+**Policy Map (BPF_MAP_TYPE_LRU_HASH):**
 ```c
-struct policy_key {
+struct policy_key {     // 288 bytes; unused bytes zero
     __u64 cgroup_id;    // 0 = global rule
-    __u32 rule_hash;    // FNV-1a hash of filename/pattern
-    __u8  event_type;   // 0=exec, 1=file, 2=net
+    __u8  event_type;   // hook-specific
+    __u8  family;
+    __u8  port[2];      // network byte order
+    __u8  address[16];  // IPv4 in first four bytes
+    char  path[256];    // full literal hook string
+    __u8  pad[4];
 };
 
 struct policy_value {
@@ -320,8 +324,13 @@ struct policy_value {
 ```
 
 **Two-Tier Lookup:**
-1. Cgroup-specific: `policy_map[{cgroup_id, hash, type}]`
-2. Global fallback: `policy_map[{0, hash, type}]`
+1. Cgroup-specific: `policy_map[{cgroup_id, full identity, hook type}]`
+2. Global fallback: `policy_map[{0, full identity, hook type}]`
+
+Policy-derived exec keys cap at 127 bytes to respect the binary WASM ABI.
+Long/unknown inputs do not populate the dynamic map. Exact pathname strings
+are not inode/content or mount-namespace identities; see the [full contract
+and limitations](design/kernel-default-deny.md#exact-identity-contract-and-limitations).
 
 **WASM→BPF Feedback Loop (exec and connect only):**
 ```
@@ -332,7 +341,7 @@ Second occurrence: LSM hit → kernel allows/denies immediately (no userspace tr
 **Graceful Fallback:** If `CONFIG_BPF_LSM` is absent or the kernel lacks LSM-BPF support, the system falls back to tracepoint-only mode with a warning. The `--lsm-enforce` flag controls whether deny decisions are enforced or audit-only.
 
 **Implementation Files:**
-- `bpf/warmor_lsm.h` — Shared structs, maps, FNV-1a hash helper
+- `bpf/warmor_lsm.h` — Shared exact-key structs/maps; observation-only Unix watch hash helper
 - `bpf/lsm_exec.bpf.c` — Exec enforcement
 - `bpf/lsm_file.bpf.c` — File access hook
 - `bpf/lsm_connect.bpf.c` — Network enforcement
@@ -482,9 +491,9 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
    - ptrace_access_check
    - sb_mount
    ↓
-2. Compute FNV-1a hash of subject (filename, endpoint, port, comm, fstype)
+2. Construct full operation key (literal filename/comm/fstype or endpoint)
    ↓
-3. Lookup policy_map[{cgroup_id, hash, event_type}]
+3. Lookup policy_map[{cgroup_id, full identity, event_type}]
    ├─ HIT + action=DENY → return -EPERM (blocked, emit audit event)
    ├─ HIT + action=ALLOW → return 0
    └─ MISS → emit event to lsm_events ringbuf, return 0 (default-allow)

@@ -1,0 +1,98 @@
+name: Daemon enforcement outcomes
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'bpf/**'
+      - 'internal/**'
+      - 'pkg/api/**'
+      - 'cmd/warmor-daemon/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.vimto.toml'
+      - 'tests/integration/**'
+      - 'tests/e2e_enforcement_test.sh'
+      - '.github/workflows/enforcement-outcomes.yml'
+      - '.github/workflows/ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'bpf/**'
+      - 'internal/**'
+      - 'pkg/api/**'
+      - 'cmd/warmor-daemon/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.vimto.toml'
+      - 'tests/integration/**'
+      - 'tests/e2e_enforcement_test.sh'
+      - '.github/workflows/enforcement-outcomes.yml'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: enforcement-outcomes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  whole-daemon-outcomes:
+    name: Whole-daemon prevention and termination (VM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      KERNEL: ghcr.io/cilium/ci-kernels:stable-selftests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Configure VM cache outside the shared checkout
+        run: |
+          mkdir -p "$RUNNER_TEMP/warmor-outcome-cache"
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/warmor-outcome-cache" >> "$GITHUB_ENV"
+      - name: Install VM and BPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 clang llvm libbpf-dev gcc-multilib iproute2
+          if [ -e /dev/kvm ]; then
+            sudo chmod a+rw /dev/kvm
+          else
+            echo VIMTO_DISABLE_KVM=1 >> "$GITHUB_ENV"
+          fi
+          CGO_ENABLED=0 go install lmb.io/vimto@v0.4.0
+      - name: Install policy compilation target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+      - name: Validate harness oracles and syntax without enforcement
+        run: |
+          bash -n tests/e2e_enforcement_test.sh tests/integration/run-outcomes.sh tests/integration/run-vm.sh
+          go test -race -count=1 ./tests/integration
+      - name: Regenerate embedded BPF from this revision
+        env:
+          BPF2GO_CFLAGS: -D__TARGET_ARCH_x86 -mcpu=v1
+        run: go generate ./internal/ebpf
+      - name: Run whole-daemon outcomes in disposable VM only
+        run: bash tests/integration/run-outcomes.sh
+      - name: Retain outcome evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daemon-enforcement-outcomes
+          path: |
+            tests/integration/artifacts/run.*/build-info.txt
+            tests/integration/artifacts/run.*/SHA256SUMS
+            tests/integration/artifacts/run.*/*.log
+            tests/integration/artifacts/run.*/*.txt
+            tests/integration/artifacts/run.*/*.yaml
+            tests/integration/artifacts/run.*/*.wasm
+            tests/integration/artifacts/run.*/*.ndjson
+            tests/integration/artifacts/run.*/*.metrics
+            tests/integration/artifacts/run.*/marker-*
+          if-no-files-found: warn
+          retention-days: 14
