@@ -1,0 +1,9 @@
+.git
+bin
+dist
+release
+payloads
+**/target
+**/coverage.out
+**/*.test
+**/*.test.exe
