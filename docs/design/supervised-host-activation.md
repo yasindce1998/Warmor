@@ -129,6 +129,8 @@ package parallelism **`-p 2`**:
 
 - `WARMOR_REQUIRE_CARGO=1 go test -count=1 -p 2 ./...`: pass, fresh execution;
   actual compiled-policy tests are required rather than skipped.
+- `WARMOR_REQUIRE_CARGO=1 go test -race -count=1 -p 2 ./...`: pass on the same
+  settled code checkpoint, including the merged recording/privatefile tests.
 - `go vet -p 2 ./...`: pass.
 - All supervised host, scope/drain/shutdown regressions under
   `go test -race -count=5 -p 2 ./internal/enforcer ./internal/platform
