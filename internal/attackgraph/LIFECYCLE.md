@@ -35,9 +35,12 @@ Runtime process-exit integration should call `RecordExit`; container-removal
 integration should call graph `Remove`/`RemoveNode`. These must use real runtime
 identity. A process exit is **not** sufficient evidence of container removal.
 Until runtime start-time/generation identity is available, PID/cgroup reuse
-before expiry cannot be distinguished reliably. The lineage tracker rejects
-parents observed after a child rather than attributing it to an obvious reused
-PID. Long-lived quiet processes can expire; missing ancestry must not be
+before expiry cannot be distinguished reliably. Lineage preserves a PID's
+first-observed generation time across re-exec and uses latest-exec time only
+for retention. An observed removal followed by reinsertion changes its local
+generation and invalidates existing child bindings; later exec timestamps alone
+are not proof of reuse. These local generations are not kernel birth identity.
+Long-lived quiet processes can expire; missing ancestry must not be
 treated as proof that no ancestor exists.
 
 ## Drift comparability and identity

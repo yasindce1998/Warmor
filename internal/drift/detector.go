@@ -1,11 +1,17 @@
 package drift
 
 import (
+	"errors"
+	"fmt"
 	"maps"
 	"math"
 	"sync"
 	"time"
 )
+
+// DefaultMaxPatterns is shared with heartbeat validation. Oversized reports
+// must be rejected explicitly, not acknowledged and silently discarded.
+const DefaultMaxPatterns = 1024
 
 // DriftAnomaly represents a detected behavioral anomaly.
 type DriftAnomaly struct {
@@ -56,7 +62,7 @@ func NewDetector(cfg DetectorConfig) *Detector {
 		cfg.MaxAgentsPerImage = 256
 	}
 	if cfg.MaxPatterns <= 0 {
-		cfg.MaxPatterns = 1024
+		cfg.MaxPatterns = DefaultMaxPatterns
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
@@ -69,15 +75,36 @@ func NewDetector(cfg DetectorConfig) *Detector {
 	}
 }
 
-// Submit adds or updates a fingerprint from an agent.
-func (d *Detector) Submit(fp *BehaviorFingerprint) {
-	if fp == nil || fp.AgentID == "" || fp.ImageHash == "" || len(fp.AgentID) > MaxKeyLength || len(fp.ImageHash) > MaxKeyLength || fp.Window < 0 || len(fp.Vectors) > d.config.MaxPatterns {
-		return
+// Validate applies the detector's actual admission limits without changing
+// state, so transports can reject invalid reports before recording success.
+func (d *Detector) Validate(fp *BehaviorFingerprint) error {
+	if fp == nil {
+		return errors.New("fingerprint is required")
+	}
+	if fp.AgentID == "" || len(fp.AgentID) > MaxKeyLength {
+		return errors.New("fingerprint agent_id is required and must be at most 256 bytes")
+	}
+	if fp.ImageHash == "" || len(fp.ImageHash) > MaxKeyLength {
+		return errors.New("fingerprint image_hash is required and must be at most 256 bytes")
+	}
+	if fp.Window < 0 {
+		return errors.New("fingerprint window must not be negative")
+	}
+	if len(fp.Vectors) > d.config.MaxPatterns {
+		return fmt.Errorf("fingerprint has too many patterns (maximum %d)", d.config.MaxPatterns)
 	}
 	for pattern, rate := range fp.Vectors {
 		if len(pattern) > MaxKeyLength || math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 {
-			return
+			return errors.New("fingerprint patterns must be at most 256 bytes and rates must be finite and nonnegative")
 		}
+	}
+	return nil
+}
+
+// Submit adds or updates a fingerprint, or reports why it was rejected.
+func (d *Detector) Submit(fp *BehaviorFingerprint) error {
+	if err := d.Validate(fp); err != nil {
+		return err
 	}
 	copy := *fp
 	copy.Vectors = maps.Clone(fp.Vectors)
@@ -127,6 +154,7 @@ func (d *Detector) Submit(fp *BehaviorFingerprint) {
 	}
 	d.fingerprints[fp.ImageHash] = append(d.fingerprints[fp.ImageHash], fp)
 	d.received[fp] = now
+	return nil
 }
 
 // Anomalies returns all detected drift anomalies for a given image.

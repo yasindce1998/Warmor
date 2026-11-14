@@ -73,6 +73,10 @@ image drift. Those implicit comparisons are no longer produced.
   (256), and patterns per fingerprint (1,024), and expires submissions thirty
   minutes after local receipt. The stale loop can prune earlier according to
   its configured threshold. No sender timestamp can pin state indefinitely.
+- Heartbeat validation uses the detector's actual admission limits, including
+  its 1,024-pattern default. Oversized/invalid reports return HTTP 400 rather
+  than acknowledging telemetry the detector cannot retain. This replaces the
+  older 10,000-pattern HTTP allowance; integrations must bound their vectors.
 - Only mature fingerprints with matching window durations and overlapping
   timestamps are compared. Legacy window-zero fingerprints compare only with
   other legacy window-zero fingerprints, not new rolling observations.

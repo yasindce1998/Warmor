@@ -131,7 +131,9 @@ func TestDetectorBoundsReceiptTTLAndIdentity(t *testing.T) {
 		{AgentID: "a", ImageHash: "i", Vectors: map[string]float64{"p": -1}},
 		{AgentID: "a", ImageHash: "i", Vectors: map[string]float64{"a": 1, "b": 2, "c": 3}},
 	} {
-		d.Submit(fp)
+		if err := d.Submit(fp); err == nil {
+			t.Error("invalid fingerprint rejection was not reported")
+		}
 	}
 	if len(d.Images()) != 0 {
 		t.Fatal("accepted invalid/unidentified fingerprint")

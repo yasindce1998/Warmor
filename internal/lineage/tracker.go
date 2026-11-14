@@ -8,13 +8,18 @@ import (
 
 // ProcessInfo stores metadata about a tracked process.
 type ProcessInfo struct {
-	PID       uint32
-	PPID      uint32
-	Comm      string
-	Filename  string
-	UID       uint32
-	GID       uint32
-	StartTime time.Time
+	PID      uint32
+	PPID     uint32
+	Comm     string
+	Filename string
+	UID      uint32
+	GID      uint32
+	// StartTime is the first observed exec of this tracked generation, not
+	// kernel birth time. Re-exec preserves it; LastExec controls retention.
+	StartTime        time.Time
+	LastExec         time.Time
+	generation       uint64
+	parentGeneration uint64
 }
 
 // Tracker maintains an in-memory process tree built from exec events.
@@ -22,14 +27,15 @@ type ProcessInfo struct {
 type Tracker struct {
 	mu        sync.RWMutex
 	processes map[uint32]*ProcessInfo
-	// order lists tracked PIDs from oldest to newest StartTime, so the
+	// order lists tracked PIDs from oldest to newest LastExec, so the
 	// oldest is evicted in O(1); elems indexes it by PID.
-	order    *list.List
-	elems    map[uint32]*list.Element
-	maxDepth int
-	maxSize  int
-	ttl      time.Duration
-	clock    func() time.Time
+	order          *list.List
+	elems          map[uint32]*list.Element
+	maxDepth       int
+	maxSize        int
+	ttl            time.Duration
+	clock          func() time.Time
+	nextGeneration uint64
 }
 
 // TrackerConfig configures the process lineage tracker.
@@ -65,31 +71,46 @@ func NewTracker(cfg TrackerConfig) *Tracker {
 	}
 }
 
-// RecordExec registers a new process execution.
+// RecordExec registers a process execution. A still-tracked PID is treated as
+// re-exec, not a new birth: without a runtime generation token, timestamps alone
+// cannot distinguish an unreported PID reuse from a valid re-exec.
 func (t *Tracker) RecordExec(pid, ppid, uid, gid uint32, comm, filename string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.clock()
 	t.prune(now)
+	startedAt := now
+	var generation uint64
 
 	if el, ok := t.elems[pid]; ok {
 		// Re-exec of a tracked PID: it becomes the newest entry.
 		t.order.MoveToBack(el)
+		startedAt = t.processes[pid].StartTime
+		generation = t.processes[pid].generation
 	} else {
 		if len(t.processes) >= t.maxSize {
 			t.evictOldest()
 		}
 		t.elems[pid] = t.order.PushBack(pid)
+		t.nextGeneration++
+		generation = t.nextGeneration
+	}
+	var parentGeneration uint64
+	if parent := t.processes[ppid]; parent != nil {
+		parentGeneration = parent.generation
 	}
 
 	t.processes[pid] = &ProcessInfo{
-		PID:       pid,
-		PPID:      ppid,
-		Comm:      comm,
-		Filename:  filename,
-		UID:       uid,
-		GID:       gid,
-		StartTime: now,
+		PID:              pid,
+		PPID:             ppid,
+		Comm:             comm,
+		Filename:         filename,
+		UID:              uid,
+		GID:              gid,
+		StartTime:        startedAt,
+		LastExec:         now,
+		generation:       generation,
+		parentGeneration: parentGeneration,
 	}
 }
 
@@ -129,9 +150,9 @@ func (t *Tracker) GetAncestors(pid uint32) []ProcessInfo {
 		seen[current] = true
 
 		parent, ok := t.processes[info.PPID]
-		if !ok || parent.StartTime.After(info.StartTime) {
-			// A parent observed after this child may be a reused PID. Without
-			// kernel start-time identity, fail closed rather than invent ancestry.
+		if !ok || (info.parentGeneration != 0 && info.parentGeneration != parent.generation) {
+			// Only a changed observed generation invalidates the binding. A
+			// parent's later exec/first observation is not proof of PID reuse.
 			break
 		}
 		chain = append(chain, *parent)
@@ -185,7 +206,7 @@ func (t *Tracker) prune(now time.Time) int {
 	removed := 0
 	for el := t.order.Front(); el != nil; el = t.order.Front() {
 		pid := el.Value.(uint32)
-		if now.Sub(t.processes[pid].StartTime) < t.ttl {
+		if now.Sub(t.processes[pid].LastExec) < t.ttl {
 			break
 		}
 		t.remove(pid)
@@ -194,8 +215,8 @@ func (t *Tracker) prune(now time.Time) int {
 	return removed
 }
 
-// evictOldest drops the process with the oldest StartTime. Entries are
-// appended (or moved to the back) whenever StartTime is set, so that is the
+// evictOldest drops the process with the oldest LastExec. Entries are
+// appended (or moved to the back) whenever LastExec is set, so that is the
 // front of order.
 func (t *Tracker) evictOldest() {
 	if el := t.order.Front(); el != nil {

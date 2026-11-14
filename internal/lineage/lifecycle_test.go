@@ -54,3 +54,57 @@ func TestConcurrentTrackerLifecycleChurn(t *testing.T) {
 		t.Fatal("tracker churn exceeded budget")
 	}
 }
+
+func TestParentReexecPreservesAncestryAndRefreshesRetention(t *testing.T) {
+	now := time.Unix(1200, 0)
+	tr := NewTracker(TrackerConfig{TTL: time.Minute, Clock: func() time.Time { return now }})
+	tr.RecordExec(10, 0, 0, 0, "parent", "/bin/parent")
+	first := now
+	now = now.Add(time.Second)
+	tr.RecordExec(20, 10, 0, 0, "child", "/bin/child")
+	if got := len(tr.GetAncestors(20)); got != 1 {
+		t.Fatalf("initial ancestor count %d", got)
+	}
+	now = now.Add(30 * time.Second)
+	tr.RecordExec(10, 0, 0, 0, "parent-reexec", "/bin/reexec")
+	chain := tr.GetAncestors(20)
+	if len(chain) != 1 || chain[0].PID != 10 || chain[0].Comm != "parent-reexec" {
+		t.Fatalf("parent re-exec lost ancestry: %+v", chain)
+	}
+	if !chain[0].StartTime.Equal(first) || !chain[0].LastExec.Equal(now) {
+		t.Fatalf("first observation and retention timestamps conflated: %+v", chain[0])
+	}
+	now = first.Add(time.Minute)
+	tr.Prune()
+	if _, ok := tr.GetProcess(10); !ok {
+		t.Fatal("retention used first observation instead of latest exec")
+	}
+	now = first.Add(91 * time.Second)
+	tr.Prune()
+	if _, ok := tr.GetProcess(10); ok {
+		t.Fatal("latest-exec TTL did not expire")
+	}
+}
+
+func TestLateParentObservationDoesNotProvePIDReuse(t *testing.T) {
+	now := time.Unix(1200, 0)
+	tr := NewTracker(TrackerConfig{Clock: func() time.Time { return now }})
+	tr.RecordExec(20, 10, 0, 0, "child", "child")
+	now = now.Add(time.Second)
+	tr.RecordExec(10, 0, 0, 0, "parent", "parent")
+	if got := len(tr.GetAncestors(20)); got != 1 {
+		t.Fatalf("late parent observation rejected without reuse provenance: %d", got)
+	}
+}
+
+func TestObservedParentRemovalInvalidatesBindingAtSameTimestamp(t *testing.T) {
+	now := time.Unix(1200, 0)
+	tr := NewTracker(TrackerConfig{Clock: func() time.Time { return now }})
+	tr.RecordExec(10, 0, 0, 0, "parent", "parent")
+	tr.RecordExec(20, 10, 0, 0, "child", "child")
+	tr.RecordExit(10)
+	tr.RecordExec(10, 0, 0, 0, "new-process", "new-process")
+	if chain := tr.GetAncestors(20); len(chain) != 0 {
+		t.Fatalf("child attributed to a removed/reinserted PID at equal clock time: %+v", chain)
+	}
+}
