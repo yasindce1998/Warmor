@@ -13,6 +13,13 @@ on:
       - 'cmd/warmor-policy-bundle/**'
       - 'cmd/warmor-compile/**'
       - 'internal/compiler/**'
+      - 'internal/learner/**'
+      - 'internal/simulator/**'
+      - 'internal/streaming/**'
+      - 'pkg/api/**'
+      - 'internal/wasm/**'
+      - 'cmd/warmor-learn/**'
+      - 'cmd/warmor-simulate/**'
       - 'examples/policies/**'
       - 'policies/yaml-example/**'
       - '.github/workflows/policy-ci.yml'
@@ -29,6 +36,13 @@ on:
       - 'cmd/warmor-policy-bundle/**'
       - 'cmd/warmor-compile/**'
       - 'internal/compiler/**'
+      - 'internal/learner/**'
+      - 'internal/simulator/**'
+      - 'internal/streaming/**'
+      - 'pkg/api/**'
+      - 'internal/wasm/**'
+      - 'cmd/warmor-learn/**'
+      - 'cmd/warmor-simulate/**'
       - 'examples/policies/**'
       - 'policies/yaml-example/**'
       - '.github/workflows/policy-ci.yml'
@@ -49,6 +63,15 @@ jobs:
           go build ./cmd/warmor-policy-diff
           go build ./cmd/warmor-policy-bundle
           go build -o warmor-compile ./cmd/warmor-compile
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Record, learn, validate, compile and replay contract
+        env:
+          WARMOR_REQUIRE_CARGO: "1"
+        run: go test ./internal/learner ./internal/simulator ./internal/streaming ./cmd/warmor-learn ./cmd/warmor-simulate -v
 
       - name: Run policy package tests
         run: |
