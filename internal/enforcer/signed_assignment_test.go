@@ -202,3 +202,60 @@ func TestSignedRequiredDefaultDenyUsesActualEligibleDomainsAndRequiredLSM(t *tes
 		})
 	}
 }
+
+func TestSignedStartupRetainsCgroupOptionsAndCaptureReadiness(t *testing.T) {
+	isolateCacheDir(t)
+	artifact, err := crypto.GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := policybuild.Append(wasmtest.VersionedConstPolicy(0, 1), policybuild.Metadata{Compiler: "reviewed-build", DefaultAction: "allow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "policy.wasm")
+	if err := os.WriteFile(path, module, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".sig", artifact.SignPolicyFile(module), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := assignment.Policy{ID: "signed-policy", Version: 1, SHA256: assignment.Digest(module), ABI: 1, Compiler: "reviewed-build", Posture: assignment.Posture{Mode: "audit", DefaultAction: "allow"}}
+	p := &readinessPlatform{}
+	cfg := stubPlatform(t, p, nil)
+	opts := &Options{AuditMode: true, MetricsPort: -1, MetricsBindAddress: "127.0.0.1", CgroupFilter: []string{"auto"}, CgroupRoot: "/host/cgroup", CgroupReconcileInterval: 2 * time.Second, PolicyVerifyKey: artifact.Public, SignedAssignment: &want}
+	e, err := New(context.Background(), path, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if cfg.CgroupRoot != opts.CgroupRoot || cfg.CgroupReconcileInterval != opts.CgroupReconcileInterval || len(cfg.CgroupFilter) != 1 || cfg.CgroupFilter[0] != "auto" || !cfg.AuditMode {
+		t.Fatalf("signed startup lost scoped capture configuration: %+v", cfg)
+	}
+	if e.Ready() == nil {
+		t.Fatal("signed bootstrap reported ready before capture loop")
+	}
+	e.processing.Store(true)
+	if err := e.Ready(); err != nil {
+		t.Fatal(err)
+	}
+	p.err = errors.New("dynamic cgroup reconciliation failed")
+	if err := e.Ready(); !errors.Is(err, p.err) {
+		t.Fatalf("signed readiness ignored capture health: %v", err)
+	}
+	p.err = nil
+	old := e.evaluator
+	refused := errors.New("fresh assignment authorization refused")
+	if err := e.ActivateAssignment(path, want, func() error { return refused }); !errors.Is(err, refused) {
+		t.Fatal(err)
+	}
+	if e.evaluator != old {
+		t.Fatal("failed signed commit replaced last-known-good evaluator")
+	}
+	if err := e.Ready(); err != nil {
+		t.Fatal("failed signed update lost healthy last-known-good readiness", err)
+	}
+	if err := e.ReloadPolicy(); err == nil {
+		t.Fatal("signed mode allowed generic reload bypass")
+	}
+}

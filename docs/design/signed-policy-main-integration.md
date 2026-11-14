@@ -58,3 +58,48 @@ Using Go **1.26.11**, with build/test parallelism limited to `-p 2`:
 
 No dependency manifests, coordinator/policy-host code, release workflows,
 external infrastructure, or real key material were changed for this validation.
+
+## PR40/main refresh (from signed checkpoint `8634b22`)
+
+The subsequent merge imports main `09fdce9`, containing reviewed PR40
+`061685e`. It does not rewrite the reviewed signed source or cherry-pick a new
+activation backend. Conflicts are confined to these three files:
+
+- `cmd/warmor-daemon/main.go`: retain one `enforcerOpts` shared by ordinary,
+  signed bootstrap/recovery, and restored-state startup, adding PR40's cgroup
+  root/reconciliation interval and metrics-bind fields. Signed config validation,
+  pre-start trust/time checks, sole-agentstore commit and SIGHUP refusal remain.
+- `internal/enforcer/enforcer.go`: retain signed candidate validation and test
+  platform injection while forwarding dynamic cgroup settings to the real
+  platform constructor. Preserve PR40's active-loop flag, capture readiness and
+  metrics readiness callback. Signed startup/update readiness still reflects
+  local capture/scope health, not desired CR-generation acknowledgement.
+- `internal/compiler/build.go`: retain cancellable toolchain checks/Cargo
+  subprocesses, wait bounds, context propagation and failed-crate cleanup, then
+  append signed build claims before returning a successful result. Recheck
+  cancellation before metadata processing/output. Compiler cache identity stays
+  7; safe crate identifier and strict input/codegen semantics remain unchanged.
+
+Controller selector-Pending behavior (including an explicit empty selector),
+last-known-good recovery/publication, dynamic cgroup discovery and its failure
+readiness, chart probes and deploy preflight are imported unchanged from PR40.
+Neither controller publication nor signed relay claims automatic per-workload
+signed activation. No kernel-generation or policy-host routing combination is
+enabled. No competing `current` pointer is added to signed mode.
+
+New overlap regression tests exercise signed startup forwarding cgroup options,
+capture-not-ready and failed reconciliation states, failed signed commit keeping
+the healthy last-known-good evaluator, generic reload rejection, and a real
+context-aware Cargo build with an unsafe display name that still loads with ABI
+3, compiler identity `warmor-yaml/7`, and matching build metadata/digest. Existing
+PR40 cancellation/cleanup and controller selector/recovery tests are retained.
+
+Validation for this merge used Go 1.26.11 with `-p 2`: full repository tests,
+full race tests, vet, configured golangci-lint (concurrency 2), module verification,
+and native builds of every command passed. All commands also cross-compiled
+for Darwin arm64 and Windows amd64 (CGO disabled), as did both daemon test
+binaries. Focused compiler/controller/enforcer/runtime/daemon tests ran with
+`WARMOR_REQUIRE_CARGO=1`, including the real context-aware signed-metadata build.
+Changed-file gofmt and diff whitespace checks passed. Logs are local validation
+artifacts only; no native macOS/Windows execution, live cluster, kernel-generation
+guarantee, real keys, push or publication is implied.

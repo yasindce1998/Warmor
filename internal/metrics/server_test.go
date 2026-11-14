@@ -3,6 +3,7 @@ package metrics
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -48,7 +49,7 @@ func TestServer_Routes(t *testing.T) {
 		contains string
 	}{
 		{"/health", http.StatusOK, "OK"},
-		{"/ready", http.StatusOK, "READY"},
+		{"/ready", http.StatusServiceUnavailable, "not initialized"},
 		{"/metrics", http.StatusOK, "warmor_events_total"},
 		{"/nope", http.StatusNotFound, ""},
 	}
@@ -97,9 +98,28 @@ func TestHealthAndReadyHandlers(t *testing.T) {
 	if code != http.StatusOK || body != "OK" {
 		t.Errorf("healthHandler = %d %q, want 200 \"OK\"", code, body)
 	}
-	code, body = doGet(t, http.HandlerFunc(readyHandler), "/ready")
+	s := NewServer(0)
+	s.SetReadinessCheck(func() error { return nil })
+	code, body = doGet(t, s.server.Handler, "/ready")
 	if code != http.StatusOK || body != "READY" {
 		t.Errorf("readyHandler = %d %q, want 200 \"READY\"", code, body)
+	}
+}
+
+func TestReadinessDegradationDoesNotBreakLiveness(t *testing.T) {
+	s := NewServerAddress("127.0.0.1:0")
+	for _, err := range []error{errors.New("inactive generation"), nil, errors.New("capacity exceeded"), nil} {
+		s.SetReadinessCheck(func() error { return err })
+		code, _ := doGet(t, s.server.Handler, "/ready")
+		if (code == http.StatusOK) != (err == nil) {
+			t.Fatal(code, err)
+		}
+		if code, _ := doGet(t, s.server.Handler, "/health"); code != http.StatusOK {
+			t.Fatal("liveness affected")
+		}
+	}
+	if s.server.Addr != "127.0.0.1:0" {
+		t.Fatal(s.server.Addr)
 	}
 }
 

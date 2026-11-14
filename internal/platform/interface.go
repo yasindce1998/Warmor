@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"time"
 
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -73,6 +74,9 @@ type Config struct {
 	// unknown exec/connect whose event can't be queued because the ring is
 	// full. Linux LSM only.
 	OnEventLoss string
+	// Host cgroup v2 mount and auto discovery interval (zero = 1s).
+	CgroupRoot              string
+	CgroupReconcileInterval time.Duration
 }
 
 // Current returns the platform for the current OS with default config.

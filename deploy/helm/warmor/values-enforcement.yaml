@@ -1,0 +1,8 @@
+# Isolated disposable nodes ONLY after validating policy and scope. auto includes
+# Warmor/system pods too; no per-workload selector isolation is implemented.
+daemon:
+  auditMode: false
+  lsmEnforce: true
+  requireLSM: true
+  confirmNodeWidePolicy: true
+  cgroupFilter: auto
