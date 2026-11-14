@@ -13,6 +13,10 @@ security fixes. `supervised-evaluator-shutdown.md` records the separately based
 reader-close-before-join shutdown integration; earlier reviewed branches remain
 unchanged.
 
+The later current-main PR39/PR50 merge and usable opt-in configuration are
+documented in `supervised-host-activation.md`, including private output boundaries
+and the still-open whole-daemon Host VM gate.
+
 ## Configuration and trust
 
 Explicit opt-in is `--experimental-supervised-policy-host`, with `--verify-key`,

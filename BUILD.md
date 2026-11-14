@@ -93,6 +93,12 @@ The 15 binaries under `cmd/` are listed in the
 
 ## Cross-compilation
 
+The experimental Linux supervised backend also needs a separately built,
+administrator-pinned `warmor-policy-host`. It is not enabled by building the
+binary; see [supervised host activation](docs/design/supervised-host-activation.md)
+for explicit opt-in flags, trust requirements and the still-open whole-daemon VM
+gate. Release/container/service packaging for that optional host remains follow-up.
+
 ```bash
 # ARM64 Linux
 GOARCH=arm64 go build -o bin/ ./cmd/...
