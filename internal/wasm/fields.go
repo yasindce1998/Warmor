@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	wazeroapi "github.com/tetratelabs/wazero/api"
+
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -31,7 +33,7 @@ func readFieldsDeclaration(ctx context.Context, p *Policy) [numEventTypes]uint32
 		return out
 	}
 	def := fn.Definition()
-	if len(def.ParamTypes()) != 1 || len(def.ResultTypes()) != 1 {
+	if !hasSignature(def, []wazeroapi.ValueType{i32}, []wazeroapi.ValueType{i32}) {
 		return out
 	}
 	ctx, cancel := context.WithTimeout(ctx, fieldsReadTimeout)

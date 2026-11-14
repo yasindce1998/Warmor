@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	wazeroapi "github.com/tetratelabs/wazero/api"
+
 	"github.com/yasindce1998/warmor/internal/compiler"
 )
 
@@ -33,7 +35,7 @@ func readStaticDomain(ctx context.Context, p *Policy, eventType uint32) StaticDo
 		return out
 	}
 	def := fn.Definition()
-	if len(def.ParamTypes()) != 3 || len(def.ResultTypes()) != 1 {
+	if !hasSignature(def, []wazeroapi.ValueType{i32, i32, i32}, []wazeroapi.ValueType{i32}) {
 		return out
 	}
 
@@ -50,19 +52,18 @@ func readStaticDomain(ctx context.Context, p *Policy, eventType uint32) StaticDo
 		return out
 	}
 
-	malloc := p.instance.ExportedFunction("malloc")
-	if malloc == nil {
+	ptr, err := p.malloc(ctx, size)
+	if err != nil {
 		return out
 	}
-	res, err = malloc.Call(ctx, uint64(size))
-	if err != nil || len(res) != 1 {
-		return out
-	}
-	ptr := uint32(res[0])
 
 	defer func() {
 		if freeFn := p.instance.ExportedFunction("free"); freeFn != nil {
-			_, _ = freeFn.Call(ctx, uint64(ptr), uint64(size))
+			if _, err := freeFn.Call(ctx, uint64(ptr), uint64(size)); err != nil {
+				// A trap can leave allocator state inconsistent without closing
+				// the guest. Do not pool it or publish its declarations.
+				_ = p.instance.Close(ctx)
+			}
 		}
 	}()
 
