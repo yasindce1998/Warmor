@@ -131,7 +131,8 @@ for the tracked items.
    `daemon.lsmEnforce: true` on BPF-LSM nodes for kernel blocking;
    `daemon.requireLSM: true` makes the daemon refuse to start without it.
 2. **Pod selectors are not executed.** The optional controller publishes one
-   node policy; selector-bearing resources remain Pending. Unsupported webhook
+   node policy; selector-bearing resources (including `selector: {}`) remain
+   Pending. Omit the selector only for intended node-wide publication. Unsupported webhook
    enablement is rejected instead of deploying a handler-less admission hook.
 3. **No policy-server integration.** The chart runs a standalone daemon
    with a ConfigMap policy; there is no `warmor-server` deployment,

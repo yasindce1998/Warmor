@@ -122,7 +122,7 @@ spec:
                     - audit
                 selector:
                   type: object
-                  description: Optional pod selector to scope this policy.
+                  description: Reserved pod selector. Any present object (including {}) is unsupported and held Pending; omit only for intended node-wide publication. A previous accepted unscoped generation is retained until explicit deletion.
                   properties:
                     matchLabels:
                       type: object

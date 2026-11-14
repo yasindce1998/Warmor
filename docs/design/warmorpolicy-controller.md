@@ -124,7 +124,7 @@ schema is `allow`/`deny`/`log`. Rendering translates `audit` → `log`
 | render or parse failure | Error | `Validated=False/InvalidPolicy`; old accepted generation retained if available |
 | compile failure | Error | `Compiled=False/CompilationFailed`, `Published=False` |
 | API publication failure | Error | `Compiled=True` if completed, `Published=False/PublicationFailed` |
-| nonempty `spec.selector` | Pending | `Validated=False/SelectorNotSupported`; any old accepted generation retained |
+| any non-nil `spec.selector`, including `{}` | Pending | `Validated=False/SelectorNotSupported`; any old accepted generation retained |
 
 `observedGeneration` describes the desired spec; `acceptedGeneration` is the
 generation committed with the published artifact. An invalid update is **not
@@ -238,7 +238,12 @@ applying a pod-scoped policy beyond its scope would be dangerous in both
 directions (a scoped *deny* would block unrelated pods; a scoped *allow*
 would be broader than intended). Selector-carrying CRs are therefore held
 `Pending` with an explanatory condition instead of being silently
-mis-applied. They become meaningful when per-workload policies land (the
+mis-applied. This includes explicit `selector: {}`, empty `matchLabels` and
+empty `matchExpressions`: presence never silently opts a scoped intent into
+node-wide publication. Omit `spec.selector` only when node-wide policy is
+intended. A selector-bearing edit retains its previous accepted unscoped
+generation until explicit deletion; the desired selector edit is not accepted.
+Selectors become meaningful when per-workload policies land (the
 OCI hook container bindings are the planned identity source).
 
 ## Failure modes

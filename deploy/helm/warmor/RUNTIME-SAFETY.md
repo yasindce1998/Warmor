@@ -3,7 +3,9 @@
 The default chart is audit-only, with `cgroupFilter: auto`. It reports denies
 without signaling or blocking. `auto` includes **every pod**, including Warmor,
 the controller, kube-system and tenants. It is not per-workload isolation;
-`WarmorPolicy.spec.selector` remains Pending. No CRI identity or protected-pod
+Any present `WarmorPolicy.spec.selector`, including `{}`, remains Pending; only
+omitting it opts into node-wide publication. Existing accepted unscoped sources
+are retained on selector edits until explicit deletion. No CRI identity or protected-pod
 exclusion model is implemented by this chart.
 
 ## Discovery and failure behavior

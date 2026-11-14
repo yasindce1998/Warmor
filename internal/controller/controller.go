@@ -472,9 +472,9 @@ func (c *Controller) classify(cr *WarmorPolicy) (*WarmorPolicyStatus, error) {
 		c.setCondition(status, "Validated", "False", "InvalidIdentity", "namespace, name and UID are required")
 		return status, nil
 	}
-	if cr.Spec.Selector != nil && !cr.Spec.Selector.Empty() {
-		c.setCondition(status, "Ready", "False", "SelectorNotSupported", "spec.selector is not evaluated: policy remains Pending; any previous node-wide accepted generation is retained until explicit deletion")
-		c.setCondition(status, "Validated", "False", "SelectorNotSupported", "workload-scoped execution is not implemented")
+	if cr.Spec.Selector != nil {
+		c.setCondition(status, "Ready", "False", "SelectorNotSupported", "spec.selector (including {}) is not evaluated: policy remains Pending; any previous node-wide accepted generation is retained until explicit deletion")
+		c.setCondition(status, "Validated", "False", "SelectorNotSupported", "workload-scoped execution is not implemented; omit spec.selector only when node-wide publication is intended")
 		return status, nil
 	}
 	specBytes, specErr := json.Marshal(cr.Spec)

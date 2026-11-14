@@ -115,6 +115,53 @@ func TestReconcile_SelectorUpdateRetainsPriorGeneration(t *testing.T) {
 	requireCondition(t, cr.Status, "Published", "True", "LastKnownGoodPublished")
 }
 
+func TestReconcile_AnyPresentSelectorCannotWidenScope(t *testing.T) {
+	for _, selector := range []string{`{}`, `{"matchLabels":{}}`, `{"matchExpressions":[]}`, `{"matchLabels":{},"matchExpressions":[]}`} {
+		for _, previouslyAccepted := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/accepted=%v", selector, previouslyAccepted), func(t *testing.T) {
+				compiles, restore := stubCompile(t)
+				defer restore()
+				api := newFakeAPI()
+				cr := testCR("alpha", nil)
+				api.addCR(cr)
+				var beforeArtifact []byte
+				var beforeSnapshot string
+				if previouslyAccepted {
+					reconcile(t, newTestController(t, api, Options{}))
+					cm := api.configMaps[testConfigMap]
+					beforeArtifact = append([]byte(nil), cm.BinaryData[PolicyDataKey]...)
+					beforeSnapshot = cm.Data[SnapshotDataKey]
+					cr.Metadata.Generation++
+				}
+				// Decode actual JSON so explicit empty objects/collections follow
+				// the same nil-vs-present path as an API server response.
+				if err := json.Unmarshal([]byte(selector), &cr.Spec.Selector); err != nil {
+					t.Fatal(err)
+				}
+				cr.Spec.DefaultAction = "deny" // must never enter node-wide merge
+				cr.Status = nil
+				api.addCR(cr)
+				reconcile(t, newTestController(t, api, Options{}))
+				if cr.Status.Phase != PhasePending {
+					t.Fatalf("explicit empty selector was accepted node-wide: %+v", cr.Status)
+				}
+				requireCondition(t, cr.Status, "Ready", "False", "SelectorNotSupported")
+				requireCondition(t, cr.Status, "Validated", "False", "SelectorNotSupported")
+				requireCondition(t, cr.Status, "Applied", "Unknown", "NoNodeAcknowledgements")
+				cm := api.configMaps[testConfigMap]
+				if previouslyAccepted {
+					if cr.Status.AcceptedGeneration != 1 || cr.Status.ObservedGeneration != 2 || string(cm.BinaryData[PolicyDataKey]) != string(beforeArtifact) || cm.Data[SnapshotDataKey] != beforeSnapshot || len(*compiles) != 1 {
+						t.Fatal("selector edit replaced or lost last-good node-wide source")
+					}
+					requireCondition(t, cr.Status, "Published", "True", "LastKnownGoodPublished")
+				} else if cr.Status.AcceptedGeneration != 0 || len(*compiles) != 0 || cm.Metadata.Annotations[AnnotationSources] != "cluster-default" {
+					t.Fatal("new selector-bearing policy contributed node-wide rules")
+				}
+			})
+		}
+	}
+}
+
 func TestReconcile_CompilerIdentityChangeRebuildsAfterRestart(t *testing.T) {
 	compiles, restore := stubCompile(t)
 	defer restore()

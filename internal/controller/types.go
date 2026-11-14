@@ -82,7 +82,7 @@ type RuleConditions struct {
 
 // Selector scopes a policy to pods. The controller does not evaluate it
 // yet (enforcement is node-wide until per-workload policies ship), so
-// policies carrying a selector are held Pending rather than silently
+// policies carrying any non-nil selector (including {}) are held Pending rather than silently
 // applied beyond their intended scope.
 type Selector struct {
 	MatchLabels      map[string]string  `json:"matchLabels,omitempty"`
@@ -94,11 +94,6 @@ type LabelRequirement struct {
 	Key      string   `json:"key"`
 	Operator string   `json:"operator"`
 	Values   []string `json:"values,omitempty"`
-}
-
-// Empty reports whether the selector constrains anything.
-func (s *Selector) Empty() bool {
-	return s == nil || (len(s.MatchLabels) == 0 && len(s.MatchExpressions) == 0)
 }
 
 // WarmorPolicyStatus is the CRD's status subresource.
