@@ -263,6 +263,10 @@ func (p *LinuxPlatform) Start(ctx context.Context, eventChan chan<- *api.Event) 
 }
 
 func (p *LinuxPlatform) monitorProcessEvents(ctx context.Context) {
+	p.monitorProcessEventsFrom(ctx, p.ebpfLoader.ReadProcessEvent)
+}
+
+func (p *LinuxPlatform) monitorProcessEventsFrom(ctx context.Context, read func() (*ebpf.Event, error)) {
 	defer p.wg.Done()
 	for {
 		select {
@@ -273,7 +277,7 @@ func (p *LinuxPlatform) monitorProcessEvents(ctx context.Context) {
 		default:
 		}
 
-		ev, err := p.ebpfLoader.ReadProcessEvent()
+		ev, err := read()
 		if err != nil {
 			p.readerError(err)
 			return
@@ -320,6 +324,10 @@ func (p *LinuxPlatform) monitorProcessEvents(ctx context.Context) {
 }
 
 func (p *LinuxPlatform) monitorFileEvents(ctx context.Context) {
+	p.monitorFileEventsFrom(ctx, p.ebpfLoader.ReadFileEvent)
+}
+
+func (p *LinuxPlatform) monitorFileEventsFrom(ctx context.Context, read func() (*ebpf.Event, error)) {
 	defer p.wg.Done()
 	for {
 		select {
@@ -330,7 +338,7 @@ func (p *LinuxPlatform) monitorFileEvents(ctx context.Context) {
 		default:
 		}
 
-		ev, err := p.ebpfLoader.ReadFileEvent()
+		ev, err := read()
 		if err != nil {
 			p.readerError(err)
 			return
@@ -377,6 +385,10 @@ func (p *LinuxPlatform) monitorFileEvents(ctx context.Context) {
 }
 
 func (p *LinuxPlatform) monitorNetworkEvents(ctx context.Context) {
+	p.monitorNetworkEventsFrom(ctx, p.ebpfLoader.ReadNetworkEvent)
+}
+
+func (p *LinuxPlatform) monitorNetworkEventsFrom(ctx context.Context, read func() (*ebpf.Event, error)) {
 	defer p.wg.Done()
 	for {
 		select {
@@ -387,7 +399,7 @@ func (p *LinuxPlatform) monitorNetworkEvents(ctx context.Context) {
 		default:
 		}
 
-		ev, err := p.ebpfLoader.ReadNetworkEvent()
+		ev, err := read()
 		if err != nil {
 			p.readerError(err)
 			return
@@ -438,6 +450,10 @@ func (p *LinuxPlatform) monitorNetworkEvents(ctx context.Context) {
 }
 
 func (p *LinuxPlatform) monitorLSMEvents(ctx context.Context) {
+	p.monitorLSMEventsFrom(ctx, p.lsmLoader.ReadLSMEvent)
+}
+
+func (p *LinuxPlatform) monitorLSMEventsFrom(ctx context.Context, read func() (*ebpf.Event, error)) {
 	defer p.wg.Done()
 	for {
 		select {
@@ -448,7 +464,7 @@ func (p *LinuxPlatform) monitorLSMEvents(ctx context.Context) {
 		default:
 		}
 
-		ev, err := p.lsmLoader.ReadLSMEvent()
+		ev, err := read()
 		if err != nil {
 			p.readerError(err)
 			return

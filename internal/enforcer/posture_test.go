@@ -3,6 +3,7 @@ package enforcer
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/wasm"
@@ -15,7 +16,11 @@ func TestAuditOverridesKernelEnforcement(t *testing.T) {
 		t.Run(map[bool]string{false: "audit", true: "learning"}[learning], func(t *testing.T) {
 			isolateCacheDir(t)
 			cfg := stubPlatform(t, &fakePlatform{}, nil)
-			opts := &Options{AuditMode: !learning, LearningMode: learning, LSMEnforce: true, RequireLSM: true, IntegrityMode: "enforce", MetricsPort: -1}
+			opts := &Options{
+				AuditMode: !learning, LearningMode: learning, LSMEnforce: true, RequireLSM: true,
+				IntegrityMode: "enforce", MetricsPort: -1, MetricsBindAddress: "127.0.0.1",
+				CgroupFilter: []string{"auto"}, CgroupRoot: "/host/cgroup", CgroupReconcileInterval: 2 * time.Second,
+			}
 			e, err := New(context.Background(), testPolicyPath, opts)
 			if err != nil {
 				t.Fatal(err)
@@ -26,6 +31,12 @@ func TestAuditOverridesKernelEnforcement(t *testing.T) {
 			}
 			if !opts.LSMEnforce || opts.IntegrityMode != "enforce" {
 				t.Fatal("New mutated caller options")
+			}
+			if cfg.CgroupRoot != opts.CgroupRoot || cfg.CgroupReconcileInterval != opts.CgroupReconcileInterval || len(cfg.CgroupFilter) != 1 || cfg.CgroupFilter[0] != "auto" {
+				t.Fatalf("strict enforcement merge lost scoped runtime options: %+v", cfg)
+			}
+			if e.Ready() == nil {
+				t.Fatal("new enforcer without running capture loop must not report ready")
 			}
 		})
 	}
