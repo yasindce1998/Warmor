@@ -297,18 +297,18 @@ func writeProcessEvaluatorBinary(b *strings.Builder, policy *Policy) {
 	b.WriteString("    let comm = read_str(base, OFF_COMM, OFF_COMM_LEN);\n")
 	b.WriteString("    let path = read_str(base, OFF_PRIMARY_STR, OFF_PRIMARY_STR_LEN);\n")
 	if FieldsRead(policy)[0]&FieldBitArgs != 0 {
-		// Query the callback's full length first: silently truncating argv
-		// could turn a deny into an allow. This cap exceeds Linux's bounded
-		// argv sensor; longer inputs from other platforms fail closed.
+		// Unknown input is handled by each rule, preserving first-match
+		// order and per-rule audit/log actions instead of a blanket DENY.
 		b.WriteString(`    let args_len = get_field_str(15, core::ptr::null_mut(), 0) as usize;
-    if args_len > 16384 { return ACTION_DENY; }
     let mut args_buf = [0u8; 16384];
-    if get_field_str(15, args_buf.as_mut_ptr(), args_len as u32) as usize != args_len {
-        return ACTION_DENY;
-    }
-    let args = match core::str::from_utf8(&args_buf[..args_len]) {
-        Ok(s) => s,
-        Err(_) => return ACTION_DENY,
+    let (args_known, args) = if args_len <= args_buf.len()
+        && get_field_str(15, args_buf.as_mut_ptr(), args_len as u32) as usize == args_len {
+        match core::str::from_utf8(&args_buf[..args_len]) {
+            Ok(s) => (true, s),
+            Err(_) => (false, ""),
+        }
+    } else {
+        (false, "")
     };
 `)
 	}
@@ -359,14 +359,15 @@ func writeNetworkEvaluatorBinary(b *strings.Builder, policy *Policy) {
 	b.WriteString("    let protocol = read_str(base, OFF_SECONDARY_STR, OFF_SECONDARY_STR_LEN);\n")
 	if FieldsRead(policy)[2]&FieldBitOperation != 0 {
 		b.WriteString(`    let operation_len = get_field_str(12, core::ptr::null_mut(), 0) as usize;
-    if operation_len > 32 { return ACTION_DENY; }
     let mut operation_buf = [0u8; 32];
-    if get_field_str(12, operation_buf.as_mut_ptr(), operation_len as u32) as usize != operation_len {
-        return ACTION_DENY;
-    }
-    let operation = match core::str::from_utf8(&operation_buf[..operation_len]) {
-        Ok(s) => s,
-        Err(_) => return ACTION_DENY,
+    let (operation_known, operation) = if operation_len <= operation_buf.len()
+        && get_field_str(12, operation_buf.as_mut_ptr(), operation_len as u32) as usize == operation_len {
+        match core::str::from_utf8(&operation_buf[..operation_len]) {
+            Ok(s) => (true, s),
+            Err(_) => (false, ""),
+        }
+    } else {
+        (false, "")
     };
 `)
 	}
@@ -386,7 +387,10 @@ func writeRuleCheckBinary(b *strings.Builder, rule Rule, eventType string, ruleI
 		action = "ACTION_AUDIT_DENY"
 	}
 
-	condExpr := generateConditionExprBinary(rule.Conditions, eventType)
+	// Only an enforcing deny may act on a possible (unknown-input) match.
+	// An uncertain audit/log rule must not return before a later definite
+	// deny or default deny. Nonblocking rules require a definite match.
+	condExpr := generateConditionExprBounds(rule.Conditions, eventType, rule.Action == "deny" && rule.Mode != "audit")
 	if condExpr == "" {
 		condExpr = "true"
 	}
@@ -487,13 +491,33 @@ extern "C" {
 `)
 }
 
-func generateConditionExprBinary(conds Conditions, eventType string) string {
+// For unavailable callback fields, nonblocking rules require a definite
+// match while enforcing deny uses a possible match. Negation flips the
+// bounds. This never escalates a rule's action and preserves rule order.
+func generateConditionExprBounds(conds Conditions, eventType string, possible bool) string {
 	var parts []string
+	conditionExpr := func(c Condition, upper bool) string {
+		expr := conditionToRustBinary(c, eventType)
+		known := ""
+		if eventType == "process" && c.Field == "args" {
+			known = "args_known"
+		}
+		if eventType == "network" && c.Field == "operation" {
+			known = "operation_known"
+		}
+		if known != "" {
+			if upper {
+				return fmt.Sprintf("(!%s || (%s))", known, expr)
+			}
+			return fmt.Sprintf("(%s && (%s))", known, expr)
+		}
+		return expr
+	}
 
 	if len(conds.All) > 0 {
 		allParts := make([]string, 0, len(conds.All))
 		for _, c := range conds.All {
-			expr := conditionToRustBinary(c, eventType)
+			expr := conditionExpr(c, possible)
 			if expr != "" {
 				allParts = append(allParts, expr)
 			}
@@ -506,7 +530,7 @@ func generateConditionExprBinary(conds Conditions, eventType string) string {
 	if len(conds.Any) > 0 {
 		anyParts := make([]string, 0, len(conds.Any))
 		for _, c := range conds.Any {
-			expr := conditionToRustBinary(c, eventType)
+			expr := conditionExpr(c, possible)
 			if expr != "" {
 				anyParts = append(anyParts, expr)
 			}
@@ -518,7 +542,7 @@ func generateConditionExprBinary(conds Conditions, eventType string) string {
 
 	if len(conds.Not) > 0 {
 		for _, c := range conds.Not {
-			expr := conditionToRustBinary(c, eventType)
+			expr := conditionExpr(c, !possible)
 			if expr != "" {
 				parts = append(parts, fmt.Sprintf("!(%s)", expr))
 			}

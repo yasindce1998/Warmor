@@ -94,7 +94,7 @@ jobs:
       - name: Test compiled policy input semantics
         env:
           WARMOR_REQUIRE_CARGO: "1"
-        run: go test ./internal/wasm/ -run 'TestCompiledPolicyArgsAndNetworkOperation|TestTemporalPolicyEndToEnd' -v
+        run: go test ./internal/wasm/ -run 'TestCompiledPolicyArgsAndNetworkOperation|TestCompiledUnknown|TestTemporalPolicyEndToEnd' -v
 
   rust-policies:
     runs-on: ubuntu-latest
