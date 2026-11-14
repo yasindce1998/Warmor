@@ -2,14 +2,17 @@ package enforcer
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/cache"
+	"github.com/yasindce1998/warmor/internal/crypto"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/platform"
 	"github.com/yasindce1998/warmor/internal/wasm"
@@ -19,7 +22,17 @@ import (
 // ErrActivationPending means the kernel commit succeeded: the candidate is
 // active, but durability/drain is unresolved. Never acknowledge or discard its
 // immutable revision. Retry the same path, not a freshly staged replacement.
-var ErrActivationPending = errors.New("policy active; durable publication or drain pending")
+var ErrActivationPending error = activationPendingError{}
+
+type activationPendingError struct{}
+
+func (activationPendingError) Error() string {
+	return "policy active; durable publication or drain pending"
+}
+
+// ActivationUncertain lets fleet clients clear a now-inaccurate old active
+// identity without importing the enforcer or acknowledging the new revision.
+func (activationPendingError) ActivationUncertain() bool { return true }
 
 const generationDrainTimeout = 5 * time.Second
 
@@ -39,9 +52,10 @@ type generationActivation struct {
 	commit  func() error
 	durable bool
 	old     *evaluationGeneration
+	digest  [sha256.Size]byte
 }
 
-// dispatchMu never nests eventMu. Readers acquire it only to capture/release
+// dispatchMu never acquires eventMu. Readers acquire it only to capture/release
 // leases. Activation holds it for register -> kernel commit -> current publish;
 // no worker/drain wait or filesystem callback runs while it is held.
 type generationDispatch struct {
@@ -239,6 +253,12 @@ func (e *Enforcer) activateGeneration(path string, commit func() error) error {
 		if pendingPath != "" && path != pendingPath {
 			return fmt.Errorf("%w: retry original immutable revision %s", ErrActivationPending, pendingPath)
 		}
+		if pendingPath != "" {
+			data, err := e.generationPolicyBytes(path)
+			if err != nil || sha256.Sum256(data) != g.pending.digest {
+				return errors.Join(ErrActivationPending, errors.New("pending revision bytes changed; restore the original immutable candidate"), err)
+			}
+		}
 		if err := e.finishGeneration(); err != nil {
 			return err
 		}
@@ -249,8 +269,21 @@ func (e *Enforcer) activateGeneration(path string, commit func() error) error {
 	if g.next == math.MaxUint64 {
 		return errors.New("generation IDs exhausted; restart required")
 	}
-	rt, pool, err := e.loadPolicyPath(path)
+	data, err := e.generationPolicyBytes(path)
 	if err != nil {
+		return err
+	}
+	rt, err := wasm.NewRuntime(e.ctx, wasm.RuntimeConfig{CacheDir: wasm.DefaultCacheDir()})
+	if err != nil {
+		return err
+	}
+	if err := rt.LoadPolicyBytes(e.ctx, data); err != nil {
+		rt.Close(e.ctx)
+		return err
+	}
+	pool, err := wasm.NewPool(e.ctx, rt, runtime.NumCPU())
+	if err != nil {
+		rt.Close(e.ctx)
 		return err
 	}
 	hostname, _ := os.Hostname()
@@ -294,6 +327,31 @@ func (e *Enforcer) activateGeneration(path string, commit func() error) error {
 	g.mu.Unlock()
 	e.decisionMu.Unlock()
 	active = true
-	g.pending = &generationActivation{path: path, commit: commit, old: old}
+	g.pending = &generationActivation{path: path, commit: commit, old: old, digest: sha256.Sum256(data)}
 	return e.finishGeneration()
+}
+
+// Generation candidates must already be compiled. Read/verify once, then load
+// exactly those bytes; a mutable standalone path cannot change pending identity.
+func (e *Enforcer) generationPolicyBytes(path string) ([]byte, error) {
+	if wasm.IsYAMLPolicy(path) {
+		return nil, errors.New("atomic generations require compiled WASM candidates")
+	}
+	if e.verifyKey != nil {
+		return ReadVerifiedPolicy(path, e.verifyKey)
+	}
+	return crypto.ReadFileLimited(path, wasm.MaxPolicySize)
+}
+
+// Called only after producer and consumer goroutines have stopped.
+func (e *Enforcer) releaseQueuedGenerationEvents() {
+	if e.generations == nil || e.eventChan == nil { return }
+	for {
+		select {
+		case event, ok := <-e.eventChan:
+			if !ok { return }
+			event.GenerationContext.Complete()
+		default: return
+		}
+	}
 }

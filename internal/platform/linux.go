@@ -35,19 +35,26 @@ type LinuxConfig struct {
 }
 
 type LinuxPlatform struct {
-	ebpfLoader   *ebpf.Loader
-	lsmLoader    *ebpf.LSMLoader
-	eventChan    chan<- *api.Event
-	stopChan     chan struct{}
-	stopOnce     sync.Once
-	wg           sync.WaitGroup
-	config       LinuxConfig
-	lsmEnabled   bool
-	capture      func(*api.Event) bool // installed before Start; never changed afterward
-	drainMu      sync.Mutex
-	drainPending chan struct{}
-	readerFailed chan struct{}
-	readerErr    error
+	ebpfLoader    *ebpf.Loader
+	lsmLoader     *ebpf.LSMLoader
+	eventChan     chan<- *api.Event
+	stopChan      chan struct{}
+	stopOnce      sync.Once
+	wg            sync.WaitGroup
+	config        LinuxConfig
+	lsmEnabled    bool
+	capture       func(*api.Event) bool // installed before Start; never changed afterward
+	drainMu       sync.Mutex
+	drainPending  chan struct{}
+	drainObserved bool
+	readerFailed  chan struct{}
+	readerErr     error
+	lsmEvents     lsmEventStream // production loader or VM-free reader fixture
+}
+
+type lsmEventStream interface {
+	ReadLSMEvent() (*ebpf.Event, error)
+	FlushLSMEvents() error
 }
 
 func NewLinuxPlatform(config LinuxConfig) (Platform, error) {
@@ -136,6 +143,7 @@ func (p *LinuxPlatform) Load(ctx context.Context) error {
 	}
 	if lsmLoader != nil {
 		p.lsmLoader = lsmLoader
+		p.lsmEvents = lsmLoader
 		p.lsmEnabled = true
 
 		if err := lsmLoader.SetEnforceMode(p.config.LSMEnforce); err != nil {
@@ -403,11 +411,17 @@ func (p *LinuxPlatform) monitorLSMEvents(ctx context.Context) {
 		default:
 		}
 
-		ev, err := p.lsmLoader.ReadLSMEvent()
+		ev, err := p.lsmEvents.ReadLSMEvent()
 		if err != nil {
 			if errors.Is(err, ringbuf.ErrFlushed) {
 				p.drainMu.Lock()
 				fence := p.drainPending
+				if p.drainObserved {
+					fence = nil
+				}
+				if fence != nil {
+					p.drainObserved = true
+				}
 				p.drainMu.Unlock()
 				if fence != nil && !p.deliver(ctx, &api.Event{DispatchBarrier: fence}) {
 					return
@@ -539,7 +553,8 @@ func (g *linuxPolicyGenerations) Drain(ctx context.Context) error {
 	}
 	if p.drainPending == nil {
 		p.drainPending = make(chan struct{})
-		if err := p.lsmLoader.FlushLSMEvents(); err != nil {
+		p.drainObserved = false
+		if err := p.lsmEvents.FlushLSMEvents(); err != nil {
 			p.drainPending = nil
 			p.drainMu.Unlock()
 			return err

@@ -189,6 +189,9 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	if opts.AtomicGenerations && (runtime.GOOS != "linux" || opts.SkipLSM || !opts.RequireLSM) {
 		return nil, errors.New("atomic generations require Linux --require-lsm without --no-lsm")
 	}
+	if opts.AtomicGenerations && wasm.IsYAMLPolicy(policyPath) {
+		return nil, errors.New("atomic generations require a compiled WASM startup policy")
+	}
 
 	port := opts.MetricsPort
 	if port == 0 {
@@ -1262,19 +1265,7 @@ func (e *Enforcer) Stop() {
 	}
 
 	e.wg.Wait()
-	if e.generations != nil && e.eventChan != nil {
-		for {
-			select {
-			case event, ok := <-e.eventChan:
-				if !ok {
-					return
-				}
-				event.GenerationContext.Complete()
-			default:
-				return
-			}
-		}
-	}
+	e.releaseQueuedGenerationEvents()
 	e.logger.LogInfo("✓ Enforcer stopped")
 }
 
@@ -1288,6 +1279,7 @@ func (e *Enforcer) Close() error {
 			_ = e.platform.Stop()
 		}
 		e.wg.Wait()
+		e.releaseQueuedGenerationEvents()
 	}
 	e.eventMu.Lock()
 	defer e.eventMu.Unlock()
