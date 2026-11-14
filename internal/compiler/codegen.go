@@ -387,7 +387,10 @@ func writeRuleCheckBinary(b *strings.Builder, rule Rule, eventType string, ruleI
 		action = "ACTION_AUDIT_DENY"
 	}
 
-	condExpr := generateConditionExprBounds(rule.Conditions, eventType, rule.Action != "allow")
+	// Only an enforcing deny may act on a possible (unknown-input) match.
+	// An uncertain audit/log rule must not return before a later definite
+	// deny or default deny. Nonblocking rules require a definite match.
+	condExpr := generateConditionExprBounds(rule.Conditions, eventType, rule.Action == "deny" && rule.Mode != "audit")
 	if condExpr == "" {
 		condExpr = "true"
 	}
@@ -488,8 +491,8 @@ extern "C" {
 `)
 }
 
-// For unavailable callback fields, allow requires a definite match while
-// deny/log (including audit-deny) use a possible match. Negation flips the
+// For unavailable callback fields, nonblocking rules require a definite
+// match while enforcing deny uses a possible match. Negation flips the
 // bounds. This never escalates a rule's action and preserves rule order.
 func generateConditionExprBounds(conds Conditions, eventType string, possible bool) string {
 	var parts []string
