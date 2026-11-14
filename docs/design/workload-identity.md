@@ -175,3 +175,29 @@ readiness. Liveness must not restart-loop during API/runtime outages.
 Only that end-to-end evidence passes the Kubernetes isolation gate. An
 independent resolver/selector, a rendered chart, or passing in-memory gRPC tests
 alone cannot justify enabling `spec.selector` or reporting Applied.
+
+## Independent validation evidence (2026-11-14)
+
+From the persistent `feat/workload-policy-isolation` worktree based on `5b32b66`,
+with `GOMAXPROCS=2` and package parallelism `-p 2`:
+
+* `go test -p 2 -race -cover -count=10 ./internal/workload`: passed;
+  100.0% package statement coverage.
+* `go test -p 2 ./...`: passed.
+* `go test -p 2 -race ./...`: passed.
+* `go vet -p 2 ./...`: passed.
+* `go mod verify`: all modules verified.
+
+Tests include actual generated CRI protobuf methods over in-memory gRPC;
+same-named Pods across namespaces; exact ID/name/UID/node/attempt joins;
+regular/init/ephemeral statuses; conflicts and incomplete metadata; duplicate
+old/recreated Pods; cgroup lifetime replacement/removal; private label copies
+under concurrent reads; RPC cancellation/failure/empty inventory; Kubernetes
+selector truth tables and invalid operators; and deterministic generation/digest
+selection with input/result mutation isolation. Statement coverage is not proof
+of complete concurrency, lifecycle, or enforcement correctness.
+
+No cluster was accessed, runtime socket opened/exposed, or privileged kernel
+enforcement test run. Controller, enforcer, kernel, chart, and existing runtime
+monitor files were not modified. Selectors remain on their existing Pending
+path; the C/D Kubernetes gate remains open pending integration above.
