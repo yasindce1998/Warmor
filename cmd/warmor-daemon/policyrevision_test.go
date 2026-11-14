@@ -12,6 +12,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/crypto"
 	"github.com/yasindce1998/warmor/internal/enforcer"
 	"github.com/yasindce1998/warmor/internal/policyserver"
+	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 )
 
 func TestPolicyUpdateFailureKeepsDurableRevision(t *testing.T) {
@@ -134,5 +135,77 @@ func TestPolicyRevisionPointerWriteFailurePreservesCurrent(t *testing.T) {
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != "old" {
 		t.Fatalf("failed publication changed active revision: %q %v", got, err)
+	}
+}
+
+func TestPolicyRevisionBootRecoveryAndPublicationRetry(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "policy.wasm")
+	sk, err := crypto.GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := readFixture(t)
+	next := wasmtest.ConstPolicy(0, &[3]uint32{})
+	writeFile(t, path, string(old))
+	writeFile(t, path+".sig", string(sk.SignPolicyFile(old)))
+	a := &policyserver.PolicyAssignment{PolicyID: "p", Version: 2, Signature: sk.Sign(next)}
+	interrupted, err := stagePolicyRevision(path, a, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Leave a fully staged but unpublished candidate, as after a process crash.
+	if res, err := enforcer.ValidatePolicy(ctx, path, sk.Public); err != nil || !res.Loaded || !res.SignatureVerified {
+		t.Fatalf("interrupted staging broke startup: %+v %v", res, err)
+	}
+	if got, err := enforcer.ReadVerifiedPolicy(path, sk.Public); err != nil || !bytes.Equal(got, old) {
+		t.Fatalf("boot selected unpublished candidate: %q %v", got, err)
+	}
+	previous := filepath.Join(path+".revisions", "previous")
+	if err := os.Mkdir(previous, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(previous, "block-rename")
+	writeFile(t, blocker, "injected publication failure")
+	validations := 0
+	hook := policyUpdateHandler(path, func(candidate string, commit func() error) error {
+		if _, err := enforcer.ValidatePolicy(ctx, candidate, sk.Public); err != nil {
+			return err
+		}
+		validations++
+		return commit()
+	})
+	if err := hook(a, next); err == nil {
+		t.Fatal("failed publication returned successful activation")
+	}
+	if res, err := enforcer.ValidatePolicy(ctx, path, sk.Public); err != nil || !res.Loaded {
+		t.Fatalf("publication failure broke startup: %+v %v", res, err)
+	}
+	if got, err := enforcer.ReadVerifiedPolicy(path, sk.Public); err != nil || !bytes.Equal(got, old) {
+		t.Fatalf("failed publication selected new revision on restart: %q %v", got, err)
+	}
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(previous); err != nil {
+		t.Fatal(err)
+	}
+	if err := hook(a, next); err != nil {
+		t.Fatal(err)
+	}
+	if validations != 2 {
+		t.Fatalf("publication failure was not retried: %d validations", validations)
+	}
+	if res, err := enforcer.ValidatePolicy(ctx, path, sk.Public); err != nil || !res.Loaded || !res.SignatureVerified {
+		t.Fatalf("successful publication not bootable: %+v %v", res, err)
+	}
+	if got, err := enforcer.ReadVerifiedPolicy(path, sk.Public); err != nil || !bytes.Equal(got, next) {
+		t.Fatalf("restart did not select published candidate: %q %v", got, err)
+	}
+	if res, err := enforcer.ValidatePolicy(ctx, filepath.Join(previous, "module.wasm"), sk.Public); err != nil || !res.Loaded {
+		t.Fatalf("previous recovery revision not bootable: %+v %v", res, err)
+	}
+	if _, err := os.Stat(interrupted.modulePath); err != nil {
+		t.Fatalf("retry removed an unrelated interrupted candidate: %v", err)
 	}
 }

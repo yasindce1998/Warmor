@@ -1,5 +1,3 @@
-//go:build fleetintegration
-
 package policyserver
 
 import (
@@ -9,15 +7,13 @@ import (
 	"testing"
 )
 
-// These tests run against fleet commits 5874b6e/3e39f07 via a Go source overlay
-// until the coordinating session integrates that independent branch.
 func TestFleetRevisionAcknowledgementSurvivesRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	s, err := OpenStore(path, StoreOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registeredAgent(s, &RegisterRequest{ID: "agent"}); err != nil {
+	if _, err := s.RegisterAgentChecked(&RegisterRequest{ID: "agent"}); err != nil {
 		t.Fatal(err)
 	}
 	req := HeartbeatRequest{AgentID: "agent", PolicyID: "accepted-policy", PolicyVersion: 7,
@@ -28,11 +24,7 @@ func TestFleetRevisionAcknowledgementSurvivesRestart(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s, err = OpenStore(path, StoreOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
+	s = openTestStore(t, path, StoreOptions{})
 	a, ok := s.GetAgent("agent")
 	if !ok || a.PolicyID != req.PolicyID || a.PolicyVersion != req.PolicyVersion ||
 		a.PolicyHash != req.PolicyHash || a.ActivationError != req.ActivationError {
@@ -42,12 +34,8 @@ func TestFleetRevisionAcknowledgementSurvivesRestart(t *testing.T) {
 
 func TestFleetRevisionAcknowledgementWriteFailureRollsBack(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	s, err := OpenStore(path, StoreOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	if _, err := registeredAgent(s, &RegisterRequest{ID: "agent"}); err != nil {
+	s := openTestStore(t, path, StoreOptions{})
+	if _, err := s.RegisterAgentChecked(&RegisterRequest{ID: "agent"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.HeartbeatRevision(HeartbeatRequest{AgentID: "agent", PolicyID: "old", PolicyVersion: 1, PolicyHash: "old-digest"}); err != nil {
@@ -63,15 +51,14 @@ func TestFleetRevisionAcknowledgementWriteFailureRollsBack(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(path, "block-rename"), []byte("failure injection"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = s.HeartbeatRevision(HeartbeatRequest{AgentID: "agent", PolicyID: "new", PolicyVersion: 2, PolicyHash: "new-digest"})
-	if err == nil {
+	if err := s.HeartbeatRevision(HeartbeatRequest{AgentID: "agent", PolicyID: "new", PolicyVersion: 2, PolicyHash: "new-digest"}); err == nil {
 		t.Fatal("unpersisted revision acknowledged")
 	}
 	a, _ := s.GetAgent("agent")
 	if a.PolicyID != "old" || a.PolicyVersion != 1 || a.PolicyHash != "old-digest" {
 		t.Fatalf("failed snapshot leaked acknowledgement: %+v", a)
 	}
-	if _, err := registeredAgent(s, &RegisterRequest{ID: "other"}); err == nil {
+	if _, err := s.RegisterAgentChecked(&RegisterRequest{ID: "other"}); err == nil {
 		t.Fatal("registration discarded persistence error")
 	}
 	if _, ok := s.GetAgent("other"); ok {
@@ -84,7 +71,7 @@ func TestFleetRevisionClosedStoreRejectsAcknowledgement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registeredAgent(s, &RegisterRequest{ID: "agent"}); err != nil {
+	if _, err := s.RegisterAgentChecked(&RegisterRequest{ID: "agent"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -93,7 +80,7 @@ func TestFleetRevisionClosedStoreRejectsAcknowledgement(t *testing.T) {
 	if err := s.HeartbeatRevision(HeartbeatRequest{AgentID: "agent", PolicyVersion: 2}); !errors.Is(err, ErrStoreClosed) {
 		t.Fatalf("closed store accepted heartbeat: %v", err)
 	}
-	if _, err := registeredAgent(s, &RegisterRequest{ID: "other"}); !errors.Is(err, ErrStoreClosed) {
+	if _, err := s.RegisterAgentChecked(&RegisterRequest{ID: "other"}); !errors.Is(err, ErrStoreClosed) {
 		t.Fatalf("closed store accepted registration: %v", err)
 	}
 }

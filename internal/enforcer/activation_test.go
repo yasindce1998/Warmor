@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/platform"
 	"github.com/yasindce1998/warmor/internal/wasm"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 	"github.com/yasindce1998/warmor/pkg/api"
@@ -190,5 +191,42 @@ func TestDefaultDenyPreparationErrorsReturned(t *testing.T) {
 				t.Fatalf("%s failure not returned: %v", mode, err)
 			}
 		})
+	}
+}
+
+type activationBootPlatform struct {
+	fakePlatform
+	pm *fakePolicyMap
+}
+
+func (p *activationBootPlatform) Capabilities() platform.Capabilities {
+	return platform.Capabilities{LSMEnforcement: true}
+}
+func (p *activationBootPlatform) PolicyMap() any { return p.pm }
+
+func TestBootKernelPreparationFailureClosesAndCanRetry(t *testing.T) {
+	isolateCacheDir(t)
+	pm := &fakePolicyMap{ddClearErr: errDDTest}
+	failed := &activationBootPlatform{pm: pm}
+	stubPlatform(t, failed, nil)
+	opts := &Options{AuditMode: true, DefaultDeny: true, MetricsPort: -1}
+	if e, err := New(context.Background(), testPolicyPath, opts); !errors.Is(err, errDDTest) || e != nil {
+		t.Fatalf("failed boot returned usable enforcer: %v %v", e, err)
+	}
+	if failed.closed != 1 {
+		t.Fatalf("failed boot leaked platform: closed=%d", failed.closed)
+	}
+	pm.ddClearErr = nil
+	recovered := &activationBootPlatform{pm: pm}
+	stubPlatform(t, recovered, nil)
+	e, err := New(context.Background(), testPolicyPath, opts)
+	if err != nil {
+		t.Fatalf("boot failed after transient kernel error recovered: %v", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if recovered.closed != 1 {
+		t.Fatalf("recovered boot leaked platform: closed=%d", recovered.closed)
 	}
 }

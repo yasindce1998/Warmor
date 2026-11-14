@@ -47,10 +47,12 @@ func TestInvalidVerdictFailsClosedWithoutPersistence(t *testing.T) {
 func TestPreloadStaticRuleHonorsGlobalAudit(t *testing.T) {
 	pm := &fakeEndpointPolicyMap{}
 	e := ddEnforcer(t, pm, true, false)
-	e.applyDefaultDeny(fakeStaticSource{
+	if err := e.applyDefaultDeny(fakeStaticSource{
 		proc: wasm.StaticDomain{Eligible: true, Rules: []compiler.StaticRule{{Event: "process", Pattern: "/bin/tool", Action: 1}}},
 		net:  wasm.StaticDomain{Eligible: true, Rules: []compiler.StaticRule{{Event: "network", Pattern: "127.0.0.1", Port: 443, Action: 1}}},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if len(pm.snapshot()) != 1 || len(pm.endpoints) != 1 {
 		t.Fatal("expected both static deny rules to preload")
 	}
