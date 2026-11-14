@@ -13,6 +13,9 @@ This is not evidence that workload policy isolation works on a real node.
    `MaxObservationGap` no larger than coordinator `MaxAge` (e.g. 30 seconds).
 3. Construct `NewUnixRuntime(DefaultUnixRuntimeConfig(socketPath, socketUID,
    resolver, verifier))`. No socket discovery, TCP fallback or HTTP runtime shim.
+   Whole-cgroup bindings are refused by default. Set
+   `AssumeExclusiveCgroupOwnership` only under the separate validated runtime
+   ownership contract below; live PID ownership alone is insufficient.
 4. Construct `NewPodHTTPSource(DefaultPodHTTPConfig(apiRoot, node, httpClient))`.
    Supply a CA-verifying HTTPS client and rotating token provider (or authenticated
    client transport). HTTP redirects are disabled. Transport ownership stays with
@@ -57,6 +60,29 @@ an unchanged cached PID that was reused**. When this trust assumption cannot be
 established, use a separately audited native runtime/task-lifetime adapter or
 leave resolution disabled. No process-name search, PID enumeration, shortened ID,
 directory-name parsing, runtime labels or Pod labels can replace this evidence.
+
+### Exclusive cgroup ownership is a separate required runtime contract
+
+`UnixRuntimeConfig.AssumeExclusiveCgroupOwnership` defaults to **false**, separately
+from `AssumeLivePIDOwnership`. Only explicitly opt in if the installed runtime
+guarantees that the exact cgroup containing the resolved init PID belongs
+exclusively to that container: every process in that cgroup must belong to the
+same container, including when other runtime containers cannot be resolved.
+This guarantee must cover the binding's use, not merely the instant of one read.
+CRI v1 does not provide it; runtime configuration/behavior must be independently
+validated, or a separately audited runtime ownership-evidence adapter supplied.
+If it cannot be established, leave the flag false and whole-cgroup identities
+remain unknown. Host `ProcessClaim` callers must supply the same separate
+`ExclusiveCgroupOwnership` assertion; its zero value refuses/retires bindings.
+
+A live, correctly owned PID in `cgroup.procs` establishes membership, **not
+exclusive container ownership of the cgroup**. Two containers can already share
+a cgroup while only one PID resolves; neither a successful membership read nor
+absence of two successful conflicting claims detects that case. No stale PID or
+lying runtime is needed. Enumerating members and requiring every PID to be a
+container init is not a solution: legitimate container children are ordinary
+members. The proc checks below corroborate the cgroup location/lifetime only,
+and cannot replace this additional runtime trust boundary.
 
 ## Host provenance and retirement
 

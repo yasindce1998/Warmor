@@ -168,7 +168,10 @@ func fullCgroupMount(data, mountpoint string) bool {
 	return false
 }
 
-// Verify uses only exact runtime PID claims. It pins each observed cgroup inode
+// Verify requires exact runtime PID claims AND a separately authorized runtime
+// assertion of exclusive container ownership of that PID's whole cgroup.
+// Membership checks cannot establish exclusivity, even with no observed conflict.
+// It pins each observed cgroup inode
 // until retirement, checks proc start-time, membership and namespaces twice,
 // and issues an opaque boot/session/incarnation lifetime. No name-based cgroup
 // inference or process scan is performed. Inode IDs refer only to exact cgroups;
@@ -235,7 +238,7 @@ func (v *HostVerifier) Verify(ctx context.Context, claims []ProcessClaim) ([]wor
 			commit()
 			return nil, ctx.Err()
 		}
-		if !safeID(claim.ContainerID) || claim.PID <= 1 || seenID[claim.ContainerID] != 1 || seenPID[claim.PID] != 1 {
+		if !claim.ExclusiveCgroupOwnership || !safeID(claim.ContainerID) || claim.PID <= 1 || seenID[claim.ContainerID] != 1 || seenPID[claim.PID] != 1 {
 			continue
 		}
 		e, dir, err := v.observe(claim)

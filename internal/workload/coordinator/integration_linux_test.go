@@ -20,7 +20,9 @@ import (
 func TestConcreteAdaptersCoordinateAndRetireDeletion(t *testing.T) {
 	name, _, _ := fakeUnixServer(t)
 	host, _, _ := fixtureHost(t)
-	runtime, err := NewUnixRuntime(DefaultUnixRuntimeConfig(name, uint32(os.Getuid()), TrustedVerboseInfoPID{AssumeLivePIDOwnership: true}, host))
+	runtimeCfg := DefaultUnixRuntimeConfig(name, uint32(os.Getuid()), TrustedVerboseInfoPID{AssumeLivePIDOwnership: true}, host)
+	runtimeCfg.AssumeExclusiveCgroupOwnership = true // Explicit fixture-only runtime isolation contract.
+	runtime, err := NewUnixRuntime(runtimeCfg)
 	if err != nil {
 		t.Fatal(err)
 	}

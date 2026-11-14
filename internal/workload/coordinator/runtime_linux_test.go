@@ -5,6 +5,7 @@ package coordinator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -75,7 +76,9 @@ func (v *fakeVerifier) Verify(_ context.Context, claims []ProcessClaim) ([]workl
 	}
 	var out []workload.Binding
 	for _, c := range claims {
-		out = append(out, workload.Binding{CgroupID: 42, ContainerID: c.ContainerID, Lifetime: "verified-fixture"})
+		if c.ExclusiveCgroupOwnership {
+			out = append(out, workload.Binding{CgroupID: 42, ContainerID: c.ContainerID, Lifetime: "verified-fixture"})
+		}
 	}
 	return out, nil
 }
@@ -110,6 +113,7 @@ func TestUnixRuntimeAuthorizedLifecycleAndFailureRetirement(t *testing.T) {
 	name, server, _ := fakeUnixServer(t)
 	v := &fakeVerifier{}
 	cfg := DefaultUnixRuntimeConfig(name, uint32(os.Getuid()), TrustedVerboseInfoPID{AssumeLivePIDOwnership: true}, v)
+	cfg.AssumeExclusiveCgroupOwnership = true
 	cfg.RPCTimeout = 100 * time.Millisecond
 	r, err := NewUnixRuntime(cfg)
 	if err != nil {
@@ -163,6 +167,7 @@ func TestUnixRuntimeDeadlinesAuthorizationAndBudgets(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			v := &fakeVerifier{}
 			cfg := DefaultUnixRuntimeConfig(name, uint32(os.Getuid()), TrustedVerboseInfoPID{AssumeLivePIDOwnership: true}, v)
+			cfg.AssumeExclusiveCgroupOwnership = true
 			cfg.RPCTimeout = 25 * time.Millisecond
 			server.mu.Lock()
 			server.block = false
@@ -226,6 +231,7 @@ func TestVerbosePIDRejectsMissingOrMalformedContract(t *testing.T) {
 	name, server, _ := fakeUnixServer(t)
 	v := &fakeVerifier{}
 	cfg := DefaultUnixRuntimeConfig(name, uint32(os.Getuid()), TrustedVerboseInfoPID{AssumeLivePIDOwnership: true}, v)
+	cfg.AssumeExclusiveCgroupOwnership = true
 	r, err := NewUnixRuntime(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +260,9 @@ func TestVerbosePIDRequiresExplicitTrust(t *testing.T) {
 func TestUnixRuntimeRechecksClaimAndRetiresOutageContinuity(t *testing.T) {
 	name, server, _ := fakeUnixServer(t)
 	host, _, _ := fixtureHost(t)
-	r, err := NewUnixRuntime(DefaultUnixRuntimeConfig(name, uint32(os.Getuid()), TrustedVerboseInfoPID{AssumeLivePIDOwnership: true}, host))
+	cfg := DefaultUnixRuntimeConfig(name, uint32(os.Getuid()), TrustedVerboseInfoPID{AssumeLivePIDOwnership: true}, host)
+	cfg.AssumeExclusiveCgroupOwnership = true
+	r, err := NewUnixRuntime(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,5 +293,66 @@ func TestUnixRuntimeRechecksClaimAndRetiresOutageContinuity(t *testing.T) {
 	server.mu.Unlock()
 	if _, b, err := r.Poll(context.Background()); err == nil || len(b) != 0 || len(host.active) != 0 {
 		t.Fatal("changed PID status retained binding")
+	}
+}
+
+type unresolvedSecondPID struct {
+	TrustedVerboseInfoPID
+	unresolved int
+}
+
+func (r *unresolvedSecondPID) PID(ctx context.Context, client runtimeapi.RuntimeServiceClient, c *runtimeapi.Container) (int, error) {
+	if c.Id == "unresolved-container" {
+		r.unresolved++
+		return 0, errors.New("container PID unavailable")
+	}
+	return r.TrustedVerboseInfoPID.PID(ctx, client, c)
+}
+
+func TestSharedCgroupWithUnresolvedContainerRequiresExclusiveOwnership(t *testing.T) {
+	name, server, _ := fakeUnixServer(t)
+	host, proc, cg := fixtureHost(t)
+	// Both containers are already in this cgroup. Runtime A's PID assertion is
+	// live and accurate, but B cannot be resolved. This is not a stale-PID race.
+	if err := os.MkdirAll(filepath.Join(proc, "124/ns"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeFixture(t, filepath.Join(proc, "124/stat"), statFixture(124, "101"))
+	writeFixture(t, filepath.Join(proc, "124/cgroup"), "0::/kubepods/container\n")
+	writeFixture(t, filepath.Join(cg, "kubepods/container/cgroup.procs"), "123\n124\n")
+	for n, kind := range []string{"pid", "cgroup", "mnt"} {
+		if err := os.Symlink(fmt.Sprintf("%s:[%d]", kind, n+10), filepath.Join(proc, "124/ns", kind)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server.mu.Lock()
+	server.inv.Containers = append(server.inv.Containers, &runtimeapi.Container{
+		Id: "unresolved-container", State: runtimeapi.ContainerState_CONTAINER_RUNNING,
+		PodSandboxId: "other-sandbox", Metadata: &runtimeapi.ContainerMetadata{Name: "other"},
+	})
+	server.mu.Unlock()
+	resolver := &unresolvedSecondPID{TrustedVerboseInfoPID: TrustedVerboseInfoPID{AssumeLivePIDOwnership: true}}
+	cfg := DefaultUnixRuntimeConfig(name, uint32(os.Getuid()), resolver, host)
+	if cfg.AssumeExclusiveCgroupOwnership {
+		t.Fatal("default configuration assumes exclusive cgroup ownership")
+	}
+	r, err := NewUnixRuntime(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := r.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	inv, bindings, err := r.Poll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inv.Containers) != 2 || resolver.unresolved != 1 {
+		t.Fatal("fixture did not exercise an unresolved second container")
+	}
+	if len(bindings) != 0 || len(host.active) != 0 {
+		t.Fatal("PID membership alone authorized a shared-cgroup identity")
 	}
 }

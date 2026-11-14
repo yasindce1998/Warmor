@@ -72,7 +72,7 @@ func writeFixture(t *testing.T, name, data string) {
 
 func TestHostEvidenceLifetimeRemovalAndPIDReuse(t *testing.T) {
 	v, proc, _ := fixtureHost(t)
-	claims := []ProcessClaim{{ContainerID: "exact-id", PID: 123}}
+	claims := []ProcessClaim{{ContainerID: "exact-id", PID: 123, ExclusiveCgroupOwnership: true}}
 	first, err := v.Verify(context.Background(), claims)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("verify %+v %v", first, err)
@@ -93,7 +93,7 @@ func TestHostEvidenceLifetimeRemovalAndPIDReuse(t *testing.T) {
 	if err != nil || len(fourth) != 1 || fourth[0].Lifetime == third[0].Lifetime {
 		t.Fatal("removed/recreated claim inherited lifetime")
 	}
-	if _, err := v.Verify(context.Background(), []ProcessClaim{{ContainerID: "new-container", PID: 123}}); err != nil {
+	if _, err := v.Verify(context.Background(), []ProcessClaim{{ContainerID: "new-container", PID: 123, ExclusiveCgroupOwnership: true}}); err != nil {
 		t.Fatal(err)
 	}
 	if v.active[fourth[0].CgroupID].binding.Lifetime == fourth[0].Lifetime {
@@ -101,7 +101,7 @@ func TestHostEvidenceLifetimeRemovalAndPIDReuse(t *testing.T) {
 	}
 	beforeGap := v.active[fourth[0].CgroupID].binding.Lifetime
 	v.observedUntil = time.Now().Add(-time.Second)
-	if _, err := v.Verify(context.Background(), []ProcessClaim{{ContainerID: "new-container", PID: 123}}); err != nil {
+	if _, err := v.Verify(context.Background(), []ProcessClaim{{ContainerID: "new-container", PID: 123, ExclusiveCgroupOwnership: true}}); err != nil {
 		t.Fatal(err)
 	}
 	if v.active[fourth[0].CgroupID].binding.Lifetime == beforeGap {
@@ -116,15 +116,17 @@ func TestHostEvidenceLifetimeRemovalAndPIDReuse(t *testing.T) {
 }
 
 func TestHostEvidenceRejectsUnprovableClaimsAndEscapes(t *testing.T) {
-	for _, mode := range []string{"missing", "start", "root", "escape", "outside-symlink", "hybrid", "namespace", "boot", "duplicates", "budget", "canceled", "migration", "not-member", "procs-budget"} {
+	for _, mode := range []string{"missing", "start", "root", "escape", "outside-symlink", "hybrid", "namespace", "boot", "duplicates", "budget", "canceled", "migration", "not-member", "procs-budget", "ownership-unproven"} {
 		t.Run(mode, func(t *testing.T) {
 			v, proc, cg := fixtureHost(t)
-			claims := []ProcessClaim{{ContainerID: "exact-id", PID: 123}}
+			claims := []ProcessClaim{{ContainerID: "exact-id", PID: 123, ExclusiveCgroupOwnership: true}}
 			if b, err := v.Verify(context.Background(), claims); err != nil || len(b) != 1 {
 				t.Fatal("fixture not verified", err)
 			}
 			ctx := context.Background()
 			switch mode {
+			case "ownership-unproven":
+				claims[0].ExclusiveCgroupOwnership = false
 			case "missing":
 				os.Remove(filepath.Join(proc, "123/stat"))
 			case "start":
@@ -222,12 +224,29 @@ func TestHostVerifierConflictingInodeAndChangedNamespace(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	b, err := v.Verify(context.Background(), []ProcessClaim{{ContainerID: "one", PID: 123}, {ContainerID: "two", PID: 124}})
+	b, err := v.Verify(context.Background(), []ProcessClaim{{ContainerID: "one", PID: 123, ExclusiveCgroupOwnership: true}, {ContainerID: "two", PID: 124, ExclusiveCgroupOwnership: true}})
 	if err != nil || len(b) != 0 {
 		t.Fatal("shared cgroup claim accepted", err)
 	}
 	v.hostPIDNamespace = "pid:[999]"
 	if _, err := v.Verify(context.Background(), nil); err == nil {
 		t.Fatal("missing authorized host namespace accepted")
+	}
+}
+
+func TestHostExclusiveOwnershipIsSeparateFromPIDMembership(t *testing.T) {
+	v, _, cg := fixtureHost(t)
+	// Other PIDs can be normal children of this container. Requiring all
+	// members to be init PIDs would neither prove ownership nor be correct.
+	writeFixture(t, filepath.Join(cg, "kubepods/container/cgroup.procs"), "123\n456\n")
+	claim := ProcessClaim{ContainerID: "exact-id", PID: 123}
+	bindings, err := v.Verify(context.Background(), []ProcessClaim{claim})
+	if err != nil || len(bindings) != 0 {
+		t.Fatal("membership without exclusive ownership was accepted", err)
+	}
+	claim.ExclusiveCgroupOwnership = true // Separate trusted fixture runtime contract.
+	bindings, err = v.Verify(context.Background(), []ProcessClaim{claim})
+	if err != nil || len(bindings) != 1 {
+		t.Fatal("explicit ownership contract rejected ordinary child process", err)
 	}
 }

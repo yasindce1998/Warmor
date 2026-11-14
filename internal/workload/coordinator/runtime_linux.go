@@ -79,6 +79,8 @@ func (resolver TrustedVerboseInfoPID) PID(ctx context.Context, client runtimeapi
 type BindingVerifier interface {
 	// Verify replaces the complete previous evidence set, retiring absent or
 	// unprovable containers. Individual failures must not retain old bindings.
+	// A PID membership claim alone cannot authorize a whole-cgroup binding:
+	// require the separate ExclusiveCgroupOwnership assertion too.
 	Verify(context.Context, []ProcessClaim) ([]workload.Binding, error)
 	Close() error
 }
@@ -86,6 +88,12 @@ type BindingVerifier interface {
 type ProcessClaim struct {
 	ContainerID string
 	PID         int
+	// Trusted runtime assertion that the exact cgroup containing this init PID
+	// is exclusively owned by this container, including every member process.
+	// This guarantee must hold throughout the resulting binding's use.
+	// Neither live PID ownership nor proc/cgroup membership proves this. False
+	// must retire/refuse any whole-cgroup binding even if the PID is verified.
+	ExclusiveCgroupOwnership bool
 }
 
 type UnixRuntimeConfig struct {
@@ -95,6 +103,12 @@ type UnixRuntimeConfig struct {
 	MaxMessageBytes, MaxContainers, MaxSandboxes int
 	Resolver                                     PIDResolver
 	Verifier                                     BindingVerifier
+	// Separate from PIDResolver's live-PID contract. Opt in only if the runtime
+	// guarantees that every member of the observed init cgroup belongs to this
+	// exact container throughout the binding's use, including when other
+	// containers cannot be resolved.
+	// The default is false; CRI and proc membership do not supply this guarantee.
+	AssumeExclusiveCgroupOwnership bool
 }
 
 func DefaultUnixRuntimeConfig(path string, uid uint32, resolver PIDResolver, verifier BindingVerifier) UnixRuntimeConfig {
@@ -222,7 +236,8 @@ func (r *UnixRuntime) Poll(ctx context.Context) (inv workload.Inventory, binding
 		pid, e := r.cfg.Resolver.PID(rpcCtx, client, c)
 		cancel()
 		if e == nil {
-			claims = append(claims, ProcessClaim{ContainerID: c.Id, PID: pid})
+			claims = append(claims, ProcessClaim{ContainerID: c.Id, PID: pid,
+				ExclusiveCgroupOwnership: r.cfg.AssumeExclusiveCgroupOwnership})
 		}
 		// An individual unprovable container is absent from the new evidence
 		// set; it can never inherit its previous binding.
