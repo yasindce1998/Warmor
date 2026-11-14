@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 
@@ -100,8 +101,12 @@ func TestPipelineRecordReplayPreservesActionOutcomes(t *testing.T) {
 			t.Fatalf("%s replay mutated the historical outcomes", name)
 		}
 	}
-	info, err := os.Stat(logPath)
-	if err != nil || info.Mode().Perm() != 0600 {
-		t.Fatalf("recording is not private: %v %v", info, err)
+	if runtime.GOOS == "windows" {
+		assertWindowsRecordingPrivate(t, logPath)
+	} else {
+		info, err := os.Stat(logPath)
+		if err != nil || info.Mode().Perm() != 0600 {
+			t.Fatalf("recording is not private: %v %v", info, err)
+		}
 	}
 }

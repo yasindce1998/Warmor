@@ -132,6 +132,7 @@ func TestFileSinkAppendsAndCountsExistingSize(t *testing.T) {
 	if err := os.WriteFile(path, existing, 0644); err != nil {
 		t.Fatal(err)
 	}
+	ownRecordingFixture(t, path)
 
 	sink, err := NewFileSink(path, 1<<20)
 	if err != nil {

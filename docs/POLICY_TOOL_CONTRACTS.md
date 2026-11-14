@@ -65,7 +65,7 @@ Untrusted/writable parent directories, symlink components/files, hard-linked
 files, nonregular files, and files owned by another user are rejected. Reopening
 and rotation use the same descriptor-relative no-follow checks; a failed reopen
 does not continue writing via the old encoder. A platform without these private
-file guarantees fails closed (notably Windows until an ACL implementation exists).
+file guarantees fails closed.
 Operators using symlinked log paths must configure the physical directory path.
 On macOS this includes system aliases such as `/var` and `/tmp`: use the
 corresponding physical `/private/var` or `/private/tmp` recording path. Recording
@@ -78,6 +78,27 @@ see [private recording paths and migration](PLATFORM_MACOS.md#private-recording-
 Rejected parent components report a physical-path configuration hint rather than
 only the operating system's `not a directory`/symlink error; no path is followed
 or retried with weaker checks as part of reporting that error.
+
+On Windows, recordings support **fixed local NTFS volumes** with persistent ACLs.
+New files/directories are created atomically with a protected DACL granting full
+access only to the current token user SID. Existing recordings and private store
+directories must already be owned by that user; their DACLs are replaced by handle
+before appending. A foreign owner is never taken over, even when running elevated.
+All path components are opened relative to validated directory handles, with
+reparse points (including junctions), hard-linked/nonregular files, alternate data
+streams, device/UNC paths, and unsafe Win32 aliases rejected. Ancestors must be
+owned by the current user or trusted Windows system principals and must not grant
+foreign principals replacement/deletion or ACL-changing rights. System-owned
+parents may remain unchanged; files and private store leaves require the current
+token user's ownership. Shared ancestors may grant child creation but the
+recording's parent must not. Only a private store
+leaf is tightened; higher-level directory ACLs are not changed. Rotation checks
+the open file identity and uses a directory-relative handle rename that atomically
+refuses an existing archive. Unsupported filesystems, security APIs, ACL forms or
+untrusted layouts fail closed; choose a physical, owned local NTFS recording path.
+Privileged administrator/backup access, like Unix root, is outside this boundary.
+Native Windows CI runs owner/DACL, reparse/unsafe-path, file-sink rotation and
+event-store replay tests; cross-compiling those tests is not runtime validation.
 
 Tightening cannot revoke access via descriptors already opened by other users or
 undo previous disclosure: treat credentials captured by older permissive logs as

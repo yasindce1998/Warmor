@@ -44,7 +44,7 @@ func TestNewEventStore_DirIsFile(t *testing.T) {
 }
 
 func TestNewEventStore_EventFileIsDir(t *testing.T) {
-	dir := testutil.PhysicalTempDir(t)
+	dir := recordingTempDir(t)
 	// Occupy today's event file path with a directory so OpenFile fails.
 	name := "events-" + time.Now().UTC().Format("2006-01-02") + ".ndjson"
 	if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
@@ -60,7 +60,7 @@ func TestNewEventStore_EventFileIsDir(t *testing.T) {
 }
 
 func TestEventStore_RotatesOnDateChange(t *testing.T) {
-	dir := testutil.PhysicalTempDir(t)
+	dir := recordingTempDir(t)
 	store, err := NewEventStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestEventStore_RotatesOnDateChange(t *testing.T) {
 }
 
 func TestEventStore_WriteRotateError(t *testing.T) {
-	dir := testutil.PhysicalTempDir(t)
+	dir := recordingTempDir(t)
 	store, err := NewEventStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +125,7 @@ func TestEventStore_FlushCloseNilFile(t *testing.T) {
 }
 
 func TestEventStore_ConcurrentWrites(t *testing.T) {
-	dir := testutil.PhysicalTempDir(t)
+	dir := recordingTempDir(t)
 	store, err := NewEventStore(dir)
 	if err != nil {
 		t.Fatal(err)
