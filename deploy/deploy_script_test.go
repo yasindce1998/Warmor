@@ -1,11 +1,23 @@
 package deploy_test
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/wasm"
+	"github.com/yasindce1998/warmor/pkg/api"
+	"gopkg.in/yaml.v3"
 )
 
 // Cluster commands reject everything except a local ConfigMap client dry-run.
@@ -79,6 +91,133 @@ echo validate >> "$CALL_LOG"
 	}
 	if strings.Count(string(calls), "compile "+policy) != 2 || strings.Count(string(calls), "validate\n") != 2 || strings.Count(string(calls), "kubectl create configmap") != 2 {
 		t.Fatalf("policy not compiled/validated: %s", calls)
+	}
+}
+
+// Real compilation, daemon validation, kubectl client dry-run and Helm render.
+// An empty kubeconfig and DRY_RUN=true keep this entirely cluster-free.
+func TestDeployRealPolicyConfigMapMatchesValidatedMountedBinary(t *testing.T) {
+	for _, tool := range []string{"helm", "kubectl"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip(tool + " unavailable")
+		}
+	}
+	if !compiler.CargoAvailable() {
+		if os.Getenv("WARMOR_REQUIRE_CARGO") == "1" {
+			t.Fatal("cargo/wasm32 required")
+		}
+		t.Skip("cargo/wasm32 unavailable")
+	}
+	root, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := filepath.Join(t.TempDir(), "selected policy.yaml")
+	if err := os.WriteFile(selected, []byte(`name: deploy-contract
+version: 7
+default_action: allow
+rules:
+- name: marker
+  event: process
+  action: deny
+  conditions: {all: [{path: {eq: /var/tmp/deploy-contract-marker}}]}
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []string{selected, filepath.Join(root, "internal/wasm/testdata/allow_policy.wasm")} {
+		t.Run(filepath.Ext(input), func(t *testing.T) {
+			cmd := exec.Command("bash", "scripts/kubernetes-deploy.sh", "--mode", "audit", "--policy", input)
+			cmd.Dir = root
+			cmd.Env = append(os.Environ(), "DRY_RUN=true", "KUBECONFIG=/dev/null", "NAMESPACE=contract-test", "RELEASE=contract", "WARMOR_COMPILE=", "WARMOR_DAEMON=")
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("local deploy: %v\n%s", err, &stderr)
+			}
+			decoder := yaml.NewDecoder(bytes.NewReader(out))
+			var cm struct {
+				Kind       string            `yaml:"kind"`
+				Metadata   map[string]string `yaml:"metadata"`
+				BinaryData map[string]string `yaml:"binaryData"`
+				Data       map[string]string `yaml:"data"`
+			}
+			if err := decoder.Decode(&cm); err != nil {
+				t.Fatal(err)
+			}
+			artifact, err := base64.StdEncoding.DecodeString(cm.BinaryData["policy.wasm"])
+			if err != nil || len(artifact) == 0 || cm.Kind != "ConfigMap" || len(cm.Data) != 0 || cm.Metadata["namespace"] != "contract-test" {
+				t.Fatalf("invalid binary ConfigMap: %+v, %v", cm, err)
+			}
+			digest := fmt.Sprintf("%x", sha256.Sum256(artifact))
+			if cm.Metadata["name"] != "contract-policy-"+digest[:16] || !strings.Contains(stderr.String(), "sha256:"+digest) {
+				t.Fatal("ConfigMap reference does not identify exact validated bytes")
+			}
+			if filepath.Ext(input) == ".wasm" {
+				original, err := os.ReadFile(input)
+				if err != nil || !bytes.Equal(artifact, original) {
+					t.Fatal("selected WASM bytes were replaced")
+				}
+			}
+			found := false
+			for {
+				var doc map[string]interface{}
+				if err := decoder.Decode(&doc); errors.Is(err, io.EOF) {
+					break
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if doc["kind"] != "DaemonSet" {
+					continue
+				}
+				found = true
+				spec := object(doc, "spec", "template", "spec")
+				policyVolume := false
+				for _, v := range spec["volumes"].([]interface{}) {
+					volume := v.(map[string]interface{})
+					if volume["name"] == "policy" {
+						policyVolume = object(volume, "configMap")["name"] == cm.Metadata["name"]
+					}
+				}
+				if !policyVolume {
+					t.Fatal("DaemonSet does not mount selected ConfigMap")
+				}
+				for _, kind := range []string{"initContainers", "containers"} {
+					c := spec[kind].([]interface{})[0].(map[string]interface{})
+					if !strings.Contains(fmtArgs(c["args"].([]interface{})), "/etc/warmor/policy.wasm") {
+						t.Fatalf("%s consumes a different policy", kind)
+					}
+					mount := c["volumeMounts"].([]interface{})[0].(map[string]interface{})
+					if mount["name"] != "policy" || mount["mountPath"] != "/etc/warmor" || mount["readOnly"] != true {
+						t.Fatalf("%s does not use selected binary read-only: %+v", kind, mount)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("missing DaemonSet")
+			}
+			ctx := context.Background()
+			runtime, err := wasm.NewRuntime(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close(ctx)
+			if err := runtime.LoadPolicyBytes(ctx, artifact); err != nil {
+				t.Fatal(err)
+			}
+			policy, err := wasm.NewPolicy(ctx, runtime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer policy.Close(ctx)
+			want := api.ActionAllow
+			if input == selected {
+				want = api.ActionDeny
+			}
+			if action, err := policy.Evaluate(ctx, &api.Event{Process: &api.ProcessEvent{Filename: "/var/tmp/deploy-contract-marker"}}); err != nil || action != want {
+				t.Fatalf("mounted binary has wrong semantics: action=%v err=%v want=%v", action, err, want)
+			}
+		})
 	}
 }
 func TestDeployScriptRejectsUnsafeRequestsBeforeTools(t *testing.T) {

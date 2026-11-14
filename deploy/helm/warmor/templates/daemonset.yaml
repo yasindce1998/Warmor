@@ -189,6 +189,9 @@ spec:
           configMap:
             name: {{ include "warmor.fullname" . }}-effective-policy
             optional: true
+            items:
+              - key: policy.wasm
+                path: policy.wasm
         {{- else if .Values.policy.existingConfigMap }}
         - name: policy
           configMap:

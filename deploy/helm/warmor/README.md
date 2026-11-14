@@ -83,6 +83,22 @@ no `cargo`.
 | `alerting.*` | disabled | PrometheusRule with deny-rate, daemon-down, error-rate, loader-failure, dropped-events, WASM-error and map-sync alerts |
 | `webhook.enabled` | `false` | Enabling is rejected: no functional admission handler exists |
 
+## Optional controller and upgrades
+
+`controller.enabled=true` compiles WarmorPolicy resources and publishes a single
+node-wide effective policy. Its HTTP probes and pod-annotated metrics use port
+9091, separate from the daemon metrics Service. Controller `/ready` means a
+recent successful **local reconciliation**, including last-good retention after
+invalid edits; it does not attest node application. CR publication is
+`phase=Published` with `Published=True`, while `Applied` stays `Unknown`.
+
+Apply `crds/warmorpolicy-crd.yaml` explicitly before controller upgrades: Helm
+does not upgrade schemas under `crds/`. The additive status schema retains old
+fields for compatibility but does not fabricate node counts or `lastApplied`.
+See [runtime safety](RUNTIME-SAFETY.md) and the
+[controller contract](../../../../docs/design/warmorpolicy-controller.md) for
+recovery, signing and selector limits.
+
 ## What works today
 
 - Install → daemon Running → metrics and health endpoints, verified by the

@@ -64,7 +64,8 @@ type Controller struct {
 	kube *kube.Client
 	opts Options
 	// now is stubbed in tests.
-	now func() time.Time
+	now        func() time.Time
+	operations operations
 }
 
 // New builds a controller.
@@ -186,6 +187,7 @@ func configMapsPath(namespace string) string {
 // level-triggered: it converges to the desired state no matter what it
 // missed while down.
 func (c *Controller) Run(ctx context.Context) error {
+	defer c.operations.stop()
 	backoff := time.Second
 	const maxBackoff = time.Minute
 	for {
@@ -254,7 +256,12 @@ func (c *Controller) watchUntilEvent(ctx context.Context, rv string) error {
 // Reconcile lists the WarmorPolicies, compiles the effective policy and
 // syncs it into the ConfigMap, then updates every CR's status. It returns
 // the list's resourceVersion to resume watching from.
-func (c *Controller) Reconcile(ctx context.Context) (string, error) {
+func (c *Controller) Reconcile(ctx context.Context) (rv string, reconcileErr error) {
+	started := c.now()
+	defer func() {
+		finished := c.now()
+		c.operations.record(finished, finished.Sub(started), reconcileErr)
+	}()
 	var list WarmorPolicyList
 	if err := c.kube.Get(ctx, c.policiesPath(), &list); err != nil {
 		return "", fmt.Errorf("list WarmorPolicies: %w", err)

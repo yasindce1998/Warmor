@@ -146,6 +146,48 @@ but is no longer emitted.
 Consumers waiting for `phase=Active` must instead inspect `Published=True` for
 publication only; they must not interpret publication as enforcement.
 
+```bash
+kubectl --context dedicated-test-cluster apply -f deploy/helm/warmor/crds/warmorpolicy-crd.yaml
+kubectl --context dedicated-test-cluster wait --for=condition=Established \
+  crd/warmorpolicies.warmor.io --timeout=60s
+# Upgrade the controller/chart only after the new status schema is established.
+```
+
+The served/storage version remains `v1alpha1`; the migration is additive.
+`Active`, `lastApplied` and `nodesApplied` remain readable for old clients, but
+the controller clears unacknowledged application claims on reconciliation.
+Schema contract tests cover every serialized status field, integer generation
+types, string-valued condition statuses and legacy phase compatibility. They
+do not replace testing admission/pruning against a real API server.
+
+### Controller probes and metrics
+
+The controller serves `/health`, `/ready` and `/metrics` on `--metrics-address`
+(default `:9091`, separate from daemon port 9090). The chart supplies real HTTP
+startup/liveness probes against `/health` and readiness against `/ready`, scrape
+annotations and controller NetworkPolicy ingress. The daemon metrics Service
+still selects only `component: daemon`; controller scraping uses pod annotations,
+not that Service or its ServiceMonitor. Port 9091 is unauthenticated operational
+telemetry; restrict access with cluster/CNI policy. Probes do not prove that a
+particular CNI permits scraping.
+
+`/health` means the HTTP process is responsive, not that reconciliation progresses.
+`/ready` requires a completed successful local reconciliation, fails after a
+reconcile error or controller shutdown, and expires when the last success is
+older than `max(resync period, 2m) + compile timeout + 1m`. It therefore withdraws
+readiness for stalled work after a bounded age without using liveness restarts to
+"repair" API or policy outages. A successful retention of last-known-good sources
+after an invalid desired edit is locally ready; inspect each CR's validation and
+accepted/observed generations to distinguish that state from desired-spec success.
+
+Metrics are `warmor_controller_ready`,
+`warmor_controller_reconciliations_total{result="success|error"}`,
+`warmor_controller_last_success_timestamp_seconds` and
+`warmor_controller_last_reconcile_duration_seconds`. They contain no CR names,
+policy operands or raw API/compiler errors. These are **local reconciliation**
+signals only: none changes `Applied=Unknown`, asserts an active digest, or proves
+node loading, evaluation, kernel prevention or termination.
+
 ### Durable snapshots and recovery
 
 The managed ConfigMap contains `data.accepted-sources.json` alongside
@@ -243,8 +285,8 @@ OCI hook container bindings are the planned identity source).
 - `deploy/Dockerfile` — `controller` target (rust:1.82-slim + default
   policy)
 - `deploy/helm/warmor/templates/controller.yaml` — Deployment + RBAC
-- `scripts/kind-e2e.sh` — legacy smoke test; its `Active` wait must be changed
-  to `Published` for this status contract
+- `scripts/kind-e2e.sh` — explicitly migrates the CRD and waits for
+  `phase=Published` plus a true `Published` condition (publication only)
 
 ## Testing
 
@@ -256,17 +298,24 @@ OCI hook container bindings are the planned identity source).
   stubbed — covering status transitions, ConfigMap create/update/skip,
   invalid-edit/restart retention, failed compile/publication/conflicts, selector
   holding, snapshot loss/tampering, same-name cross-namespace CRs, budgets,
-  deadlines, ownership and unchanged-annotation artifact healing.
+  deadlines, ownership and unchanged-annotation artifact healing. A real
+  cargo/WASM integration test round-trips the ConfigMap journal, restarts with
+  an invalid desired edit, evaluates retained bytes, adds another source and
+  evaluates a newly compiled composition containing the recovered deny.
+- `deploy`: CRD wire-shape migration, real compilation/validation → ConfigMap
+  client dry-run → Helm binary mount contracts, executable selected-policy
+  semantics, publication wait predicate and controller probe/render contracts.
+  No cluster access or host enforcement is involved in these tests.
 - `scripts/kind-e2e.sh`: end-to-end — controller compiles a CR in-cluster
   (real cargo, real WASM), publishes the ConfigMap and the agent
-  hot-reloads it. The legacy test observes decisions by exec'ing a marker binary
+  hot-reloads it. The audit test observes decisions by exec'ing a marker binary
   under a path only the CR's rule covers (`/var/tmp/warmor-cr-*`; the
   baked default blocks only `/tmp/**`) and watching the daemon's
-  `warmor_events_total{action="DENY"}` counter tick up — attributing
-  the deny to the CR specifically. The counter, not the daemon's log,
-  is the signal: on kind the daemon evaluates every exec on the shared
-  host kernel and its container log rotates within seconds. The kind
-  node also does not share the host PID namespace, so the deny's
-  SIGKILL cannot reach the probe — on kind the counter is the
-  verifiable part of the chain. This proves a policy decision, **not** successful
+  `warmor_events_total{action="DENY"}` counter tick up. The counter, not
+  the daemon's log, is the signal: auto scope discovers pod/container cgroup
+  IDs, and the test creates a non-root probe pod after startup and retries
+  across discovery and ConfigMap propagation lag. The pod must survive in
+  audit mode. An aggregate deny counter may include unrelated denies and is
+  not authenticated per-node, exact-digest evidence. This tests policy
+  decisions, **not** successful
   termination, kernel prevention, workload isolation, or acknowledged activation.

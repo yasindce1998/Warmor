@@ -92,6 +92,10 @@ spec:
       component: controller
   template:
     metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
       labels:
         {{- include "warmor.selectorLabels" . | nindent 8 }}
         component: controller
@@ -132,9 +136,32 @@ spec:
             {{- end }}
             - "--resync-period"
             - {{ .Values.controller.resyncPeriod | quote }}
+            - "--metrics-address"
+            - ":9091"
           {{- if .Values.controller.extraArgs }}
           {{- toYaml .Values.controller.extraArgs | nindent 12 }}
           {{- end }}
+          ports:
+            - name: controller-http
+              containerPort: 9091
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: controller-http
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: controller-http
+            periodSeconds: 30
+          # Reconciliation/publication only, never a node-applied signal.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: controller-http
+            periodSeconds: 10
           {{- with .Values.controller.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

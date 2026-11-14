@@ -62,8 +62,13 @@ host. Scope confirmation does not make a policy safe for Warmor/system workloads
 Current chart images are restricted to Linux amd64. Use `image.digest` and
 `controller.image.digest` (`sha256:<64 lowercase hex>`) to override mutable tags;
 the daemon's policy validator shares its pinned image. Controller writable cache
-and temporary storage are bounded. Controller probes/metrics and durable applied
-generation reporting require controller integration, not fabricated endpoints.
+and temporary storage are bounded. The controller serves real process liveness,
+recent-local-reconciliation readiness and metrics on port 9091 (separate pod
+scrape annotations; the daemon Service does not select it). Reconcile failure or
+staleness withdraws controller readiness; retaining a valid last-good publication
+after an invalid desired edit can remain locally ready. This never proves node
+application: CR `Applied` remains Unknown, with no asserted node count or
+`lastApplied`. See the [controller contract](../../../../docs/design/warmorpolicy-controller.md#controller-probes-and-metrics).
 
 ## Empirical capability and real-node test matrix (not run here)
 
