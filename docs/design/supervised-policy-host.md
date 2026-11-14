@@ -18,6 +18,11 @@ WASM decoding, native-code cache, or guest export runs in the parent backend.
 Signatures authenticate content only, **not** assignment, scope or rollback.
 The caller must not concurrently mutate supplied inputs while staging/snapshotting.
 
+The parent retains its verified staged snapshot; the upload creates a separate
+child-owned buffer. The runtime may retain references to that buffer after load.
+Neither dropping a local reference nor garbage collection promises immediate
+reclamation or secure erasure; resource enforcement does not depend on either.
+
 Build the dedicated executable separately:
 
 ```sh

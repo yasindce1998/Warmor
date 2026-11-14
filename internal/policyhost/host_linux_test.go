@@ -111,7 +111,11 @@ func reaped(t *testing.T, h *Host) {
 	default:
 		t.Fatal("child not reaped before operation returned")
 	}
-	if h.cmd.ProcessState == nil || !h.cmd.ProcessState.Exited() && h.cmd.ProcessState.Sys().(syscall.WaitStatus).Signaled() == false {
+	if h.cmd.ProcessState == nil {
+		t.Fatal("missing child process state")
+	}
+	status, ok := h.cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || (!h.cmd.ProcessState.Exited() && !status.Signaled()) {
 		t.Fatal("missing child wait status")
 	}
 	// Wait may only happen once; ECHILD proves this owned child is reaped.
@@ -226,7 +230,10 @@ func TestCPURlimitKillsOwnedWorker(t *testing.T) {
 		t.Fatalf("CPU limit = %v", err)
 	}
 	reaped(t, h)
-	status := h.cmd.ProcessState.Sys().(syscall.WaitStatus)
+	status, ok := h.cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok {
+		t.Fatalf("unexpected child wait status type %T", h.cmd.ProcessState.Sys())
+	}
 	if !status.Signaled() || status.Signal() != syscall.SIGKILL {
 		t.Fatalf("CPU limit status %v", status)
 	}

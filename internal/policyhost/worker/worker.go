@@ -54,7 +54,6 @@ func Run(in io.Reader, out io.Writer) error {
 	if err := rt.LoadPolicyBytes(ctx, data); err != nil {
 		return errors.New("policy load failed")
 	}
-	data = nil
 	pool, err := wasm.NewPool(ctx, rt, 1)
 	if err != nil {
 		return errors.New("policy initialization failed")
