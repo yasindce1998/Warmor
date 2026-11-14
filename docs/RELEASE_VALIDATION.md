@@ -126,3 +126,46 @@ Docker/Trivy image builds and scans, native hosted ARM64/Windows/macOS jobs,
 GitHub artifact API ZIP transfer, GHCR/Helm OCI promotion, OIDC attestations,
 immutable tag rulesets, privileged Kubernetes/BPF outcomes or native SDK/driver
 infrastructure. No remote push, PR, tag, release, deployment or merge was made.
+
+## PR #42 hosted failure triage (head `049204b`)
+
+Inspected existing logs for Release run **43607491228** and Windows CI run
+**43607491182** without rerunning jobs. Release checked out the PR merge commit
+`012e91a45009dc8f29918a3795e2617d1a5cdac6`, not just the head commit. No scanner
+download, checksum, database-download, unsupported-flag, workflow-rule or action
+pin failure was found in the requested jobs.
+
+| Job | Actual failure / disposition |
+| --- | --- |
+| Release tests `132485185572` | Go regression/race tests and Rust policy builds passed. govulncheck completed and blocked on `GO-2026-6865` (compress v1.18.0; reports fix v1.20.2) and `GO-2026-6497`/`GO-2026-6499` (ORAS v2.6.1; fix v2.6.2). Rust Trivy steps were **skipped**, not passed. Keep blocked pending PR #36 through main and a clean rescan. |
+| Daemon AMD64/ARM64 `132485216504` / `132485216633` | Native Docker builds, image CLI/default-policy smoke tests and pinned Trivy installation passed. Both completed scans found one fixable HIGH `CVE-2026-63209` in compress v1.18.0 (Trivy reports fix 1.18.7). This is a dependency finding, not scanner infrastructure failure; PR #36 must satisfy both scanners. |
+| Controller AMD64/ARM64 `132485216580` / `132485216586` | Native builds, smoke tests and pinned scanner installation passed. Both completed scans found eight fixable HIGH Debian findings: six in `linux-libc-dev` 6.12.116-1 (fix 6.12.117-1) and two in `zlib1g` 1:1.3.dfsg+really1.3.1-1+b1 (fix 1:1.3.dfsg+really1.3.1-1+deb13u1). The Rust base needs security maintenance and fresh native scans; Go-only PR #36 does **not** fix these OS packages. No exceptions/ignore rules were added. |
+| Darwin AMD64 `132485216542` | `TestReloadPolicy_Errors/invalid_wasm` failed its cache/old-policy assertions after setup evaluation exceeded the 50 ms default (`malloc failed: module closed with context deadline exceeded`). Failed reload returns before changing the active runtime/cache. The test now uses a bounded five-second evaluation budget only for this reload-atomicity scenario, requires a successful cached ALLOW **before** reload, checks unchanged evaluator/pool/runtime/cache afterward, requires a real cache hit, and distinguishes a cacheable policy DENY from an evaluation-error DENY. Production deadlines and dedicated timeout tests are unchanged. |
+| Windows CI `132485184776` | `TestPolicyEvaluator_Evaluate_Allow` required latency > 0. A fast evaluation can measure zero within a Windows clock tick. The assertion now accepts zero but still rejects negative/impossible elapsed durations and missing timestamps; production timing is not fabricated. Race testing, coverage and ETW gates are not removed or bypassed. |
+
+The same Release run successfully built/smoke-tested/uploaded portable archives
+on Linux AMD64/ARM64, Windows AMD64 and Darwin ARM64, and packaged the staged
+chart. Darwin AMD64 archive creation was skipped after its test failure. Image
+SBOM/save/upload steps were not reached after vulnerability failures. Both
+publishers were skipped; there was no release/tag publication. These are results
+for that existing PR merge commit, not green evidence for the follow-up patch.
+
+Local follow-up validation (Linux AMD64, Go 1.26.11, `GOMAXPROCS=2`):
+
+- Reload error regression passes **30 race-enabled repetitions**, evaluator
+  ALLOW timing test passes **100 race-enabled repetitions**.
+- Both affected packages pass `go test -mod=readonly -race -short -count=1 -p=1
+  ./internal/enforcer ./internal/wasm`, including existing timeout/fail-closed
+  regressions.
+- All **21 Python release regressions** pass; actionlint v1.7.12 passes for the
+  four release-owned workflows plus `windows-ci.yml` (`-shellcheck=`), release
+  shell scripts pass `bash -n`, CI-configured errcheck passes, and
+  `git diff --check` passes.
+
+Only tests and this validation record change. Required security/native gates,
+workflow permissions, production evaluation limits, dependency manifests,
+Docker base digests and source chart are unchanged. No native Windows/macOS
+follow-up run, old-job rerun, push, PR update, merge, tag or release was requested
+or performed. Security findings remain release blockers, not unverified scans;
+OIDC/registry publication, artifact consumption and privileged/native driver
+infrastructure still need coordinating validation.
