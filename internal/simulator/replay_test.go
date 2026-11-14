@@ -100,8 +100,13 @@ func TestReplay_DecisionBreakdown(t *testing.T) {
 	if a.EventType != "file" || a.Comm != "cat" || a.Target != "/etc/hosts" || a.Count != 2 {
 		t.Errorf("unexpected allow detail: %+v", a)
 	}
-	if res.Duration <= 0 {
-		t.Errorf("Duration = %v, want > 0", res.Duration)
+	if res.EvaluationErrors != 0 {
+		t.Errorf("EvaluationErrors = %d, want 0", res.EvaluationErrors)
+	}
+	// A fast replay can complete within one clock tick on hosted runners.
+	// Elapsed time must be nonnegative, but need not be strictly positive.
+	if res.Duration < 0 {
+		t.Errorf("Duration = %v, want >= 0", res.Duration)
 	}
 }
 
