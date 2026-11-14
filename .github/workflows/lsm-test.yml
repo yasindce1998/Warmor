@@ -50,8 +50,15 @@ jobs:
         run: go test -v -race -short -p 1 ./internal/ebpf/... ./internal/compiler/... ./internal/wasm/...
 
   bpf-compile:
-    name: BPF Compilation Check
+    name: BPF Compilation Check (Clang ${{ matrix.clang }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        clang: [18, 21]
+    env:
+      BPF2GO_CC: clang-${{ matrix.clang }}
+      BPF2GO_STRIP: llvm-strip-${{ matrix.clang }}
     steps:
       - uses: actions/checkout@v4
 
@@ -62,65 +69,67 @@ jobs:
       - name: Install BPF build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev linux-headers-$(uname -r) gcc-multilib
+          sudo apt-get install -y clang-${{ matrix.clang }} llvm-${{ matrix.clang }} libbpf-dev linux-headers-$(uname -r) gcc-multilib
+          clang-${{ matrix.clang }} --version
 
       - name: Compile LSM exec program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_exec.bpf.c -o /tmp/lsm_exec.bpf.o
 
       - name: Compile LSM file program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_file.bpf.c -o /tmp/lsm_file.bpf.o
 
       - name: Compile LSM connect program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_connect.bpf.c -o /tmp/lsm_connect.bpf.o
 
       - name: Compile LSM bind program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_bind.bpf.c -o /tmp/lsm_bind.bpf.o
 
       - name: Compile LSM listen program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_listen.bpf.c -o /tmp/lsm_listen.bpf.o
 
       - name: Compile LSM ptrace program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_ptrace.bpf.c -o /tmp/lsm_ptrace.bpf.o
 
       - name: Compile LSM mount program
         run: |
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+          clang-${{ matrix.clang }} -g -O2 -target bpf -D__TARGET_ARCH_x86 -mcpu=v1 \
             -I/usr/include/bpf -I./bpf \
             -I/usr/include/x86_64-linux-gnu \
             -c bpf/lsm_mount.bpf.c -o /tmp/lsm_mount.bpf.o
 
       - name: Compile monitor programs
-        run: make -C bpf all
+        run: make -C bpf all CLANG='clang-${{ matrix.clang }} -mcpu=v1'
 
       - name: Check regenerated generation ABI and compile VM fixtures offline
         env:
           BPF2GO_CFLAGS: -D__TARGET_ARCH_x86 -mcpu=v1
         run: |
           go generate ./internal/ebpf
+          go test -count=1 -run '^TestGenerationObject' ./internal/ebpf
           go test -race -count=1 ./internal/ebpf
           go test -tags integration -run '^$' ./internal/ebpf
 
@@ -128,7 +137,7 @@ jobs:
         run: |
           for obj in /tmp/lsm_exec.bpf.o /tmp/lsm_file.bpf.o /tmp/lsm_connect.bpf.o /tmp/lsm_bind.bpf.o /tmp/lsm_listen.bpf.o /tmp/lsm_ptrace.bpf.o /tmp/lsm_mount.bpf.o; do
             echo "=== $(basename $obj) ==="
-            llvm-objdump -h "$obj" | head -20
+            llvm-objdump-${{ matrix.clang }} -h "$obj" | head -20
             echo ""
           done
 

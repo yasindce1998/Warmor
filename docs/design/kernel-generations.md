@@ -250,3 +250,27 @@ and input-manifest validation without starting a VM or attaching any program.
 These are required CI assertions, not a report that CI has already passed. They
 do not supply the still-missing combined daemon evaluator/activation/recovery
 protocol or authorize enabling the opt-in generation API.
+
+### Clang 21 dormant-map BTF compatibility
+
+Even observation-only hooks include the shared, initially empty
+`active_generation` map. Clang 21 can emit an unsized BTF forward declaration for
+a named inner `generation_value` struct when that hook never dereferences it
+(notably integrity), so bpf2go fails before any verifier can run. The canonical
+value is therefore one anonymous struct behind the `generation_value` typedef,
+used by both the map declaration and policy lookup helpers. No duplicate layout,
+dummy kernel map, policy lookup, security decision or loader fallback is added.
+Its members remain `policy_value policy` at byte 0 and `__u64 generation` at byte
+8, size 16; C assertions and offline BTF tests enforce this.
+
+`TestGenerationObjectABI` parses all eight hooks in **both** ELF byte orders,
+including objects not embedded by the host's build tags. It checks the full
+288-byte exact key, 8-byte policy value, 16-byte generation value and 416-byte
+event with member types/offsets, the empty single-pointer map and matching inner
+map properties. `TestGenerationObjectGoABI` also checks userspace sizes/offsets.
+The required BPF compile job regenerates with explicitly selected Clang 18 and
+21, matching llvm-strip and `-mcpu=v1`, then runs these tests without loading any
+BPF. This repairs common supported compiler compatibility rather than selecting
+a newer compiler to conceal the failure. The non-skippable Linux 6.1/6.18 VM
+verifier/outcome gates remain required: successful compilation and BTF parsing
+are not verifier acceptance, enforcement or combined-daemon proof.
