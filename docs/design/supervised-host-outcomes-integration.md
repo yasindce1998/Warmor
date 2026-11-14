@@ -47,6 +47,36 @@ then normal/profile lint, tagged compile-only and Host build-only preparation.
 Results/logs are recorded after completion; no broad-green result is inferred
 from focused tests. Build-only never launches a daemon, VM or BPF program.
 
+The complete pipeline **passed**, with code settled at **9cb5694** (the full
+normal phase began before the identical source was committed; all later phases
+and both build-only metadata checks use that commit). No production source or
+test assertions changed during execution; only explanatory documentation was
+updated. Specifically:
+
+- Fresh `WARMOR_REQUIRE_CARGO=1 go test -count=1 -p 2 ./...`: pass.
+- Fresh `WARMOR_REQUIRE_CARGO=1 go test -race -count=1 -p 2 ./...`: pass,
+  including signed guards, metadata, initialized blocking, manifest compiler-7
+  compatibility, real Host shutdown/lease/deadline tests and recording checks.
+- Full configured golangci-lint normal build: pass. Profile lint with
+  `integration,policyhost_phaseproof` for host/oracle/harness/daemon: pass.
+- Tagged real-worker phase tests under race: pass (release/cancel/deadline,
+  wrong release rejection, capacity/reap and stale-receipt refusal).
+- `go test -tags integration -run '^$' ./internal/ebpf ./tests/integration`:
+  pass, compilation only; no BPF or enforcing test executes.
+- Offline packaging/workflow tests: **24 Python tests**, actionlint and shell
+  syntax all pass. Host/strict-gate mock-log no-skip/exact-PASS tests also pass
+  as part of both full Go suites.
+- Build-only legacy **and** atomic Host runs pass with exact paired-profile
+  binary metadata/helper pins. Retained artifacts:
+  `tests/integration/artifacts/run.f4XTxy` (legacy), `run.l2QasY` (atomic).
+- Normal Linux daemon/helper builds pass; a byte-string check confirms both
+  phase-control environment names and all three held/confirm/release protocol
+  markers are absent from each normal binary (not just unused at runtime).
+
+Logs: `/tmp/opencode/supervised-outcomes-integration-{full,race,lint,profile-lint,`
+`profile-race,tagged,packaging,actionlint,build-legacy,build-atomic}.log`.
+No failed/partial broad run is relabeled as this successful sequential run.
+
 Actual legacy **and** atomic Host VM CI is still required after coordinator review
 and PR53 gate append. No local VM/BPF attachment, Docker publication, native
 arm64/container/bootstrap/update evidence or supported combined signed-deployment
