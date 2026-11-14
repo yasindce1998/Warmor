@@ -28,9 +28,12 @@ type lsm_bindLsmConfig struct {
 type lsm_bindPolicyKey struct {
 	_         structs.HostLayout
 	CgroupId  uint64
-	RuleHash  uint32
 	EventType uint8
-	Pad       [3]uint8
+	Family    uint8
+	Port      [2]uint8
+	Address   [16]uint8
+	Path      [256]int8
+	Pad       [4]uint8
 }
 
 type lsm_bindPolicyValue struct {

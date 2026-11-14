@@ -2,6 +2,15 @@
 
 ## Review scope
 
+The follow-up merge of `origin/main` at `ce1d5ab` into `4290664` is automatic:
+there are no textual conflicts or additional production resolutions. It brings
+main's independently reviewed kernel/manifest integration, including the
+explicit compiler-7 manifest compatibility pin and timing-fixture corrections.
+The earlier compiler-pin blocker below is historical and resolved by main.
+`build.go`, metadata append, subprocess helpers, and the existing generation-
+pinning fixture are unchanged by this follow-up; no new timeout budget changes
+are made here.
+
 This integration merges `origin/main` at `98d2b90` into compiler-process branch
 tip `33151a5`. It does not replace the independent reviews of `a5ca745` and
 `d05496b`, or their native CI results. The controller-main integration remains
@@ -72,7 +81,7 @@ under host load; no deadline settings were changed. Full test/race and lint
 results are reported in the integration handoff rather than inferred from the
 earlier branch CI.
 
-## Main-side compatibility blocker discovered by full tests
+## Historical main-side compatibility blocker (resolved by `ce1d5ab`)
 
 At `98d2b90`, `internal/workload/manifest/manifest.go` deliberately pins
 `SupportedCompilerVersion = "6"` and requires it to equal `compiler.Version`.

@@ -4,6 +4,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,12 +37,22 @@ type LinuxConfig struct {
 	CgroupReconcileInterval time.Duration
 }
 
+type tracepointMonitor interface {
+	ReadProcessEvent() (*ebpf.Event, error)
+	ReadFileEvent() (*ebpf.Event, error)
+	ReadNetworkEvent() (*ebpf.Event, error)
+	ReplaceCgroupFilter([]uint64) error
+	StopReaders() error
+	Close() error
+}
+
 type LinuxPlatform struct {
-	ebpfLoader *ebpf.Loader
+	ebpfLoader tracepointMonitor
 	lsmLoader  *ebpf.LSMLoader
 	eventChan  chan<- *api.Event
 	stopChan   chan struct{}
 	stopOnce   sync.Once
+	stopErr    error
 	wg         sync.WaitGroup
 	config     LinuxConfig
 	lsmEnabled bool
@@ -601,20 +612,29 @@ func (p *LinuxPlatform) lossVerb() string {
 
 // Stop signals the monitors to exit and waits for them. It is idempotent.
 func (p *LinuxPlatform) Stop() error {
-	p.stopOnce.Do(func() { close(p.stopChan) })
-	// Idle ring-buffer reads must wake without detaching protection.
-	if p.ebpfLoader != nil {
-		p.ebpfLoader.InterruptReaders()
-	}
-	if p.lsmLoader != nil {
-		p.lsmLoader.InterruptReader()
-	}
+	p.stopOnce.Do(func() {
+		close(p.stopChan)
+		// Readers can be idle forever (including ReadLSMEvent's deadline
+		// retry loop). Interrupt them before waiting, but keep enforcement
+		// hooks/maps alive until Close finishes the resource lifecycle.
+		var errs []error
+		if p.ebpfLoader != nil {
+			errs = append(errs, p.ebpfLoader.StopReaders())
+		}
+		if p.lsmLoader != nil {
+			errs = append(errs, p.lsmLoader.StopReaders())
+		}
+		p.stopErr = errors.Join(errs...)
+	})
 	p.wg.Wait()
-	return nil
+	return p.stopErr
 }
 
 func (p *LinuxPlatform) Close() error {
 	var errs []error
+	if err := p.Stop(); err != nil {
+		errs = append(errs, err)
+	}
 	if p.lsmLoader != nil {
 		if err := p.lsmLoader.Close(); err != nil {
 			errs = append(errs, err)

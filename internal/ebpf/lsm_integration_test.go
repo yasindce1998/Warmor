@@ -18,6 +18,9 @@ import (
 func requireRoot(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() != 0 {
+		if os.Getenv("WARMOR_REQUIRE_BPF_LSM") == "1" {
+			t.Fatal("BPF-LSM verifier/outcome gate requires root in the VM")
+		}
 		t.Skip("requires root")
 	}
 }
@@ -25,6 +28,9 @@ func requireRoot(t *testing.T) {
 func requireLSM(t *testing.T) {
 	t.Helper()
 	if !IsLSMSupported() {
+		if os.Getenv("WARMOR_REQUIRE_BPF_LSM") == "1" {
+			t.Fatal("BPF-LSM verifier/outcome gate requires an active BPF LSM")
+		}
 		t.Skip("kernel does not have CONFIG_BPF_LSM enabled")
 	}
 }
@@ -34,11 +40,11 @@ func loadLSMOrSkip(t *testing.T) *LSMLoader {
 	loader, err := LoadLSM()
 	if err != nil {
 		errStr := err.Error()
-		if strings.Contains(errStr, "header padding") ||
+		if os.Getenv("WARMOR_REQUIRE_BPF_LSM") != "1" && (strings.Contains(errStr, "header padding") ||
 			strings.Contains(errStr, "non-zero trailer") ||
 			strings.Contains(errStr, "non-zero byte") ||
 			strings.Contains(errStr, "parsing .BTF") ||
-			strings.Contains(errStr, "load kernel spec") {
+			strings.Contains(errStr, "load kernel spec")) {
 			t.Skipf("kernel BTF incompatible with cilium/ebpf library: %v", err)
 		}
 		t.Fatalf("LoadLSM failed: %v", err)
@@ -167,7 +173,7 @@ func TestLSM_ExecBlocked(t *testing.T) {
 	cmd := exec.Command(testBin)
 	err := cmd.Run()
 	if err == nil {
-		// The kernel hashes the full bprm->filename exactly like HashPattern,
+		// The kernel matches the full literal bprm->filename,
 		// so a rule for a >16-byte path must match.
 		t.Fatal("expected exec to be blocked, but it succeeded")
 	}
@@ -234,7 +240,7 @@ func TestLSM_ConnectBlocked(t *testing.T) {
 	}
 
 	// Block connections to 169.254.169.254:80 (metadata service), keyed the
-	// way lsm_connect hashes the raw sockaddr_in.
+	// way lsm_connect reads the raw sockaddr_in.
 	pm := loader.PolicyMap()
 	if err := pm.SetEndpointRule(0, EventTypeNetwork, "169.254.169.254", 80, ActionDeny, false); err != nil {
 		t.Fatalf("SetEndpointRule deny: %v", err)
@@ -452,11 +458,11 @@ func TestLSM_WASMFeedbackLoop(t *testing.T) {
 	// Simulate the WASM feedback loop:
 	// 1. A batch of decisions arrives from WASM evaluation
 	decisions := []CachedDecision{
-		{CgroupID: 0, EventType: EventTypeExec, Pattern: "/usr/bin/nc", Action: ActionDeny, Audit: true},
-		{CgroupID: 0, EventType: EventTypeExec, Pattern: "/usr/bin/ncat", Action: ActionDeny, Audit: true},
-		{CgroupID: 0, EventType: EventTypeExec, Pattern: "/usr/bin/socat", Action: ActionDeny, Audit: true},
-		{CgroupID: 0, EventType: EventTypeFile, Pattern: "/etc/shadow", Action: ActionDeny, Audit: false},
-		{CgroupID: 0, EventType: EventTypeExec, Pattern: "/usr/bin/curl", Action: ActionAllow, Audit: false},
+		{CgroupID: 42, EventType: EventTypeExec, Pattern: "/usr/bin/nc", Action: ActionDeny, Audit: true},
+		{CgroupID: 42, EventType: EventTypeExec, Pattern: "/usr/bin/ncat", Action: ActionDeny, Audit: true},
+		{CgroupID: 42, EventType: EventTypeExec, Pattern: "/usr/bin/socat", Action: ActionDeny, Audit: true},
+		{CgroupID: 42, EventType: EventTypeFile, Pattern: "/etc/shadow", Action: ActionDeny, Audit: false},
+		{CgroupID: 42, EventType: EventTypeExec, Pattern: "/usr/bin/curl", Action: ActionAllow, Audit: false},
 	}
 
 	// 2. SyncFromWASM writes them all into the BPF map
@@ -475,11 +481,7 @@ func TestLSM_WASMFeedbackLoop(t *testing.T) {
 	}
 
 	// 4. Verify the lookup would work by checking the raw map
-	key := PolicyKey{
-		CgroupID:  0,
-		RuleHash:  HashPattern("/usr/bin/nc"),
-		EventType: EventTypeExec,
-	}
+	key := mustStringKey(t, 42, EventTypeExec, "/usr/bin/nc")
 	var val PolicyValue
 	keyBytes, _ := key.MarshalBinary()
 	err = loader.execObjs.PolicyMap.Lookup(keyBytes, &val)
@@ -550,13 +552,13 @@ func TestLSM_ListenBlocked(t *testing.T) {
 
 	// Block listening on port 9998
 	port := uint16(9998)
-	portHash := HashPort(port)
 
 	pm := loader.PolicyMap()
 	key := PolicyKey{
 		CgroupID:  0,
-		RuleHash:  portHash,
 		EventType: EventTypeListen,
+		Family:    syscall.AF_INET,
+		Port:      [2]byte{byte(port >> 8), byte(port & 255)},
 	}
 	val := PolicyValue{Action: ActionDeny}
 	if err := pm.policyMap.Put(key, val); err != nil {
