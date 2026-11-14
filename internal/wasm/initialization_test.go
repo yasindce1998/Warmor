@@ -176,8 +176,11 @@ func TestMatchedRuleCannotAliasOrOverreadEventBuffer(t *testing.T) {
 
 func TestPoolReplacementPinnedToOriginalModule(t *testing.T) {
 	ctx := context.Background()
-	rt := boundedTestRuntime(t)
-	if err := rt.LoadPolicyBytes(ctx, buildTestModule([]testFunc{fnMalloc, fnBinaryDeny})); err != nil {
+	// This tests generation pinning, not deadline enforcement. Keep the
+	// normal bounded initialization budget for benign setup/replacement;
+	// the 30ms looping-guest helper flakes under native Windows contention.
+	rt, err := loadTestModule(t, fnMalloc, fnBinaryDeny)
+	if err != nil {
 		t.Fatal(err)
 	}
 	pool, err := NewPool(ctx, rt, 1)
