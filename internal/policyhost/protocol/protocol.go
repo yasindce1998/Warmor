@@ -10,19 +10,43 @@ import (
 	"io"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 const (
-	Version    = 1
+	Version    = 2
 	MaxModule  = 64 << 20
 	MaxControl = 4096
 	MaxEvent   = 256 << 10
 	MaxResult  = 8192
 	MaxReason  = 1024
+	// Includes worst-case JSON escaping of 4096 full-size patterns, while
+	// decoded rule counts/pattern lengths are independently bounded.
+	MaxMetadata = 8 << 20
 )
 
 var ErrProtocol = errors.New("invalid policy-host protocol")
+
+// Ready is required in protocol v2. Older workers cannot silently omit
+// declarations and be mistaken for a cacheable constant policy.
+type Ready struct {
+	Control  Control
+	Metadata policymeta.Module
+}
+
+// Validate checks the complete authenticated readiness envelope. The parent
+// must call this after bounded canonical decoding and before publishing Host.
+func (r Ready) Validate(digest string, limits Limits) error {
+	c := r.Control
+	if c.Version != Version || c.Kind != "ready" || c.Digest != digest || c.Sequence != 0 || c.Limits != limits {
+		return ErrProtocol
+	}
+	if err := r.Metadata.Validate(digest); err != nil {
+		return ErrProtocol
+	}
+	return nil
+}
 
 // Limits are checked independently on both sides, before module upload.
 // AddressSpaceBytes is RLIMIT_AS, not an RSS quota. CPUSeconds is a
@@ -197,7 +221,7 @@ func Receive(r io.Reader, v any, max uint32) error {
 	if err := d.Decode(new(any)); err != io.EOF {
 		return ErrProtocol
 	}
-	// V1 requires the canonical encoding produced by Send, including every
+	// The protocol requires the canonical encoding produced by Send, including every
 	// field. In particular an omitted Action must not become zero/ALLOW.
 	// This also rejects duplicate keys, null scalars and case-folded keys.
 	canonical, err := json.Marshal(v)

@@ -172,9 +172,10 @@ section declaration (`warmor.build.v1`) is retained unchanged, including compile
 identity `warmor-yaml/7`. Signed assignment checking uses the actual instantiated
 pool ABI, captured artifact digest and authenticated build declaration, not a
 generation-specific metadata model. This branch introduces no alternative
-ABI/compiler/posture struct or `ModuleClaims`. Proposed `policymeta.Module`
-runtime observations and `policymeta.Source` on another branch are distinct trust
-statements and must be integrated by their owners, not inferred here.
+ABI/compiler/posture struct or `ModuleClaims`. Main's canonical `policymeta.Module`
+runtime observations and `policymeta.Source` are retained unchanged, including
+actual digest/ABI observations and digest-pinned Host effective methods. Build
+declarations remain distinct from observed structure or optimization permission.
 
 Generation spec building consumes the pre-existing structural surface:
 
@@ -186,12 +187,16 @@ type staticRulesSource interface {
 // wasm.StaticDomain: { Eligible bool; Rules []compiler.StaticRule }
 ```
 
-The metadata branch aliases `wasm.StaticDomain = policymeta.StaticDomain`, so
-these two method signatures remain compatible. Its `policymeta.Source` also
+Main aliases `compiler.StaticRule = policymeta.StaticRule` and
+`wasm.StaticDomain = policymeta.StaticDomain`, so the existing generation seam's
+two method signatures remain compatible without another metadata model.
+The canonical `policymeta.Source` also
 exposes `Metadata() Module`, field/temporal/age queries, and
 `DecisionCacheEligible`/`LinuxKernelCacheEligible`. Future supervised evaluator
 wiring should use that source's **effective trusted methods**, not raw observed
-flags or a signed build declaration as cache authorization. This checkpoint
+flags or a signed build declaration as cache authorization. A component test
+checks canonical source/interface compatibility and copied installation inputs;
+it is not Host+generation execution proof. This checkpoint
 still stores concrete in-process `*wasm.PolicyEvaluator`, `*wasm.Pool` and
 `*wasm.Runtime`; it does **not** claim Host is wired. A reviewed evaluator
 evaluation/close/source interface plus backend lifecycle owner is still needed.

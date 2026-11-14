@@ -15,10 +15,30 @@ import (
 	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/platform"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/internal/wasm"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
+
+// The generation seam consumes the canonical source's effective static methods,
+// not raw Module flags or a second generation-specific metadata representation.
+var _ staticRulesSource = (policymeta.Source)(nil)
+
+func TestGenerationSpecAcceptsCanonicalStaticDomainAliases(t *testing.T) {
+	e := &Enforcer{defaultDeny: true}
+	process := policymeta.StaticDomain{Eligible: true, Rules: []policymeta.StaticRule{{Event: "process", Pattern: "/bin/canonical", Action: 0}}}
+	network := policymeta.StaticDomain{Eligible: true, Rules: []policymeta.StaticRule{{Event: "network", Pattern: "127.0.0.1", Port: 443, Action: 1, Audit: true}}}
+	spec, err := e.generationSpec(fakeStaticSource{proc: process, net: network})
+	if err != nil || len(spec.Rules) != 2 || len(spec.DefaultDeny) != 2 {
+		t.Fatalf("canonical source aliases incompatible: %+v %v", spec, err)
+	}
+	process.Rules[0].Pattern = "/bin/changed"
+	network.Rules[0].Port = 8443
+	if spec.Rules[0].Pattern != "/bin/canonical" || spec.Rules[1].Port != 443 || !spec.Rules[1].Audit {
+		t.Fatalf("generation installation input retained mutable canonical source data: %+v", spec)
+	}
+}
 
 // Only the publication/drain boundary is faked; evaluators and pools are real.
 // No test in this file loads/attaches BPF or signals a host process.
