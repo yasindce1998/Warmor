@@ -1,8 +1,12 @@
 # WASM compilation isolation: limitation and release gate
 
-Status: **not implemented**. Admission limits are defense in depth,
-not a killable compilation worker. Do not claim hard policy-load CPU/RSS or
-wall-time bounds, and do not admit untrusted binary publishers on that premise.
+Status: **not implemented in the default enforcer**. An opt-in separate-process
+backend now exists; see [its contract and limitations](supervised-policy-host.md).
+It is not wired into the concrete enforcer evaluator or release packaging and
+does not implement the stronger cgroup/native-compromise boundary below.
+Admission limits on the existing path remain defense in depth, not a killable
+compilation worker. Do not claim default hard policy-load CPU/RSS or wall-time
+bounds, or admit untrusted binary publishers on that premise.
 
 ## Why the context is insufficient
 
