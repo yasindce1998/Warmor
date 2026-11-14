@@ -234,7 +234,7 @@ func isValidEvent(event string) bool {
 // Version identifies the YAML-to-WASM compiler. Bump it whenever the output
 // for an unchanged YAML policy changes (codegen, ABI or build settings), so
 // cached compiled policies are rebuilt.
-const Version = "6"
+const Version = "7"
 
 // Identity is embedded in artifact-signed WASM build metadata. Release systems
 // may use a stricter immutable identity for custom toolchains.

@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/tetratelabs/wazero"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 )
 
 // ErrPoolClosed is returned by Get after the pool has been closed.
@@ -15,10 +16,12 @@ var ErrPoolClosed = errors.New("policy pool is closed")
 // Pool manages a set of pre-instantiated WASM policy instances for
 // lock-free parallel evaluation.
 type Pool struct {
-	instances chan *Policy
-	runtime   *Runtime
-	module    wazero.CompiledModule
-	size      int
+	instances     chan *Policy
+	runtime       *Runtime
+	module        wazero.CompiledModule
+	buildMetadata *policybuild.Metadata
+	moduleDigest  string
+	size          int
 
 	// fields is the module's fields-read declaration per event type,
 	// read once from the first instance.
@@ -52,11 +55,16 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 	defer cancel()
 
 	p := &Pool{
-		instances: make(chan *Policy, size),
-		runtime:   runtime,
-		module:    runtime.module,
-		size:      size,
-		done:      make(chan struct{}),
+		instances:    make(chan *Policy, size),
+		runtime:      runtime,
+		module:       runtime.module,
+		moduleDigest: runtime.digest,
+		size:         size,
+		done:         make(chan struct{}),
+	}
+	if runtime.metadata != nil {
+		metadata := *runtime.metadata
+		p.buildMetadata = &metadata
 	}
 
 	for i := 0; i < size; i++ {

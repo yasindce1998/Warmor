@@ -153,7 +153,13 @@ func DefaultDenyPolicy() []byte {
 	// Store the one-byte eligible table at the requested pointer and return
 	// its size. Query calls use pointer zero, harmless in this test module.
 	table := []byte{opLocalGet, 1, opI32Const, 1, 0x3a, 0, 0, opI32Const, 1}
-	return assemble(mallocFn, fn{export: "evaluate_event", body: i32Const(1)}, fn{export: "abi_version", body: i32Const(1), noArg: true}, fn{export: "warmor_static_rules", body: table, threeArgs: true})
+	// Main's allocator contract forbids transient declarations from aliasing
+	// the persistent 256-byte event buffer. Use a separate static-table region.
+	alloc := append(i32Const(1024), i32Const(2048)...)
+	alloc = append(alloc, opLocalGet, 0)
+	alloc = append(alloc, i32Const(256)...)
+	alloc = append(alloc, opI32Eq, opSelect)
+	return assemble(fn{export: "malloc", body: alloc}, fn{export: "evaluate_event", body: i32Const(1)}, fn{export: "abi_version", body: i32Const(1), noArg: true}, fn{export: "warmor_static_rules", body: table, threeArgs: true})
 }
 
 // UIDPolicy denies (1) events with uid 0 and allows (0) everything else.

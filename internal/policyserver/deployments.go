@@ -122,17 +122,17 @@ func (s *Server) handleAdminDeployment(w http.ResponseWriter, r *http.Request) {
 	}
 	wire, err := io.ReadAll(io.LimitReader(r.Body, assignment.MaxBundleBytes+1))
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	b, err := assignment.DecodeBundle(wire)
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	e, err := assignment.Decode(b.Envelope)
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	d := e.Deployment
@@ -161,38 +161,38 @@ func (s *Server) handleAdminDeployment(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", 405)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if len(s.assignmentTrust) == 0 {
-		http.Error(w, "signed deployment relay not configured", 501)
+		http.Error(w, "signed deployment relay not configured", http.StatusNotImplemented)
 		return
 	}
 	w.Header().Set(assignment.ProtocolHeader, "1")
 	id := r.URL.Query().Get("agent_id")
 	if id == "" || !authorizeAgent(w, r, id) {
 		if id == "" {
-			http.Error(w, "agent_id required", 400)
+			http.Error(w, "agent_id required", http.StatusBadRequest)
 		}
 		return
 	}
 	if _, ok := s.store.GetAgent(id); !ok {
-		http.Error(w, "agent not registered", 404)
+		http.Error(w, "agent not registered", http.StatusNotFound)
 		return
 	}
 	wire := s.store.deployment(id)
 	if wire == nil {
-		http.Error(w, "no signed deployment for audience", 404)
+		http.Error(w, "no signed deployment for audience", http.StatusNotFound)
 		return
 	}
 	b, err := assignment.DecodeBundle(wire)
 	if err != nil {
-		http.Error(w, "corrupt deployment", 503)
+		http.Error(w, "corrupt deployment", http.StatusServiceUnavailable)
 		return
 	}
 	e, err := assignment.Decode(b.Envelope)
 	if err != nil {
-		http.Error(w, "corrupt envelope", 503)
+		http.Error(w, "corrupt envelope", http.StatusServiceUnavailable)
 		return
 	}
 	if r.URL.Query().Get("if_sequence") == fmt.Sprint(e.Deployment.Sequence) && r.URL.Query().Get("if_envelope_hash") == assignment.Digest(b.Envelope) {

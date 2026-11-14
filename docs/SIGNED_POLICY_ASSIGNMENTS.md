@@ -229,8 +229,8 @@ timestamp or reusing its sequence.
 Build `./cmd/warmor-policy-assignment`, `./cmd/warmor-server` and
 `./cmd/warmor-daemon` (also included by `make tools`). The deployment signer runs
 in a protected environment separate from the relay. First build an artifact
-using `warmor-compile`; compiler version 6 embeds `warmor.build.v1` custom
-section metadata with compiler identity `warmor-yaml/6` and default action.
+using `warmor-compile`; compiler version 7 embeds `warmor.build.v1` custom
+section metadata with compiler identity `warmor-yaml/7` and default action.
 Sign the final bytes with the offline artifact key **after** compilation.
 Custom toolchains must append `policybuild.Metadata` before artifact signing and
 export `abi_version() -> i32`. Signed mode rejects missing metadata/ABI. Metadata
@@ -299,7 +299,7 @@ Provision an administrator-owned config file:
 {
   "scope":"tenant/prod","audience":"node-1",
   "keys":[{"id":"deployment-2026","public_key":"<PKIX PUBLIC KEY PEM>","can_rollback":false}],
-  "compilers":["warmor-yaml/6"],"max_lifetime_seconds":3600,
+  "compilers":["warmor-yaml/7"],"max_lifetime_seconds":3600,
   "trusted_declaration_digests":["<exact lowercase SHA-256 from independently reviewed build>"],
   "require_enforce":true,"require_default_deny":true
 }

@@ -10,8 +10,8 @@ import (
 // build declarations. Missing metadata/ABI is refused only in explicit signed
 // mode; legacy modules need not gain new exports or sections.
 func (p *Pool) CheckAssignment(want assignment.Policy) error {
-	m := p.runtime.metadata
-	if p.abiVersion == 0 || p.abiVersion != want.ABI || m == nil || m.Compiler != want.Compiler || m.DefaultAction != want.Posture.DefaultAction || p.runtime.digest != want.SHA256 {
+	m := p.buildMetadata
+	if p.abiVersion == 0 || p.abiVersion != want.ABI || m == nil || m.Compiler != want.Compiler || m.DefaultAction != want.Posture.DefaultAction || p.moduleDigest != want.SHA256 {
 		return fmt.Errorf("%w: actual artifact ABI/build metadata/digest mismatch", assignment.ErrCompatibility)
 	}
 	return nil
