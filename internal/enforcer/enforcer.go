@@ -74,6 +74,9 @@ type Options struct {
 	// (default_action: deny, exact eq rules on the kernel key); see
 	// docs/design/kernel-default-deny.md.
 	DefaultDeny bool
+	// AtomicGenerations opts into experimental Linux generation activation.
+	// Off by default pending supported-kernel combined VM validation.
+	AtomicGenerations bool
 
 	// AttackGraph enables the node-side intelligence chain: MITRE
 	// correlation, the per-container attack graph and blast-radius
@@ -133,6 +136,7 @@ type Enforcer struct {
 	// during a reload cannot repopulate the map with a stale decision after
 	// it was cleared.
 	policyGen      atomic.Uint64
+	generations    *generationDispatch
 	pipeline       *streaming.Pipeline
 	lineageTracker *lineage.Tracker
 	// intelligence is non-nil when --attack-graph is set (MITRE attack
@@ -182,6 +186,9 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		}
 	}
 	opts = &effective
+	if opts.AtomicGenerations && (runtime.GOOS != "linux" || opts.SkipLSM || !opts.RequireLSM) {
+		return nil, errors.New("atomic generations require Linux --require-lsm without --no-lsm")
+	}
 
 	port := opts.MetricsPort
 	if port == 0 {
@@ -429,9 +436,19 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	// Preload the kernel default-deny domains from the policy's static
 	// rules. No events flow yet; decisionMu is uncontended but held for
 	// symmetry with the reload path.
-	e.decisionMu.Lock()
-	activationErr := e.applyDefaultDeny(evaluator)
-	e.decisionMu.Unlock()
+	var activationErr error
+	if opts.AtomicGenerations {
+		gp, ok := plat.(platform.GenerationPlatform)
+		if !ok {
+			activationErr = errors.New("platform lacks atomic generation dispatch")
+		} else {
+			activationErr = e.enableGenerations(gp)
+		}
+	} else {
+		e.decisionMu.Lock()
+		activationErr = e.applyDefaultDeny(evaluator)
+		e.decisionMu.Unlock()
+	}
 	if activationErr != nil {
 		e.Close()
 		return nil, fmt.Errorf("activate kernel default-deny: %w", activationErr)
@@ -456,6 +473,14 @@ func (e *Enforcer) Start() error {
 	// Start event processing
 	e.wg.Add(1)
 	go e.eventLoop()
+	if e.generations != nil {
+		e.activationMu.Lock()
+		err := e.finishGeneration()
+		e.activationMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("initial generation drain: %w", err)
+		}
+	}
 
 	if _, ok := e.policyMap.(policyMapCounter); ok {
 		e.wg.Add(1)
@@ -485,6 +510,10 @@ func (e *Enforcer) eventLoop() {
 			if !ok {
 				return
 			}
+			if event.DispatchBarrier != nil {
+				close(event.DispatchBarrier)
+				continue
+			}
 			e.handleEvent(event)
 		}
 	}
@@ -492,10 +521,23 @@ func (e *Enforcer) eventLoop() {
 
 // handleEvent processes a single event with caching and metrics
 func (e *Enforcer) handleEvent(event *api.Event) {
+	defer event.GenerationContext.Complete()
 	e.eventMu.RLock()
 	defer e.eventMu.RUnlock()
 	if e.closed {
 		return
+	}
+	decisionCache := e.cache
+	var captured *evaluationGeneration
+	if e.generations != nil {
+		captured = e.eventGeneration(event)
+		if captured == nil {
+			return
+		}
+		// Direct/internal dispatch may acquire its lease here rather than in
+		// the platform. Completion is idempotent for pre-captured events.
+		defer event.GenerationContext.Complete()
+		decisionCache = captured.cache
 	}
 	metrics.RecordEventProcessed(event.GetType().String())
 	if e.checkEscape(event) {
@@ -595,7 +637,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	}
 
 	// Check cache first
-	if result, hit := e.cache.Get(event); hit {
+	if result, hit := decisionCache.Get(event); hit {
 		metrics.RecordCacheHit()
 		_ = e.actionHandler.Enforce(e.ctx, event, result)
 		e.logger.LogEvent(event, result)
@@ -615,6 +657,9 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	gen := e.policyGen.Load()
 	pid := e.policyID
 	e.evaluatorMu.RUnlock()
+	if captured != nil {
+		evaluator, gen, pid = captured.evaluator, captured.id, captured.policyID
+	}
 
 	if evaluator.ReadsContainerAge(event.GetType()) {
 		e.annotateContainerStart(event)
@@ -664,7 +709,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	}
 
 	// Update cache size metric
-	cacheStats := e.cache.Stats()
+	cacheStats := decisionCache.Stats()
 	metrics.UpdateCacheSize(cacheStats.Size)
 }
 
@@ -768,7 +813,17 @@ func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, g
 	if e.policyGen.Load() != gen {
 		return
 	}
-	e.cache.Put(event, result)
+	decisionCache := e.cache
+	if e.generations != nil {
+		e.generations.mu.Lock()
+		state := e.generations.states[gen]
+		e.generations.mu.Unlock()
+		if state == nil {
+			return
+		}
+		decisionCache = state.cache
+	}
+	decisionCache.Put(event, result)
 
 	// Compile decision into BPF policy map for kernel fast-path
 	if e.policyMap != nil && !event.LSMEvent {
@@ -903,6 +958,9 @@ func (e *Enforcer) syncDecision(event *api.Event, result *api.ActionResult, gen 
 	// fold global audit mode in here: the kernel must never be stricter than
 	// userspace, and an audit-flagged deny is only logged by the BPF side.
 	audit := result.Audit || e.auditMode
+	if e.generations != nil {
+		return e.generations.kernel.SyncEvent(gen, event, action, audit)
+	}
 
 	if es, ok := e.policyMap.(eventPolicyMapSyncer); ok {
 		return es.SyncEvent(event, action, audit)
@@ -1051,6 +1109,9 @@ func (e *Enforcer) ActivatePolicy(path string, commit func() error) error {
 	e.eventMu.RUnlock()
 	if closed {
 		return errors.New("enforcer closed")
+	}
+	if e.generations != nil {
+		return e.activateGeneration(path, commit)
 	}
 	e.logger.LogInfo(fmt.Sprintf("Reloading policy from: %s", path))
 
@@ -1201,6 +1262,19 @@ func (e *Enforcer) Stop() {
 	}
 
 	e.wg.Wait()
+	if e.generations != nil && e.eventChan != nil {
+		for {
+			select {
+			case event, ok := <-e.eventChan:
+				if !ok {
+					return
+				}
+				event.GenerationContext.Complete()
+			default:
+				return
+			}
+		}
+	}
 	e.logger.LogInfo("✓ Enforcer stopped")
 }
 
@@ -1208,6 +1282,13 @@ func (e *Enforcer) Stop() {
 func (e *Enforcer) Close() error {
 	e.activationMu.Lock()
 	defer e.activationMu.Unlock()
+	if e.generations != nil {
+		e.cancel()
+		if e.platform != nil {
+			_ = e.platform.Stop()
+		}
+		e.wg.Wait()
+	}
 	e.eventMu.Lock()
 	defer e.eventMu.Unlock()
 	if e.closed {
@@ -1243,6 +1324,13 @@ func (e *Enforcer) Close() error {
 	}
 	if rt != nil {
 		rt.Close(e.ctx)
+	}
+	if e.generations != nil {
+		for _, state := range e.generations.states {
+			if state.pool != pool {
+				closeEvaluationGeneration(state)
+			}
+		}
 	}
 	if e.platform != nil {
 		e.platform.Close()
