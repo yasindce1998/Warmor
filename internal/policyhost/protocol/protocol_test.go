@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -40,6 +41,34 @@ func TestFrameBoundsAndStrictDecoding(t *testing.T) {
 	}
 	if _, err := Read(bytes.NewReader([]byte{0, 0, 0, 2, 1}), MaxControl); err == nil {
 		t.Fatal("accepted truncated frame")
+	}
+}
+
+func TestReadyMetadataRequiredAndBounded(t *testing.T) {
+	m := policymeta.Observe(strings.Repeat("a", 64), 5, policymeta.EncodingBinary, [3]uint32{0, 0, 0}, policymeta.StaticDomain{}, policymeta.StaticDomain{})
+	r := Ready{Control: Control{Version: Version, Kind: "ready", Digest: m.ModuleSHA256}, Metadata: m}
+	var b bytes.Buffer
+	if err := Send(&b, r, MaxMetadata); err != nil {
+		t.Fatal(err)
+	}
+	var got Ready
+	if err := Receive(&b, &got, MaxMetadata); err != nil || got.Metadata.Validate(m.ModuleSHA256) != nil {
+		t.Fatal("valid metadata rejected", err)
+	}
+	for _, body := range []string{`{"Control":{},"Metadata":null}`, `{"Control":{},"Metadata":{},"Metadata":{}}`, `{"Control":{}}`} {
+		b.Reset()
+		if err := Write(&b, []byte(body), MaxMetadata); err != nil {
+			t.Fatal(err)
+		}
+		got = Ready{}
+		if err := Receive(&b, &got, MaxMetadata); err == nil {
+			t.Fatal("missing/duplicate metadata accepted")
+		}
+	}
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], MaxMetadata+1)
+	if _, err := Read(bytes.NewReader(header[:]), MaxMetadata); !errors.Is(err, ErrProtocol) {
+		t.Fatal("oversized metadata allocated")
 	}
 }
 

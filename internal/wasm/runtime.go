@@ -68,6 +68,9 @@ type Runtime struct {
 	// cacheDir is RuntimeConfig.CacheDir; compiled YAML policies are kept
 	// under it (see LoadPolicyFromYAML).
 	cacheDir string
+	// moduleDigest identifies exactly the bytes successfully loaded, never
+	// guest-provided metadata or the runtime's native compilation cache.
+	moduleDigest string
 }
 
 // NewRuntime creates a new WASM runtime with compilation cache support.
@@ -203,6 +206,8 @@ func (r *Runtime) LoadPolicyBytes(ctx context.Context, wasmBytes []byte) error {
 	}
 
 	r.module = compiled
+	digest := sha256.Sum256(wasmBytes)
+	r.moduleDigest = hex.EncodeToString(digest[:])
 	return nil
 }
 

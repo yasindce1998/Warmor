@@ -10,19 +10,30 @@ import (
 	"io"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 const (
-	Version    = 1
+	Version    = 2
 	MaxModule  = 64 << 20
 	MaxControl = 4096
 	MaxEvent   = 256 << 10
 	MaxResult  = 8192
 	MaxReason  = 1024
+	// Includes worst-case JSON escaping of 4096 full-size patterns, while
+	// decoded rule counts/pattern lengths are independently bounded.
+	MaxMetadata = 8 << 20
 )
 
 var ErrProtocol = errors.New("invalid policy-host protocol")
+
+// Ready is required in protocol v2. Older workers cannot silently omit
+// declarations and be mistaken for a cacheable constant policy.
+type Ready struct {
+	Control  Control
+	Metadata policymeta.Module
+}
 
 // Limits are checked independently on both sides, before module upload.
 // AddressSpaceBytes is RLIMIT_AS, not an RSS quota. CPUSeconds is a
