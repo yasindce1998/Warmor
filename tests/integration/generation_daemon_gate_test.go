@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -15,6 +16,84 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type daemonGenerationEvidence struct {
+	Phase                                    string
+	Generation                               *uint64
+	KernelGeneration                         uint64
+	LSM                                      bool
+	Hook                                     string
+	PID, UID                                 uint32
+	CgroupID                                 uint64
+	Filename, Decision                       string
+	Audit, KernelDenied, Enforced, Attempted bool
+}
+
+// Same pure oracle is exercised with negative evidence on the host and real
+// captured evidence in the VM. Counters or a claimed current ID cannot pass it.
+func validateGenerationDaemonEvidence(e daemonGenerationEvidence, scoped uint64) error {
+	if e.Generation == nil || e.PID == 0 || e.UID != 65534 || e.CgroupID != scoped {
+		return errors.New("uncaptured, unattributed or cross-scope evidence")
+	}
+	if e.LSM && *e.Generation != e.KernelGeneration {
+		return errors.New("current ID relabel replaced captured kernel generation")
+	}
+	if e.Phase != "decision" || !e.LSM || e.Hook != "exec" {
+		return nil
+	}
+	if *e.Generation != 1 && *e.Generation != 2 {
+		return errors.New("unexpected extra publication")
+	}
+	name := filepath.Base(e.Filename)
+	denied := name == "first-denied" || name == "global-audit" || (name == "allowed" && *e.Generation == 2) || (name == "reload-denied" && *e.Generation == 1)
+	if denied {
+		if e.Decision != "DENY" || !e.KernelDenied || !e.Enforced || e.Attempted || e.Audit {
+			return errors.New("kernel denial disagrees with exact snapshot/outcome")
+		}
+	} else if name == "allowed" || name == "reload-denied" || name == "rule-audit" {
+		if e.Decision != "DENY" || !e.Audit || e.KernelDenied || e.Enforced || e.Attempted {
+			return errors.New("old/new audited evaluator disagrees with exact snapshot")
+		}
+	}
+	return nil
+}
+
+func TestGenerationDaemonGateCapturedVerdictOracle(t *testing.T) {
+	one, two := uint64(1), uint64(2)
+	good := daemonGenerationEvidence{Phase: "decision", Generation: &one, KernelGeneration: 1, LSM: true, Hook: "exec", PID: 123, UID: 65534, CgroupID: 555, Filename: "/fixture/allowed", Decision: "DENY", Audit: true}
+	for name, mutate := range map[string]func(*daemonGenerationEvidence){
+		"pass":              func(*daemonGenerationEvidence) {},
+		"missing capture":   func(e *daemonGenerationEvidence) { e.Generation = nil },
+		"wrong scope":       func(e *daemonGenerationEvidence) { e.CgroupID++ },
+		"wrong uid":         func(e *daemonGenerationEvidence) { e.UID = 0 },
+		"unknown pid":       func(e *daemonGenerationEvidence) { e.PID = 0 },
+		"current relabel":   func(e *daemonGenerationEvidence) { e.Generation = &two },
+		"false allow":       func(e *daemonGenerationEvidence) { e.Decision = "ALLOW" },
+		"mistaken kill":     func(e *daemonGenerationEvidence) { e.Attempted = true; e.Enforced = true },
+		"missed prevention": func(e *daemonGenerationEvidence) { e.Generation = &two; e.KernelGeneration = 2 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := good
+			mutate(&e)
+			if err := validateGenerationDaemonEvidence(e, 555); (err == nil) != (name == "pass") {
+				t.Fatalf("accepted invalid association=%v evidence=%+v err=%v", name, e, err)
+			}
+		})
+	}
+	denied := good
+	denied.Generation = &two
+	denied.KernelGeneration = 2
+	denied.Audit = false
+	denied.KernelDenied = true
+	denied.Enforced = true
+	if err := validateGenerationDaemonEvidence(denied, 555); err != nil {
+		t.Fatal(err)
+	}
+	denied.Enforced = false
+	if err := validateGenerationDaemonEvidence(denied, 555); err == nil {
+		t.Fatal("unproven prevention accepted")
+	}
+}
+
 func TestGenerationDaemonGatePassOracle(t *testing.T) {
 	const parent = "--- PASS: TestDaemonGenerationOutcomes (1.23s)\n"
 	const reload = "    --- PASS: TestDaemonGenerationOutcomes/opposing-captured-reload-LKG-and-idle-shutdown (0.50s)\n"
@@ -22,17 +101,18 @@ func TestGenerationDaemonGatePassOracle(t *testing.T) {
 	const shutdown = "    --- PASS: TestDaemonGenerationOutcomes/SIGTERM-cancels-held-generation-worker (0.20s)\n"
 	good := parent + reload + recovery + shutdown + "PASS\n"
 	for name, log := range map[string]string{
-		"pass":           good,
-		"empty":          "",
-		"missing child":  parent + reload + "PASS\n",
-		"missing parent": reload + recovery + shutdown + "PASS\n",
-		"no tests":       "testing: warning: no tests to run\nPASS\n",
-		"skip":           good + "    --- SKIP: TestDaemonGenerationOutcomes/required (0.00s)\n",
-		"fail":           good + "    --- FAIL: TestDaemonGenerationOutcomes/required (0.00s)\n",
-		"panic":          good + "panic: unexpected fault\n",
-		"duplicate":      good + parent,
-		"no final PASS":  parent + reload + recovery,
-		"near match":     strings.Replace(good, "Outcomes (", "OutcomesOther (", 1),
+		"pass":             good,
+		"empty":            "",
+		"missing child":    parent + reload + "PASS\n",
+		"missing shutdown": parent + reload + recovery + "PASS\n",
+		"missing parent":   reload + recovery + shutdown + "PASS\n",
+		"no tests":         "testing: warning: no tests to run\nPASS\n",
+		"skip":             good + "    --- SKIP: TestDaemonGenerationOutcomes/required (0.00s)\n",
+		"fail":             good + "    --- FAIL: TestDaemonGenerationOutcomes/required (0.00s)\n",
+		"panic":            good + "panic: unexpected fault\n",
+		"duplicate":        good + parent,
+		"no final PASS":    parent + reload + recovery,
+		"near match":       strings.Replace(good, "Outcomes (", "OutcomesOther (", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "log")
@@ -153,7 +233,7 @@ func TestGenerationDaemonGateWorkflowBothKernels(t *testing.T) {
 		t.Fatal("daemon VM or retained fault/outcome evidence missing")
 	}
 	for _, event := range []string{"push", "pull_request"} {
-		for _, path := range []string{"internal/generationvm/**", "internal/platform/**", "tests/integration/generation_daemon_test.go", "tests/integration/run-generation-daemon.sh"} {
+		for _, path := range []string{"internal/generationvm/**", "internal/platform/**", "tests/integration/generation_daemon_test.go", "tests/integration/outcomes_test.go", "tests/integration/helpers_test.go", "tests/integration/run-generation-daemon.sh"} {
 			if !strings.Contains(strings.Join(w.On[event].Paths, ","), path) {
 				t.Errorf("%s trigger omits %s", event, path)
 			}

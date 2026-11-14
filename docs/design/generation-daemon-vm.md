@@ -103,6 +103,15 @@ Affected unit/race suites, normal/profile lint and guard/fault/PASS-oracle tests
 are run without enforcement. Logs: `/tmp/opencode/generation-daemon-vm-*.log`;
 ignored build artifacts: `tests/integration/artifacts/generation-daemon.*`.
 
+At checkpoint `3bf1b26`, the full default `go test -p 2 ./...` suite and affected
+package race suites pass. Real Cargo preparation identified that `log` decisions
+do not carry the evaluator's audit bit, so the final opposing fixtures use
+explicit `deny` plus `mode: audit` for permitted operations. This preserves
+nonblocking semantics in both kernel and dynamic writeback and makes the
+captured-ID oracle reject wrong-generation enforced/audited decisions. It is
+not a relaxation of the required actual EPERM or outcome assertions. A pure
+negative-evidence oracle is run on the host and reused for real VM associations.
+
 **Not executed locally:** vimto/QEMU, any privileged/host hook, either supported
 kernel's daemon phase, physical crash, signed/Host combination, cross-platform
 runtime or BPF regeneration. Publish only after actual non-skipped CI results.

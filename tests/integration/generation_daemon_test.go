@@ -8,6 +8,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -130,18 +132,6 @@ type generationControl struct {
 	HoldPath    string
 	FailDurable bool
 	FailDrain   bool
-}
-
-type daemonGenerationEvidence struct {
-	Phase                                    string
-	Generation                               *uint64
-	KernelGeneration                         uint64
-	LSM                                      bool
-	Hook                                     string
-	PID, UID                                 uint32
-	CgroupID                                 uint64
-	Filename, Decision                       string
-	Audit, KernelDenied, Enforced, Attempted bool
 }
 
 func atomicFixtureWrite(t *testing.T, path string, data []byte) {
@@ -284,30 +274,8 @@ func heldGenerationHelper(t *testing.T, f *outcomeFixture, binary, marker string
 func checkGenerationVerdicts(t *testing.T, dir string, scoped uint64) {
 	t.Helper()
 	for _, e := range readGenerationEvidence(t, dir) {
-		if e.Generation == nil {
-			t.Fatalf("uncaptured evidence: %+v", e)
-		}
-		if e.CgroupID != scoped {
-			t.Fatalf("cross-scope evidence: %+v expected cgroup=%d", e, scoped)
-		}
-		if e.LSM && *e.Generation != e.KernelGeneration {
-			t.Fatalf("current relabel replaced captured kernel generation: %+v", e)
-		}
-		if e.Phase != "decision" || !e.LSM || e.Hook != "exec" {
-			continue
-		}
-		if *e.Generation != 1 && *e.Generation != 2 {
-			t.Fatalf("unexpected extra publication: %+v", e)
-		}
-		name := filepath.Base(e.Filename)
-		if name == "first-denied" || name == "global-audit" || (name == "allowed" && *e.Generation == 2) || (name == "reload-denied" && *e.Generation == 1) {
-			if e.Decision != "DENY" || !e.KernelDenied || !e.Enforced || e.Attempted {
-				t.Fatalf("kernel denial not associated with exact snapshot: %+v", e)
-			}
-		} else if name == "allowed" || name == "reload-denied" {
-			if e.Decision != "DENY" || !e.Audit || e.KernelDenied || e.Enforced || e.Attempted {
-				t.Fatalf("old/new opposing evaluator mismatch: %+v", e)
-			}
+		if err := validateGenerationDaemonEvidence(e, scoped); err != nil {
+			t.Fatalf("%v: %+v", err, e)
 		}
 	}
 }
@@ -490,12 +458,14 @@ func TestDaemonGenerationOutcomes(t *testing.T) {
 		releaseNew()
 		releaseOldAudit()
 		releaseNewAudit()
-		stopDeny()
 		// Invalid compiler output must not become a new generation or create
 		// a clear/rebuild window. Actual enforcer load rejects it; B is LKG.
 		d.rejectReload(t, active)
+		// Stop the workload only after LKG probes: the invariant deny loop
+		// spans live publication AND the rejected update's recovery boundary.
 		f.requireFirstDenied(t, "allowed", "generation-LKG-denied")
 		f.runAllowed(t, "reload-denied", "generation-LKG-allowed", 0)
+		stopDeny()
 		// Idle rings: no further operation is needed to wake Stop/Close.
 		d.stop(t) // actual SIGTERM exit 0, never harness SIGKILL as success
 		checkGenerationVerdicts(t, control, scope)
@@ -506,8 +476,55 @@ func TestDaemonGenerationOutcomes(t *testing.T) {
 		if err := srv.Store().CreatePolicy(&policyserver.Policy{ID: "generation"}, filepath.Join(f.dir, "generation-A.wasm")); err != nil {
 			t.Fatal(err)
 		}
-		ts := httptest.NewServer(srv.Handler())
+		var receiptMu sync.Mutex
+		var receipts []policyserver.HeartbeatRequest
+		unknownSeen, earlyAck := false, false
+		handler := srv.Handler()
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/heartbeat" {
+				body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+				if err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				var h policyserver.HeartbeatRequest
+				if err := json.Unmarshal(body, &h); err != nil {
+					t.Error(err)
+				} else {
+					receiptMu.Lock()
+					receipts = append(receipts, h)
+					if h.PolicyVersion == 0 && h.ActivationError != "" {
+						unknownSeen = true
+					}
+					if unknownSeen && h.PolicyVersion != 0 {
+						if h.PolicyVersion != 2 {
+							earlyAck = true
+						}
+						if _, err := os.Stat(filepath.Join(control, "retired-2.json")); err != nil {
+							earlyAck = true
+						}
+					}
+					receiptMu.Unlock()
+				}
+			}
+			handler.ServeHTTP(w, r)
+		}))
 		defer ts.Close()
+		t.Cleanup(func() {
+			receiptMu.Lock()
+			defer receiptMu.Unlock()
+			data, err := json.MarshalIndent(receipts, "", "  ")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			mustWrite(t, filepath.Join(f.dir, "generation-heartbeats.json"), data, 0644)
+			if earlyAck {
+				t.Error("fleet acknowledged a live revision before pending drain retirement")
+			}
+		})
 		active := f.activePolicy(t, "generation-fleet-active", filepath.Join(f.dir, "generation-A.wasm"))
 		d := f.startDaemon(t, "generation-fleet", active, "--experimental-atomic-generations", "--default-deny", "--eval-timeout", "2s", "--generation-vm-control", control, "--server", ts.URL, "--agent-id", "generation-vm", "--poll-interval", "100ms")
 		t.Cleanup(func() { controlGeneration(t, control, generationControl{}) })
@@ -567,6 +584,12 @@ func TestDaemonGenerationOutcomes(t *testing.T) {
 		other.runAllowed(t, "first-denied", "outside-after-recovery", 0)
 		mustWrite(t, filepath.Join(f.dir, "generation-fleet.metrics"), []byte(d.scrape()), 0644)
 		d.stop(t)
+		requireGenerationEvidence(t, control, func(e daemonGenerationEvidence) bool {
+			return e.Phase == "decision" && e.LSM && e.Generation != nil && *e.Generation == 3 && filepath.Base(e.Filename) == "allowed" && e.KernelDenied && e.Enforced && !e.Attempted
+		})
+		requireGenerationEvidence(t, control, func(e daemonGenerationEvidence) bool {
+			return e.Phase == "decision" && e.LSM && e.Generation != nil && *e.Generation == 3 && filepath.Base(e.Filename) == "reload-denied" && e.Audit && !e.KernelDenied && !e.Enforced && !e.Attempted
+		})
 		for _, e := range readGenerationEvidence(t, control) {
 			if e.Generation == nil || e.CgroupID != scope || (e.LSM && *e.Generation != e.KernelGeneration) {
 				t.Fatalf("fleet recovery lost captured generation/scope: %+v", e)
