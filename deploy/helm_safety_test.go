@@ -70,10 +70,11 @@ func object(m map[string]interface{}, path ...string) map[string]interface{} {
 	}
 	return m
 }
-func fmtArgs(args []interface{}) string {
+func fmtArgs(t *testing.T, args []interface{}) string {
+	t.Helper()
 	var out []string
 	for _, a := range args {
-		out = append(out, a.(string))
+		out = append(out, contractValue[string](t, "argument", a))
 	}
 	return strings.Join(out, " ")
 }
@@ -96,9 +97,9 @@ func TestHelmScopedRuntimeAndMetrics(t *testing.T) {
 				if nodes["kubernetes.io/os"] != "linux" || nodes["kubernetes.io/arch"] != "amd64" {
 					t.Fatal(nodes)
 				}
-				for _, item := range spec["containers"].([]interface{}) {
-					c := item.(map[string]interface{})
-					if !strings.HasSuffix(c["image"].(string), "@"+digest) {
+				for _, item := range contractValue[[]interface{}](t, "containers", spec["containers"]) {
+					c := contractValue[map[string]interface{}](t, "container", item)
+					if !strings.HasSuffix(contractValue[string](t, "container image", c["image"]), "@"+digest) {
 						t.Fatal(c["image"])
 					}
 					if doc["kind"] != "DaemonSet" {
@@ -107,17 +108,17 @@ func TestHelmScopedRuntimeAndMetrics(t *testing.T) {
 					if spec["automountServiceAccountToken"] != false {
 						t.Fatal("agent gets API token")
 					}
-					text := fmtArgs(c["args"].([]interface{}))
+					text := fmtArgs(t, contractValue[[]interface{}](t, "container args", c["args"]))
 					if !strings.Contains(text, "-cgroup-filter auto") || !strings.Contains(text, "-cgroup-root /host/cgroups") {
 						t.Fatal(text)
 					}
-					caps := fmtArgs(object(c, "securityContext", "capabilities")["add"].([]interface{}))
+					caps := fmtArgs(t, contractValue[[]interface{}](t, "container capabilities", object(c, "securityContext", "capabilities")["add"]))
 					if strings.Contains(caps, "KILL") != enforcing || strings.Contains(caps, "NET_ADMIN") {
 						t.Fatal(caps)
 					}
 					mounted := false
-					for _, item := range c["volumeMounts"].([]interface{}) {
-						m := item.(map[string]interface{})
+					for _, item := range contractValue[[]interface{}](t, "container volumeMounts", c["volumeMounts"]) {
+						m := contractValue[map[string]interface{}](t, "volume mount", item)
 						if m["name"] == "host-cgroup" {
 							mounted = m["mountPath"] == "/host/cgroups" && m["readOnly"] == true
 						}
@@ -133,12 +134,12 @@ func TestHelmScopedRuntimeAndMetrics(t *testing.T) {
 func TestHelmNoUnusedAgentRBACAndDigestValidator(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("b", 64)
 	for _, doc := range renderChart(t, "image.digest="+digest) {
-		if strings.Contains(doc["kind"].(string), "Role") {
+		if strings.Contains(contractValue[string](t, "kind", doc["kind"]), "Role") {
 			t.Fatal("unused agent API permissions")
 		}
 		if doc["kind"] == "DaemonSet" {
-			for _, item := range object(doc, "spec", "template", "spec")["initContainers"].([]interface{}) {
-				if item.(map[string]interface{})["image"] != "ghcr.io/yasindce1998/warmor@"+digest {
+			for _, item := range contractValue[[]interface{}](t, "initContainers", object(doc, "spec", "template", "spec")["initContainers"]) {
+				if contractValue[map[string]interface{}](t, "init container", item)["image"] != "ghcr.io/yasindce1998/warmor@"+digest {
 					t.Fatal("validator not pinned")
 				}
 			}
@@ -174,9 +175,10 @@ func TestHelmRenderedAgentArgumentsExist(t *testing.T) {
 		}
 		spec := object(doc, "spec", "template", "spec")
 		for _, kind := range []string{"containers", "initContainers"} {
-			for _, item := range spec[kind].([]interface{}) {
-				for _, value := range item.(map[string]interface{})["args"].([]interface{}) {
-					arg := value.(string)
+			for _, item := range contractValue[[]interface{}](t, kind, spec[kind]) {
+				c := contractValue[map[string]interface{}](t, kind+" entry", item)
+				for _, value := range contractValue[[]interface{}](t, kind+" args", c["args"]) {
+					arg := contractValue[string](t, "argument", value)
 					if !strings.HasPrefix(arg, "-") {
 						continue
 					}

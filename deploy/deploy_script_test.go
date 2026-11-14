@@ -173,8 +173,8 @@ rules:
 				found = true
 				spec := object(doc, "spec", "template", "spec")
 				policyVolume := false
-				for _, v := range spec["volumes"].([]interface{}) {
-					volume := v.(map[string]interface{})
+				for _, v := range contractValue[[]interface{}](t, "daemon volumes", spec["volumes"]) {
+					volume := contractValue[map[string]interface{}](t, "daemon volume", v)
 					if volume["name"] == "policy" {
 						policyVolume = object(volume, "configMap")["name"] == cm.Metadata["name"]
 					}
@@ -183,11 +183,19 @@ rules:
 					t.Fatal("DaemonSet does not mount selected ConfigMap")
 				}
 				for _, kind := range []string{"initContainers", "containers"} {
-					c := spec[kind].([]interface{})[0].(map[string]interface{})
-					if !strings.Contains(fmtArgs(c["args"].([]interface{})), "/etc/warmor/policy.wasm") {
+					containers := contractValue[[]interface{}](t, kind, spec[kind])
+					if len(containers) != 1 {
+						t.Fatalf("expected one %s entry, got %d", kind, len(containers))
+					}
+					c := contractValue[map[string]interface{}](t, kind+" entry", containers[0])
+					if !strings.Contains(fmtArgs(t, contractValue[[]interface{}](t, kind+" args", c["args"])), "/etc/warmor/policy.wasm") {
 						t.Fatalf("%s consumes a different policy", kind)
 					}
-					mount := c["volumeMounts"].([]interface{})[0].(map[string]interface{})
+					mounts := contractValue[[]interface{}](t, kind+" volumeMounts", c["volumeMounts"])
+					if len(mounts) == 0 {
+						t.Fatalf("%s has no volume mounts", kind)
+					}
+					mount := contractValue[map[string]interface{}](t, kind+" policy mount", mounts[0])
 					if mount["name"] != "policy" || mount["mountPath"] != "/etc/warmor" || mount["readOnly"] != true {
 						t.Fatalf("%s does not use selected binary read-only: %+v", kind, mount)
 					}

@@ -13,6 +13,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func contractValue[T any](t *testing.T, field string, raw interface{}) T {
+	t.Helper()
+	value, ok := raw.(T)
+	if !ok {
+		t.Fatalf("%s has unexpected type %T", field, raw)
+	}
+	return value
+}
+
 func TestCRDMigrationPreservesPublicationStatusWireShape(t *testing.T) {
 	raw, err := os.ReadFile("helm/warmor/crds/warmorpolicy-crd.yaml")
 	if err != nil {
@@ -22,8 +31,11 @@ func TestCRDMigrationPreservesPublicationStatusWireShape(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &crd); err != nil {
 		t.Fatal(err)
 	}
-	versions := object(crd, "spec")["versions"].([]interface{})
-	version := versions[0].(map[string]interface{})
+	versions := contractValue[[]interface{}](t, "spec.versions", object(crd, "spec")["versions"])
+	if len(versions) != 1 {
+		t.Fatalf("expected one CRD version, got %d", len(versions))
+	}
+	version := contractValue[map[string]interface{}](t, "spec.versions[0]", versions[0])
 	if version["name"] != "v1alpha1" || version["served"] != true || version["storage"] != true {
 		t.Fatal("migration unexpectedly changed served/storage version")
 	}
@@ -133,8 +145,12 @@ func TestHelmControllerProbesAndPolicyProjectionContract(t *testing.T) {
 			if docSpec := object(doc, "spec"); docSpec["replicas"] != 1 || object(docSpec, "strategy")["type"] != "Recreate" {
 				t.Fatal("controller must remain one writer")
 			}
-			c := spec["containers"].([]interface{})[0].(map[string]interface{})
-			if !strings.Contains(fmtArgs(c["args"].([]interface{})), "--metrics-address :9091") {
+			containers := contractValue[[]interface{}](t, "controller containers", spec["containers"])
+			if len(containers) != 1 {
+				t.Fatalf("expected one controller container, got %d", len(containers))
+			}
+			c := contractValue[map[string]interface{}](t, "controller container", containers[0])
+			if !strings.Contains(fmtArgs(t, contractValue[[]interface{}](t, "controller args", c["args"])), "--metrics-address :9091") {
 				t.Fatal("missing controller listener argument")
 			}
 			for _, probe := range []string{"startupProbe", "livenessProbe", "readinessProbe"} {
@@ -149,20 +165,28 @@ func TestHelmControllerProbesAndPolicyProjectionContract(t *testing.T) {
 			}
 		case "DaemonSet":
 			foundDaemon = true
-			c := spec["containers"].([]interface{})[0].(map[string]interface{})
-			if !strings.Contains(fmtArgs(c["args"].([]interface{})), "-policy /etc/warmor/policy.d/policy.wasm") {
+			containers := contractValue[[]interface{}](t, "daemon containers", spec["containers"])
+			if len(containers) != 1 {
+				t.Fatalf("expected one daemon container, got %d", len(containers))
+			}
+			c := contractValue[map[string]interface{}](t, "daemon container", containers[0])
+			if !strings.Contains(fmtArgs(t, contractValue[[]interface{}](t, "daemon args", c["args"])), "-policy /etc/warmor/policy.d/policy.wasm") {
 				t.Fatal("controller binaryData key does not reach daemon policy path")
 			}
 			found := false
-			for _, item := range spec["volumes"].([]interface{}) {
-				v := item.(map[string]interface{})
+			for _, item := range contractValue[[]interface{}](t, "daemon volumes", spec["volumes"]) {
+				v := contractValue[map[string]interface{}](t, "daemon volume", item)
 				if v["name"] == "effective-policy" {
 					cm := object(v, "configMap")
 					found = cm["name"] == "safety-warmor-effective-policy" && cm["optional"] == true
 					// Do not project accepted-sources.json into the daemon. It
 					// contains policy source history, not executable input.
-					items, _ := cm["items"].([]interface{})
-					if len(items) != 1 || items[0].(map[string]interface{})["key"] != controller.PolicyDataKey || items[0].(map[string]interface{})["path"] != "policy.wasm" {
+					items := contractValue[[]interface{}](t, "policy ConfigMap items", cm["items"])
+					if len(items) != 1 {
+						t.Fatalf("expected one projected policy key, got %d", len(items))
+					}
+					projection := contractValue[map[string]interface{}](t, "policy ConfigMap item", items[0])
+					if projection["key"] != controller.PolicyDataKey || projection["path"] != "policy.wasm" {
 						t.Fatal("daemon must project only the compiled policy key")
 					}
 				}
@@ -173,9 +197,17 @@ func TestHelmControllerProbesAndPolicyProjectionContract(t *testing.T) {
 		case "NetworkPolicy":
 			if object(doc, "spec", "podSelector", "matchLabels")["component"] == "controller" {
 				foundNetwork = true
-				ingress := object(doc, "spec")["ingress"].([]interface{})
-				ports := ingress[0].(map[string]interface{})["ports"].([]interface{})
-				if ports[0].(map[string]interface{})["port"] != 9091 {
+				ingress := contractValue[[]interface{}](t, "controller ingress", object(doc, "spec")["ingress"])
+				if len(ingress) != 1 {
+					t.Fatalf("expected one controller ingress rule, got %d", len(ingress))
+				}
+				rule := contractValue[map[string]interface{}](t, "controller ingress rule", ingress[0])
+				ports := contractValue[[]interface{}](t, "controller ingress ports", rule["ports"])
+				if len(ports) != 1 {
+					t.Fatalf("expected one controller ingress port, got %d", len(ports))
+				}
+				port := contractValue[map[string]interface{}](t, "controller ingress port", ports[0])
+				if port["port"] != 9091 {
 					t.Fatal("controller metrics ingress port differs from listener")
 				}
 			}
