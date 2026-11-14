@@ -160,6 +160,11 @@ func TestSupervisedConcurrentStopCloseWaitsActiveOutcomeLease(t *testing.T) {
 	}
 	e.eventChan <- event
 	shutdownWait(t, entered, "active outcome")
+	queued := &api.Event{UID: 1000, Filename: "/queued-lease"} // PID zero cannot invoke the fake action callback
+	if !e.captureGeneration(queued) {
+		t.Fatal("queued old lease capture refused")
+	}
+	e.eventChan <- queued
 	draining := make(chan struct{})
 	k.drain = func(context.Context) error { close(draining); return nil }
 	activated := make(chan error, 1)
@@ -216,7 +221,7 @@ func TestSupervisedCloseCancelsInFlightGuestAndReapsBeforeMaps(t *testing.T) {
 	h := supervisedHost(t, e.evaluator)
 	// Wrap only to synchronize the real IPC call; no mock decision or worker.
 	started := make(chan struct{})
-	wrapper := &shutdownObservedEvaluator{Evaluator: e.evaluator, started: started}
+	wrapper := &shutdownObservedEvaluator{Evaluator: e.evaluator, started: started, returned: make(chan struct{})}
 	e.evaluator = wrapper
 	e.backend.evaluator = wrapper
 	e.generations.states[1].evaluator = wrapper
@@ -227,6 +232,13 @@ func TestSupervisedCloseCancelsInFlightGuestAndReapsBeforeMaps(t *testing.T) {
 	}
 	e.eventChan <- &api.Event{UID: 0, Filename: "/guest-loop"}
 	shutdownWait(t, started, "guest request entry")
+	// Give the actual endless WASM request a chance to block on IPC. It must
+	// not produce a decision before shutdown cancels the authoritative context.
+	select {
+	case <-wrapper.returned:
+		t.Fatal("looping guest returned before cancellation")
+	case <-time.After(20 * time.Millisecond):
+	}
 	done := make(chan struct{})
 	go func() { _ = e.Close(); close(done) }()
 	shutdownWait(t, done, "in-flight guest cancellation")
@@ -237,11 +249,13 @@ func TestSupervisedCloseCancelsInFlightGuestAndReapsBeforeMaps(t *testing.T) {
 
 type shutdownObservedEvaluator struct {
 	Evaluator
-	started chan struct{}
-	enter   sync.Once
+	started  chan struct{}
+	returned chan struct{}
+	enter    sync.Once
 }
 
 func (e *shutdownObservedEvaluator) Evaluate(ctx context.Context, event *api.Event) (*api.ActionResult, error) {
 	e.enter.Do(func() { close(e.started) })
+	defer close(e.returned)
 	return e.Evaluator.Evaluate(ctx, event)
 }
