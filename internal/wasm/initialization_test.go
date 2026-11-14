@@ -83,18 +83,35 @@ func TestPoolDeclarationCallsBounded(t *testing.T) {
 		{name: "warmor_static_rules", params: 3, results: 1, body: []byte{0x00}},
 	} {
 		t.Run(guest.name, func(t *testing.T) {
-			rt := boundedTestRuntime(t)
-			if err := rt.LoadPolicyBytes(context.Background(), buildTestModule([]testFunc{fnMalloc, fnBinaryDeny, guest})); err != nil {
-				t.Fatal(err)
-			}
+			rt := loadDeclarationTestRuntime(t, fnMalloc, fnBinaryDeny, guest)
 			within(t, 2*time.Second, func() {
-				if pool, err := NewPool(context.Background(), rt, 1); err == nil {
-					pool.Close(context.Background())
-					t.Error("accepted instance closed by declaration timeout")
+				pool, err := NewPool(context.Background(), rt, 1)
+				if err == nil {
+					_ = pool.Close(context.Background())
+					t.Fatal("accepted instance closed by declaration timeout or trap")
+				}
+				if !strings.Contains(err.Error(), "initialize pool member 0:") {
+					t.Errorf("failed before the declaration under test: %v", err)
 				}
 			})
 		})
 	}
+}
+
+// loadDeclarationTestRuntime gives compilation and the benign load-time probe
+// the normal initialization budget. Only NewPool's declaration phase needs a
+// short test budget; charging setup to 30ms flakes on contended native runners.
+func loadDeclarationTestRuntime(t *testing.T, funcs ...testFunc) *Runtime {
+	t.Helper()
+	rt, err := loadTestModule(t, funcs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Leave scheduler headroom for pool instantiation, but remain shorter than
+	// both declaration-specific production limits and the 2s watchdog. The
+	// caller also asserts the failure came after successful instantiation.
+	rt.initTimeout = 250 * time.Millisecond
+	return rt
 }
 
 func TestMallocRegionsValidated(t *testing.T) {
@@ -246,15 +263,15 @@ func TestDeclarationMallocAndFreeFailures(t *testing.T) {
 		{"free traps", []testFunc{fnMalloc, fnJSONAllow, static, {name: "free", params: 2, body: []byte{0x00}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rt := boundedTestRuntime(t)
-			if err := rt.LoadPolicyBytes(context.Background(), buildTestModule(tc.funcs)); err != nil {
-				t.Fatal(err)
-			}
+			rt := loadDeclarationTestRuntime(t, tc.funcs...)
 			within(t, 2*time.Second, func() {
 				pool, err := NewPool(context.Background(), rt, 1)
 				if err == nil {
-					pool.Close(context.Background())
+					_ = pool.Close(context.Background())
 					t.Fatal("pool accepted failed declaration allocation/free")
+				}
+				if !strings.Contains(err.Error(), "initialize pool member 0:") {
+					t.Errorf("failed before the declaration allocation/free under test: %v", err)
 				}
 			})
 		})

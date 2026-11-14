@@ -1405,8 +1405,22 @@ func TestReloadPolicy_Errors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateCacheDir(t)
 			e, _ := newTestEnforcer(t, testEnforcerOpts{})
-			e.handleEvent(&api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"})
+			// This tests failed-reload atomicity, not evaluation latency. A
+			// contended hosted runner can exhaust the production 50ms budget
+			// during setup, leaving no cached ALLOW to preserve. Keep a bounded
+			// test-only budget; timeout/fail-closed tests keep their own limits.
+			inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
+			allowedEvent := &api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"}
+			e.handleEvent(allowedEvent)
+			if stats := e.GetStats(); stats.Allowed != 1 || stats.Denied != 0 {
+				t.Fatalf("setup must evaluate ALLOW before reload: %+v", stats)
+			}
+			beforeCache := e.cache.Stats()
+			if beforeCache.Size != 1 {
+				t.Fatalf("setup cache size = %d, want 1", beforeCache.Size)
+			}
 			oldEval := e.evaluator
+			oldPool, oldRuntime := e.pool, e.wasmRuntime
 			e.policyPath = tc.path
 
 			err := e.ReloadPolicy()
@@ -1414,15 +1428,25 @@ func TestReloadPolicy_Errors(t *testing.T) {
 				t.Fatalf("ReloadPolicy() error = %v, want containing %q", err, tc.wantErr)
 			}
 			// Failed reload must keep the old policy active and the cache intact.
-			if e.evaluator != oldEval {
-				t.Error("evaluator must not change on failed reload")
+			if e.evaluator != oldEval || e.pool != oldPool || e.wasmRuntime != oldRuntime {
+				t.Error("active evaluator, pool and runtime must not change on failed reload")
 			}
-			if e.cache.Stats().Size != 1 {
-				t.Error("cache must not be cleared on failed reload")
+			if afterCache := e.cache.Stats(); afterCache != beforeCache {
+				t.Errorf("failed reload changed cache: before=%+v after=%+v", beforeCache, afterCache)
+			}
+			e.handleEvent(allowedEvent)
+			if stats := e.GetStats(); stats.Allowed != 2 || stats.Denied != 0 {
+				t.Errorf("cached ALLOW must survive failed reload: %+v", stats)
+			}
+			if got := e.cache.Stats().TotalHits; got != beforeCache.TotalHits+1 {
+				t.Errorf("cache hits = %d, want %d", got, beforeCache.TotalHits+1)
 			}
 			e.handleEvent(&api.Event{PID: 0, UID: 0, Comm: "bash", Filename: "/bin/bash"})
 			if e.GetStats().Denied != 1 {
 				t.Error("old policy should still enforce after failed reload")
+			}
+			if e.cache.Stats().Size != 2 {
+				t.Error("old policy must produce a cacheable DENY, not an evaluation-error denial")
 			}
 		})
 	}

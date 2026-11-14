@@ -216,6 +216,43 @@ func TestSupervisedTerminalHostCannotServeEarlierCachedAllow(t *testing.T) {
 	}
 }
 
+func TestSupervisedReadinessRequiresLiveHostAndHealthyCapture(t *testing.T) {
+	e, _, key := supervisedEnforcer(t, wasmtest.ConstPolicy(0, nil), supervisedConfig(t), false)
+	if err := e.Ready(); err == nil {
+		t.Fatal("inactive loop reported ready")
+	}
+	e.processing.Store(true)
+	if err := e.Ready(); err != nil {
+		t.Fatal("live supervised host incorrectly requires an in-process pool", err)
+	}
+	captureErr := errors.New("cgroup reconciliation failed")
+	p := &readinessPlatform{err: captureErr}
+	e.platform = p
+	if err := e.Ready(); !errors.Is(err, captureErr) {
+		t.Fatal("supervised backend hid platform scope/readiness error", err)
+	}
+	p.err = nil
+	if err := e.Ready(); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisedHost(t, e.evaluator).Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Ready(); err == nil {
+		t.Fatal("dead supervised host reported ready")
+	}
+	if err := e.ActivatePolicy(signedCandidate(t, key, wasmtest.ConstPolicy(0, nil)), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Ready(); err != nil {
+		t.Fatal("explicit replacement did not restore readiness", err)
+	}
+	e.cancel()
+	if err := e.Ready(); !errors.Is(err, context.Canceled) {
+		t.Fatal("canceled enforcer reported ready", err)
+	}
+}
+
 func TestSupervisedPendingCommitRetainsBothHostsAndReusesExactCandidate(t *testing.T) {
 	c := supervisedConfig(t)
 	e, k, key := supervisedEnforcer(t, wasmtest.ConstPolicy(0, nil), c, true)

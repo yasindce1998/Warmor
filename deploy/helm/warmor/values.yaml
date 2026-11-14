@@ -1,6 +1,7 @@
 image:
   repository: ghcr.io/yasindce1998/warmor
   tag: "latest"
+  digest: ""
   pullPolicy: IfNotPresent
 
 nameOverride: ""
@@ -10,6 +11,7 @@ daemon:
   logLevel: info
   statsInterval: 30s
   metricsPort: 9090
+  metricsBindAddress: ""
   # Start safely: no kernel blocking or process termination. Explicitly
   # set false only after validating policies and workload scope.
   auditMode: true
@@ -27,7 +29,15 @@ daemon:
   # docs/design/kernel-default-deny.md. Misses stay allowed when the policy
   # is not eligible.
   defaultDeny: false
-  cgroupFilter: ""
+  # Covers all pods, including Warmor/system pods; NOT workload selectors.
+  cgroupFilter: "auto"
+  cgroupReconcileInterval: 1s
+  confirmNodeWidePolicy: false
+
+hostPaths:
+  cgroup: /sys/fs/cgroup
+  cgroupMount: /host/sys/fs/cgroup
+  kernel: /sys/kernel
 
 policy:
   # The image ships with a default policy compiled in at build time
@@ -58,6 +68,7 @@ controller:
     # needs cargo at runtime to compile policies.
     repository: ghcr.io/yasindce1998/warmor-controller
     tag: "latest"
+    digest: ""
     pullPolicy: IfNotPresent
   # Watch WarmorPolicies in every namespace instead of just the release
   # namespace. Single-tenant clusters only: any namespace could then
@@ -66,6 +77,7 @@ controller:
   # Re-reconcile this often even without events, healing out-of-band
   # edits to the policy ConfigMap.
   resyncPeriod: 10m
+  cacheSizeLimit: 1Gi
   resources:
     limits:
       cpu: 500m
@@ -86,7 +98,10 @@ resources:
 tolerations:
   - operator: Exists
 
-nodeSelector: {}
+# Current published images/BPF objects target Linux amd64.
+nodeSelector:
+  kubernetes.io/os: linux
+  kubernetes.io/arch: amd64
 
 affinity: {}
 

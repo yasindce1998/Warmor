@@ -3,8 +3,12 @@
 package ebpf
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -26,9 +30,49 @@ func TestResolveCgroupID_Self(t *testing.T) {
 }
 
 func TestResolveCgroupID_NotExist(t *testing.T) {
-	_, err := ResolveCgroupID("/nonexistent/path")
-	if err == nil {
-		t.Fatal("expected error for non-existent path")
+	_, err := ResolveCgroupID(filepath.Join(t.TempDir(), "missing"))
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("resolver must preserve wrapped ENOENT: %v", err)
+	}
+}
+
+func TestDiscoverPodCgroupsWrappedResolverChurn(t *testing.T) {
+	root := t.TempDir()
+	pod := filepath.Join(root, "kubepods", "podabcd")
+	child := filepath.Join(pod, "container")
+	if err := os.MkdirAll(child, 0755); err != nil {
+		t.Fatal(err)
+	}
+	podID, err := ResolveCgroupID(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed := false
+	ids, err := discoverPodCgroups(root, func(path string) (uint64, error) {
+		if path == child {
+			// Walk has already stat'ed this directory. Delete it just before
+			// the actual resolver's Statx, as happens during container churn.
+			if err := os.Remove(child); err != nil {
+				t.Fatal(err)
+			}
+			removed = true
+		}
+		id, err := ResolveCgroupID(path)
+		if err != nil {
+			return 0, fmt.Errorf("additional resolver context: %w", err)
+		}
+		return id, nil
+	})
+	if err != nil || !removed || len(ids) != 1 || ids[0] != podID {
+		t.Fatalf("wrapped ENOENT during churn should skip only vanished child: ids=%v removed=%v err=%v", ids, removed, err)
+	}
+	// Non-churn resolver failures must still fail discovery, not be mistaken
+	// for a harmless deletion and silently shrink coverage.
+	_, err = discoverPodCgroups(root, func(string) (uint64, error) {
+		return 0, fmt.Errorf("statx permission: %w", fs.ErrPermission)
+	})
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("wrapped permission error was swallowed: %v", err)
 	}
 }
 
@@ -72,9 +116,9 @@ func TestDiscoverPodCgroups_EmptyKubepods(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := DiscoverPodCgroups(tmpDir)
-	if err == nil {
-		t.Fatal("expected error when no pod cgroups found")
+	ids, err := DiscoverPodCgroups(tmpDir)
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("empty hierarchy must be an empty scoped set: %v, %v", ids, err)
 	}
 }
 
@@ -193,15 +237,94 @@ func TestDiscoverPodCgroups_CgroupfsKubepods(t *testing.T) {
 	}
 }
 
+func TestDiscoverPodCgroups_KubeletRootLayouts(t *testing.T) {
+	for _, tc := range []struct {
+		name, base, qos, guaranteed, burstable string
+	}{
+		{"kind-systemd", "kubelet.slice/kubelet-kubepods.slice", "kubelet-kubepods-burstable.slice", "kubelet-kubepods-podabcd.slice", "kubelet-kubepods-burstable-podabcd_1234.slice"},
+		{"kubelet-cgroupfs", "kubelet/kubepods", "burstable", "podabcd-1234", "poddef0-5678"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			base := filepath.Join(root, filepath.FromSlash(tc.base))
+			pod := filepath.Join(base, tc.qos, tc.burstable)
+			podDirs := []string{
+				filepath.Join(base, tc.guaranteed),
+				pod,
+				filepath.Join(pod, "cri-containerd-abcd.scope"),
+				filepath.Join(pod, "crio-def0.scope", "nested-child"),
+				filepath.Join(pod, "crio-def0.scope"),
+			}
+			for _, path := range append(podDirs,
+				filepath.Join(root, "system.slice", "poddead"), // outside the selected pod hierarchy
+				filepath.Join(root, "kubelet.slice", "host-service.scope"),
+				filepath.Join(base, tc.qos, "host-service.scope")) {
+				if err := os.MkdirAll(path, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ids, err := DiscoverPodCgroups(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := make(map[uint64]bool)
+			for _, path := range podDirs {
+				id, err := ResolveCgroupID(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want[id] = true
+			}
+			if len(ids) != len(want) {
+				t.Fatalf("nested hierarchy lost pod/descendant IDs: got %v, want %v", ids, want)
+			}
+			for _, id := range ids {
+				if !want[id] {
+					t.Fatalf("scope included parent/QoS/host ID %d", id)
+				}
+			}
+		})
+	}
+}
+
+func TestDiscoverPodCgroups_KubeletRootStillFailsWithoutPodHierarchy(t *testing.T) {
+	for _, layout := range []string{"kubelet.slice", "kubelet", "kubelet.slice/kubelet-kubepods.slice", "kubelet/kubepods"} {
+		t.Run(layout, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, filepath.FromSlash(layout))
+			if strings.Contains(layout, "/") {
+				if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, nil, 0644); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Mkdir(path, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if ids, err := DiscoverPodCgroups(root); err == nil {
+				t.Fatalf("missing/non-directory nested pod hierarchy must fail, got %v", ids)
+			}
+		})
+	}
+}
+
 func TestIsPodCgroupDir(t *testing.T) {
 	for name, want := range map[string]bool{
 		"kubepods-pod9f8e7d6c_1234_4abc_8def_0123456789ab.slice":            true,
 		"kubepods-besteffort-pod9f8e7d6c_1234_4abc_8def_0123456789ab.slice": true,
 		"kubepods-burstable-podabcd.slice":                                  true,
+		"kubelet-kubepods-podabcd.slice":                                    true,
+		"kubelet-kubepods-besteffort-podabcd_1234.slice":                    true,
+		"kubelet-kubepods-burstable-podabcd.slice":                          true,
 		"pod9f8e7d6c-1234-4abc-8def-0123456789ab":                           true,
 		"kubepods-besteffort.slice":                                         false,
 		"kubepods-burstable.slice":                                          false,
 		"kubepods.slice":                                                    false,
+		"kubelet-kubepods.slice":                                            false,
+		"kubelet-kubepods-besteffort.slice":                                 false,
+		"kubelet-kubepods-burstable.slice":                                  false,
+		"arbitrary-kubepods-podabcd.slice":                                  false,
 		"besteffort":                                                        false,
 		"cri-containerd-0123.scope":                                         false,
 		"0123456789abcdef":                                                  false,
@@ -248,8 +371,8 @@ func TestDiscoverPodCgroups_NoMatchingDirs(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(tmpDir, "kubepods", "besteffort", "system"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DiscoverPodCgroups(tmpDir); err == nil {
-		t.Fatal("expected error when no pod-like directories exist")
+	if ids, err := DiscoverPodCgroups(tmpDir); err != nil || len(ids) != 0 {
+		t.Fatalf("no pods must be an empty scoped set: %v, %v", ids, err)
 	}
 }
 

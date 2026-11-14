@@ -122,7 +122,7 @@ spec:
                     - audit
                 selector:
                   type: object
-                  description: Optional pod selector to scope this policy.
+                  description: Reserved pod selector. Any present object (including {}) is unsupported and held Pending; omit only for intended node-wide publication. A previous accepted unscoped generation is retained until explicit deletion.
                   properties:
                     matchLabels:
                       type: object
@@ -155,11 +155,29 @@ spec:
                   enum:
                     - Pending
                     - Active
+                    - Published
                     - Error
                 observedGeneration:
                   type: integer
                   format: int64
                   description: Last generation observed by the controller.
+                acceptedGeneration:
+                  type: integer
+                  format: int64
+                  description: Last generation committed with the published artifact; invalid updates retain this generation.
+                desiredRevision:
+                  type: string
+                  description: Effective source and compiler identity, including retained last-known-good sources.
+                desiredDigest:
+                  type: string
+                  description: SHA-256 of the desired compiled effective artifact, when available. Not a node activation claim.
+                publishedDigest:
+                  type: string
+                  description: SHA-256 of the last successfully published effective artifact. Not a node activation claim.
+                lastPublished:
+                  type: string
+                  format: date-time
+                  description: Timestamp of the last successful publication containing this source.
                 conditions:
                   type: array
                   items:
@@ -182,8 +200,8 @@ spec:
                         type: string
                 nodesApplied:
                   type: integer
-                  description: Number of nodes where this policy is active.
+                  description: Reserved for authenticated node acknowledgements. The controller does not assert this count.
                 lastApplied:
                   type: string
                   format: date-time
-                  description: Timestamp of last successful application.
+                  description: Reserved for acknowledged node application. Publication does not set this field.

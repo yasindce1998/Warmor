@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -64,8 +65,11 @@ func TestPolicyEvaluator_Evaluate_Allow(t *testing.T) {
 	if result.Cached {
 		t.Error("Cached should be false for a direct evaluation")
 	}
-	if result.Latency <= 0 {
-		t.Error("Latency should be positive")
+	// Fast evaluations can start and finish within one Windows clock tick.
+	// Zero is a valid measurement; do not invent latency in production to make
+	// the test pass. Still reject negative or impossible elapsed durations.
+	if result.Timestamp.IsZero() || result.Latency < 0 || result.Latency > time.Since(result.Timestamp) {
+		t.Errorf("invalid evaluation timing: timestamp=%v latency=%v", result.Timestamp, result.Latency)
 	}
 	if result.Audit {
 		t.Error("Audit should be false for a plain ALLOW")

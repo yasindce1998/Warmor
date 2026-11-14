@@ -2,14 +2,19 @@ package compiler
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type BuildOptions struct {
+	// Context bounds toolchain checks and compilation. Nil preserves the
+	// historical unbounded CLI behavior for existing callers.
+	Context    context.Context
 	OutputPath string
 	RustOnly   bool
 	Verbose    bool
@@ -22,6 +27,12 @@ type BuildResult struct {
 }
 
 func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
+	if opts.Context == nil {
+		opts.Context = context.Background()
+	}
+	if err := opts.Context.Err(); err != nil {
+		return nil, err
+	}
 	rustSource, err := GenerateRust(policy)
 	if err != nil {
 		return nil, fmt.Errorf("generate rust: %w", err)
@@ -31,7 +42,7 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 		return &BuildResult{RustSource: rustSource}, nil
 	}
 
-	if err := checkCargo(); err != nil {
+	if err := checkCargoContext(opts.Context); err != nil {
 		return nil, err
 	}
 
@@ -39,6 +50,14 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}
+	// Failed builds otherwise leak sources and target files: no BuildResult
+	// reaches the caller's Cleanup.
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			os.RemoveAll(crateDir)
+		}
+	}()
 
 	srcDir := filepath.Join(crateDir, "src")
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
@@ -59,6 +78,7 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 		return nil, fmt.Errorf("cargo build: %w", err)
 	}
 
+	succeeded = true
 	return &BuildResult{
 		WasmPath:   wasmPath,
 		RustSource: rustSource,
@@ -67,14 +87,22 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 }
 
 func checkCargo() error {
+	return checkCargoContext(context.Background())
+}
+
+func checkCargoContext(ctx context.Context) error {
 	_, err := exec.LookPath("cargo")
 	if err != nil {
 		return fmt.Errorf("cargo not found in PATH. Install Rust from https://rustup.rs and run: rustup target add wasm32-unknown-unknown")
 	}
 
-	cmd := exec.Command("rustup", "target", "list", "--installed")
+	cmd := exec.CommandContext(ctx, "rustup", "target", "list", "--installed")
+	cmd.WaitDelay = 5 * time.Second
 	output, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("failed to check rust targets (is rustup installed?): %w", err)
 	}
 
@@ -87,7 +115,12 @@ func checkCargo() error {
 
 func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) {
 	args := []string{"build", "--target", "wasm32-unknown-unknown", "--release"}
-	cmd := exec.Command("cargo", args...)
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, "cargo", args...)
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = crateDir
 	cmd.Env = append(os.Environ(), "CARGO_TARGET_DIR="+filepath.Join(crateDir, "target"))
 
@@ -100,6 +133,9 @@ func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) 
 	}
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("cargo build failed: %w\n%s", err, stderr.String())
 	}
 

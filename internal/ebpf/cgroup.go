@@ -4,7 +4,9 @@ package ebpf
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,9 +41,10 @@ func ResolveCgroupIDs(paths []string) ([]uint64, error) {
 
 // podCgroupDirRe matches the per-pod cgroup directory names kubelet creates:
 // systemd driver "kubepods-pod<uid>.slice" / "kubepods-<qos>-pod<uid>.slice"
+// (prefixed "kubelet-" when kubelet's cgroupRoot is /kubelet, as in kind)
 // (uid dashes escaped to underscores), cgroupfs driver "pod<uid>". QoS-class
 // slices such as "kubepods-besteffort.slice" deliberately do not match.
-var podCgroupDirRe = regexp.MustCompile(`^(kubepods(-[a-z]+)?-pod[0-9a-fA-F_]+\.slice|pod[0-9a-fA-F-]+)$`)
+var podCgroupDirRe = regexp.MustCompile(`^((kubelet-)?kubepods(-[a-z]+)?-pod[0-9a-fA-F_]+\.slice|pod[0-9a-fA-F-]+)$`)
 
 func isPodCgroupDir(name string) bool {
 	return podCgroupDirRe.MatchString(name)
@@ -51,17 +54,36 @@ func isPodCgroupDir(name string) bool {
 // for all discovered pod cgroups and their container cgroups. This provides "monitor all K8s pods, skip host"
 // behavior when --cgroup-filter=auto is specified.
 func DiscoverPodCgroups(cgroupRoot string) ([]uint64, error) {
+	return discoverPodCgroups(cgroupRoot, ResolveCgroupID)
+}
+
+// The resolver argument makes deletion between Walk's stat and Statx
+// deterministic in unprivileged tests, without a mutable global test hook.
+func discoverPodCgroups(cgroupRoot string, resolve func(string) (uint64, error)) ([]uint64, error) {
 	kubepodsDirs := []string{
 		filepath.Join(cgroupRoot, "kubepods.slice"),
 		filepath.Join(cgroupRoot, "kubepods"),
+		// kind configures kubelet cgroupRoot=/kubelet. systemd encodes
+		// ancestor names in each slice component; cgroupfs uses plain dirs.
+		// These are explicit layouts, not a recursive search of host cgroups.
+		filepath.Join(cgroupRoot, "kubelet.slice", "kubelet-kubepods.slice"),
+		filepath.Join(cgroupRoot, "kubelet", "kubepods"),
 	}
 
 	var baseDir string
 	for _, d := range kubepodsDirs {
-		if info, err := os.Stat(d); err == nil && info.IsDir() {
-			baseDir = d
-			break
+		info, err := os.Stat(d)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
 		}
+		if err != nil {
+			return nil, fmt.Errorf("stat kubepods: %w", err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("kubepods path %s is not a directory", d)
+		}
+		baseDir = d
+		break
 	}
 	if baseDir == "" {
 		return nil, fmt.Errorf("kubepods cgroup directory not found under %s", cgroupRoot)
@@ -75,7 +97,10 @@ func DiscoverPodCgroups(cgroupRoot string) ([]uint64, error) {
 	var podDir string
 	err := filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil
+			if errors.Is(err, fs.ErrNotExist) && path != baseDir {
+				return nil
+			} // ordinary pod churn
+			return err
 		}
 		if !info.IsDir() {
 			return nil
@@ -91,9 +116,12 @@ func DiscoverPodCgroups(cgroupRoot string) ([]uint64, error) {
 			}
 			podDir = path
 		}
-		id, err := ResolveCgroupID(path)
+		id, err := resolve(path)
 		if err != nil {
-			return nil
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
 		}
 		ids = append(ids, id)
 		return nil
@@ -102,9 +130,6 @@ func DiscoverPodCgroups(cgroupRoot string) ([]uint64, error) {
 		return nil, fmt.Errorf("walk kubepods: %w", err)
 	}
 
-	if len(ids) == 0 {
-		return nil, fmt.Errorf("no pod cgroups found under %s", baseDir)
-	}
 	return ids, nil
 }
 

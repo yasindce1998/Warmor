@@ -2,9 +2,10 @@
 
 > **Status on `main`: Experimental, detection only.** The ESF client answers
 > **every AUTH event with ALLOW**, so nothing is blocked on macOS today. The
-> cgo ESF code is never compiled in CI (`CGO_ENABLED=0`). Release binaries are
-> also built with `CGO_ENABLED=0`, so the released macOS `warmor-daemon`
-> cannot start the ESF platform; build from source with cgo and the macOS SDK.
+> cgo ESF code is not compiled in CI (`CGO_ENABLED=0`). New release archives
+> contain **tools only; no macOS daemon**. Older cgo-disabled daemon downloads
+> cannot start ESF. Building from source with cgo is experimental and remains
+> unverified against the native SDK; it is not a supported runnable artifact.
 > See [Feature Status](STATUS.md).
 
 ## Architecture
@@ -101,10 +102,11 @@ log stream --predicate 'process == "warmor-daemon"' --level debug
 macOS builds are validated on every push and PR via
 `.github/workflows/macos-ci.yml`:
 
-- **Runner:** `macos-latest`
+- **Runner:** `macos-15`
 - **Build:** `CGO_ENABLED=0 go build ./...` (CGO disabled — ESF SDK headers
-  unavailable on the runner, so the ESF path itself is not compiled in CI)
-- **Tests:** `CGO_ENABLED=0 go test -race -short -coverprofile=coverage.out ./...`
+  the ESF path itself is not compiled or validated in CI)
+- **Tests:** `CGO_ENABLED=0 go test -short -coverprofile=coverage.out ./...`
+- No race-detector claim: Go's race detector requires cgo
 - **Coverage gate:** fails the build below 40%
 - Tests requiring Endpoint Security entitlements are skipped via `-short`
 
@@ -114,7 +116,8 @@ macOS builds are validated on every push and PR via
 2. **Not exercised end to end** — the cgo ESF code is never compiled in CI
 3. **Network events are NOTIFY only** — cannot block by design
 4. **System Extension required** — manual approval, code signing for distribution
-5. **Release binaries cannot start the platform** — built with `CGO_ENABLED=0`
+5. **No macOS daemon in new releases** — tools-only archives deliberately omit
+   the nonfunctional cgo-disabled daemon; see [release support](RELEASE_SUPPORT.md)
 
 ## What is needed to reach enforcement
 

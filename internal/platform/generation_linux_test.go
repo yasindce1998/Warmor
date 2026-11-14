@@ -144,3 +144,95 @@ func TestGenerationReaderFailureAndCanceledDelivery(t *testing.T) {
 		t.Fatal("canceled delivery leaked captured zero generation")
 	}
 }
+
+func TestGenerationScopedQueueLeaseSurvivesReconciliationAndOrdersFence(t *testing.T) {
+	p, stream, events := generationPlatform(t)
+	p.ebpfLoader = &ebpf.Loader{} // readiness only; never Load or attach BPF
+	p.config = LinuxConfig{CgroupFilter: []string{"auto"}, CgroupReconcileInterval: time.Second}
+	p.scope.enabled = true
+	p.scope.accept([]uint64{42}, nil)
+	var captures, released atomic.Int32
+	p.SetEventCapture(func(e *api.Event) bool {
+		captures.Add(1)
+		e.GenerationContext = api.NewGenerationContext(e.PolicyGeneration, func() { released.Add(1) })
+		return true
+	})
+	if err := p.Ready(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// The raw outside-scope sample is consumed, but must never acquire a
+	// generation lease. Only the exact accepted ID reaches the queue.
+	stream.reads <- generationRead{event: &ebpf.Event{CgroupID: 999, PolicyGeneration: 70, Hook: "exec"}}
+	stream.reads <- generationRead{event: &ebpf.Event{CgroupID: 42, PolicyGeneration: 71, Hook: "exec", KernelTimestampNS: 12345}}
+	var queued *api.Event
+	select {
+	case queued = <-events:
+	case <-ctx.Done():
+		t.Fatal("scoped event not delivered")
+	}
+	if queued.CgroupID != 42 || queued.GenerationContext.ID != 71 || queued.KernelTimestampNS != 12345 || captures.Load() != 1 {
+		t.Fatalf("scope or captured identity lost: %+v", queued)
+	}
+	writerErr := errors.New("scope map update failed")
+	if err := p.reconcileCgroups(func(string) ([]uint64, error) { return []uint64{43}, nil }, func([]uint64) error { return writerErr }); !errors.Is(err, writerErr) {
+		t.Fatal(err)
+	}
+	if !p.scope.contains(42) || p.scope.contains(43) || p.Ready() == nil {
+		t.Fatal("failed reconciliation changed accepted scope or stayed ready")
+	}
+	if err := p.reconcileCgroups(func(string) ([]uint64, error) { return []uint64{43}, nil }, func([]uint64) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if p.Ready() != nil || p.scope.contains(42) || !p.scope.contains(43) {
+		t.Fatal("accepted scope replacement failed")
+	}
+	if released.Load() != 0 || queued.GenerationContext.ID != 71 {
+		t.Fatal("scope churn released or relabeled an already captured lease")
+	}
+	g := &linuxPolicyGenerations{p: p}
+	done := make(chan error, 1)
+	go func() { done <- g.Drain(ctx) }()
+	for stream.flushes.Load() == 0 {
+		select {
+		case <-ctx.Done():
+			t.Fatal("no generation flush")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	// Scope removal applies before new captures, not retroactively to work
+	// already queued. Even an empty accepted scope cannot filter a fence.
+	p.scope.accept(nil, nil)
+	stream.reads <- generationRead{event: &ebpf.Event{CgroupID: 42, PolicyGeneration: 71, Hook: "exec"}}
+	stream.reads <- generationRead{event: &ebpf.Event{CgroupID: 43, PolicyGeneration: 72, Hook: "exec"}}
+	stream.reads <- generationRead{err: fmt.Errorf("scoped ring: %w", ringbuf.ErrFlushed)}
+	var fence *api.Event
+	select {
+	case fence = <-events:
+	case <-ctx.Done():
+		t.Fatal("empty scope swallowed the generation queue fence")
+	}
+	if fence.DispatchBarrier == nil || captures.Load() != 1 || p.Ready() != nil {
+		t.Fatal("filtered event captured, fence captured, or normal flush withdrew readiness")
+	}
+	queued.GenerationContext.Complete()
+	close(fence.DispatchBarrier)
+	if err := <-done; err != nil || released.Load() != 1 {
+		t.Fatal("queue fence or captured lease did not complete", err)
+	}
+	readerErr := errors.New("LSM stream disconnected after scope churn")
+	stream.reads <- generationRead{err: readerErr}
+	select {
+	case <-p.readerFailed:
+	case <-ctx.Done():
+		t.Fatal("reader failure did not wake generation drain")
+	}
+	if err := p.Ready(); !errors.Is(err, readerErr) {
+		t.Fatal("reader failure did not withdraw scope readiness", err)
+	}
+	if err := g.Drain(ctx); !errors.Is(err, readerErr) || stream.flushes.Load() != 1 {
+		t.Fatal("reader failure silently acknowledged/overlapped drain", err)
+	}
+}
