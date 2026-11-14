@@ -152,7 +152,7 @@ func TestVMDeadlineCoversPreGuestStartup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"verifier) LIMIT=300s", "outcomes) LIMIT=360s", "timeout --verbose --signal=QUIT --kill-after=15s", `"$LIMIT" "$@" 2>&1 | tee`, `exit "$code"`} {
+	for _, required := range []string{"verifier) LIMIT=300s", "outcomes) LIMIT=360s", "timeout --verbose --signal=QUIT --kill-after=15s", `"$LIMIT" "$@" </dev/null 2>&1 | tee`, `exit "$code"`} {
 		if !strings.Contains(string(data), required) {
 			t.Errorf("host cache/boot deadline or failure propagation missing: %s", required)
 		}
@@ -164,6 +164,35 @@ func TestVMDeadlineCoversPreGuestStartup(t *testing.T) {
 	if strings.Contains(string(workflow), "${{ runner.temp }}") ||
 		!strings.Contains(string(workflow), `echo "XDG_CACHE_HOME=$RUNNER_TEMP/warmor-outcome-cache" >> "$GITHUB_ENV"`) {
 		t.Fatal("configure the cache using shell RUNNER_TEMP, not an unavailable job-env expression context")
+	}
+}
+
+func TestVMLauncherReplacesClosedCIStdinWithDevNull(t *testing.T) {
+	// Actions gives its shell an already-closed pipe. Direct vimto exec must
+	// receive /dev/null so v0.4.0 installs its held-open QEMU stdin pipe instead
+	// of forwarding EOF and disconnecting the virtio stdio port. No VM is run.
+	for _, phase := range []string{"verifier", "outcomes"} {
+		t.Run(phase, func(t *testing.T) {
+			dir := t.TempDir()
+			fake := filepath.Join(dir, "vimto")
+			script := "#!/bin/sh\nif ! [ /proc/self/fd/0 -ef /dev/null ]; then\n  echo 'unexpected EOF pipe passed to QEMU transport' >&2\n  exit 91\nfi\necho vimto-dev-null-workaround-selected\n"
+			if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			input, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = input.Close() })
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("bash", "run-vm.sh", phase, dir, fake)
+			cmd.Stdin = input
+			if output, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(output), "vimto-dev-null-workaround-selected") {
+				t.Fatalf("closed CI stdin must not disconnect VM stdio: %v output=%s", err, output)
+			}
+		})
 	}
 }
 
