@@ -153,6 +153,55 @@ rules:
 	}
 }
 
+func TestLSM_ExactAuditDeniesAreNotKernelRefusals(t *testing.T) {
+	l, cgid := identityTestLoader(t)
+	dir, err := os.MkdirTemp("/tmp", "warmor-audit-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "audited")
+	bin, err := os.ReadFile("/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, bin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		enforce, audit bool
+	}{{true, true}, {false, false}, {true, false}} {
+		if err := l.SetEnforceMode(tc.enforce); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.PolicyMap().SetRule(cgid, EventTypeExec, path, ActionDeny, tc.audit); err != nil {
+			t.Fatal(err)
+		}
+		blocked := tc.enforce && !tc.audit
+		err := exec.Command(path).Run()
+		if (blocked && !errors.Is(err, syscall.EPERM)) || (!blocked && err != nil) {
+			t.Fatalf("enforce=%v audit=%v exec=%v", tc.enforce, tc.audit, err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if time.Now().After(deadline) {
+				t.Fatal("missing exact audit/refusal event")
+			}
+			event, err := l.ReadLSMEvent()
+			if err != nil {
+				continue
+			}
+			if event.Hook != "exec" || event.Filename != path {
+				continue
+			}
+			if event.KernelDenied != blocked || event.KernelTimestampNS == 0 {
+				t.Fatalf("audit must not masquerade as actual kernel refusal: %+v", event)
+			}
+			break
+		}
+	}
+}
+
 func TestLSM_ExactEndpointCollisionDefaultDeny(t *testing.T) {
 	l, cgid := identityTestLoader(t)
 	a, b := "127.1.156.58:8644", "127.1.248.57:24525"

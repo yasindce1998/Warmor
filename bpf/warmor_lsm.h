@@ -91,7 +91,7 @@ struct warmor_event {
 	__u64 timestamp;
 	__u64 cgroup_id;
 	__u8  event_type;
-	__u8  decision;     // 0=miss (needs userspace), 1=denied by map
+	__u8  decision;     // 0=pass/audit (needs userspace), 1=actually refused
 	__u16 remote_port;
 	__u32 remote_addr_v4;
 	__u8  remote_addr_v6[16];

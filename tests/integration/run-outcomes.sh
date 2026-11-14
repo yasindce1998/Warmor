@@ -64,9 +64,9 @@ fi
 # No sudo, host daemon, Docker, kind, kubectl, or host enforcement fallback.
 WARMOR_OUTCOME_VM=1 WARMOR_REQUIRE_BPF_LSM=1 "$VIMTO" -kernel "$KERNEL" exec -- \
   "$ARTIFACTS/kernel.test" -test.v -test.count=1 -test.timeout=120s \
-  -test.run '^TestLSM_(LoadAndAttach|ExactExecCollisionFirstMatchDefaultDenyAndScope|ExactEndpointCollisionDefaultDeny|TruncatedExecCannotHitExactAllow|ExactIPv6AndMappedEndpointIdentities)$' \
+  -test.run '^TestLSM_(LoadAndAttach|ExactExecCollisionFirstMatchDefaultDenyAndScope|ExactAuditDeniesAreNotKernelRefusals|ExactEndpointCollisionDefaultDeny|TruncatedExecCannotHitExactAllow|ExactIPv6AndMappedEndpointIdentities)$' \
   | tee "$ARTIFACTS/verifier.log"
-for test in LoadAndAttach ExactExecCollisionFirstMatchDefaultDenyAndScope ExactEndpointCollisionDefaultDeny TruncatedExecCannotHitExactAllow ExactIPv6AndMappedEndpointIdentities; do
+for test in LoadAndAttach ExactExecCollisionFirstMatchDefaultDenyAndScope ExactAuditDeniesAreNotKernelRefusals ExactEndpointCollisionDefaultDeny TruncatedExecCannotHitExactAllow ExactIPv6AndMappedEndpointIdentities; do
   grep -q -- "^--- PASS: TestLSM_${test} " "$ARTIFACTS/verifier.log"
 done
 WARMOR_OUTCOME_VM=1 "$VIMTO" -kernel "$KERNEL" exec -- \

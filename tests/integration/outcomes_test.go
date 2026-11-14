@@ -342,7 +342,7 @@ func (f *outcomeFixture) runAudited(t *testing.T, d *daemonProcess, binary, mark
 	// Keep the child alive through actual policy evaluation (and event
 	// delivery), rather than allowing a fast exit to outrun a mistaken kill.
 	d.requireEvent(t, func(e streaming.SecurityEvent) bool {
-		return e.PID == uint32(cmd.Process.Pid) && e.UID == 65534 && e.Decision == "deny" && e.AuditOnly && !e.Enforced
+		return e.PID == uint32(cmd.Process.Pid) && e.UID == 65534 && e.Decision == "deny" && e.AuditOnly && !e.Enforced && !e.EnforcementAttempted && e.EnforcementError == ""
 	})
 	if _, err := input.Write([]byte{'x'}); err != nil {
 		t.Fatalf("audit-only child did not survive evaluation: %v", err)
@@ -622,6 +622,11 @@ func TestDaemonOutcomes(t *testing.T) {
 			}
 		})
 		waitReady(t, output)
+		// PR #31 intentionally refuses events in the process's ambiguous start
+		// tick. Age this controlled live fixture past Linux USER_HZ=100's tick
+		// before releasing the file operation, rather than relaxing identity
+		// checks or accepting a refused signal as termination evidence.
+		time.Sleep(100 * time.Millisecond)
 		if _, err := input.Write([]byte{'x'}); err != nil {
 			_ = input.Close()
 			_ = waitCommand(cmd, time.Second)
@@ -633,7 +638,8 @@ func TestDaemonOutcomes(t *testing.T) {
 		}
 		d.requireEvent(t, func(e streaming.SecurityEvent) bool {
 			return e.PID == uint32(cmd.Process.Pid) && e.UID == 65534 && e.EventType == "file" &&
-				e.Filename == filepath.Join(f.work, "watched-file") && e.Decision == "deny" && e.Enforced && !e.AuditOnly
+				e.Filename == filepath.Join(f.work, "watched-file") && e.Decision == "deny" && e.Enforced && !e.AuditOnly &&
+				e.EnforcementAttempted && e.EnforcementError == "" && !e.KernelEnforced
 		})
 		// Deliberately no "no side effect" assertion here: userspace SIGKILL
 		// is asynchronous containment, not synchronous file-open prevention.

@@ -177,6 +177,12 @@ together; external raw-map tooling must migrate its key ABI. The key alone
 occupies 18 MiB at 65536 entries, before values and hash/LRU overhead;
 recheck node memory budgets and performance before rollout.
 
+The event decision byte records an **actual refusal**, not merely a cached
+deny action. Audit-flagged entries and a disabled enforcement toggle emit a
+pass/audit event for userspace re-evaluation; they must not be marked
+`KernelDenied` or streamed as successfully enforced. This remains distinct
+from PR #31's verified pidfd signal attempt and process wait status.
+
 - **Exec is literal pathname policy, not file identity policy.** The key
   is `bprm->filename`, without path cleaning, symlink/inode resolution or
   mount-namespace canonicalization. Relative paths, symlink spellings,

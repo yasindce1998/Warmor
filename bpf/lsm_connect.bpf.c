@@ -78,11 +78,12 @@ int BPF_PROG(lsm_connect_check, struct socket *sock, struct sockaddr *address, i
 		__sync_fetch_and_add(&val->hit_count, 1);
 
 		if (val->action == ACTION_DENY) {
-			emit_lsm_event(EVENT_TYPE_NETWORK, 1, 0, 0,
+			__u8 blocked = is_enforce_enabled() && !val->audit;
+			emit_lsm_event(EVENT_TYPE_NETWORK, blocked, 0, 0,
 				cgid, family, port, addr_v4, addr_v6);
 
 			// An audit-flagged deny is a would-be denial: log it, never block.
-			if (is_enforce_enabled() && !val->audit)
+			if (blocked)
 				return -1; // -EPERM
 			return 0;
 		}

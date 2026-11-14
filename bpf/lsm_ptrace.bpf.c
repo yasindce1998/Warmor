@@ -58,11 +58,12 @@ int BPF_PROG(lsm_ptrace_check, struct task_struct *child, unsigned int mode)
 		__sync_fetch_and_add(&val->hit_count, 1);
 
 		if (val->action == ACTION_DENY) {
-			emit_lsm_event_aux(EVENT_TYPE_PTRACE, 1, comm_buf, 16,
+			__u8 blocked = is_enforce_enabled() && !val->audit;
+			emit_lsm_event_aux(EVENT_TYPE_PTRACE, blocked, comm_buf, 16,
 				cgid, 0, 0, 0, 0, 0, target_cgid);
 
 			// An audit-flagged deny is a would-be denial: log it, never block.
-			if (is_enforce_enabled() && !val->audit)
+			if (blocked)
 				return -1;
 			return 0;
 		}

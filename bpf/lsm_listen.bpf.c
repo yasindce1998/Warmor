@@ -34,11 +34,12 @@ int BPF_PROG(lsm_listen_check, struct socket *sock, int backlog)
 		__sync_fetch_and_add(&val->hit_count, 1);
 
 		if (val->action == ACTION_DENY) {
-			emit_lsm_event(EVENT_TYPE_LISTEN, 1, 0, 0,
+			__u8 blocked = is_enforce_enabled() && !val->audit;
+			emit_lsm_event(EVENT_TYPE_LISTEN, blocked, 0, 0,
 				cgid, family, port, 0, 0);
 
 			// An audit-flagged deny is a would-be denial: log it, never block.
-			if (is_enforce_enabled() && !val->audit)
+			if (blocked)
 				return -1;
 			return 0;
 		}
