@@ -23,12 +23,23 @@ func newFakeBackend() *fakeBackend {
 }
 
 func (f *fakeBackend) Put(key, value any) error {
-	f.entries[key.(PolicyKey)] = value.(PolicyValue)
+	k, ok := key.(PolicyKey)
+	if !ok {
+		return fmt.Errorf("policy key has type %T, want PolicyKey", key)
+	}
+	v, ok := value.(PolicyValue)
+	if !ok {
+		return fmt.Errorf("policy value has type %T, want PolicyValue", value)
+	}
+	f.entries[k] = v
 	return nil
 }
 
 func (f *fakeBackend) Delete(key any) error {
-	k := key.(PolicyKey)
+	k, ok := key.(PolicyKey)
+	if !ok {
+		return fmt.Errorf("policy key has type %T, want PolicyKey", key)
+	}
 	if err := f.deleteErr[k]; err != nil {
 		return err
 	}
@@ -162,15 +173,27 @@ func (f *fakeDefaultDenyBackend) Put(key, value any) error {
 	if f.putErr != nil {
 		return f.putErr
 	}
+	k, ok := key.(DefaultDenyKey)
+	if !ok {
+		return fmt.Errorf("default-deny key has type %T, want DefaultDenyKey", key)
+	}
+	v, ok := value.(uint8)
+	if !ok {
+		return fmt.Errorf("default-deny value has type %T, want uint8", value)
+	}
 	if f.entries == nil {
 		f.entries = map[DefaultDenyKey]uint8{}
 	}
-	f.entries[key.(DefaultDenyKey)] = value.(uint8)
+	f.entries[k] = v
 	return nil
 }
 
 func (f *fakeDefaultDenyBackend) Delete(key any) error {
-	delete(f.entries, key.(DefaultDenyKey))
+	k, ok := key.(DefaultDenyKey)
+	if !ok {
+		return fmt.Errorf("default-deny key has type %T, want DefaultDenyKey", key)
+	}
+	delete(f.entries, k)
 	return nil
 }
 
