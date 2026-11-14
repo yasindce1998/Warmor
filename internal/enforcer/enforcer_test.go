@@ -723,12 +723,22 @@ func TestHandleEvent_NetFilterNilNetworkPayload(t *testing.T) {
 	e, _ := newTestEnforcer(t, testEnforcerOpts{
 		netFilter: &NetFilterConfig{BlockCIDRs: []string{"0.0.0.0/0"}},
 	})
+	// Test missing-payload delegation/cache semantics, not the production 50ms
+	// latency bound; keep benign evaluation bounded on contended native runners.
+	e.evaluator.SetTimeout(5 * time.Second)
 
 	// Network type with no payload: no remote addr to check, falls through.
-	e.handleEvent(&api.Event{PID: 0, UID: 1000, Comm: "x", Type: api.EventTypeNetwork})
+	event := &api.Event{PID: 0, UID: 1000, Comm: "x", Type: api.EventTypeNetwork}
+	e.handleEvent(event)
 
 	if got := e.GetStats().Allowed; got != 1 {
 		t.Errorf("Allowed = %d, want 1 (empty remote addr is not blocklisted)", got)
+	}
+	if event.Network != nil {
+		t.Error("network payload must remain nil")
+	}
+	if e.cache.Stats().Size != 1 {
+		t.Error("nil network payload should fall through to policy evaluation and caching")
 	}
 }
 
