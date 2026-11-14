@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"errors"
 	"reflect"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/policymeta"
+	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -70,6 +72,22 @@ func TestReadyMetadataRequiredAndBounded(t *testing.T) {
 	if _, err := Read(bytes.NewReader(header[:]), MaxMetadata); !errors.Is(err, ErrProtocol) {
 		t.Fatal("oversized metadata allocated")
 	}
+}
+
+func TestMaximumEscapedMetadataFitsBoundedFrame(t *testing.T) {
+	domain:=policymeta.StaticDomain{Eligible:true}
+	for i:=range policymeta.MaxStaticRules {
+		// Legal non-NUL control bytes need six-byte JSON escapes. The cap
+		// must admit the full contract, not only pleasant printable paths.
+		pattern:=fmt.Sprintf("%08d",i)+strings.Repeat("\x01",policymeta.MaxPatternBytes-8)
+		domain.Rules=append(domain.Rules,compiler.StaticRule{Event:"process",Pattern:pattern})
+	}
+	m:=policymeta.Observe(strings.Repeat("a",64),5,policymeta.EncodingBinary,[3]uint32{compiler.FieldBitPath,0,0},domain,policymeta.StaticDomain{})
+	if err:=m.Validate(m.ModuleSHA256);err!=nil {t.Fatal(err)}
+	var b bytes.Buffer
+	if err:=Send(&b,Ready{Control:Control{Version:Version,Kind:"ready",Digest:m.ModuleSHA256},Metadata:m},MaxMetadata);err!=nil {t.Fatal("valid capacity exceeds wire cap",err)}
+	var r Ready
+	if err:=Receive(&b,&r,MaxMetadata);err!=nil || r.Metadata.Validate(m.ModuleSHA256)!=nil {t.Fatal("max capacity failed round trip",err)}
 }
 
 func TestSnapshotPreservesInputsWithoutRepair(t *testing.T) {

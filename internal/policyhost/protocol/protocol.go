@@ -208,7 +208,7 @@ func Receive(r io.Reader, v any, max uint32) error {
 	if err := d.Decode(new(any)); err != io.EOF {
 		return ErrProtocol
 	}
-	// V1 requires the canonical encoding produced by Send, including every
+	// The protocol requires the canonical encoding produced by Send, including every
 	// field. In particular an omitted Action must not become zero/ALLOW.
 	// This also rejects duplicate keys, null scalars and case-folded keys.
 	canonical, err := json.Marshal(v)
