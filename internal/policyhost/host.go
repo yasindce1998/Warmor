@@ -1,5 +1,5 @@
 // Package policyhost provides an opt-in supervised backend. It never imports
-// the WASM runtime. It is not wired into the enforcer's concrete evaluator.
+// the WASM runtime. The enforcer's experimental adapter owns its lifecycle.
 package policyhost
 
 import (
@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/policyhost/protocol"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -49,6 +50,10 @@ type Config struct {
 	LoadTimeout       time.Duration
 	EvaluationTimeout time.Duration
 	MaxHosts          int
+	// TrustedDeclarationDigests explicitly attests exhaustive, deterministic
+	// declarations for these exact modules. A signature or trusted executable
+	// alone does not establish this property. Empty disables optimizations.
+	TrustedDeclarationDigests []string
 }
 
 type Supervisor struct {
@@ -66,6 +71,17 @@ func New(c Config) (*Supervisor, error) {
 	if c.InitializationTimeout <= 0 || c.InitializationTimeout > time.Minute || c.LoadTimeout <= 0 || c.LoadTimeout > c.InitializationTimeout || c.EvaluationTimeout <= 0 || c.EvaluationTimeout > 5*time.Second || c.MaxHosts < 1 || c.MaxHosts > 16 {
 		return nil, errors.New("policy-host configuration out of range")
 	}
+	if len(c.TrustedDeclarationDigests) > 256 {
+		return nil, errors.New("too many trusted declaration digests")
+	}
+	seen := map[string]bool{}
+	for _, digest := range c.TrustedDeclarationDigests {
+		if !policymeta.ValidDigest(digest) || seen[digest] {
+			return nil, errors.New("invalid trusted declaration digest")
+		}
+		seen[digest] = true
+	}
+	c.TrustedDeclarationDigests = append([]string(nil), c.TrustedDeclarationDigests...)
 	f, err := trustedExecutable(c.Executable, c.ExecutableSHA256)
 	if err != nil {
 		return nil, err
@@ -79,14 +95,16 @@ func New(c Config) (*Supervisor, error) {
 // their own bounded activation/replacement policy. Errors never contain guest
 // diagnostics, events, signatures or child stderr.
 type Host struct {
-	cmd      *exec.Cmd
-	in, out  *os.File
-	done     chan struct{}
-	gate     chan struct{}
-	stop     sync.Once
-	sequence uint64
-	config   Config
-	digest   string
+	cmd                 *exec.Cmd
+	in, out             *os.File
+	done                chan struct{}
+	gate                chan struct{}
+	stop                sync.Once
+	sequence            uint64
+	config              Config
+	digest              string
+	metadata            policymeta.Module
+	declarationsTrusted bool
 }
 
 func (s *Supervisor) Start(ctx context.Context, p *StagedPolicy) (*Host, error) {
@@ -139,6 +157,11 @@ func (s *Supervisor) Start(ctx context.Context, p *StagedPolicy) (*Host, error) 
 	cmd.Stdout = childOut
 	cmd.Stderr = devnull
 	h := &Host{cmd: cmd, in: parentIn, out: parentOut, done: make(chan struct{}), gate: make(chan struct{}, 1), config: s.config, digest: p.digest}
+	for _, digest := range s.config.TrustedDeclarationDigests {
+		if digest == p.digest {
+			h.declarationsTrusted = true
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		parentIn.Close()
 		parentOut.Close()
@@ -157,6 +180,7 @@ func (s *Supervisor) Start(ctx context.Context, p *StagedPolicy) (*Host, error) 
 	phase := "configure"
 	err = protocol.Send(h.in, protocol.Control{Version: protocol.Version, Kind: "configure", Limits: s.config.Limits}, protocol.MaxControl)
 	var reply protocol.Control
+	var ready protocol.Ready
 	if err == nil {
 		err = protocol.Receive(h.out, &reply, protocol.MaxControl)
 	}
@@ -181,11 +205,13 @@ func (s *Supervisor) Start(ctx context.Context, p *StagedPolicy) (*Host, error) 
 		ctx, loadCancel = context.WithTimeout(ctx, s.config.LoadTimeout)
 		defer loadCancel()
 		stop = h.watch(ctx)
-		reply = protocol.Control{}
-		err = protocol.Receive(h.out, &reply, protocol.MaxControl)
+		err = protocol.Receive(h.out, &ready, protocol.MaxMetadata)
 	}
-	if err == nil && (reply.Version != protocol.Version || reply.Kind != "ready" || reply.Digest != p.digest || reply.Sequence != 0 || reply.Limits != s.config.Limits) {
-		err = protocol.ErrProtocol
+	if err == nil {
+		err = ready.Validate(p.digest, s.config.Limits)
+		if err == nil {
+			h.metadata = ready.Metadata.Clone()
+		}
 	}
 	stop()
 	if ctx.Err() != nil {
@@ -216,6 +242,18 @@ func (h *Host) terminate() { h.stop.Do(func() { kill(h.cmd); h.in.Close(); h.out
 
 func (h *Host) Close() error   { h.terminate(); <-h.done; return nil }
 func (h *Host) Digest() string { return h.digest }
+
+// Alive reports whether the owned child has been reaped. A terminal host must
+// never authorize a cached decision in an enclosing evaluator. Like any health
+// snapshot it is not a promise that a child cannot exit immediately afterward.
+func (h *Host) Alive() bool {
+	select {
+	case <-h.done:
+		return false
+	default:
+		return true
+	}
+}
 
 func (h *Host) Evaluate(ctx context.Context, event *api.Event) (*api.ActionResult, error) {
 	start := time.Now()

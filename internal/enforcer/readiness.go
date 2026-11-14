@@ -13,8 +13,15 @@ func (e *Enforcer) Ready() error {
 	}
 	e.evaluatorMu.RLock()
 	defer e.evaluatorMu.RUnlock()
-	if e.evaluator == nil || e.pool == nil {
+	if e.evaluator == nil {
 		return fmt.Errorf("no active policy")
+	}
+	if host, ok := e.evaluator.(*hostEvaluator); ok {
+		if !host.Alive() {
+			return fmt.Errorf("active policy host stopped")
+		}
+	} else if e.pool == nil {
+		return fmt.Errorf("no active policy pool")
 	}
 	if p, ok := e.platform.(interface{ Ready() error }); ok {
 		return p.Ready()

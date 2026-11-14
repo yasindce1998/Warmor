@@ -188,6 +188,11 @@ func (r *stagedPolicyRevision) commit() error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// A prior uncertain commit can already point here. Retry its durability
+	// barrier without destroying the actual previous recovery revision.
+	if old == filepath.Base(r.dir) {
+		return r.syncDir(r.root)
+	}
 	if old != "" {
 		if err := replacePolicyLink(filepath.Join(r.root, "previous"), old); err != nil {
 			return err

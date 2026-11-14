@@ -46,6 +46,9 @@ func TestAssignmentChecksPoolCapturedModuleAfterRuntimeReload(t *testing.T) {
 	if err := pool.CheckAssignment(want); err != nil {
 		t.Fatal("runtime reload changed captured pool identity", err)
 	}
+	if err := pool.Metadata().MatchArtifact(want.SHA256, want.ABI, want.Compiler, want.Posture.DefaultAction); err != nil {
+		t.Fatal("canonical Source observation changed after runtime reload", err)
+	}
 	borrowed, err := pool.Get(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +58,9 @@ func TestAssignmentChecksPoolCapturedModuleAfterRuntimeReload(t *testing.T) {
 	}
 	if err := pool.CheckAssignment(want); err != nil {
 		t.Fatal(err)
+	}
+	if err := pool.Metadata().MatchArtifact(want.SHA256, want.ABI, want.Compiler, want.Posture.DefaultAction); err != nil {
+		t.Fatal("replacement lost canonical captured identity", err)
 	}
 	wrong := want
 	wrong.ABI = 2

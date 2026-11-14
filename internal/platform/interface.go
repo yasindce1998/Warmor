@@ -4,8 +4,25 @@ import (
 	"context"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
+
+// PolicyGenerations is optional and Linux-only today. Drain must flush the
+// single LSM reader, deliver all samples normally, and wait for its queue fence.
+type PolicyGenerations interface {
+	Prepare(uint64, kernelmap.GenerationSpec) error
+	Activate(uint64) error
+	Abort(uint64) error
+	AcknowledgeDrain(uint64) error
+	SyncEvent(uint64, *api.Event, uint8, bool) error
+	Drain(context.Context) error
+}
+
+type GenerationPlatform interface {
+	PolicyGenerations() PolicyGenerations
+	SetEventCapture(func(*api.Event) bool)
+}
 
 // Platform represents the OS-specific implementation
 type Platform interface {
@@ -37,7 +54,14 @@ type Capabilities struct {
 	FileMonitoring    bool // Can monitor file operations
 	NetworkMonitoring bool // Can monitor network operations
 	Enforcement       bool // Can actually block, not just log
-	LSMEnforcement    bool // Kernel-level blocking via LSM-BPF
+	LSMEnforcement    bool // LSM-BPF hooks loaded; not proof blocking was enabled
+}
+
+// LSMBlocking is an optional Linux posture query implemented by LinuxPlatform.
+// Consumers requiring kernel denial must check the requested effective mode AND
+// this initialized status, never infer blocking from Capabilities alone.
+type LSMBlocking interface {
+	LSMBlocking() bool
 }
 
 // Config holds platform-agnostic configuration passed to New().

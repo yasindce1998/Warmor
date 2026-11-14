@@ -70,3 +70,25 @@ The suite does **not** yet prove atomic successful policy activation, map-write-
 `scripts/kind-e2e.sh` is a deployment/controller/**evaluation smoke test** on a shared host kernel. Ready pods, a loaded policy, Active CRs, events and deny counters demonstrate plumbing and policy evaluation, **not synchronous prevention or successful process termination**. Do not substitute its result for this VM outcome gate, or turn enforcement on in kind to obtain such proof. Lower-level `internal/ebpf` integration tests cover BPF loader/map behavior but likewise do not replace this whole-daemon test.
 
 Local build/oracle success without a live VM run must be reported as **infrastructure-blocked for prevention/termination evidence**, not as an enforcement pass.
+
+## Kernel-generation verifier and stress gate
+
+`run-kernel-generations.sh` is the separate strict, non-skippable gate for the
+opt-in kernel generation API. It requires real PASS results for every
+`TestLSM_Generation*` fixture plus named legacy/integrity regressions. It runs a
+prebuilt hashed binary only in a disposable vimto VM, requires BPF LSM and IMA,
+and checks the requested actual kernel minor. Broad suite skips do not count.
+
+Local compilation and oracle checks, **without host attachment or a VM**:
+
+```sh
+bash -n tests/integration/run-kernel-generations.sh
+go test -race -run '^TestGenerationGate' ./tests/integration
+bash tests/integration/run-kernel-generations.sh --build-only
+```
+
+The dedicated CI matrix runs on the built 6.1 and 6.18 IMA kernels and retains
+logs, manifest and input hashes under `artifacts/generations.*`. See
+[`docs/design/kernel-generations.md`](../../docs/design/kernel-generations.md)
+for concurrency, flush/retirement assertions and the still-unimplemented daemon
+activation contract. A build-only success is not verifier/runtime evidence.

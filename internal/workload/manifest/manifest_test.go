@@ -151,6 +151,19 @@ func TestManifestValidation(t *testing.T) {
 	}
 }
 
+func TestReviewedCompiler7PinRejectsOldAndFutureVersions(t *testing.T) {
+	if SupportedCompilerVersion != "7" || compiler.Version != "7" || compiler.Identity != "warmor-yaml/7" {
+		t.Fatal("reviewed build-claims-only compiler transition changed")
+	}
+	for _, version := range []string{"6", "8", "future"} {
+		doc, _ := fixture()
+		doc.Compiler = version
+		if _, err := New(doc); err == nil {
+			t.Fatal("unreviewed compiler version admitted", version)
+		}
+	}
+}
+
 func TestCanonicalContentAndCopies(t *testing.T) {
 	doc, _ := fixture()
 	doc.Additions[0].Source.RuleModes = map[string]string{"same-rule": "audit"}

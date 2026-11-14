@@ -34,6 +34,17 @@ type Loader struct {
 	networkReader *ringbuf.Reader
 }
 
+// InterruptEventReads wakes the single readers during platform shutdown.
+func (l *Loader) InterruptEventReads() error {
+	var errs []error
+	for _, rd := range []*ringbuf.Reader{l.processReader, l.fileReader, l.networkReader} {
+		if rd != nil {
+			errs = append(errs, rd.Flush())
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func Load() (*Loader, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("remove memlock: %w", err)

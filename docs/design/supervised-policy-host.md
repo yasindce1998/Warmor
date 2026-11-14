@@ -1,10 +1,10 @@
 # Supervised policy host: opt-in backend contract
 
 Status: **implemented and tested as an optional Linux API, not the enforcer's
-default backend or a completed isolation release gate**. The existing concrete
-`*wasm.PolicyEvaluator` remains unchanged. No daemon flag enables this backend
-yet. This work starts from `de59b21` and does not integrate activation or release
-packaging changes on other branches.
+default backend or a completed isolation release gate**. The experimental
+adapter in `supervised-evaluator-integration.md` adds explicit daemon flags and
+backend lifecycle ownership; the in-process backend remains the default.
+Release packaging is still not integrated.
 
 ## Ownership and trust boundary
 
@@ -67,7 +67,12 @@ directory or writable cache. The sole explicit environment entry is
 against its event snapshot. WASI receives no mounted files, argv, environment,
 network listeners or external command execution capabilities.
 
-## Wire protocol v1
+## Wire protocol v2
+
+The [declaration metadata contract](policyhost-declarations.md) extends this
+checkpoint with a required versioned readiness metadata envelope and an 8 MiB
+metadata-frame cap. Protocol 1 workers are incompatible and rejected. Metadata
+transport does not by itself authorize optimizations.
 
 Each frame has a four-byte big-endian nonzero length. Lengths are checked before
 allocation. Structured frames use the exact canonical JSON encoding of the Go
@@ -170,14 +175,13 @@ under a trusted wazero/Go host**, not a sandbox for a compromised native worker:
   there is no Job Object or tested equivalent. Cross-compilation is not platform
   execution validation. Tests do not install host security hooks or alter parent
   process rlimits.
-- Declarations are read/validated inside the child but not exposed as routing or
-  kernel metadata yet. Until a versioned bounded declaration contract is added,
-  integrations must not enable decision caching or kernel default-deny preloads
-  based on assumptions about fields-read/static rules.
-- The enforcer still owns a concrete in-process evaluator. Interface extraction,
-  atomic verified activation/rollback, checked-out host drain, bounded replacement
-  backoff, failure metrics, expected workload scope and fail-closed enforcement
-  tests remain required **before wiring this backend as the default**.
+- Declarations now have an optional bounded metadata API; see its separate
+  trust contract above. Caching/default-deny remain disabled by default for the
+  supervised backend unless exact declaration digests are independently attested.
+  The experimental adapter now consumes only effective trusted methods.
+- The adapter drains old hosts with captured generation leases and never
+  automatically respawns failed hosts. Whole-daemon supported-kernel VM evidence,
+  workload scope and packaging remain required **before making it the default**.
 - Release artifacts, container/service packaging and installed-host trust/upgrade
   tests are not provided by this checkpoint. No shipped isolation claim is made.
 

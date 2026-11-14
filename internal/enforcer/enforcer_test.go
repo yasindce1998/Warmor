@@ -29,6 +29,15 @@ import (
 // everything else.
 var testPolicyPath = filepath.Join("..", "wasm", "testdata", "allow_policy.wasm")
 
+func inProcessEvaluator(t *testing.T, e *Enforcer) *wasm.PolicyEvaluator {
+	t.Helper()
+	evaluator, ok := e.evaluator.(*wasm.PolicyEvaluator)
+	if !ok {
+		t.Fatal("test requires the legacy in-process evaluator")
+	}
+	return evaluator
+}
+
 // ---- fakes ----
 
 // fakePlatform is an in-memory platform.Platform that never touches the kernel.
@@ -1122,7 +1131,7 @@ func TestPrintStats_WithEvents(t *testing.T) {
 	// This tests decision/cache statistics, not the production 50ms latency
 	// bound. Keep evaluation bounded without letting hosted-runner scheduling
 	// turn successful policy decisions into uncached timeout failures.
-	e.evaluator.SetTimeout(5 * time.Second)
+	inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 
 	allow := &api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"}
 	e.handleEvent(allow)
@@ -1404,7 +1413,7 @@ func TestReloadPolicy_Errors(t *testing.T) {
 			// contended hosted runner can exhaust the production 50ms budget
 			// during setup, leaving no cached ALLOW to preserve. Keep a bounded
 			// test-only budget; timeout/fail-closed tests keep their own limits.
-			e.evaluator.SetTimeout(5 * time.Second)
+			inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 			allowedEvent := &api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"}
 			e.handleEvent(allowedEvent)
 			if stats := e.GetStats(); stats.Allowed != 1 || stats.Denied != 0 {

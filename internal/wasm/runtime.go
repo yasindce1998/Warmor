@@ -69,8 +69,10 @@ type Runtime struct {
 	// cacheDir is RuntimeConfig.CacheDir; compiled YAML policies are kept
 	// under it (see LoadPolicyFromYAML).
 	cacheDir string
-	metadata *policybuild.Metadata
-	digest   string
+	// moduleDigest identifies exactly the bytes successfully loaded, never
+	// guest-provided metadata or the runtime's native compilation cache.
+	moduleDigest  string
+	buildMetadata *policybuild.Metadata
 }
 
 // NewRuntime creates a new WASM runtime with compilation cache support.
@@ -186,9 +188,9 @@ func (r *Runtime) LoadPolicyBytes(ctx context.Context, wasmBytes []byte) error {
 	if err := preflightModule(ctx, wasmBytes); err != nil {
 		return fmt.Errorf("policy preflight: %w", err)
 	}
-	metadata, err := policybuild.Read(wasmBytes)
+	buildMetadata, err := policybuild.Read(wasmBytes)
 	if err != nil {
-		return err
+		return fmt.Errorf("policy build metadata: %w", err)
 	}
 	// This is synchronous by design: racing CompileModule against a timer
 	// would abandon non-interruptible work in a goroutine. The context is
@@ -210,9 +212,9 @@ func (r *Runtime) LoadPolicyBytes(ctx context.Context, wasmBytes []byte) error {
 	}
 
 	r.module = compiled
-	r.metadata = metadata
-	sum := sha256.Sum256(wasmBytes)
-	r.digest = hex.EncodeToString(sum[:])
+	digest := sha256.Sum256(wasmBytes)
+	r.moduleDigest = hex.EncodeToString(digest[:])
+	r.buildMetadata = buildMetadata
 	return nil
 }
 

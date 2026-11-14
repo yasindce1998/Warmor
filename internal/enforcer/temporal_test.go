@@ -83,7 +83,7 @@ func TestHandleEvent_PreTemporalPolicyStillCached(t *testing.T) {
 	// Contended native Darwin runners can spend >50ms in WASM malloc; such a
 	// timeout correctly produces an uncacheable denial. Keep this fixture's
 	// evaluation bounded without changing timeout/fail-closed tests or defaults.
-	e.evaluator.SetTimeout(5 * time.Second)
+	inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 	setCacheDependencies(e.cache, e.evaluator)
 	starts := &fakeStarts{}
 	e.containerStarts = starts

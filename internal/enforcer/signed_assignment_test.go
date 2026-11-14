@@ -24,7 +24,7 @@ import (
 func TestSignedHTTPActivationWaitsForRealEventDrain(t *testing.T) {
 	isolateCacheDir(t)
 	e, _ := newTestEnforcer(t, testEnforcerOpts{audit: true, poolSize: 1, policyWasm: wasmtest.ConstPolicy(0, &[3]uint32{})})
-	e.evaluator.SetTimeout(5 * time.Second)
+	inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 	artifact, _ := crypto.GenerateSigningKey()
 	signer, _ := crypto.GenerateSigningKey()
 	e.verifyKey = artifact.Public
@@ -139,7 +139,8 @@ type signedKernelPlatform struct {
 func (*signedKernelPlatform) Capabilities() platform.Capabilities {
 	return platform.Capabilities{Enforcement: true, LSMEnforcement: true}
 }
-func (p *signedKernelPlatform) PolicyMap() any { return p.pm }
+func (p *signedKernelPlatform) PolicyMap() any    { return p.pm }
+func (p *signedKernelPlatform) LSMBlocking() bool { return true }
 
 func TestSignedRequiredDefaultDenyUsesActualEligibleDomainsAndRequiredLSM(t *testing.T) {
 	isolateCacheDir(t)

@@ -5,6 +5,7 @@ package platform
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,13 +40,24 @@ func TestLinuxMonitorsPreserveKernelIdentityWithCgroupReadiness(t *testing.T) {
 				scope:  cgroupScope{enabled: true},
 			}
 			p.scope.accept([]uint64{42}, nil)
+			var captured, released atomic.Int32
+			p.SetEventCapture(func(event *api.Event) bool {
+				captured.Add(1)
+				id := uint64(88) // tracepoints capture current at dispatch
+				if event.LSMEvent {
+					id = event.PolicyGeneration
+				}
+				event.GenerationContext = api.NewGenerationContext(id, func() { released.Add(1) })
+				return true
+			})
 			if err := p.Ready(); err != nil {
 				t.Fatal(err)
 			}
 			input := ebpf.Event{
 				Kind: tc.kind, PID: 1234, UID: 10001, GID: 10002, CgroupID: 42,
 				KernelTimestampNS: stamp, Timestamp: time.Unix(42, 123),
-				Comm: "identity-marker", Filename: "/marker", Args: []string{"marker", "argument"},
+				PolicyGeneration: 77,
+				Comm:             "identity-marker", Filename: "/marker", Args: []string{"marker", "argument"},
 				PPID: 123, ParentComm: "parent", Family: 10, RemoteAddr: "::1", RemotePort: 443,
 				KernelDenied: true, IntegrityViolation: true, Hook: "bprm_check_security",
 				TargetCgroupID: 43, MountSource: "/source",
@@ -68,7 +80,7 @@ func TestLinuxMonitorsPreserveKernelIdentityWithCgroupReadiness(t *testing.T) {
 				return &event, nil
 			})
 			p.wg.Wait()
-			if len(out) != 2 {
+			if len(out) != 2 || captured.Load() != 2 {
 				t.Fatalf("scope leaked or lost events: %d", len(out))
 			}
 			for _, wantStamp := range []uint64{stamp, 0} {
@@ -79,6 +91,17 @@ func TestLinuxMonitorsPreserveKernelIdentityWithCgroupReadiness(t *testing.T) {
 				if tc.lsm && (!event.KernelDenied || !event.IntegrityViolation || event.Hook != input.Hook || event.TargetCgroupID != input.TargetCgroupID || event.MountSource != input.MountSource) {
 					t.Fatalf("LSM outcome/identity evidence lost: %+v", event)
 				}
+				wantGeneration := uint64(88)
+				if tc.lsm {
+					wantGeneration = input.PolicyGeneration
+				}
+				if event.GenerationContext == nil || event.GenerationContext.ID != wantGeneration {
+					t.Fatalf("scoped monitor lost captured generation: %+v", event)
+				}
+				event.GenerationContext.Complete()
+			}
+			if released.Load() != 2 {
+				t.Fatal("scoped monitor delivery leaked generation leases")
 			}
 			if err := p.Ready(); !errors.Is(err, readerErr) {
 				t.Fatalf("reader failure must withdraw readiness: %v", err)

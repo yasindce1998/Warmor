@@ -124,7 +124,7 @@ func TestHandleEvent_LoopingPolicyFailsClosedWithoutCaching(t *testing.T) {
 	pm := &fakePolicyMap{}
 	// uid 0 loops forever inside the policy; other uids are allowed.
 	e, _ := newTestEnforcer(t, testEnforcerOpts{policyMap: pm, poolSize: 1, policyWasm: wasmtest.LoopOnUIDPolicy()})
-	e.evaluator.SetTimeout(20 * time.Millisecond)
+	inProcessEvaluator(t, e).SetTimeout(20 * time.Millisecond)
 
 	done := make(chan struct{})
 	go func() {
@@ -159,14 +159,14 @@ func TestNew_EvalTimeoutOption(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer e.Close()
-	if got := e.evaluator.Timeout(); got != 123*time.Millisecond {
+	if got := inProcessEvaluator(t, e).Timeout(); got != 123*time.Millisecond {
 		t.Fatalf("evaluator timeout = %v, want 123ms", got)
 	}
 	e.evaluator = nil // let ReloadPolicy close the old pool only once
 	if err := e.ReloadPolicy(); err != nil {
 		t.Fatal(err)
 	}
-	if got := e.evaluator.Timeout(); got != 123*time.Millisecond {
+	if got := inProcessEvaluator(t, e).Timeout(); got != 123*time.Millisecond {
 		t.Fatalf("timeout after reload = %v, want 123ms", got)
 	}
 }
