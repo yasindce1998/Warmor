@@ -103,8 +103,7 @@ func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) 
 		return "", fmt.Errorf("cargo build failed: %w\n%s", err, stderr.String())
 	}
 
-	safeName := strings.ReplaceAll(policyName, "-", "_")
-	safeName = strings.ReplaceAll(safeName, " ", "_")
+	safeName := crateIdentifier(policyName)
 	wasmFile := fmt.Sprintf("warmor_policy_%s.wasm", safeName)
 	builtPath := filepath.Join(crateDir, "target", "wasm32-unknown-unknown", "release", wasmFile)
 
@@ -145,4 +144,3 @@ func Cleanup(result *BuildResult) {
 func CargoAvailable() bool {
 	return checkCargo() == nil
 }
-

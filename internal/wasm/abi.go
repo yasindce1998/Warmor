@@ -90,8 +90,18 @@ func signatureString(def wazeroapi.FunctionDefinition) string {
 // it has one, and is rejected otherwise: calling it with one argument would
 // fail on every event and the host would deny everything.
 func detectABI(exports map[string]wazeroapi.FunctionDefinition) (policyABI, error) {
-	if _, ok := exports[exportMalloc]; !ok {
+	if def, ok := exports[exportMalloc]; !ok {
 		return 0, fmt.Errorf("policy module does not export %q", exportMalloc)
+	} else if !hasSignature(def, []wazeroapi.ValueType{i32}, []wazeroapi.ValueType{i32}) {
+		return 0, fmt.Errorf("policy export %q has signature %s, want (i32) -> (i32)", exportMalloc, signatureString(def))
+	}
+	for name, sig := range map[string]struct{ params, results []wazeroapi.ValueType }{
+		"free":                  {[]wazeroapi.ValueType{i32, i32}, nil},
+		"get_last_matched_rule": {[]wazeroapi.ValueType{i32, i32}, []wazeroapi.ValueType{i32}},
+	} {
+		if def, ok := exports[name]; ok && !hasSignature(def, sig.params, sig.results) {
+			return 0, fmt.Errorf("policy export %q has incompatible signature %s", name, signatureString(def))
+		}
 	}
 
 	if def, ok := exports[exportABIVersion]; ok && !hasSignature(def, nil, []wazeroapi.ValueType{i32}) {
@@ -122,6 +132,9 @@ func detectABI(exports map[string]wazeroapi.FunctionDefinition) (policyABI, erro
 
 // validateCompiledModule checks the module's exports statically.
 func validateCompiledModule(compiled wazero.CompiledModule) error {
+	if _, ok := compiled.ExportedMemories()["memory"]; !ok {
+		return fmt.Errorf("policy module does not export memory")
+	}
 	_, err := detectABI(compiled.ExportedFunctions())
 	return err
 }
@@ -165,12 +178,12 @@ func initPolicy(ctx context.Context, runtime *Runtime, instance wazeroapi.Module
 	p := &Policy{runtime: runtime, instance: instance, abiVersion: version}
 	if abi == abiBinary {
 		p.useBinaryABI = true
-		results, err := instance.ExportedFunction(exportMalloc).Call(ctx, uint64(eventStructSize))
+		ptr, err := p.malloc(ctx, eventStructSize)
 		if err != nil {
 			instance.Close(ctx)
 			return nil, fmt.Errorf("malloc for event buffer: %w", err)
 		}
-		p.eventBufPtr = uint32(results[0])
+		p.eventBufPtr = ptr
 	}
 	return p, nil
 }

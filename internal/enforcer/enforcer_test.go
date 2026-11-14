@@ -1388,7 +1388,8 @@ func TestReloadPolicy_Errors(t *testing.T) {
 		{"invalid wasm", garbage, "load new policy"},
 		{"missing yaml", filepath.Join(dir, "missing.yaml"), "load new YAML policy"},
 		{"invalid yaml", badYAML, "load new YAML policy"},
-		{"uninstantiable module", badImport, "create new policy pool"},
+		// Static memory validation now rejects this before creating a pool.
+		{"uninstantiable module", badImport, "load new policy"},
 	}
 
 	for _, tc := range tests {

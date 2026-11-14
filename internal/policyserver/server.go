@@ -289,12 +289,12 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	// recorded, so a malformed one fails loudly instead of poisoning the
 	// fleet comparison.
 	if req.Fingerprint != nil {
-		if err := validateFingerprint(req.Fingerprint); err != nil {
+		// Validate the authenticated identity, not the untrusted body identity.
+		req.Fingerprint.AgentID = req.AgentID
+		if err := s.drift.Validate(req.Fingerprint); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		// Trust the authenticated request identity, not the body.
-		req.Fingerprint.AgentID = req.AgentID
 	}
 
 	if err := s.store.HeartbeatRevision(req); err != nil {
@@ -307,7 +307,10 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Fingerprint != nil {
-		s.drift.Submit(req.Fingerprint)
+		if err := s.drift.Submit(req.Fingerprint); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Return the agent's current policy assignment via rollout-aware resolution
