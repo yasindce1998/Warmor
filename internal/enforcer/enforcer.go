@@ -344,7 +344,11 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	metrics.SetEBPFLoaderStatus(caps.LSMEnforcement || !opts.LSMEnforce)
 	var policyMapSyncer PolicyMapSyncer
 	if caps.LSMEnforcement {
-		logger.LogInfo("✓ LSM-BPF kernel enforcement active")
+		if kernelBlocking {
+			logger.LogInfo("✓ LSM-BPF kernel blocking initialized")
+		} else {
+			logger.LogInfo("LSM-BPF hooks loaded; kernel blocking is not established")
+		}
 		if pm, ok := plat.PolicyMap().(PolicyMapSyncer); ok {
 			policyMapSyncer = pm
 		}

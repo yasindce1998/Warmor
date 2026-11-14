@@ -506,9 +506,26 @@ func TestSupervisedRelativePolicyAndRevisionAliasPaths(t *testing.T) {
 	old := newPlatform
 	newPlatform = func(platform.Config) (platform.Platform, error) { return &fakePlatform{}, nil }
 	t.Cleanup(func() { newPlatform = old })
-	for _, path := range []string{"revision/module.wasm", "current/module.wasm"} {
-		t.Run(path, func(t *testing.T) {
-			e, err := New(context.Background(), path, &Options{AuditMode: true, PolicyVerifyKey: pub, SupervisedBackend: &c})
+	for _, tc := range []struct {
+		name   string
+		path   string
+		atomic bool
+	}{
+		{name: "relative", path: "revision/module.wasm"},
+		{name: "relative revision alias", path: "current/module.wasm"},
+		{name: "atomic relative", path: "revision/module.wasm", atomic: true},
+		{name: "atomic relative revision alias", path: "current/module.wasm", atomic: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.atomic {
+				newPlatform = func(platform.Config) (platform.Platform, error) {
+					return &generationTestPlatform{k: &generationKernel{}}, nil
+				}
+			} else {
+				newPlatform = func(platform.Config) (platform.Platform, error) { return &fakePlatform{}, nil }
+			}
+			e, err := New(context.Background(), tc.path, &Options{AuditMode: true, PolicyVerifyKey: pub,
+				SupervisedBackend: &c, AtomicGenerations: tc.atomic, RequireLSM: tc.atomic})
 			if err != nil {
 				t.Fatal("supported relative policy path rejected", err)
 			}
