@@ -7,6 +7,12 @@ on:
       - "bpf/**"
       - "internal/ebpf/**"
       - "internal/enforcer/**"
+      - "internal/generationvm/**"
+      - "internal/platform/**"
+      - "internal/streaming/**"
+      - "tests/integration/generation_daemon_test.go"
+      - "tests/integration/generation_daemon_gate_test.go"
+      - "tests/integration/run-generation-daemon.sh"
       - "internal/compiler/**"
       - "internal/kernelmap/**"
       - "internal/wasm/**"
@@ -25,6 +31,12 @@ on:
       - "bpf/**"
       - "internal/ebpf/**"
       - "internal/enforcer/**"
+      - "internal/generationvm/**"
+      - "internal/platform/**"
+      - "internal/streaming/**"
+      - "tests/integration/generation_daemon_test.go"
+      - "tests/integration/generation_daemon_gate_test.go"
+      - "tests/integration/run-generation-daemon.sh"
       - "internal/compiler/**"
       - "internal/kernelmap/**"
       - "internal/wasm/**"
@@ -310,7 +322,7 @@ jobs:
     name: Required generation verifier/outcomes (${{ matrix.version }})
     runs-on: ubuntu-24.04
     needs: [unit-tests, bpf-compile, ima-kernel]
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -342,15 +354,27 @@ jobs:
         env:
           BPF2GO_CFLAGS: -D__TARGET_ARCH_x86 -mcpu=v1
         run: go generate ./internal/ebpf
+      - name: Install real policy compilation target for daemon phase
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
       - name: Validate strict gate oracles without enforcement
         run: |
           bash -n tests/integration/run-kernel-generations.sh tests/integration/run-vm.sh
           go test -race -count=1 -run '^(TestGenerationGate|TestVM)' ./tests/integration
+          bash -n tests/integration/run-generation-daemon.sh
+          go test -race -count=1 -run '^TestGenerationDaemonGate' ./tests/integration
       - name: Require actual non-skipped generation, legacy and integrity outcomes in VM
         env:
           KERNEL: ${{ github.workspace }}/kernel-out/vmlinuz
           EXPECT_KERNEL_MINOR: ${{ matrix.minor }}
         run: bash tests/integration/run-kernel-generations.sh
+      - name: Require whole-daemon generation reload and pending recovery outcomes
+        env:
+          KERNEL: ${{ github.workspace }}/kernel-out/vmlinuz
+          EXPECT_KERNEL_MINOR: ${{ matrix.minor }}
+        run: bash tests/integration/run-generation-daemon.sh
       - name: Retain exact inputs and VM verdict evidence even on failure
         if: always()
         uses: actions/upload-artifact@v4
@@ -362,5 +386,6 @@ jobs:
             tests/integration/artifacts/generations.*/SHA256SUMS
             tests/integration/artifacts/generations.*/*.log
             tests/integration/artifacts/generations.*/generations-status.txt
+            tests/integration/artifacts/generation-daemon.*/**
           if-no-files-found: error
           retention-days: 14

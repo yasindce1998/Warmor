@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -422,11 +423,29 @@ func TestTimeoutCleanupIsNotTerminationProof(t *testing.T) {
 }
 
 type daemonProcess struct {
-	cmd     *exec.Cmd
-	done    chan error
-	metrics string
-	events  string
-	log     string
+	cmd      *exec.Cmd
+	done     chan error
+	metrics  string
+	events   string
+	log      string
+	stopOnce sync.Once
+}
+
+func (d *daemonProcess) stop(t *testing.T) {
+	t.Helper()
+	d.stopOnce.Do(func() {
+		_ = d.cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case err := <-d.done:
+			if err != nil {
+				t.Errorf("daemon did not shut down cleanly: %v (log %s)", err, d.log)
+			}
+		case <-time.After(outcomeTimeout):
+			_ = d.cmd.Process.Kill()
+			cleanupErr := <-d.done
+			t.Errorf("daemon shutdown timed out (cleanup result %v; log %s)", cleanupErr, d.log)
+		}
+	})
 }
 
 func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ...string) *daemonProcess {
@@ -464,17 +483,7 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 	}
 	go func() { d.done <- d.cmd.Wait() }()
 	t.Cleanup(func() {
-		_ = d.cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case err := <-d.done:
-			if err != nil {
-				t.Errorf("daemon did not shut down cleanly: %v (log %s)", err, d.log)
-			}
-		case <-time.After(outcomeTimeout):
-			_ = d.cmd.Process.Kill()
-			cleanupErr := <-d.done
-			t.Errorf("daemon shutdown timed out (cleanup result %v; log %s)", cleanupErr, d.log)
-		}
+		d.stop(t)
 		// Wait has completed (also after forced cleanup), so the recording is
 		// closed. Retain partial evidence even when the subtest already failed.
 		if err := exportOutcomeRecording(d.events, filepath.Join(f.dir, name+".ndjson")); err != nil {

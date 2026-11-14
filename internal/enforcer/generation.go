@@ -13,6 +13,7 @@ import (
 
 	"github.com/yasindce1998/warmor/internal/cache"
 	"github.com/yasindce1998/warmor/internal/crypto"
+	"github.com/yasindce1998/warmor/internal/generationvm"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/platform"
 	"github.com/yasindce1998/warmor/internal/wasm"
@@ -211,6 +212,9 @@ func (e *Enforcer) finishGeneration() error {
 	}
 	ctx, cancel := context.WithTimeout(e.ctx, timeout)
 	defer cancel()
+	if err := generationvm.Checkpoint(ctx, "before-drain", g.current, nil); err != nil {
+		return errors.Join(ErrActivationPending, err)
+	}
 	if err := g.kernel.Drain(ctx); err != nil {
 		return errors.Join(ErrActivationPending, err)
 	}
@@ -238,7 +242,7 @@ func (e *Enforcer) finishGeneration() error {
 		closeEvaluationGeneration(p.old)
 	}
 	g.pending = nil
-	return nil
+	return generationvm.Checkpoint(ctx, "retired", p.old.id, nil)
 }
 
 func closeEvaluationGeneration(s *evaluationGeneration) {
@@ -338,6 +342,9 @@ func (e *Enforcer) activateGeneration(path string, commit func() error) error {
 	e.decisionMu.Unlock()
 	active = true
 	g.pending = &generationActivation{path: path, commit: commit, old: old, digest: sha256.Sum256(data)}
+	if err := generationvm.Checkpoint(e.ctx, "live", state.id, nil); err != nil {
+		return errors.Join(ErrActivationPending, err)
+	}
 	return e.finishGeneration()
 }
 

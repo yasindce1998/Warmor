@@ -114,7 +114,7 @@ func TestRunnerUsesPreparedBinariesInVM(t *testing.T) {
 
 func TestVMDeadlinePropagatesFailureAndCapturesStderr(t *testing.T) {
 	// Exercise only a fake vimto. No guest, BPF loader or daemon is executed.
-	for _, phase := range []string{"verifier", "outcomes", "generations"} {
+	for _, phase := range []string{"verifier", "outcomes", "generations", "generation-daemon"} {
 		t.Run(phase, func(t *testing.T) {
 			testVMDeadlinePropagatesFailureAndCapturesStderr(t, phase)
 		})
@@ -161,7 +161,7 @@ func TestVMDeadlineCoversPreGuestStartup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"verifier) LIMIT=300s", "outcomes) LIMIT=360s", "generations) LIMIT=420s", "timeout --verbose --signal=QUIT --kill-after=15s", `"$LIMIT" "$@" </dev/null 2>&1 | tee`, `exit "$code"`} {
+	for _, required := range []string{"verifier) LIMIT=300s", "outcomes) LIMIT=360s", "generations) LIMIT=420s", "generation-daemon) LIMIT=480s", "timeout --verbose --signal=QUIT --kill-after=15s", `"$LIMIT" "$@" </dev/null 2>&1 | tee`, `exit "$code"`} {
 		if !strings.Contains(string(data), required) {
 			t.Errorf("host cache/boot deadline or failure propagation missing: %s", required)
 		}
@@ -185,7 +185,7 @@ func TestVMLauncherReplacesClosedCIStdinWithDevNull(t *testing.T) {
 	// Actions gives its shell an already-closed pipe. Direct vimto exec must
 	// receive /dev/null so v0.4.0 installs its held-open QEMU stdin pipe instead
 	// of forwarding EOF and disconnecting the virtio stdio port. No VM is run.
-	for _, phase := range []string{"verifier", "outcomes", "generations"} {
+	for _, phase := range []string{"verifier", "outcomes", "generations", "generation-daemon"} {
 		t.Run(phase, func(t *testing.T) {
 			dir := t.TempDir()
 			fake := filepath.Join(dir, "vimto")
@@ -211,7 +211,7 @@ func TestVMLauncherReplacesClosedCIStdinWithDevNull(t *testing.T) {
 }
 
 func TestVMDeadlineActuallyStopsStalledLauncher(t *testing.T) {
-	for _, phase := range []string{"verifier", "outcomes", "generations"} {
+	for _, phase := range []string{"verifier", "outcomes", "generations", "generation-daemon"} {
 		t.Run(phase, func(t *testing.T) {
 			for _, hardKill := range []bool{false, true} {
 				t.Run(fmt.Sprint("hard-kill=", hardKill), func(t *testing.T) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/yasindce1998/warmor/internal/ebpf"
+	"github.com/yasindce1998/warmor/internal/generationvm"
 	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -590,6 +591,9 @@ func (p *LinuxPlatform) SetEventCapture(capture func(*api.Event) bool) { p.captu
 func (p *LinuxPlatform) deliver(ctx context.Context, event *api.Event) bool {
 	if event.DispatchBarrier == nil && p.capture != nil && !p.capture(event) {
 		return true // unknown generation is refused, never relabeled as current
+	}
+	if event.DispatchBarrier == nil {
+		generationvm.Capture(event)
 	}
 	select {
 	case p.eventChan <- event:

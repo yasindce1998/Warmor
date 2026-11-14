@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/yasindce1998/warmor/internal/generationvm"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -132,6 +133,7 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 // Emit sends an event+decision into the pipeline for async processing.
 // Non-blocking; drops the event if the buffer is full.
 func (p *Pipeline) Emit(event *api.Event, result *api.ActionResult) {
+	generationvm.Observe(event, result)
 	p.sendMu.RLock()
 	defer p.sendMu.RUnlock()
 	if p.closed.Load() {

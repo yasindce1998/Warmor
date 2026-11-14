@@ -22,6 +22,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/escape"
+	"github.com/yasindce1998/warmor/internal/generationvm"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/lineage"
 	"github.com/yasindce1998/warmor/internal/logging"
@@ -594,6 +595,9 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 		// the platform. Completion is idempotent for pre-captured events.
 		defer event.GenerationContext.Complete()
 		decisionCache = captured.cache
+		if err := generationvm.Checkpoint(e.ctx, "event", captured.id, event); err != nil {
+			return
+		}
 	}
 	metrics.RecordEventProcessed(event.GetType().String())
 	if e.checkEscape(event) {

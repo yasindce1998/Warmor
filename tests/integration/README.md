@@ -99,5 +99,32 @@ Offline fake-launcher tests cover closed stdin, failure propagation and stalled
 startup with QUIT/KILL escalation. These do not execute a VM or enforcement.
 The required-PASS/no-SKIP/duplicate-PASS oracle is unchanged. See
 [`docs/design/kernel-generations.md`](../../docs/design/kernel-generations.md)
-for concurrency, flush/retirement assertions and the still-unimplemented daemon
-activation contract. A build-only success is not verifier/runtime evidence.
+for concurrency and flush/retirement assertions. A build-only success is not
+verifier/runtime evidence.
+
+## Whole-daemon generation activation gate
+
+`run-generation-daemon.sh` separately executes the actual daemon with
+`--experimental-atomic-generations --require-lsm --lsm-enforce --default-deny`.
+It is required after the kernel phase on both built 6.1.188 and 6.18.53 kernels.
+Its compiled VM-only profile holds old work and injects named post-live durable/
+pre-drain failures; normal builds have no fault-control flag. The guard checks
+actual vimto PID 1/private ports before enabling the profile. The strict oracle
+requires the parent and every child PASS, no skips, plus successful cleanup.
+
+Safe local checks (no daemon or hooks):
+
+```sh
+bash -n tests/integration/run-generation-daemon.sh
+go test -race -run '^TestGenerationDaemonGate' ./tests/integration
+go test -race -tags 'integration generation_daemon_vm' -run '^TestProfile' ./internal/generationvm
+bash tests/integration/run-generation-daemon.sh --build-only
+```
+
+Full VM invocation requires `KERNEL=/absolute/built/vmlinuz` and
+`EXPECT_KERNEL_MINOR=6.1` (or `6.18`). It retains exact binaries/hashes, real Cargo
+WASM, generation/scope/verdict evidence, markers, heartbeats/fault stages and
+SIGTERM outcomes under `artifacts/generation-daemon.*`. It is not signed-mode or
+supervised-Host combination proof. See
+[`generation-daemon-vm.md`](../../docs/design/generation-daemon-vm.md) for exact
+assertions, compile-profile boundaries and locally unexecuted VM evidence.

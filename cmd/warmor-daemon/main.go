@@ -115,6 +115,9 @@ func runDaemon(stop <-chan struct{}) {
 	if err := checkGenerationAssignmentMode(*signedAssignments, *atomicGenerations); err != nil {
 		log.Fatal(err)
 	}
+	if err := setupGenerationVM(); err != nil {
+		log.Fatal(err)
+	}
 	// Reject an unsupported fleet publication mode before loading monitors,
 	// seeding a fallback, creating aliases, or starting any network client.
 	if *serverURL != "" {
