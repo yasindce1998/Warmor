@@ -205,7 +205,10 @@ func (t *Tracker) Prune() int {
 func (t *Tracker) prune(now time.Time) int {
 	removed := 0
 	for el := t.order.Front(); el != nil; el = t.order.Front() {
-		pid := el.Value.(uint32)
+		pid, ok := el.Value.(uint32)
+		if !ok {
+			panic("lineage: invalid retention list entry")
+		}
 		if now.Sub(t.processes[pid].LastExec) < t.ttl {
 			break
 		}

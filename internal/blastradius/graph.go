@@ -105,7 +105,11 @@ func (g *Graph) AddNode(node *ContainerNode) {
 		g.order.MoveToBack(el)
 	} else {
 		if len(g.nodes) >= g.config.MaxNodes {
-			g.removeNode(g.order.Front().Value.(observation).id)
+			oldest, ok := g.order.Front().Value.(observation)
+			if !ok {
+				panic("blastradius: invalid retention list entry")
+			}
+			g.removeNode(oldest.id)
 		}
 		g.entries[node.CgroupID] = g.order.PushBack(observation{node.CgroupID, now})
 	}
@@ -181,7 +185,10 @@ func (g *Graph) Prune() int {
 
 func (g *Graph) pruneNodes(now time.Time) {
 	for el := g.order.Front(); el != nil; el = g.order.Front() {
-		entry := el.Value.(observation)
+		entry, ok := el.Value.(observation)
+		if !ok {
+			panic("blastradius: invalid retention list entry")
+		}
 		if now.Sub(entry.at) < g.config.TTL {
 			break
 		}

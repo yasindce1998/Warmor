@@ -109,7 +109,11 @@ func (g *Graph) Ingest(event *streaming.SecurityEvent) {
 		g.order.MoveToBack(el)
 	} else {
 		if len(g.containers) >= g.config.MaxContainers {
-			g.remove(g.order.Front().Value.(observation).id)
+			oldest, ok := g.order.Front().Value.(observation)
+			if !ok {
+				panic("attackgraph: invalid retention list entry")
+			}
+			g.remove(oldest.id)
 		}
 		g.entries[event.CgroupID] = g.order.PushBack(observation{event.CgroupID, received})
 	}
@@ -250,7 +254,10 @@ func (g *Graph) Prune() int {
 func (g *Graph) prune(now time.Time) int {
 	removed := 0
 	for el := g.order.Front(); el != nil; el = g.order.Front() {
-		entry := el.Value.(observation)
+		entry, ok := el.Value.(observation)
+		if !ok {
+			panic("attackgraph: invalid retention list entry")
+		}
 		if now.Sub(entry.at) < g.config.TTL {
 			break
 		}

@@ -321,12 +321,14 @@ func (d *Detector) PruneStale(cutoff time.Time) {
 	}
 }
 
-// SubmitFromCollector is a convenience that takes a snapshot from a collector and submits it.
-func (d *Detector) SubmitFromCollector(fc *FingerprintCollector, agentID string) {
+// SubmitFromCollector submits an available snapshot and propagates admission
+// errors. An agent with no snapshot is a successful no-op.
+func (d *Detector) SubmitFromCollector(fc *FingerprintCollector, agentID string) error {
 	fp := fc.Snapshot(agentID)
 	if fp != nil {
-		d.Submit(fp)
+		return d.Submit(fp)
 	}
+	return nil
 }
 
 // FleetStatus returns summary info per image.

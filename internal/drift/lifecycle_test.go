@@ -91,7 +91,7 @@ func TestDetectorBoundsReceiptTTLAndIdentity(t *testing.T) {
 	now := time.Unix(1200, 0)
 	d := NewDetector(DetectorConfig{TTL: time.Minute, MaxFingerprints: 4, MaxImages: 2, MaxAgentsPerImage: 2, MaxPatterns: 2, Clock: func() time.Time { return now }})
 	submit := func(agent, image string) {
-		d.Submit(&BehaviorFingerprint{AgentID: agent, ImageHash: image, Timestamp: now.Add(100 * time.Hour), Vectors: map[string]float64{"p": 1}})
+		submitFingerprint(t, d, &BehaviorFingerprint{AgentID: agent, ImageHash: image, Timestamp: now.Add(100 * time.Hour), Vectors: map[string]float64{"p": 1}})
 	}
 	for n := range 1000 {
 		submit(fmt.Sprint(n), fmt.Sprint(n%3))
@@ -144,27 +144,27 @@ func TestDetectorOwnedVectorsAndComparableWindows(t *testing.T) {
 	now := time.Unix(1200, 0)
 	d := NewDetector(DetectorConfig{Clock: func() time.Time { return now }})
 	fp := &BehaviorFingerprint{AgentID: "a", ImageHash: "i", Window: time.Minute, Timestamp: now, Vectors: map[string]float64{"unique": 10}}
-	d.Submit(fp)
+	submitFingerprint(t, d, fp)
 	fp.Vectors["unique"] = 0
 	peer := &BehaviorFingerprint{AgentID: "b", ImageHash: "i", Window: 2 * time.Minute, Timestamp: now, Vectors: map[string]float64{"normal": 10}}
-	d.Submit(peer)
+	submitFingerprint(t, d, peer)
 	if len(d.Anomalies("i")) != 0 {
 		t.Fatal("compared different window sizes")
 	}
 	peer.Window = time.Minute
 	peer.Warmup = true
-	d.Submit(peer)
+	submitFingerprint(t, d, peer)
 	if len(d.Anomalies("i")) != 0 {
 		t.Fatal("compared warming-up peer")
 	}
 	peer.Warmup = false
 	peer.Timestamp = now.Add(-2 * time.Minute)
-	d.Submit(peer)
+	submitFingerprint(t, d, peer)
 	if len(d.Anomalies("i")) != 0 {
 		t.Fatal("compared disjoint observation windows")
 	}
 	peer.Timestamp = now
-	d.Submit(peer)
+	submitFingerprint(t, d, peer)
 	if len(d.AnomaliesForAgent("a", "i")) != 1 {
 		t.Fatal("expected original owned unique vector to survive mutation")
 	}
@@ -180,7 +180,10 @@ func TestConcurrentCollectorAndDetectorLifecycle(t *testing.T) {
 				agent := fmt.Sprint((n + worker) % 30)
 				fc.Record(agent, fmt.Sprint(n%5), fmt.Sprint(n%100))
 				if fp := fc.Snapshot(agent); fp != nil {
-					d.Submit(fp)
+					if err := d.Submit(fp); err != nil {
+						t.Errorf("submit concurrent fingerprint: %v", err)
+						return
+					}
 					fp.Vectors["caller-owned"] = 42
 				}
 				_ = d.Status()
@@ -213,7 +216,7 @@ func TestDetectorIndependentCapacityLimits(t *testing.T) {
 			tc.config.Clock = func() time.Time { return now }
 			d := NewDetector(tc.config)
 			for n := range 3 {
-				d.Submit(&BehaviorFingerprint{AgentID: fmt.Sprint(n), ImageHash: "image"})
+				submitFingerprint(t, d, &BehaviorFingerprint{AgentID: fmt.Sprint(n), ImageHash: "image"})
 				now = now.Add(time.Second)
 			}
 			if d.AgentCount("image") != 2 || len(d.received) != 2 {
