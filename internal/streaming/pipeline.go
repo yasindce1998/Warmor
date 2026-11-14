@@ -4,8 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"log"
 	"maps"
 	"os"
 	"slices"
@@ -20,7 +20,7 @@ import (
 // Pipeline consumes api.Event + ActionResult pairs, enriches them into
 // SecurityEvents, and fans out to all registered sinks.
 type Pipeline struct {
-	sinks    []Sink
+	workers  []*sinkWorker
 	hostname string
 	labels   map[string]string
 
@@ -33,7 +33,11 @@ type Pipeline struct {
 	// sendMu orders Emit's send against Close's close(eventCh): Emit holds
 	// it shared while checking closed and sending, Close holds it
 	// exclusively while closing, so a send can never hit a closed channel.
-	sendMu sync.RWMutex
+	sendMu          sync.RWMutex
+	ctx             context.Context
+	cancel          context.CancelFunc
+	shutdownTimeout time.Duration
+	closeErr        error // published by closing doneCh
 
 	stats pipelineCounters
 }
@@ -46,20 +50,28 @@ type eventPair struct {
 // PipelineStats is a snapshot of streaming metrics (all plain values).
 type PipelineStats struct {
 	EventsReceived uint64
-	EventsEmitted  uint64
-	EventsDropped  uint64
-	SinkErrors     uint64
+	// EventsEmitted counts enriched events offered to sink queues, not
+	// delivery acknowledgements. EventsDropped covers ingress only.
+	EventsEmitted   uint64
+	EventsDropped   uint64
+	EventsRejected  uint64 // Emit calls after shutdown started
+	ShutdownDropped uint64 // subset of EventsDropped discarded on shutdown
+	SinkErrors      uint64
+	Sinks           []SinkStats // registration order, including duplicate names
 }
 
 type pipelineCounters struct {
-	eventsReceived atomic.Uint64
-	eventsEmitted  atomic.Uint64
-	eventsDropped  atomic.Uint64
-	sinkErrors     atomic.Uint64
+	eventsReceived  atomic.Uint64
+	eventsEmitted   atomic.Uint64
+	eventsDropped   atomic.Uint64
+	eventsRejected  atomic.Uint64
+	shutdownDropped atomic.Uint64
+	sinkErrors      atomic.Uint64
 }
 
 // Enricher adds context to a SecurityEvent before it's sent to sinks.
 type Enricher interface {
+	// Enrich must return promptly; it runs serially in ingestion order.
 	Enrich(event *SecurityEvent)
 }
 
@@ -69,6 +81,14 @@ type PipelineConfig struct {
 	Sinks      []Sink
 	Labels     map[string]string
 	Enrichers  []Enricher
+	// SinkBufferSize is a separate drop-newest FIFO per sink (default 4096).
+	SinkBufferSize int
+	// WriteTimeout bounds each write or periodic/final flush (default 5s).
+	WriteTimeout  time.Duration
+	FlushInterval time.Duration // default 5s
+	// ShutdownTimeout is one total drain budget shared by every worker
+	// (default 5s), not a fresh timeout per queued event or sink.
+	ShutdownTimeout time.Duration
 }
 
 // NewPipeline creates a streaming pipeline with the given sinks.
@@ -76,14 +96,33 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 	if cfg.BufferSize <= 0 {
 		cfg.BufferSize = 4096
 	}
+	if cfg.SinkBufferSize <= 0 {
+		cfg.SinkBufferSize = 4096
+	}
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = 5 * time.Second
+	}
+	if cfg.FlushInterval <= 0 {
+		cfg.FlushInterval = 5 * time.Second
+	}
+	if cfg.ShutdownTimeout <= 0 {
+		cfg.ShutdownTimeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithCancel(context.Background())
 	hostname, _ := os.Hostname()
 	p := &Pipeline{
-		sinks:     cfg.Sinks,
 		hostname:  hostname,
 		labels:    cfg.Labels,
 		enrichers: cfg.Enrichers,
 		eventCh:   make(chan eventPair, cfg.BufferSize),
 		doneCh:    make(chan struct{}),
+		ctx:       ctx, cancel: cancel, shutdownTimeout: cfg.ShutdownTimeout,
+	}
+	for _, sink := range cfg.Sinks {
+		w := newSinkWorker(p, sink, cfg)
+		p.workers = append(p.workers, w)
+		p.wg.Add(1)
+		go w.run()
 	}
 	p.wg.Add(1)
 	go p.loop()
@@ -96,6 +135,8 @@ func (p *Pipeline) Emit(event *api.Event, result *api.ActionResult) {
 	p.sendMu.RLock()
 	defer p.sendMu.RUnlock()
 	if p.closed.Load() {
+		p.stats.eventsRejected.Add(1)
+		recordLoss("ingress_closed", "none", 1)
 		return
 	}
 	p.stats.eventsReceived.Add(1)
@@ -103,67 +144,73 @@ func (p *Pipeline) Emit(event *api.Event, result *api.ActionResult) {
 	case p.eventCh <- eventPair{event: event, result: result}:
 	default:
 		p.stats.eventsDropped.Add(1)
+		recordLoss("ingress_full", "none", 1)
 	}
 }
 
 // Stats returns a snapshot of pipeline metrics.
 func (p *Pipeline) Stats() PipelineStats {
-	return PipelineStats{
-		EventsReceived: p.stats.eventsReceived.Load(),
-		EventsEmitted:  p.stats.eventsEmitted.Load(),
-		EventsDropped:  p.stats.eventsDropped.Load(),
-		SinkErrors:     p.stats.sinkErrors.Load(),
+	s := PipelineStats{
+		EventsReceived:  p.stats.eventsReceived.Load(),
+		EventsEmitted:   p.stats.eventsEmitted.Load(),
+		EventsDropped:   p.stats.eventsDropped.Load(),
+		EventsRejected:  p.stats.eventsRejected.Load(),
+		ShutdownDropped: p.stats.shutdownDropped.Load(),
+		SinkErrors:      p.stats.sinkErrors.Load(),
 	}
+	for _, w := range p.workers {
+		s.Sinks = append(s.Sinks, w.snapshot())
+	}
+	return s
 }
 
-// Close shuts down the pipeline, flushing all sinks.
+// Close stops ingress, drains and closes independent workers within one shared
+// shutdown budget. Sinks must honor cancellation/close contracts; Go cannot
+// safely terminate arbitrary non-cancelable callbacks. Concurrent callers wait
+// for the same completed shutdown and receive its error.
 func (p *Pipeline) Close() error {
 	p.sendMu.Lock()
 	if p.closed.Swap(true) {
 		p.sendMu.Unlock()
-		return nil
+		<-p.doneCh
+		return p.closeErr
 	}
 	close(p.eventCh)
 	p.sendMu.Unlock()
+	timer := time.AfterFunc(p.shutdownTimeout, p.cancel)
 	p.wg.Wait()
+	timer.Stop()
 
 	var errs []error
-	for _, sink := range p.sinks {
-		if err := sink.Flush(context.Background()); err != nil {
-			errs = append(errs, err)
-		}
-		if err := sink.Close(); err != nil {
-			errs = append(errs, err)
+	if p.ctx.Err() != nil {
+		errs = append(errs, fmt.Errorf("shutdown budget exhausted: %w", context.DeadlineExceeded))
+	}
+	for _, w := range p.workers {
+		if w.closeErr != nil {
+			errs = append(errs, w.closeErr)
 		}
 	}
+	p.cancel()
+	p.closeErr = errors.Join(errs...)
 	close(p.doneCh)
-	if len(errs) > 0 {
-		return fmt.Errorf("pipeline close: %v", errs)
-	}
-	return nil
+	return p.closeErr
 }
 
 func (p *Pipeline) loop() {
 	defer p.wg.Done()
-
-	flushTicker := time.NewTicker(5 * time.Second)
-	defer flushTicker.Stop()
-
-	for {
-		select {
-		case pair, ok := <-p.eventCh:
-			if !ok {
-				return
-			}
-			p.process(pair)
-		case <-flushTicker.C:
-			for _, sink := range p.sinks {
-				if err := sink.Flush(context.Background()); err != nil {
-					p.stats.sinkErrors.Add(1)
-					log.Printf("streaming: flush %s: %v", sink.Name(), err)
-				}
-			}
+	defer func() {
+		for _, w := range p.workers {
+			close(w.queue)
 		}
+	}()
+	for pair := range p.eventCh {
+		if p.ctx.Err() != nil {
+			p.stats.eventsDropped.Add(1)
+			p.stats.shutdownDropped.Add(1)
+			recordLoss("ingress_shutdown", "none", 1)
+			continue
+		}
+		p.process(pair)
 	}
 }
 
@@ -174,12 +221,8 @@ func (p *Pipeline) process(pair eventPair) {
 		enricher.Enrich(se)
 	}
 
-	ctx := context.Background()
-	for _, sink := range p.sinks {
-		if err := sink.Write(ctx, se); err != nil {
-			p.stats.sinkErrors.Add(1)
-			log.Printf("streaming: write %s: %v", sink.Name(), err)
-		}
+	for _, w := range p.workers {
+		w.enqueue(se)
 	}
 	p.stats.eventsEmitted.Add(1)
 }

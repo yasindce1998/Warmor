@@ -2,10 +2,13 @@ package streaming
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -108,18 +111,26 @@ func syslogHostname(s string) string {
 
 // SyslogSink sends events to a syslog server over UDP or TCP in CEF format.
 type SyslogSink struct {
-	network  string
-	addr     string
-	facility int
-	conn     net.Conn
-	mu       sync.Mutex
+	network   string
+	addr      string
+	facility  int
+	conn      net.Conn
+	mu        sync.Mutex
+	timeout   time.Duration
+	initOnce  sync.Once
+	writeGate chan struct{}
+	lifetime  context.Context
+	cancel    context.CancelFunc
+	closed    bool
+	dropped   atomic.Uint64
 }
 
 // SyslogConfig configures the syslog SIEM sink.
 type SyslogConfig struct {
-	Network  string // "udp" or "tcp"
-	Addr     string // host:port
-	Facility int    // syslog facility (default 1 = LOG_USER)
+	Network  string        // "udp" or "tcp"
+	Addr     string        // host:port
+	Facility int           // syslog facility (default 1 = LOG_USER)
+	Timeout  time.Duration // total dial/write budget (default 5s)
 }
 
 // NewSyslogSink creates a sink that writes CEF-formatted events to syslog.
@@ -130,8 +141,11 @@ func NewSyslogSink(cfg SyslogConfig) (*SyslogSink, error) {
 	if cfg.Facility <= 0 {
 		cfg.Facility = 1 // LOG_USER
 	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 5 * time.Second
+	}
 
-	conn, err := net.DialTimeout(cfg.Network, cfg.Addr, 5*time.Second)
+	conn, err := net.DialTimeout(cfg.Network, cfg.Addr, cfg.Timeout)
 	if err != nil {
 		return nil, fmt.Errorf("syslog connect %s://%s: %w", cfg.Network, cfg.Addr, err)
 	}
@@ -141,10 +155,44 @@ func NewSyslogSink(cfg SyslogConfig) (*SyslogSink, error) {
 		addr:     cfg.Addr,
 		facility: cfg.Facility,
 		conn:     conn,
+		timeout:  cfg.Timeout,
 	}, nil
 }
 
-func (s *SyslogSink) Write(_ context.Context, event *SecurityEvent) error {
+func (s *SyslogSink) init() {
+	s.initOnce.Do(func() {
+		if s.timeout <= 0 {
+			s.timeout = 5 * time.Second
+		}
+		s.writeGate = make(chan struct{}, 1)
+		s.lifetime, s.cancel = context.WithCancel(context.Background())
+	})
+}
+
+// Write attempts each record once. Partial writes/transport errors may have
+// reached the receiver and are not retried implicitly; the next event may
+// reconnect. TCP/UDP success is not a remote delivery acknowledgement.
+func (s *SyslogSink) Write(ctx context.Context, event *SecurityEvent) (err error) {
+	s.init()
+	defer func() {
+		if err != nil {
+			s.dropped.Add(1)
+			recordLoss("syslog_write", "syslog", 1)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	stopLifetime := context.AfterFunc(s.lifetime, cancel)
+	defer stopLifetime()
+	select {
+	case s.writeGate <- struct{}{}:
+		defer func() { <-s.writeGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	cef := ToCEF(event)
 	pri := s.facility*8 + syslogSeverity(event.Decision)
 	msg := fmt.Sprintf("<%d>%s %s warmor: %s\n",
@@ -155,35 +203,79 @@ func (s *SyslogSink) Write(_ context.Context, event *SecurityEvent) error {
 	)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.conn == nil {
-		conn, err := net.DialTimeout(s.network, s.addr, 5*time.Second)
+	if s.closed {
+		s.mu.Unlock()
+		return errors.New("syslog closed")
+	}
+	conn := s.conn
+	s.mu.Unlock()
+	if conn == nil {
+		var err error
+		conn, err = (&net.Dialer{}).DialContext(ctx, s.network, s.addr)
 		if err != nil {
 			return fmt.Errorf("syslog reconnect: %w", err)
 		}
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			_ = conn.Close()
+			return errors.New("syslog closed")
+		}
 		s.conn = conn
+		s.mu.Unlock()
 	}
 
-	_, err := s.conn.Write([]byte(msg))
+	deadline, _ := ctx.Deadline()
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		s.discardConn(conn)
+		return fmt.Errorf("syslog write deadline: %w", err)
+	}
+	// Cancellation/shutdown must interrupt an already blocked TCP write.
+	canceled := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetWriteDeadline(time.Now()); close(canceled) })
+	n, err := conn.Write([]byte(msg))
+	if !stop() {
+		<-canceled // callback cannot affect the next record
+	}
+	if err == nil && n != len(msg) {
+		err = io.ErrShortWrite
+	}
 	if err != nil {
-		s.conn.Close()
-		s.conn = nil
+		s.discardConn(conn)
 		return fmt.Errorf("syslog write: %w", err)
 	}
 	return nil
 }
 
+func (s *SyslogSink) discardConn(conn net.Conn) {
+	_ = conn.Close()
+	s.mu.Lock()
+	if s.conn == conn {
+		s.conn = nil
+	}
+	s.mu.Unlock()
+}
+
 func (s *SyslogSink) Flush(_ context.Context) error { return nil }
 
 func (s *SyslogSink) Close() error {
+	s.init()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	s.cancel()
 	if s.conn != nil {
-		return s.conn.Close()
+		err := s.conn.Close() // net.Conn.Close interrupts an active write
+		s.conn = nil
+		return err
 	}
 	return nil
 }
+
+func (s *SyslogSink) Dropped() uint64 { return s.dropped.Load() }
 
 func (s *SyslogSink) Name() string {
 	return fmt.Sprintf("syslog:%s://%s", s.network, s.addr)

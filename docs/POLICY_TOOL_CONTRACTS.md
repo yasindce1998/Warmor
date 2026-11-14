@@ -92,6 +92,16 @@ still a recorded deny, not evidence that the operation was actually prevented.
 Replay never sends signals or changes the recorded outcome. Candidate decisions
 do not predict whether a live termination would succeed.
 
+Delivery uses independent bounded sink queues (see
+[streaming reliability](streaming-reliability.md)). Workers share immutable events;
+stdout/webhook redaction copies the summary rather than removing inputs from the
+private recording worker's event. Webhook retries retain that already-redacted
+copy, including the original action outcome and redaction marker. Retry failures
+and counted delivery losses do not alter historical enforcement outcomes. Queue
+drain/close preserves the same descriptor checks and 0600 recording permissions;
+queue/retry/shutdown loss accounting remains best effort, not a durable audit-log
+guarantee.
+
 ## Diff and merge
 
 Files are validated with the real compiler parser before diff/merge loads them.

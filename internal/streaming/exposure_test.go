@@ -31,6 +31,9 @@ func TestGeneralExportsRequireSensitiveInputOptIn(t *testing.T) {
 		if err := webhook.Write(context.Background(), event); err != nil {
 			t.Fatal(err)
 		}
+		if err := webhook.Close(); err != nil {
+			t.Fatal(err)
+		}
 		server.Close()
 		if strings.Contains(payload, "secret-token") != full {
 			t.Fatalf("webhook opt-in=%t: %s", full, payload)

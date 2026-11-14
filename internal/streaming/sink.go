@@ -3,9 +3,11 @@ package streaming
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,7 +20,10 @@ import (
 	"github.com/yasindce1998/warmor/internal/privatefile"
 )
 
-// Sink consumes SecurityEvents. Implementations must be safe for concurrent use.
+// Sink consumes SecurityEvents. Implementations must be safe for concurrent use,
+// treat events as immutable, honor Write/Flush cancellation and return promptly
+// from Close. A non-cancelable writer (including a CEF callback) can still block
+// its own worker/shutdown; Go cannot safely terminate arbitrary callbacks.
 type Sink interface {
 	Write(ctx context.Context, event *SecurityEvent) error
 	Flush(ctx context.Context) error
@@ -204,15 +209,18 @@ func (s *FileSink) Close() error {
 
 func (s *FileSink) Name() string { return "file:" + s.path }
 
-// WebhookSink POSTs batches of events to an HTTP endpoint. Batches that
-// fail with a retryable error are kept and re-sent on the next flush, up to
-// maxPending events; beyond that the oldest events are dropped and counted.
+// WebhookSink POSTs FIFO batches with at most one request in flight. Transient
+// failures retain the head batch subject to count, age and attempt budgets.
+// Delivery is best effort, with possible duplicates after ambiguous transport
+// errors; it is not durable or exactly-once delivery.
 type WebhookSink struct {
 	includePolicyInput bool
 	url                string
 	client             *http.Client
 	headers            map[string]string
 	batch              []*SecurityEvent
+	attempts           []int
+	queuedAt           []time.Time
 	batchSize          int
 	maxPending         int
 	flushEvery         time.Duration
@@ -220,6 +228,14 @@ type WebhookSink struct {
 	lastFlush          time.Time
 	failing            bool // last flush failed; Write waits for flushEvery before retrying
 	dropped            atomic.Uint64
+	maxAttempts        int
+	maxAge             time.Duration
+	flushGate          chan struct{}
+	lifetime           context.Context
+	cancel             context.CancelFunc
+	closed             bool
+	closeDone          chan struct{}
+	closeErr           error // published by closeDone
 }
 
 type WebhookConfig struct {
@@ -231,8 +247,13 @@ type WebhookConfig struct {
 	FlushEvery         time.Duration
 	Timeout            time.Duration
 	// MaxPending bounds how many events are retained for retry while the
-	// endpoint is failing (default 10 * BatchSize).
+	// endpoint is failing (default 10 * BatchSize), plus at most BatchSize
+	// detached events in an in-flight request.
 	MaxPending int
+	// MaxAttempts includes the first POST (default 3); MaxAge bounds retained
+	// retry age (default 5m). Expiry is checked on Write, Flush and Close.
+	MaxAttempts int
+	MaxAge      time.Duration
 }
 
 func NewWebhookSink(cfg WebhookConfig) *WebhookSink {
@@ -245,27 +266,54 @@ func NewWebhookSink(cfg WebhookConfig) *WebhookSink {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
-	if cfg.MaxPending < cfg.BatchSize {
+	if cfg.MaxPending <= 0 {
 		cfg.MaxPending = 10 * cfg.BatchSize
+	}
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = 3
+	}
+	if cfg.MaxAge <= 0 {
+		cfg.MaxAge = 5 * time.Minute
+	}
+	lifetime, cancel := context.WithCancel(context.Background())
+	// Own the pool so closing this sink cannot affect unrelated clients.
+	transport := http.DefaultTransport
+	if defaults, ok := transport.(*http.Transport); ok {
+		transport = defaults.Clone()
 	}
 	return &WebhookSink{
 		includePolicyInput: cfg.IncludePolicyInput,
 		url:                cfg.URL,
-		client:             &http.Client{Timeout: cfg.Timeout},
-		headers:            cfg.Headers,
+		client:             &http.Client{Timeout: cfg.Timeout, Transport: transport},
+		headers:            maps.Clone(cfg.Headers),
 		batchSize:          cfg.BatchSize,
 		maxPending:         cfg.MaxPending,
 		flushEvery:         cfg.FlushEvery,
 		lastFlush:          time.Now(),
+		maxAttempts:        cfg.MaxAttempts, maxAge: cfg.MaxAge,
+		flushGate: make(chan struct{}, 1), lifetime: lifetime, cancel: cancel,
+		closeDone: make(chan struct{}),
 	}
 }
 
 func (s *WebhookSink) Write(ctx context.Context, event *SecurityEvent) error {
+	if err := ctx.Err(); err != nil {
+		s.drop("webhook_canceled", 1)
+		return err
+	}
 	if !s.includePolicyInput {
 		event = event.SummaryForExport()
 	}
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		s.drop("webhook_closed", 1)
+		return errors.New("webhook closed")
+	}
+	s.expireLocked(time.Now())
 	s.batch = append(s.batch, event)
+	s.attempts = append(s.attempts, 0)
+	s.queuedAt = append(s.queuedAt, time.Now())
 	s.trimLocked()
 	// While the endpoint is failing, a full batch alone does not trigger a
 	// flush, otherwise every Write would re-POST the whole retry backlog.
@@ -279,32 +327,88 @@ func (s *WebhookSink) Write(ctx context.Context, event *SecurityEvent) error {
 }
 
 func (s *WebhookSink) Flush(ctx context.Context) error {
-	s.mu.Lock()
-	if len(s.batch) == 0 {
-		s.mu.Unlock()
-		return nil
+	return s.flush(ctx, false)
+}
+
+func (s *WebhookSink) flush(ctx context.Context, closing bool) error {
+	// One timeout covers waiting for a preceding flush AND every request in
+	// this flush, not a fresh budget for every queued batch.
+	ctx, cancel := context.WithTimeout(ctx, s.client.Timeout)
+	defer cancel()
+	if !closing {
+		stop := context.AfterFunc(s.lifetime, cancel)
+		defer stop()
 	}
-	batch := s.batch
-	s.batch = nil
-	s.lastFlush = time.Now()
-	s.mu.Unlock()
-
-	retry, err := s.post(ctx, batch)
-
+	select {
+	case s.flushGate <- struct{}{}:
+		defer func() { <-s.flushGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	s.mu.Lock()
-	s.failing = err != nil
-	if err != nil {
-		if retry {
-			// Put the failed batch back in front of anything written
-			// meanwhile so ordering is preserved on the next attempt.
-			s.batch = append(batch, s.batch...)
-			s.trimLocked()
-		} else {
-			s.dropped.Add(uint64(len(batch)))
+	remaining := len(s.batch) // concurrent writes wait until a later flush
+	s.mu.Unlock()
+	for remaining > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
+		s.mu.Lock()
+		s.expireLocked(time.Now())
+		n := min(len(s.batch), s.batchSize, remaining)
+		if n == 0 {
+			// Expiry may have removed a previously failing head. Do not
+			// suppress full-batch writes after the backlog has disappeared.
+			s.failing = false
+			s.mu.Unlock()
+			return nil
+		}
+		batch, attempts, queuedAt := s.batch[:n:n], s.attempts[:n:n], s.queuedAt[:n:n]
+		s.batch, s.attempts, s.queuedAt = s.batch[n:], s.attempts[n:], s.queuedAt[n:]
+		s.lastFlush = time.Now()
+		s.mu.Unlock()
+		for i := range attempts {
+			attempts[i]++
+		}
+		retry, err := s.post(ctx, batch)
+		s.mu.Lock()
+		s.failing = err != nil
+		if err != nil {
+			if s.closed && !closing {
+				s.drop("webhook_shutdown", uint64(n))
+			} else if retry {
+				// Restore failed events still within budget ahead of newer
+				// writes. Serialized requests cannot overtake this head.
+				var retained []*SecurityEvent
+				var tries []int
+				var ages []time.Time
+				for i, event := range batch {
+					switch {
+					case attempts[i] >= s.maxAttempts:
+						s.drop("webhook_attempts", 1)
+					case time.Since(queuedAt[i]) >= s.maxAge:
+						s.drop("webhook_expired", 1)
+					default:
+						retained = append(retained, event)
+						tries = append(tries, attempts[i])
+						ages = append(ages, queuedAt[i])
+					}
+				}
+				s.batch = append(retained, s.batch...)
+				s.attempts = append(tries, s.attempts...)
+				s.queuedAt = append(ages, s.queuedAt...)
+				s.trimLocked()
+			} else {
+				s.drop("webhook_rejected", uint64(n))
+			}
+		}
+		clear(batch) // release delivered pointers in the backing array
+		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		remaining -= n
 	}
-	s.mu.Unlock()
-	return err
+	return nil
 }
 
 // post sends one batch. retry reports whether a failure is transient
@@ -330,12 +434,16 @@ func (s *WebhookSink) post(ctx context.Context, batch []*SecurityEvent) (retry b
 	if err != nil {
 		return true, fmt.Errorf("webhook post: %w", err)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	// Bound work even if the collector streams a huge/unending response.
+	_, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	_ = resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		retry := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 		return retry, fmt.Errorf("webhook returned %d", resp.StatusCode)
+	}
+	if readErr != nil {
+		return true, fmt.Errorf("webhook response: %w", readErr)
 	}
 	return false, nil
 }
@@ -344,18 +452,70 @@ func (s *WebhookSink) post(ctx context.Context, batch []*SecurityEvent) (retry b
 // be held.
 func (s *WebhookSink) trimLocked() {
 	if over := len(s.batch) - s.maxPending; over > 0 {
-		s.dropped.Add(uint64(over))
+		s.drop("webhook_overflow", uint64(over))
 		s.batch = append([]*SecurityEvent(nil), s.batch[over:]...)
+		s.attempts = append([]int(nil), s.attempts[over:]...)
+		s.queuedAt = append([]time.Time(nil), s.queuedAt[over:]...)
 	}
 }
 
 // Dropped returns how many events were discarded, either because the retry
-// backlog exceeded MaxPending or because the endpoint rejected them with a
-// non-retryable error.
+// backlog exceeded MaxPending, retry age/attempt budgets expired, shutdown
+// abandoned retries, or the endpoint rejected them permanently.
 func (s *WebhookSink) Dropped() uint64 { return s.dropped.Load() }
 
-func (s *WebhookSink) Close() error {
-	return s.Flush(context.Background())
+func (s *WebhookSink) expireLocked(now time.Time) {
+	n := 0
+	for n < len(s.batch) && now.Sub(s.queuedAt[n]) >= s.maxAge {
+		n++
+	}
+	if n > 0 {
+		s.drop("webhook_expired", uint64(n))
+		clear(s.batch[:n])
+		s.batch, s.attempts, s.queuedAt = s.batch[n:], s.attempts[n:], s.queuedAt[n:]
+	}
+}
+
+func (s *WebhookSink) drop(reason string, n uint64) {
+	s.dropped.Add(n)
+	recordLoss(reason, "webhook", n)
+}
+
+func (s *WebhookSink) Close() error { return s.CloseContext(context.Background()) }
+
+// CloseContext cancels an active request, attempts one bounded final flush,
+// then explicitly counts/discards retained retries. Concurrent callers respect
+// their own wait context without creating another shutdown goroutine.
+func (s *WebhookSink) CloseContext(ctx context.Context) error {
+	s.mu.Lock()
+	first := !s.closed
+	if first {
+		s.closed = true
+	}
+	s.mu.Unlock()
+	if first {
+		s.cancel()
+		s.closeErr = s.flush(ctx, true)
+		// Detached requests outliving this budget see closed and count their
+		// own shutdown loss instead of requeueing after cleanup.
+		s.mu.Lock()
+		s.drop("webhook_shutdown", uint64(len(s.batch)))
+		s.batch, s.attempts, s.queuedAt = nil, nil, nil
+		s.mu.Unlock()
+		s.client.CloseIdleConnections()
+		close(s.closeDone)
+	}
+	select {
+	case <-s.closeDone:
+		return s.closeErr
+	default:
+	}
+	select {
+	case <-s.closeDone:
+		return s.closeErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *WebhookSink) Name() string { return "webhook:" + s.url }
