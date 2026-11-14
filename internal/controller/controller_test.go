@@ -24,8 +24,10 @@ type fakeAPI struct {
 	configMaps map[string]*ConfigMap    // "ns/name" -> object
 	rv         int
 
-	statusPUTs    map[string]int
-	configMapPUTs int
+	statusPUTs          map[string]int
+	configMapPUTs       int
+	configMapWriteError int
+	conflicts           int
 }
 
 func newFakeAPI() *fakeAPI {
@@ -50,6 +52,15 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(v)
 	}
+	mux.HandleFunc("/apis/warmor.io/v1alpha1/warmorpolicies", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		list := WarmorPolicyList{Metadata: ListMeta{ResourceVersion: fmt.Sprint(f.rv)}}
+		for _, cr := range f.policies {
+			list.Items = append(list.Items, *cr)
+		}
+		writeJSON(w, list)
+	})
 	mux.HandleFunc("/apis/warmor.io/v1alpha1/namespaces/", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -114,6 +125,16 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 	mux.HandleFunc("/api/v1/namespaces/", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if r.Method != http.MethodGet && (f.configMapWriteError != 0 || f.conflicts > 0) {
+			code := f.configMapWriteError
+			if f.conflicts > 0 {
+				f.conflicts--
+				code = http.StatusConflict
+			}
+			w.WriteHeader(code)
+			writeJSON(w, map[string]any{"code": code, "message": "injected publication failure"})
+			return
+		}
 		rest := strings.TrimPrefix(r.URL.Path, "/api/v1/namespaces/")
 		parts := strings.Split(rest, "/")
 		ns, resource := parts[0], parts[1]
@@ -147,6 +168,10 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 				var body ConfigMap
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Errorf("decode configmap: %v", err)
+				}
+				if body.Metadata.ResourceVersion != cm.Metadata.ResourceVersion {
+					w.WriteHeader(http.StatusConflict)
+					return
 				}
 				f.configMapPUTs++
 				body.Metadata.ResourceVersion = cm.Metadata.ResourceVersion
