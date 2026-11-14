@@ -44,8 +44,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
-      # Persistent runner disk, not a memory-backed /tmp, for OCI kernel cache.
-      XDG_CACHE_HOME: ${{ github.workspace }}/tests/integration/artifacts/cache
+      # Persistent runner disk, outside the checkout exported to the guest.
+      # Avoid nesting vimto's root overlay cache within its shared repository.
+      XDG_CACHE_HOME: ${{ runner.temp }}/warmor-outcome-cache
       KERNEL: ghcr.io/cilium/ci-kernels:stable-selftests
     steps:
       - uses: actions/checkout@v4
@@ -69,7 +70,7 @@ jobs:
           rustup target add wasm32-unknown-unknown
       - name: Validate harness oracles and syntax without enforcement
         run: |
-          bash -n tests/e2e_enforcement_test.sh tests/integration/run-outcomes.sh
+          bash -n tests/e2e_enforcement_test.sh tests/integration/run-outcomes.sh tests/integration/run-vm.sh
           go test -race -count=1 ./tests/integration
       - name: Regenerate embedded BPF from this revision
         env:

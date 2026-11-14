@@ -18,7 +18,7 @@ The termination test is asynchronous containment: it deliberately **does not cla
 
 ## Run
 
-Host requirements: Linux amd64/arm64, Go from `go.mod`, Rust with `wasm32-unknown-unknown`, QEMU, `ip` (iproute2), and statically built vimto:
+Host requirements: Linux amd64/arm64, Go from `go.mod`, Rust with `wasm32-unknown-unknown`, QEMU, GNU `timeout`, `ip` (iproute2), and statically built vimto:
 
 ```sh
 CGO_ENABLED=0 go install lmb.io/vimto@v0.4.0
@@ -43,7 +43,7 @@ The guest runs controlled executables in its private `/var/tmp` overlay, so a ch
 ### Safe local validation without a VM
 
 ```sh
-bash -n tests/e2e_enforcement_test.sh tests/integration/run-outcomes.sh
+bash -n tests/e2e_enforcement_test.sh tests/integration/run-outcomes.sh tests/integration/run-vm.sh
 go test -race -count=1 ./tests/integration
 go test -tags integration -run 'Test(VMGuard|EPERMOracle|SIGKILLOracle|TimeoutCleanupIsNotTerminationProof)$' ./tests/integration
 bash tests/integration/run-outcomes.sh --build-only
@@ -54,6 +54,8 @@ bash tests/integration/run-outcomes.sh --build-only
 ## CI, evidence and limits
 
 `.github/workflows/enforcement-outcomes.yml` is a dedicated gate, independent of the existing workflows. It regenerates BPF bindings from the tested revision with the v1 instruction baseline before building. The runner first loads/attaches the generated objects through the VM verifier and requires non-skipped exact-identity exec/connect `EPERM` tests, then executes the whole-daemon outcome suite in a fresh vimto VM. Both runs execute the exact prepared test binaries, not a later rebuild. Hashes identify the daemon, test binaries, validated WASM, all 22 embedded BPF objects, generated Go bindings, and C sources; the outcome guest verifies the manifest before enforcement. Logs, source policy YAML, build revision/toolchain information, guest kernel/LSM information, daemon process/capability status, markers, NDJSON events, metrics snapshots and hashes are retained in `tests/integration/artifacts/run.*`. Binaries and caches are not uploaded. A nonzero exit remains a failed job even when evidence is uploaded.
+
+Host-side deadlines additionally bound vimto's kernel fetch, boot, transport and shutdown: 300 seconds for the verifier VM and 360 seconds for daemon outcomes, each with a 15-second hard-kill grace. Guest test timers remain 120/180 seconds. Both stdout and stderr and phase status are retained; a host deadline requests Go stacks and records process/disk/memory diagnostics. Deadline exits are failures, never retries, skips or outcome evidence. The CI kernel cache lives on runner disk outside the checkout shared with the VM, avoiding a checkout export containing the kernel root-overlay source. Run 43607514299 reached host preparation but was cancelled at the job limit with only kernel-cache progress and no guest test output; it supplied no whole-daemon prevention/termination evidence. Its full job cleanup log confirms QEMU had started, narrowing the stall to VM boot/transport before guest tests, not image download. The precise guest-side cause was not retained; moving the cache is isolation hardening, not a proven root-cause repair.
 
 The nonroot termination gate assumes the daemon retains the ability to signal uid 65534 (normally `CAP_KILL`), alongside the capabilities needed to load/attach BPF. Root UID alone is insufficient evidence. PR #31's signaling/pidfd implementation is integrated from `origin/main`: trusted `KernelTimestampNS` must survive both sensor channels and the platform conversion, and the guest must have initial PID/time namespaces and usable procfs. The controlled file reader remains live for 100 ms after readiness before the trigger, clearing Linux's USER_HZ=100 process-start tick ambiguity without relaxing production identity checks. Its event must report an actual successful userspace enforcement attempt with no error, not kernel prevention. Capability absence, signal permission errors, identity refusals, pidfd failures, and cleanup kills remain failures, never skips or substitutes for actual SIGKILL and attributed enforcement.
 
