@@ -277,7 +277,7 @@ rollback. This is **not signed collector-to-report support**, complete sensor-lo
 coverage, or permission for automatic actions. A future integration needs a
 separately reviewed signed telemetry/cohort authorization contract.
 
-Validation caveat for this exact main snapshot: `98d2b90` itself pins
+Historical validation caveat for main snapshot `98d2b90`: that commit pins
 `manifest.SupportedCompilerVersion` to `"6"` while `compiler.Version` is `"7"`.
 `TestCanonicalContentAndCopies` fails identically from a clean archive of that
 main commit, before telemetry changes. Full-suite validation must not be reported
@@ -287,8 +287,9 @@ telemetry invalidation test now uses real receipt time plus explicit warm-up
 offsets instead of a fixed one-second future anchor; production freshness, gap,
 and invalidation checks are unchanged.
 
-Handoff validation on Go 1.26.11 (`-p 2`): affected policyserver/enforcer/daemon
-package tests pass; signed/telemetry race checks pass, including five repeated
+Handoff validation at `6ff5a5d` on Go 1.26.11 (`-p 2`): affected
+policyserver/enforcer/daemon package tests pass; signed/telemetry race checks pass,
+including five repeated
 signed fences and invalidation-poison checks; full vet/lint and Windows/Darwin
 cross-compilation pass. Full-suite attempts were not green: besides the confirmed
 main manifest pin mismatch, concurrent resource pressure triggered unrelated
@@ -297,6 +298,22 @@ were stopped rather than repeatedly testing that known baseline failure. Rerun
 one full race suite after the separately owned manifest/compiler compatibility
 fix is merged and resources are available. No native-platform runtime or full
 sensor-loss support is claimed by these checks.
+
+### Exact-kernel and compiler-compatibility refresh
+
+Merge `3e459b3` brings main `ce1d5ab` (PR #41) into `6ff5a5d`. The kernel/BPF
+objects, full scoped identity keys, 127-byte userspace/static path boundary,
+reader-interrupt-before-join shutdown, and compiler-7 manifest compatibility fix
+are unchanged from main. The reviewed compiler pin is advanced by main's
+compatibility fix, not bypassed by telemetry. This resolves the historical
+manifest-version blocker above.
+
+Signed telemetry remains unsupported/sealed with explicit pending reports;
+legacy telemetry retains its source/session/epoch fences, atomic cursor and
+contribution deduplication, quality/gap checks, and invalidation/persistence
+poison behavior unchanged from `6ff5a5d`. No collector flags, automatic actions,
+or full sensor-loss claim are added. Main's VM evidence belongs to its reviewed
+commit; local package/race validation here is not a new kernel VM execution.
 
 ## Original integration proposal and acceptance checklist
 
