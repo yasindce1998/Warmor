@@ -1,6 +1,7 @@
 package policymeta
 
 import (
+	"hash/fnv"
 	"strings"
 	"testing"
 
@@ -96,8 +97,10 @@ func TestExactKeysCapacityAndDefensiveCopies(t *testing.T) {
 	m := goodModule()
 	// Distinct full paths must remain distinct even if a hash-only backend
 	// would collide. No 32-bit fingerprint crosses this contract.
-	a := compiler.StaticRule{Event: "process", Pattern: "/bin/costarring"}
-	b := compiler.StaticRule{Event: "process", Pattern: "/bin/liquid"}
+	a := compiler.StaticRule{Event: "process", Pattern: "/bin/collision-10848"}
+	b := compiler.StaticRule{Event: "process", Pattern: "/bin/collision-125290"}
+	hash := func(s string) uint32 { h:=fnv.New32a(); _,err:=h.Write([]byte(s));if err!=nil {t.Fatal(err)};return h.Sum32() }
+	if hash(a.Pattern)!=hash(b.Pattern) {t.Fatal("fixture no longer collides in legacy FNV key")}
 	ka, err := ValidateRule(0, a)
 	if err != nil {
 		t.Fatal(err)
@@ -106,6 +109,12 @@ func TestExactKeysCapacityAndDefensiveCopies(t *testing.T) {
 	if err != nil || ka == kb {
 		t.Fatal("lost exact identity")
 	}
+	distinct:=Domain{Type:0,StaticDomain:StaticDomain{Eligible:true,Rules:[]compiler.StaticRule{a,b}}}
+	if err:=ValidateDomain(distinct,compiler.FieldBitPath);err!=nil {t.Fatal("full keys collapsed on FNV collision",err)}
+	for _,port:=range []uint16{0,65535} {
+		if _,err:=ValidateRule(api.EventTypeNetwork,compiler.StaticRule{Event:"network",Pattern:"127.0.0.1",Port:port});err!=nil {t.Fatal("finite port endpoint rejected",err)}
+	}
+	if _,err:=ValidateRule(api.EventTypeProcess,compiler.StaticRule{Event:"process",Pattern:strings.Repeat("x",MaxPatternBytes)});err!=nil {t.Fatal("path length endpoint rejected",err)}
 	m.Domains[1].Rules = append(m.Domains[1].Rules, compiler.StaticRule{Event: "network", Pattern: "2001:db8::1", Port: 444})
 	if err := m.Validate(m.ModuleSHA256); err != nil {
 		t.Fatal("distinct ports collide", err)
