@@ -22,6 +22,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/streaming"
 	"github.com/yasindce1998/warmor/internal/wasm"
+	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 const outcomeTimeout = 20 * time.Second
@@ -92,6 +93,12 @@ rules:
         - path: {eq: %q}
     action: deny
     mode: audit
+  - name: allow-fixture-file-IO
+    event: file
+    conditions:
+      all:
+        - path: {glob: "*"}
+    action: allow
 `, filepath.Join(guestFixtureDir, "allowed"), filepath.Join(guestFixtureDir, "rule-audit"))
 	filePolicy := fmt.Sprintf(`name: outcome-file
 version: 1
@@ -126,10 +133,52 @@ rules:
 			rt.Close(context.Background())
 			t.Fatal(err)
 		}
+		validatePreparedPolicy(t, name, rt)
 		rt.Close(context.Background())
 		t.Logf("compiled and runtime-validated %s.wasm", name)
 	}
 	mustWrite(t, filepath.Join(dir, "watched-file"), []byte("readable without daemon\n"), 0644)
+}
+
+func validatePreparedPolicy(t *testing.T, name string, rt *wasm.Runtime) {
+	t.Helper()
+	ctx := context.Background()
+	pool, err := wasm.NewPool(ctx, rt, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evaluator := wasm.NewPolicyEvaluator(pool, "outcome-prepare")
+	defer evaluator.Close(ctx)
+	check := func(kind api.EventType, path string, uid uint32, action api.Action, audit bool) {
+		t.Helper()
+		event := &api.Event{Type: kind, UID: uid, PID: 123, Filename: path}
+		if kind == api.EventTypeFile {
+			event.File = &api.FileEvent{Path: path}
+		} else {
+			event.Process = &api.ProcessEvent{Filename: path}
+		}
+		result, err := evaluator.Evaluate(ctx, event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Action != action || result.Audit != audit {
+			t.Fatalf("prepared %s policy: path=%s uid=%d got action=%s audit=%v; want action=%s audit=%v",
+				name, path, uid, result.Action, result.Audit, action, audit)
+		}
+	}
+	if name == "static" {
+		if domain := evaluator.StaticRulesProcess(); !domain.Eligible || len(domain.Rules) != 2 {
+			t.Fatalf("prepared static policy must expose eligible exec domain with 2 entries: %+v", domain)
+		}
+		check(api.EventTypeProcess, filepath.Join(guestFixtureDir, "allowed"), 65534, api.ActionAllow, false)
+		check(api.EventTypeProcess, filepath.Join(guestFixtureDir, "first-denied"), 65534, api.ActionDeny, false)
+		check(api.EventTypeProcess, filepath.Join(guestFixtureDir, "rule-audit"), 65534, api.ActionDeny, true)
+		check(api.EventTypeFile, filepath.Join(guestFixtureDir, "markers", "allowed"), 65534, api.ActionAllow, false)
+	} else {
+		check(api.EventTypeFile, filepath.Join(guestFixtureDir, "watched-file"), 65534, api.ActionDeny, false)
+		check(api.EventTypeFile, filepath.Join(guestFixtureDir, "watched-file"), 0, api.ActionAllow, false)
+		check(api.EventTypeProcess, filepath.Join(guestFixtureDir, "file-victim"), 65534, api.ActionAllow, false)
+	}
 }
 
 func requireOutcomeVM(t *testing.T) {
@@ -163,7 +212,11 @@ func requireOutcomeVM(t *testing.T) {
 	if err != nil || !strings.Contains(","+strings.TrimSpace(string(lsm))+",", ",bpf,") {
 		t.Fatalf("BPF LSM is required, not a skip or observe fallback: lsm=%q err=%v", lsm, err)
 	}
-	mustWrite(t, filepath.Join(artifactDir(t), "guest-info.txt"), []byte(fmt.Sprintf("init=%s\nlsm=%s\n", initExe, lsm)), 0644)
+	kernel, err := os.ReadFile("/proc/version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(artifactDir(t), "guest-info.txt"), []byte(fmt.Sprintf("init=%s\nlsm=%s\nkernel=%s", initExe, lsm, kernel)), 0644)
 }
 
 type outcomeFixture struct {
@@ -259,6 +312,63 @@ func (f *outcomeFixture) runAllowed(t *testing.T, binary, marker string, delay t
 	return pid
 }
 
+func (f *outcomeFixture) runAudited(t *testing.T, d *daemonProcess, binary, marker string) {
+	t.Helper()
+	cmd := f.helper(t, binary, marker, "", 0)
+	cmd.Env = append(cmd.Env, "WARMOR_OUTCOME_HOLD=1")
+	input, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	output, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("audit-only executable was refused: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	waitReady(t, output)
+	f.checkMarker(t, marker, true)
+	// Keep the child alive through actual policy evaluation (and event
+	// delivery), rather than allowing a fast exit to outrun a mistaken kill.
+	d.requireEvent(t, func(e streaming.SecurityEvent) bool {
+		return e.PID == uint32(cmd.Process.Pid) && e.UID == 65534 && e.Decision == "deny" && e.AuditOnly && !e.Enforced
+	})
+	if _, err := input.Write([]byte{'x'}); err != nil {
+		t.Fatalf("audit-only child did not survive evaluation: %v", err)
+	}
+	_ = input.Close()
+	if err := waitCommand(cmd, outcomeTimeout); err != nil {
+		t.Fatalf("audit-only child must exit normally after policy evaluation, got %v stderr=%s", err, &stderr)
+	}
+}
+
+func waitReady(t *testing.T, output io.Reader) {
+	t.Helper()
+	ready := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(output).ReadString('\n')
+		ready <- line
+	}()
+	select {
+	case line := <-ready:
+		if line != "READY uid=65534\n" {
+			t.Fatalf("child never reached live nonroot readiness: %q", line)
+		}
+	case <-time.After(outcomeTimeout):
+		t.Fatal("nonroot child readiness timed out; harness cleanup is not outcome proof")
+	}
+}
+
 func waitCommand(cmd *exec.Cmd, timeout time.Duration) error {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -270,6 +380,17 @@ func waitCommand(cmd *exec.Cmd, timeout time.Duration) error {
 		<-done
 		// Never return the cleanup SIGKILL as the daemon's termination proof.
 		return fmt.Errorf("timed out after %s (harness killed the child for cleanup)", timeout)
+	}
+}
+
+func TestTimeoutCleanupIsNotTerminationProof(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "while :; do :; done")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	err := waitCommand(cmd, 10*time.Millisecond)
+	if err == nil || wasSIGKILL(err) || !strings.Contains(err.Error(), "harness killed") {
+		t.Fatalf("cleanup must report a timeout, never a daemon SIGKILL outcome: %v", err)
 	}
 }
 
@@ -389,8 +510,38 @@ func (f *outcomeFixture) requireFirstDenied(t *testing.T, binary, marker string)
 	f.checkMarker(t, marker, false)
 }
 
+func (d *daemonProcess) rejectReload(t *testing.T, active string) {
+	t.Helper()
+	// Current API can reject an invalid candidate before activation. This
+	// does NOT claim map-write fault injection or atomic activation coverage.
+	mustWrite(t, active, []byte("invalid WASM candidate"), 0644)
+	if err := d.cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "daemon to acknowledge rejected reload", func() bool {
+		data, _ := os.ReadFile(d.log)
+		return strings.Contains(string(data), "Failed to reload policy")
+	})
+}
+
+func (f *outcomeFixture) activePolicy(t *testing.T, name, source string) string {
+	t.Helper()
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := filepath.Join(f.dir, name+".wasm")
+	mustWrite(t, active, data, 0644)
+	return active
+}
+
 func TestDaemonOutcomes(t *testing.T) {
 	requireOutcomeVM(t) // Must precede any daemon start or BPF operation.
+	t.Cleanup(func() {
+		if !t.Failed() {
+			mustWrite(t, filepath.Join(artifactDir(t), "outcome-success.txt"), []byte("whole-daemon outcomes passed in vimto\n"), 0644)
+		}
+	})
 	f := newFixture(t)
 	staticPolicy := filepath.Join(f.dir, "static.wasm")
 	filePolicy := filepath.Join(f.dir, "file.wasm")
@@ -411,12 +562,7 @@ func TestDaemonOutcomes(t *testing.T) {
 		t.Fatal("baseline failed; outcome probes would be ambiguous")
 	}
 	t.Run("allow-first-deny-and-rejected-reload-LKG", func(t *testing.T) {
-		active := filepath.Join(f.dir, "active.wasm")
-		data, err := os.ReadFile(staticPolicy)
-		if err != nil {
-			t.Fatal(err)
-		}
-		mustWrite(t, active, data, 0644)
+		active := f.activePolicy(t, "active", staticPolicy)
 		d := f.startDaemon(t, "default-deny", active, "--default-deny")
 		waitFor(t, "exec allowlist active", func() bool {
 			return strings.Contains(d.scrape(), "warmor_kernel_default_deny_active{event_type=\"exec\"} 1")
@@ -424,34 +570,23 @@ func TestDaemonOutcomes(t *testing.T) {
 		f.runAllowed(t, "allowed", "allowed-before-reload", 100*time.Millisecond)
 		f.requireFirstDenied(t, "first-denied", "denied-first")
 		// Per-rule audit is tested while global/kernel enforcement is active.
-		pid := f.runAllowed(t, "rule-audit", "rule-audit", time.Second)
-		d.requireEvent(t, func(e streaming.SecurityEvent) bool {
-			return e.PID == uint32(pid) && e.UID == 65534 && e.Decision == "deny" && e.AuditOnly && !e.Enforced
-		})
-		// Current API can reject an invalid candidate before activation. This
-		// does NOT claim map-write fault injection or atomic activation coverage.
-		mustWrite(t, active, []byte("invalid WASM candidate"), 0644)
-		if err := d.cmd.Process.Signal(syscall.SIGHUP); err != nil {
-			t.Fatal(err)
-		}
-		waitFor(t, "daemon to acknowledge rejected reload", func() bool {
-			data, _ := os.ReadFile(d.log)
-			return strings.Contains(string(data), "Failed to reload policy")
-		})
+		f.runAudited(t, d, "rule-audit", "rule-audit")
+		d.rejectReload(t, active)
 		f.runAllowed(t, "allowed", "allowed-after-reload", 100*time.Millisecond)
 		f.requireFirstDenied(t, "reload-denied", "denied-after-reload")
 		mustWrite(t, filepath.Join(f.dir, "default-deny.metrics"), []byte(d.scrape()), 0644)
 	})
 	t.Run("global-audit-never-blocks-or-kills", func(t *testing.T) {
 		d := f.startDaemon(t, "global-audit", staticPolicy, "--default-deny", "--audit")
-		pid := f.runAllowed(t, "global-audit", "global-audit", time.Second)
-		d.requireEvent(t, func(e streaming.SecurityEvent) bool {
-			return e.PID == uint32(pid) && e.UID == 65534 && e.Decision == "deny" && e.AuditOnly && !e.Enforced
-		})
+		f.runAudited(t, d, "global-audit", "global-audit")
 		mustWrite(t, filepath.Join(f.dir, "audit.metrics"), []byte(d.scrape()), 0644)
 	})
 	t.Run("nonroot-process-actually-terminated", func(t *testing.T) {
-		d := f.startDaemon(t, "termination", filePolicy)
+		active := f.activePolicy(t, "active-file", filePolicy)
+		d := f.startDaemon(t, "termination", active)
+		// A previously unseen file event must still be evaluated by LKG,
+		// not merely hit a kernel decision cached before the rejected reload.
+		d.rejectReload(t, active)
 		// A live nonroot child starts normally, signals readiness, and waits.
 		// Only then does the parent release its denied file-open operation.
 		// This cannot pass due to a refused exec or an already-dead child.
@@ -469,23 +604,14 @@ func TestDaemonOutcomes(t *testing.T) {
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("victim did not start: %v", err)
 		}
-		ready := make(chan string, 1)
-		go func() {
-			line, _ := bufio.NewReader(output).ReadString('\n')
-			ready <- line
-		}()
-		select {
-		case line := <-ready:
-			if line != "READY uid=65534\n" {
-				_ = input.Close()
-				_ = waitCommand(cmd, time.Second)
-				t.Fatalf("victim never reached nonroot readiness: %q stderr=%s", line, &stderr)
+		t.Cleanup(func() {
+			_ = input.Close()
+			if cmd.ProcessState == nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
 			}
-		case <-time.After(outcomeTimeout):
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			t.Fatal("victim readiness timed out; harness cleanup is not termination proof")
-		}
+		})
+		waitReady(t, output)
 		if _, err := input.Write([]byte{'x'}); err != nil {
 			_ = input.Close()
 			_ = waitCommand(cmd, time.Second)

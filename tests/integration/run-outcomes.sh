@@ -10,6 +10,8 @@ usage() {
   echo 'Optional: VIMTO=/path/to/vimto KERNEL=/absolute/vmlinuz-or-OCI-reference'
 }
 BUILD_ONLY=false
+# When Go invokes the suite through -exec, vimto sees a Go test binary, not
+# this script. Both artifact binaries and repository paths stay on shared disk.
 case "${1:-}" in
   --build-only) BUILD_ONLY=true ;;
   --help|-h) usage; exit 0 ;;
@@ -61,3 +63,6 @@ fi
 WARMOR_OUTCOME_VM=1 "$VIMTO" -kernel "$KERNEL" -- \
   go test -v -count=1 -tags integration -timeout 180s \
   -run '^TestDaemonOutcomes$' ./tests/integration | tee "$ARTIFACTS/outcomes.log"
+# A skipped/mis-selected suite must not turn a successful go-test exit into
+# enforcement proof. The guest writes this only after every outcome/cleanup.
+grep -qx 'whole-daemon outcomes passed in vimto' "$ARTIFACTS/outcome-success.txt"

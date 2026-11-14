@@ -45,6 +45,13 @@ func runHelper() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 93
 	}
+	if os.Getenv("WARMOR_OUTCOME_HOLD") == "1" {
+		fmt.Println("READY uid=65534")
+		var release [1]byte
+		if n, err := os.Stdin.Read(release[:]); err != nil || n != 1 {
+			return 95
+		}
+	}
 	delay, err := time.ParseDuration(os.Getenv("WARMOR_OUTCOME_DELAY"))
 	if err != nil {
 		return 94
