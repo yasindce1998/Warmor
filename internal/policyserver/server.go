@@ -69,6 +69,8 @@ type ServerConfig struct {
 	// DriftThreshold is the z-score threshold for fleet drift anomalies
 	// computed from fingerprints in agent heartbeats (0 = library default).
 	DriftThreshold float64
+	// Store injects an already-opened store; the caller owns its lifecycle.
+	Store *Store
 }
 
 // NewServer creates a policy management server.
@@ -80,7 +82,10 @@ func NewServer(cfg ServerConfig) *Server {
 		cfg.StaleThreshold = 90 * time.Second
 	}
 
-	store := NewStore()
+	store := cfg.Store
+	if store == nil {
+		store = NewStore()
+	}
 	if cfg.VerifyKey != nil {
 		store.SetVerifyKey(cfg.VerifyKey)
 	}
@@ -89,7 +94,7 @@ func NewServer(cfg ServerConfig) *Server {
 		rollouts:   NewRolloutManager(store),
 		addr:       cfg.Addr,
 		staleCheck: cfg.StaleThreshold,
-		containers: newContainerStore(),
+		containers: newContainerStore(store),
 		drift:      drift.NewDetector(drift.DetectorConfig{Threshold: cfg.DriftThreshold}),
 		tlsConfig:  cfg.TLSConfig,
 		jwtSecret:  cfg.JWTSecret,

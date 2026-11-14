@@ -5,15 +5,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"sync"
+	"slices"
 	"time"
 )
 
 // RolloutManager handles gradual policy rollouts and A/B testing.
 type RolloutManager struct {
-	mu       sync.RWMutex
-	rollouts map[string]*RolloutState
-	store    *Store
+	store *Store
 }
 
 // RolloutState tracks a live rollout's progress.
@@ -40,21 +38,24 @@ var ErrRolloutNotActive = errors.New("rollout is not active")
 // NewRolloutManager creates a rollout manager backed by the given store.
 func NewRolloutManager(store *Store) *RolloutManager {
 	return &RolloutManager{
-		rollouts: make(map[string]*RolloutState),
-		store:    store,
+		store: store,
 	}
 }
 
 // CreateRollout starts a new gradual rollout.
 func (rm *RolloutManager) CreateRollout(cfg RolloutConfig) (*RolloutState, error) {
-	rm.mu.Lock()
-	defer rm.mu.Unlock()
+	s := rm.store
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !validStateID(cfg.ID) {
+		return nil, fmt.Errorf("valid rollout id required")
+	}
 
-	if _, exists := rm.rollouts[cfg.ID]; exists {
+	if _, exists := s.rollouts[cfg.ID]; exists {
 		return nil, fmt.Errorf("rollout %s already exists", cfg.ID)
 	}
 
-	policy, ok := rm.store.GetPolicy(cfg.PolicyID)
+	policy, ok := s.policies[cfg.PolicyID]
 	if !ok {
 		return nil, fmt.Errorf("policy %s not found", cfg.PolicyID)
 	}
@@ -63,7 +64,7 @@ func (rm *RolloutManager) CreateRollout(cfg RolloutConfig) (*RolloutState, error
 		return nil, fmt.Errorf("percentage must be 0-100, got %d", cfg.Percentage)
 	}
 
-	for _, r := range rm.rollouts {
+	for _, r := range s.rollouts {
 		if r.PolicyID == cfg.PolicyID && r.Status == "active" {
 			return nil, fmt.Errorf("policy %s already has active rollout %s", cfg.PolicyID, r.ID)
 		}
@@ -73,7 +74,7 @@ func (rm *RolloutManager) CreateRollout(cfg RolloutConfig) (*RolloutState, error
 	if target == 0 {
 		target = policy.Version
 	}
-	if !rm.store.HasVersion(cfg.PolicyID, target) {
+	if s.versions[cfg.PolicyID][target] == nil {
 		return nil, fmt.Errorf("policy %s has no version %d", cfg.PolicyID, target)
 	}
 
@@ -82,7 +83,12 @@ func (rm *RolloutManager) CreateRollout(cfg RolloutConfig) (*RolloutState, error
 	// it replaced.
 	base := policy.ActiveVersion
 	if base == target {
-		base = rm.store.previousVersion(cfg.PolicyID, target)
+		base = 0
+		for v := range s.versions[cfg.PolicyID] {
+			if v < target && v > base {
+				base = v
+			}
+		}
 	}
 	if base == 0 {
 		return nil, fmt.Errorf("policy %s has no version to roll out from", cfg.PolicyID)
@@ -100,19 +106,21 @@ func (rm *RolloutManager) CreateRollout(cfg RolloutConfig) (*RolloutState, error
 		BaseVersion: base,
 	}
 
-	rm.rollouts[cfg.ID] = state
-	cp := *state
-	return &cp, nil
+	if err := s.mutateLocked("rollout.create", cfg.ID, func() error { s.rollouts[cfg.ID] = state; return nil }); err != nil {
+		return nil, err
+	}
+	return cloneRollout(state), nil
 }
 
 // UpdatePercentage changes the rollout percentage (for gradual ramp-up).
 // Reaching 100% completes the rollout and promotes the target version to the
 // policy's active version.
 func (rm *RolloutManager) UpdatePercentage(rolloutID string, pct int) error {
-	rm.mu.Lock()
-	defer rm.mu.Unlock()
+	s := rm.store
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	state, ok := rm.rollouts[rolloutID]
+	state, ok := s.rollouts[rolloutID]
 	if !ok {
 		return fmt.Errorf("rollout %s not found", rolloutID)
 	}
@@ -123,16 +131,20 @@ func (rm *RolloutManager) UpdatePercentage(rolloutID string, pct int) error {
 		return fmt.Errorf("percentage must be 0-100")
 	}
 
-	if pct == 100 {
-		if err := rm.store.SetActiveVersion(state.PolicyID, state.TargetVersion); err != nil {
-			return fmt.Errorf("promote target version: %w", err)
+	return s.mutateLocked("rollout.percentage", rolloutID, func() error {
+		state = cloneRollout(state)
+		if pct == 100 {
+			p := clonePolicy(s.policies[state.PolicyID])
+			p.ActiveVersion, p.UpdatedAt = state.TargetVersion, time.Now()
+			s.policies[p.ID] = p
+			now := time.Now()
+			state.CompletedAt = &now
+			state.Status = "completed"
 		}
-		now := time.Now()
-		state.CompletedAt = &now
-		state.Status = "completed"
-	}
-	state.Percentage = pct
-	return nil
+		state.Percentage = pct
+		s.rollouts[rolloutID] = state
+		return nil
+	})
 }
 
 // CompleteRollout marks a rollout as fully rolled out.
@@ -142,47 +154,51 @@ func (rm *RolloutManager) CompleteRollout(rolloutID string) error {
 
 // AbortRollout cancels a rollout and reverts all agents to the base version.
 func (rm *RolloutManager) AbortRollout(rolloutID string) error {
-	rm.mu.Lock()
-	defer rm.mu.Unlock()
+	s := rm.store
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	state, ok := rm.rollouts[rolloutID]
+	state, ok := s.rollouts[rolloutID]
 	if !ok {
 		return fmt.Errorf("rollout %s not found", rolloutID)
 	}
 	if state.Status != "active" {
 		return fmt.Errorf("rollout %s is %s: %w", rolloutID, state.Status, ErrRolloutNotActive)
 	}
-	// Pin the policy back to the base version. This only fails if the policy
-	// was deleted, in which case there is nothing left to serve anyway.
-	_ = rm.store.SetActiveVersion(state.PolicyID, state.BaseVersion)
-	now := time.Now()
-	state.CompletedAt = &now
-	state.Status = "aborted"
-	return nil
+	return s.mutateLocked("rollout.abort", rolloutID, func() error {
+		state = cloneRollout(state)
+		p := clonePolicy(s.policies[state.PolicyID])
+		p.ActiveVersion, p.UpdatedAt = state.BaseVersion, time.Now()
+		s.policies[p.ID] = p
+		now := time.Now()
+		state.CompletedAt = &now
+		state.Status = "aborted"
+		s.rollouts[rolloutID] = state
+		return nil
+	})
 }
 
 // GetRollout returns rollout state.
 func (rm *RolloutManager) GetRollout(id string) (*RolloutState, bool) {
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
-	r, ok := rm.rollouts[id]
+	rm.store.mu.RLock()
+	defer rm.store.mu.RUnlock()
+	r, ok := rm.store.rollouts[id]
 	if !ok {
 		return nil, false
 	}
-	cp := *r
-	return &cp, true
+	return cloneRollout(r), true
 }
 
 // ListRollouts returns all rollouts.
 func (rm *RolloutManager) ListRollouts() []*RolloutState {
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
+	rm.store.mu.RLock()
+	defer rm.store.mu.RUnlock()
 
-	result := make([]*RolloutState, 0, len(rm.rollouts))
-	for _, r := range rm.rollouts {
-		cp := *r
-		result = append(result, &cp)
+	result := make([]*RolloutState, 0, len(rm.store.rollouts))
+	for _, r := range rm.store.rollouts {
+		result = append(result, cloneRollout(r))
 	}
+	slices.SortFunc(result, func(a, b *RolloutState) int { return stringsCompare(a.ID, b.ID) })
 	return result
 }
 
@@ -190,9 +206,9 @@ func (rm *RolloutManager) ListRollouts() []*RolloutState {
 // policy version based on the rollout percentage. Uses consistent hashing
 // so the same agent always gets the same decision for a given rollout.
 func (rm *RolloutManager) ShouldUseNewVersion(rolloutID, agentID string) bool {
-	rm.mu.RLock()
-	state, ok := rm.rollouts[rolloutID]
-	rm.mu.RUnlock()
+	rm.store.mu.RLock()
+	defer rm.store.mu.RUnlock()
+	state, ok := rm.store.rollouts[rolloutID]
 
 	if !ok || state.Status != "active" {
 		return false
@@ -213,18 +229,17 @@ func (rm *RolloutManager) ShouldUseNewVersion(rolloutID, agentID string) bool {
 // taking active rollouts into account: during a rollout the canary cohort
 // receives the target version and everyone else the base version.
 func (rm *RolloutManager) ResolvePolicy(agentID string, labels map[string]string) *PolicyAssignment {
-	// Hold the rollout lock across the store reads so an abort or completion
-	// (which update the store under this lock) is observed atomically.
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
+	// One store lock observes policies and rollouts in a single transaction.
+	rm.store.mu.RLock()
+	defer rm.store.mu.RUnlock()
 
-	basePolicy := rm.store.MatchPolicy(labels)
+	basePolicy := rm.store.matchPolicyLocked(labels)
 	if basePolicy == nil {
 		return nil
 	}
 
 	version := basePolicy.ActiveVersion
-	for _, state := range rm.rollouts {
+	for _, state := range rm.store.rollouts {
 		if state.Status != "active" {
 			continue
 		}
@@ -239,11 +254,20 @@ func (rm *RolloutManager) ResolvePolicy(agentID string, labels map[string]string
 		break
 	}
 
-	assignment, ok := rm.store.assignment(basePolicy.ID, version)
+	assignment, ok := rm.store.assignmentLocked(basePolicy.ID, version)
 	if !ok {
 		return nil
 	}
 	return assignment
+}
+
+func cloneRollout(r *RolloutState) *RolloutState {
+	cp := *r
+	if r.CompletedAt != nil {
+		t := *r.CompletedAt
+		cp.CompletedAt = &t
+	}
+	return &cp
 }
 
 // consistentBucket returns a stable 0-99 bucket for a (rollout, agent) pair.
