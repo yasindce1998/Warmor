@@ -2,130 +2,376 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
-      - "release-*"
-    tags: ["v*"]
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/binaries.yml'
+      - 'deploy/Dockerfile'
+      - '.dockerignore'
+      - 'scripts/release-*'
+      - 'tests/release/**'
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  docker:
-    runs-on: ubuntu-latest
+  metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      repository: ${{ steps.meta.outputs.repository }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate version and exact commit
+        id: meta
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+            test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
+            git branch -r --contains "$GITHUB_SHA" | grep -Eq 'origin/(main|release-[^ ]+)$'
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-ci.${GITHUB_SHA}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "repository=${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.10'
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: '1.100.0'
+          targets: wasm32-unknown-unknown
+      - name: Release regression tests and dependency integrity
+        run: |
+          python3 -m unittest discover -s tests/release -v
+          go mod download
+          go mod verify
+      - name: Build Rust policies
+        run: bash scripts/build-rust-policies.sh
+      - name: Race tests including required Rust/WASM contracts
+        env:
+          WARMOR_REQUIRE_CARGO: '1'
+          WARMOR_REQUIRE_POLICY_CRATES: '1'
+        run: go test -mod=readonly -race -count=1 ./...
+      - name: Go vulnerability gate (reachable vulnerabilities)
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: Install pinned scanner
+        run: bash scripts/release-install-trivy.sh
+      - name: Rust lockfile vulnerability gate
+        # The build above resolves Cargo.lock for the example crates. These
+        # source examples are not compiled payloads in the release archives.
+        run: |
+          trivy fs --scanners vuln --pkg-types library --severity HIGH,CRITICAL \
+            --ignore-unfixed --exit-code 1 --timeout 10m policies/
+
+  binaries:
+    needs: metadata
+    uses: ./.github/workflows/binaries.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+
+  chart:
+    needs: metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
+        with:
+          version: v3.22.1
+      - name: Package and test exact versioned chart
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          IMAGE_REPOSITORY: ghcr.io/${{ needs.metadata.outputs.repository }}
+        run: bash scripts/release-chart.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chart
+          path: dist/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  images:
+    needs: metadata
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        target: [daemon, controller]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Native image metadata
+        id: meta
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) exit 1 ;; esac
+          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+          echo "tag=warmor-${TARGET}:${VERSION}-${arch}" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.39.0
+          driver-opts: image=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
+      - name: Build once without registry writes
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/${{ steps.meta.outputs.arch }}
+          load: true
+          push: false
+          provenance: false
+          tags: ${{ steps.meta.outputs.tag }}
+          build-args: VERSION=${{ needs.metadata.outputs.version }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.metadata.outputs.version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+      - name: Smoke-test actual image and baked policy
+        env:
+          IMAGE: ${{ steps.meta.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          docker run --rm "$IMAGE" --version 2>&1 | grep -F -- "$VERSION"
+          if [[ "$TARGET" == daemon ]]; then
+            docker run --rm "$IMAGE" --validate-policy /etc/warmor/policy.wasm
+          else
+            docker run --rm --entrypoint cargo "$IMAGE" --version
+            docker run --rm --entrypoint rustup "$IMAGE" target list --installed | grep -Fx wasm32-unknown-unknown
+          fi
+      - name: Install pinned scanner
+        run: bash scripts/release-install-trivy.sh
+      - name: Gate fixable high/critical vulnerabilities and retain exact image
+        env:
+          IMAGE: ${{ steps.meta.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ steps.meta.outputs.arch }}
+        run: |
+          trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --timeout 10m "$IMAGE"
+          mkdir -p dist
+          trivy image --format spdx-json --output "dist/${TARGET}-${ARCH}.spdx.json" --timeout 10m "$IMAGE"
+          docker image inspect "$IMAGE" --format '{{.Id}}' > "dist/${TARGET}-${ARCH}.image-id"
+          docker save "$IMAGE" -o "dist/${TARGET}-${ARCH}.tar"
+          (cd dist && sha256sum ./* > IMAGE_SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-${{ matrix.target }}-${{ steps.meta.outputs.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # No registry/release writes until every exact-commit gate passes. PRs stop here.
+  publish-images:
+    needs: [metadata, tests, binaries, chart, images]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
-
+    strategy:
+      matrix:
+        target: [daemon, controller]
+        arch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Lowercase image name
-        run: echo "IMAGE_NAME_LC=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
-        env:
-          IMAGE_NAME: ${{ github.repository }}
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          registry: ${{ env.REGISTRY }}
+          name: image-${{ matrix.target }}-${{ matrix.arch }}
+          path: image
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # The WarmorPolicy controller image: same Dockerfile, controller
-      # target (Rust toolchain + baked default policy). The chart's
-      # controller.image default references this tag set.
-      - name: Extract controller metadata
-        id: meta-controller
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}-controller
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=
-
-      - name: Build and push controller
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/Dockerfile
-          target: controller
-          push: true
-          tags: ${{ steps.meta-controller.outputs.tags }}
-          labels: ${{ steps.meta-controller.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.meta-controller.outputs.version }}
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  helm:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: azure/setup-helm@v4
-
-      - name: Lowercase repo name
-        run: echo "REPO_LC=${REPO,,}" >> "$GITHUB_ENV"
+      - name: Push tested image without rebuilding
         env:
-          REPO: ${{ github.repository }}
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          REPOSITORY: ${{ needs.metadata.outputs.repository }}
+        run: |
+          (cd image && sha256sum -c IMAGE_SHA256SUMS)
+          docker load -i "image/${TARGET}-${ARCH}.tar"
+          source="warmor-${TARGET}:${VERSION}-${ARCH}"
+          test "$(docker image inspect "$source" --format '{{.Id}}')" = "$(cat "image/${TARGET}-${ARCH}.image-id")"
+          suffix=""
+          if [[ "$TARGET" == controller ]]; then suffix=-controller; fi
+          image="ghcr.io/${REPOSITORY}${suffix}:build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          docker tag "$source" "$image"
+          docker push "$image"
 
-      - name: Login to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
-
-      - name: Package Helm chart
-        run: helm package deploy/helm/warmor/ --destination /tmp/helm-pkg
-
-      - name: Push chart to GHCR
-        run: helm push /tmp/helm-pkg/warmor-*.tgz oci://${{ env.REGISTRY }}/${{ env.REPO_LC }}/charts
-
-  release:
-    needs: [docker, helm]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+  publish:
+    needs: [metadata, tests, binaries, chart, images, publish-images]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: write
-
+      packages: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: binaries-*
+          merge-multiple: true
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: chart
+          path: release
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.39.0
+          driver-opts: image=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
+        with:
+          version: v3.22.1
+      - name: Reject existing release/image/chart versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          REPOSITORY: ${{ needs.metadata.outputs.repository }}
+        run: |
+          status=$(gh api -i "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" 2>&1 || true)
+          grep -q 'HTTP/[^ ]* 404' <<< "$status"
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for image in "ghcr.io/$REPOSITORY" "ghcr.io/$REPOSITORY-controller"; do
+            if docker buildx imagetools inspect "$image:$VERSION" > /dev/null 2> inspect-error; then
+              echo "::error::Refusing to overwrite $image:$VERSION"; exit 1
+            fi
+            grep -Eqi 'not found|manifest unknown' inspect-error
+          done
+          if helm show chart "oci://ghcr.io/$REPOSITORY/charts/warmor" --version "$VERSION" > /dev/null 2> inspect-error; then
+            echo '::error::Refusing to overwrite chart'; exit 1
+          fi
+          grep -Eqi 'not found|manifest unknown' inspect-error
+      - name: Promote tested architectures and record immutable digests
+        id: promote
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          REPOSITORY: ${{ needs.metadata.outputs.repository }}
+        run: |
+          for target in daemon controller; do
+            suffix=""
+            if [[ "$target" == controller ]]; then suffix=-controller; fi
+            image="ghcr.io/${REPOSITORY}${suffix}"
+            docker buildx imagetools create -t "$image:$VERSION" \
+              "$image:build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-amd64" \
+              "$image:build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-arm64"
+            digest=$(docker buildx imagetools inspect "$image:$VERSION" --format '{{.Manifest.Digest}}')
+            echo "$target=$digest" >> "$GITHUB_OUTPUT"
+            echo "$image@$digest" >> release/IMAGES.txt
+          done
+      - name: Attest daemon image
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ghcr.io/${{ needs.metadata.outputs.repository }}
+          subject-digest: ${{ steps.promote.outputs.daemon }}
+          push-to-registry: true
+      - name: Attest controller image
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ghcr.io/${{ needs.metadata.outputs.repository }}-controller
+          subject-digest: ${{ steps.promote.outputs.controller }}
+          push-to-registry: true
+      - name: Verify image provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          while read -r image; do
+            gh attestation verify "oci://$image" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF" --deny-self-hosted-runners
+          done < release/IMAGES.txt
+      - name: Install pinned scanner
+        run: bash scripts/release-install-trivy.sh
+      - name: SBOMs for exact archives and published images
+        run: |
+          python3 scripts/release-extract.py release payloads
+          trivy rootfs --format spdx-json --output release/binaries.spdx.json --timeout 10m payloads/
+          while read -r image; do
+            name=daemon
+            if [[ "$image" == *-controller@* ]]; then name=controller; fi
+            trivy image --format spdx-json --output "release/${name}.spdx.json" --timeout 10m "$image"
+          done < release/IMAGES.txt
+          cp docs/RELEASE_SUPPORT.md release/
+          (cd release && sha256sum ./* > SHA256SUMS)
+      - name: Sign archives, SBOMs, chart and checksum manifest
+        id: provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release/*
+      - name: Attest binary archive SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            release/*.tar.gz
+            release/*.zip
+          sbom-path: release/binaries.spdx.json
+      - name: Verify signatures/checksums before publishing chart/downloads
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          (cd release && sha256sum -c SHA256SUMS)
+          for artifact in release/*; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" --bundle "$BUNDLE" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF" --deny-self-hosted-runners
+          done
+          cp "$BUNDLE" release/provenance.sigstore.json
+      - name: Publish checked chart and release assets (no deployment)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          REPOSITORY: ${{ needs.metadata.outputs.repository }}
+        run: |
+          helm push "release/warmor-${VERSION}.tgz" "oci://ghcr.io/$REPOSITORY/charts"
+          args=(--verify-tag --title "$GITHUB_REF_NAME" --generate-notes --notes-file docs/RELEASE_SUPPORT.md)
+          if [[ "$VERSION" == *-* ]]; then args+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" release/* "${args[@]}"

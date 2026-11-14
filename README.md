@@ -95,7 +95,7 @@ The daemon prints a `Security posture:` line at startup that tells you whether L
 |----------|-----------|------|
 | **Linux** | eBPF tracepoints + LSM-BPF (7 hooks) | Most mature. Kernel blocking for cached exec/connect denies, and detect-then-`SIGKILL` for everything else. LSM attach is tested in a VM in CI. |
 | **Windows** | ETW, plus eBPF-for-Windows | **Experimental beta.** The ETW path (detect, then `TerminateProcess`) is what is tested in CI. The eBPF-for-Windows programs have never been built or run in CI, so their kernel blocking is unverified. |
-| **macOS** | Endpoint Security Framework | **Experimental, detection only.** Every AUTH event is answered ALLOW. The cgo ESF code is not compiled in CI, and release binaries are built without cgo. |
+| **macOS** | Endpoint Security Framework | **Experimental, detection only.** Every AUTH event is answered ALLOW. The cgo ESF code is unverified in CI; release archives contain tools only, **no daemon**. |
 
 ### Performance (measured)
 

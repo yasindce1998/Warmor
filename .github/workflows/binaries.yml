@@ -1,95 +1,77 @@
-name: Release Binaries
+name: Release Binaries (build only)
 
+# Only the calling Release workflow publishes; no independent tag trigger.
 on:
-  push:
-    tags: ["v*"]
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - goos: linux
+          - runner: ubuntu-24.04
+            goos: linux
             goarch: amd64
-          - goos: linux
+          - runner: ubuntu-24.04-arm
+            goos: linux
             goarch: arm64
-          - goos: windows
+          - runner: windows-2025
+            goos: windows
             goarch: amd64
-          - goos: darwin
+          - runner: macos-15-intel
+            goos: darwin
             goarch: amd64
-          - goos: darwin
+          - runner: macos-15
+            goos: darwin
             goarch: arm64
-
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          go-version-file: go.mod
-
-      - name: Build all binaries
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.10'
+      - name: Verify native runner and exact source
         env:
+          EXPECTED_OS: ${{ matrix.goos }}
+          EXPECTED_ARCH: ${{ matrix.goarch }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(go env GOOS)" = "$EXPECTED_OS"
+          test "$(go env GOARCH)" = "$EXPECTED_ARCH"
+          go mod download
+          go mod verify
+      - name: Native portable tests (not an ESF or driver test)
+        env:
+          CGO_ENABLED: '0'
+        run: go test -mod=readonly -short -count=1 ./...
+      - name: Build and smoke-test archive payload
+        env:
+          VERSION: ${{ inputs.version }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
         run: |
-          VERSION="${{ github.ref_name }}"
-          EXT=""
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            EXT=".exe"
-          fi
-
-          OUTDIR="dist/warmor-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}"
-          mkdir -p "$OUTDIR"
-
-          TOOLS=(
-            warmor-daemon
-            warmorctl
-            warmor-server
-            warmor-compile
-            warmor-learn
-            warmor-simulate
-            warmor-policy-gen
-            warmor-policy-merge
-            warmor-policy-diff
-            warmor-policy-bundle
-            warmor-integrity-scan
-            warmor-sbom-policy
-            warmor-oci-hook
-          )
-
-          for tool in "${TOOLS[@]}"; do
-            echo "Building ${tool}..."
-            go build -ldflags="-s -w -X github.com/yasindce1998/warmor/internal/version.Version=${VERSION}" \
-              -o "${OUTDIR}/${tool}${EXT}" \
-              "./cmd/${tool}"
-          done
-
-      - name: Create checksums
-        run: |
-          VERSION="${{ github.ref_name }}"
-          OUTDIR="dist/warmor-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}"
-          cd "$OUTDIR"
-          sha256sum * > SHA256SUMS
-
-      - name: Create archive
-        run: |
-          VERSION="${{ github.ref_name }}"
-          OUTDIR="warmor-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}"
-          cd dist
-
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            zip -r "${OUTDIR}.zip" "$OUTDIR"
-          else
-            tar -czf "${OUTDIR}.tar.gz" "$OUTDIR"
-          fi
-
-      - name: Upload to release
-        uses: softprops/action-gh-release@v2
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          bash scripts/release-build.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          files: |
-            dist/warmor-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.*
+          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 7

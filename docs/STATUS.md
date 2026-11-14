@@ -110,7 +110,7 @@ updates this page when it merges.
 |----------|--------|------------------|------------|
 | Windows (ETW) | Experimental (beta) | ETW consumer for process, network and file events, tested on a real Windows CI runner. Denials are detect-then-`TerminateProcess` (PID reuse checked). Runs as a Windows service. | Termination happens after the fact |
 | Windows (eBPF-for-Windows) | Experimental | Programs and loader are written against the official SDK | The native programs and driver have **never been built or run in CI**. Kernel blocking is unverified. |
-| macOS (ESF) | Experimental (detection only) | The ESF client subscribes to AUTH and NOTIFY events | **Every AUTH event is answered ALLOW**, so nothing is blocked. The cgo ESF code is never compiled in CI (`CGO_ENABLED=0`). Release binaries are built with `CGO_ENABLED=0`, so the released macOS `warmor-daemon` cannot start a platform at all. |
+| macOS (ESF) | Experimental (detection only) | The ESF client subscribes to AUTH and NOTIFY events | **Every AUTH event is answered ALLOW**, so nothing is blocked. The cgo ESF code is not validated in CI. New macOS releases are tools-only and omit the daemon; older cgo-disabled daemons cannot start ESF. |
 
 ## 8. Performance
 

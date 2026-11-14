@@ -6,21 +6,30 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   build-test:
-    runs-on: macos-latest
+    # Portable tooling only; this is deliberately not an ESF backend gate.
+    runs-on: macos-15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          go-version: "1.26"
+          persist-credentials: false
 
-      - name: Build (CGO disabled - ESF requires SDK headers not on runner)
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.10'
+
+      - name: Build portable tools/stubs (not the cgo ESF backend)
         run: CGO_ENABLED=0 go build ./...
 
-      - name: Run tests
-        run: CGO_ENABLED=0 go test -race -short -coverprofile=coverage.out ./...
+      # Go's race detector requires cgo. Enabling cgo here would also compile
+      # the unverified ESF code, so do not claim a race/native backend test.
+      - name: Run portable tests without race detector
+        run: CGO_ENABLED=0 go test -short -coverprofile=coverage.out ./...
 
       - name: Check coverage threshold
         run: |
