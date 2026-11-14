@@ -52,7 +52,7 @@ func TestCanaryHealthy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ca.Configure("canary-1", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-1", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 0, // immediate for testing
 		MinSampleSize:     10,
@@ -90,7 +90,7 @@ func TestCanaryRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ca.Configure("canary-2", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-2", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 0,
 		MinSampleSize:     10,
@@ -134,7 +134,7 @@ func TestCanaryDegradedNoAutoRollback(t *testing.T) {
 		Percentage:    10,
 	})
 
-	ca.Configure("canary-3", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-3", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 0,
 		MinSampleSize:     10,
@@ -173,7 +173,7 @@ func TestCanaryPendingInsufficientSamples(t *testing.T) {
 		Percentage:    10,
 	})
 
-	ca.Configure("canary-4", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-4", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 0,
 		MinSampleSize:     100,
@@ -209,7 +209,7 @@ func TestCanaryPendingObservationWindow(t *testing.T) {
 		Percentage:    10,
 	})
 
-	ca.Configure("canary-5", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-5", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 5 * time.Minute,
 		MinSampleSize:     10,
@@ -252,7 +252,7 @@ func TestCanaryReset(t *testing.T) {
 		Percentage:    10,
 	})
 
-	ca.Configure("canary-6", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-6", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 0,
 		MinSampleSize:     10,
@@ -282,7 +282,7 @@ func TestCanaryMetricsAccuracy(t *testing.T) {
 		Percentage:    10,
 	})
 
-	ca.Configure("canary-7", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-7", CanaryConfig{
 		MaxDenyRateDelta:  0.50,
 		ObservationWindow: 0,
 		MinSampleSize:     10,
@@ -323,7 +323,7 @@ func TestCanaryIdempotentAfterRollback(t *testing.T) {
 		Percentage:    10,
 	})
 
-	ca.Configure("canary-8", CanaryConfig{
+	mustConfigureCanary(t, ca, "canary-8", CanaryConfig{
 		MaxDenyRateDelta:  0.05,
 		ObservationWindow: 0,
 		MinSampleSize:     10,
@@ -813,7 +813,7 @@ func TestCanaryThresholdAndMetricsAreSideEffectFree(t *testing.T) {
 func TestCanaryMetricsAfterRollback(t *testing.T) {
 	rm, ca := setupCanaryTest(t)
 	_, _ = rm.CreateRollout(RolloutConfig{ID: "rb", PolicyID: "canary-policy", TargetVersion: 2, Percentage: 50})
-	ca.Configure("rb", CanaryConfig{MaxDenyRateDelta: 0.1, MinSampleSize: 1, AutoRollback: true})
+	mustConfigureCanary(t, ca, "rb", CanaryConfig{MaxDenyRateDelta: 0.1, MinSampleSize: 1, AutoRollback: true})
 	ca.RecordDecision("rb", false, false)
 	ca.RecordDecision("rb", true, true)
 
