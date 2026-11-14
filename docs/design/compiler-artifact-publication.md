@@ -115,3 +115,35 @@ The comma-TMPDIR regression also uses a fresh child and real Cargo: it checks th
 raw output is singly-linked, final bytes equal raw WASM plus metadata, and signed
 loading retains the expected ABI/declarations. A real rustc option failure must
 preserve the previous signed artifact and leave no staging files or crate.
+
+## Integration port
+
+`fix/compiler-artifact-publication` is frozen at `5cf6db5`. The separate
+`fix/compiler-artifact-integration` worktree starts there and merges main
+`971471e` (telemetry, current-status documentation, and manifest/compiler-7
+compatibility). The merge has no conflicts and leaves the reviewed compiler,
+metadata, signed-assignment test, and CI changes unchanged. PR #52's unmerged
+process helpers are deliberately not included; the merge guidance above still
+applies when they are integrated separately.
+
+Validation is local Linux test evidence, not native Windows/macOS filesystem
+durability, host-hook enforcement, sandboxing, or live infrastructure evidence.
+Python release checks run only from an external source snapshot, with a fresh
+HOME, empty Git templates, disabled hooks, and an allowlisted environment with
+no ambient `GIT_*` variables. This main revision contains 22 Python tests; do not
+report the unmerged hermetic-fixture branch's larger count as this port's result.
+
+The full normal and race suites pass sequentially with Go 1.26.11, `-p 2`,
+`WARMOR_REQUIRE_CARGO=1`, and `WARMOR_TEST_CARGO_BUILD=1`, including real-Cargo
+CLI compilation, controller last-known-good restart recovery, signed artifact
+roundtrips, and manifest/compiler-7 compatibility. Changed-code golangci-lint
+against `971471e`, formatting, and whitespace checks pass; the external-copy
+Python run passes all 22 tests. Windows/amd64 and Darwin/arm64 compiler test
+binaries cross-compile, which does not establish native durability behavior.
+An initial normal-suite attempt hit temporary-filesystem quota while linking;
+the successful rerun uses a dedicated disk-backed temp directory, without
+deleting shared caches or another session's files.
+
+The validated code merge is `c216cd3` (parents `5cf6db5` and `971471e`). The
+follow-up integration commit changes only these validation notes; the source
+branch remains frozen. No push or PR creation is part of this local handoff.
