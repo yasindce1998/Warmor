@@ -14,13 +14,49 @@ TAG="${1:-warmor:e2e}"
 IMAGE="${WARMOR_IMAGE:-}"
 CLUSTER="warmor-e2e"
 RELEASE="warmor-e2e"
+KCTX=(--context "kind-$CLUSTER")
+DIAGNOSTICS_DIR="${WARMOR_E2E_DIAGNOSTICS_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/warmor-kind-e2e-diagnostics}"
 
 for tool in docker kind kubectl helm curl; do
   command -v "$tool" >/dev/null || { echo "error: $tool not found" >&2; exit 1; }
 done
 
+collect_diagnostics() {
+  # Run before deleting the cluster, including when Helm --wait fails before
+  # the explicit pod wait. Keep every read bounded and avoid policy contents,
+  # kubeconfigs, Secrets and full environment dumps in CI logs/artifacts.
+  echo "--- collecting failed kind e2e diagnostics" >&2
+  kubectl "${KCTX[@]}" --request-timeout=10s get nodes -o wide || true
+  kubectl "${KCTX[@]}" --request-timeout=10s get daemonsets,deployments,pods -o wide || true
+  kubectl "${KCTX[@]}" --request-timeout=10s describe pods \
+    -l "app.kubernetes.io/instance=$RELEASE" || true
+  kubectl "${KCTX[@]}" --request-timeout=10s get events \
+    --sort-by=.metadata.creationTimestamp || true
+  local container
+  for container in validate-policy warmor controller; do
+    kubectl "${KCTX[@]}" --request-timeout=10s logs \
+      -l "app.kubernetes.io/instance=$RELEASE" -c "$container" \
+      --tail=100 --timestamps=true --prefix=true || true
+    kubectl "${KCTX[@]}" --request-timeout=10s logs \
+      -l "app.kubernetes.io/instance=$RELEASE" -c "$container" \
+      --previous --tail=100 --timestamps=true --prefix=true || true
+  done
+}
+
 cleanup() {
+  local status=$?
+  if [ "$status" -ne 0 ]; then
+    # Diagnostic/storage failures must not hide the original Helm/probe error
+    # or prevent deletion of this disposable test cluster.
+    if mkdir -p "$DIAGNOSTICS_DIR"; then
+      collect_diagnostics >"$DIAGNOSTICS_DIR/diagnostics.log" 2>&1 || true
+      cat "$DIAGNOSTICS_DIR/diagnostics.log" >&2 || true
+    else
+      collect_diagnostics >&2 || true
+    fi
+  fi
   kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+  return "$status"
 }
 trap cleanup EXIT
 
@@ -110,7 +146,6 @@ wait_for() { # wait_for <description> <timeout-s> <command...>
     sleep 3
   done
 }
-KCTX=(--context "kind-$CLUSTER")
 EFFECTIVE_CM="${RELEASE}-effective-policy"
 wait_for "the effective policy ConfigMap" 300 \
   kubectl "${KCTX[@]}" get configmap "$EFFECTIVE_CM"
