@@ -42,6 +42,11 @@ enablement checklist, not a statement that automatic rollback is available.
   return a conflict but do not undo or invent an ordinary acknowledgement.
   A failed/mismatched ordinary acknowledgement immediately suspends and clears
   that source's evidence; recovery rebaselines before admitting new intervals.
+  These are separate persistence domains, not a cross-store transaction. If
+  invalidation fails after the fleet acknowledgement commits, even before the
+  telemetry rename, the telemetry writer is poisoned and all reports stay
+  pending. Restoring disk space or refreshing assignments cannot revive the old
+  view; reopening rotates the epoch and requires fresh evidence.
 - Both telemetry support and an active non-audit rollout are required to issue
   an eligible assignment. Old agents/servers and absent telemetry remain fully
   supported but provide **zero canary evidence**. New clients without a session

@@ -406,6 +406,9 @@ type TelemetryIngestResult struct {
 // observeAcknowledgement invalidates evidence as soon as a durable heartbeat
 // reports an activation failure or a different artifact, even without a new
 // telemetry snapshot. Recovery rebaselines rather than counting that interval.
+// The fleet acknowledgement has ALREADY committed in a separate persistence
+// domain. Even a definite precommit telemetry failure must poison this writer:
+// retaining a reportable old view would contradict the authoritative ack.
 func (t *TelemetryStore) observeAcknowledgement(req HeartbeatRequest) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -417,12 +420,16 @@ func (t *TelemetryStore) observeAcknowledgement(req HeartbeatRequest) error {
 	if req.ActivationError == "" && req.PolicyID == r.PolicyID && req.PolicyVersion == r.PolicyVersion && req.PolicyHash == r.PolicyHash {
 		return nil
 	}
-	return t.mutate(func(s *telemetryState) error {
+	err := t.mutate(func(s *telemetryState) error {
 		src := s.Sources[req.AgentID]
 		src.Suspended = true
 		src.Buckets = [telemetryBuckets]telemetryBucket{}
 		return nil
 	})
+	if err != nil {
+		t.fault = fmt.Errorf("acknowledgement invalidation failed: %w", err)
+	}
+	return err
 }
 
 // ingest requires a separately recorded durable activation acknowledgement.
