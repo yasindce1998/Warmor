@@ -171,7 +171,11 @@ func newBlockingSink() *blockingSink {
 
 func (b *blockingSink) Write(ctx context.Context, event *SecurityEvent) error {
 	b.started <- struct{}{}
-	<-b.release
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	return b.mockSink.Write(ctx, event)
 }
 
@@ -207,12 +211,13 @@ func (l labelEnricher) Enrich(ev *SecurityEvent) {
 }
 
 func TestPipelineBackpressureDropsDeterministically(t *testing.T) {
-	sink := newBlockingSink()
-	p := NewPipeline(PipelineConfig{BufferSize: 1, Sinks: []Sink{sink}})
+	sink := &mockSink{}
+	enricher := &blockingEnricher{started: make(chan struct{}, 4), release: make(chan struct{})}
+	p := NewPipeline(PipelineConfig{BufferSize: 1, Sinks: []Sink{sink}, Enrichers: []Enricher{enricher}})
 
 	allow := &api.ActionResult{Action: api.ActionAllow}
 	p.Emit(&api.Event{PID: 1}, allow)
-	<-sink.started // worker is now blocked inside Write with event 1
+	<-enricher.started // ingestion, not sink delivery, is now blocked
 
 	p.Emit(&api.Event{PID: 2}, allow) // fills the 1-slot buffer
 	p.Emit(&api.Event{PID: 3}, allow) // buffer full -> dropped
@@ -223,7 +228,7 @@ func TestPipelineBackpressureDropsDeterministically(t *testing.T) {
 		t.Fatalf("expected received=4 dropped=2, got %+v", stats)
 	}
 
-	close(sink.release)
+	close(enricher.release)
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -263,10 +268,13 @@ func TestPipelineEmitAfterCloseIgnored(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// Must not panic (send on closed channel) and must not count.
+	// Must not panic or count as received; rejection is observable separately.
 	p.Emit(&api.Event{PID: 1}, &api.ActionResult{})
 	if s := p.Stats(); s.EventsReceived != 0 {
 		t.Errorf("expected emit after close to be ignored, got %+v", s)
+	}
+	if s := p.Stats(); s.EventsRejected != 1 {
+		t.Errorf("expected one closed ingress rejection: %+v", s)
 	}
 	// Second close is a no-op.
 	if err := p.Close(); err != nil {
