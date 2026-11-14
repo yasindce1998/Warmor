@@ -19,7 +19,9 @@ type BuildOptions struct {
 	Context context.Context
 
 	// OutputPath defaults to policy.wasm. Build replaces a regular file only
-	// after metadata validation; symlinks and special files are rejected.
+	// after metadata validation; symlinks, hard links, and special files are
+	// rejected. New outputs retain private staging permissions (0600 on Unix,
+	// further restricted by umask); existing permission bits are preserved.
 	OutputPath string
 	RustOnly   bool
 	Verbose    bool
@@ -141,7 +143,13 @@ func checkCargoContext(ctx context.Context) error {
 }
 
 func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) {
-	args := []string{"build", "--target", "wasm32-unknown-unknown", "--release"}
+	safeName := crateIdentifier(policyName)
+	wasmFile := fmt.Sprintf("warmor_policy_%s.wasm", safeName)
+	builtPath := filepath.Join(crateDir, wasmFile)
+	// Cargo normally hard-links release artifacts to its deps directory. Have
+	// rustc emit the final link output directly into our private crate instead,
+	// so strict rejection of hard-linked tool output also works with real Cargo.
+	args := []string{"rustc", "--target", "wasm32-unknown-unknown", "--release", "--lib", "--", "--emit=link=" + builtPath}
 	ctx := opts.Context
 	if ctx == nil {
 		ctx = context.Background()
@@ -165,10 +173,6 @@ func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) 
 		}
 		return "", fmt.Errorf("cargo build failed: %w\n%s", err, stderr.String())
 	}
-
-	safeName := crateIdentifier(policyName)
-	wasmFile := fmt.Sprintf("warmor_policy_%s.wasm", safeName)
-	builtPath := filepath.Join(crateDir, "target", "wasm32-unknown-unknown", "release", wasmFile)
 
 	// Cargo never receives or writes the caller's destination. Build reads this
 	// private artifact with a size bound and validates metadata before publishing.

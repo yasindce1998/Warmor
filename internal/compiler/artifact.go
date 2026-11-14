@@ -32,11 +32,14 @@ func readBuiltArtifact(path string) ([]byte, error) {
 	}
 	defer f.Close()
 	// Check the opened object too: Lstat alone would race a symlink/FIFO swap.
-	info, err = f.Stat()
+	opened, err := checkedArtifactInfo(f)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkBuiltArtifact(info); err != nil {
+	if err := checkArtifactIdentity(path, f, opened); err != nil {
+		return nil, err
+	}
+	if err := checkBuiltArtifact(opened); err != nil {
 		return nil, err
 	}
 	// Do not trust only Stat: a tool's surviving writer could grow the file.
@@ -47,7 +50,25 @@ func readBuiltArtifact(path string) ([]byte, error) {
 	if len(data) > maxCompiledArtifactBytes {
 		return nil, fmt.Errorf("built wasm exceeds %d bytes", maxCompiledArtifactBytes)
 	}
+	// Recheck the same handle after the bounded read, including its link count.
+	if _, err := checkedArtifactInfo(f); err != nil {
+		return nil, err
+	}
 	return data, nil
+}
+
+func checkedArtifactInfo(f *os.File) (os.FileInfo, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("wasm artifact must be a singly-linked regular file")
+	}
+	if err := checkArtifactLinkCount(f, info); err != nil {
+		return nil, err
+	}
+	return info, nil
 }
 
 func checkBuiltArtifact(info os.FileInfo) error {
@@ -90,7 +111,7 @@ func (p artifactPublisher) publish(ctx context.Context, path string, data []byte
 	if err != nil {
 		return "", fmt.Errorf("resolve output wasm: %w", err)
 	}
-	mode, err := outputArtifactMode(path)
+	mode, existing, err := outputArtifactMode(path)
 	if err != nil {
 		return "", fmt.Errorf("check output wasm: %w", err)
 	}
@@ -112,9 +133,14 @@ func (p artifactPublisher) publish(ctx context.Context, path string, data []byte
 	if err != nil {
 		return "", fmt.Errorf("write staged wasm: %w", err)
 	}
-	if err := f.Chmod(mode); err != nil {
-		return "", fmt.Errorf("set output wasm mode: %w", err)
+	if existing {
+		if err := f.Chmod(mode); err != nil {
+			return "", fmt.Errorf("set output wasm mode: %w", err)
+		}
 	}
+	// New outputs retain CreateTemp's 0600 filtered by the caller's umask.
+	// Chmod(0644) here would bypass a restrictive umask. Do not read/change the
+	// process-wide umask: compilation can run concurrently with other file I/O.
 	if err := p.fileSync(f); err != nil {
 		return "", fmt.Errorf("sync staged wasm: %w", err)
 	}
@@ -137,35 +163,35 @@ func (p artifactPublisher) publish(ctx context.Context, path string, data []byte
 	return path, nil
 }
 
-func outputArtifactMode(path string) (os.FileMode, error) {
+func outputArtifactMode(path string) (mode os.FileMode, existing bool, err error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return 0o644, nil
+		return 0, false, nil
 	}
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if !info.Mode().IsRegular() {
-		return 0, fmt.Errorf("output wasm must be a regular file, not a symlink or special file")
+		return 0, false, fmt.Errorf("output wasm must be a regular file, not a symlink or special file")
 	}
 	// Rename permission alone would allow bypassing an existing read-only file.
 	if info.Mode().Perm()&0o222 == 0 {
-		return 0, os.ErrPermission
+		return 0, false, os.ErrPermission
 	}
 	f, err := openArtifact(path, true) // Check writability, never truncate.
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	opened, err := f.Stat()
-	closeErr := f.Close()
+	defer f.Close()
+	opened, err := checkedArtifactInfo(f)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	if closeErr != nil {
-		return 0, closeErr
+	if err := checkArtifactIdentity(path, f, opened); err != nil {
+		return 0, false, err
 	}
-	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
-		return 0, fmt.Errorf("output wasm changed during publication")
+	if err := f.Close(); err != nil {
+		return 0, false, err
 	}
-	return opened.Mode().Perm(), nil
+	return opened.Mode().Perm(), true, nil
 }

@@ -3,11 +3,35 @@
 package compiler
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
+
+func checkArtifactLinkCount(_ *os.File, info os.FileInfo) error {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st == nil {
+		return fmt.Errorf("cannot establish wasm artifact link count")
+	}
+	if st.Nlink != 1 {
+		return fmt.Errorf("wasm artifact must be singly-linked (link count %d)", st.Nlink)
+	}
+	return nil
+}
+
+func checkArtifactIdentity(path string, _ *os.File, opened os.FileInfo) error {
+	current, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !current.Mode().IsRegular() || !os.SameFile(current, opened) {
+		return fmt.Errorf("wasm artifact changed while opening")
+	}
+	return nil
+}
 
 func openArtifact(path string, write bool) (*os.File, error) {
 	flags := os.O_RDONLY

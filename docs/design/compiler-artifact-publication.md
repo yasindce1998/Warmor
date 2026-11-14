@@ -11,9 +11,16 @@ previous artifact even though the build returned an error.
   (`MkdirTemp`, mode 0700 on Unix). Generated sources and Cargo files are not
   staged beside the destination. Failed builds remove the crate; successful
   callers retain the existing `Cleanup(result)` responsibility.
-- Read only regular, non-symlink Cargo output. Check its size before reading,
-  check the opened object, and also limit the read to 64 MiB plus one byte to
-  detect growth. Reject a final metadata-bearing artifact larger than 64 MiB.
+- Cargo normally hard-links its release artifact into `deps`. Use `cargo rustc`
+  with `--emit=link=<private crate path>` to get a singly-linked output directly
+  from rustc, rather than accepting or copying a multiply-linked input. Release
+  profile and generated code are unchanged.
+- Read only singly-linked regular, non-symlink Cargo output. Check its size
+  before reading, verify the opened handle's link count and pathname identity,
+  and also limit the read to 64 MiB plus one byte to detect growth. Recheck the
+  handle's link count after reading. Unix uses handle-stat `Nlink`; Windows uses
+  `GetFileInformationByHandle.NumberOfLinks`. If link count cannot be established,
+  fail closed. Reject a final metadata-bearing artifact larger than 64 MiB.
 - Run `policybuild.Append` before any destination access. This checks the WASM
   header/section framing and rejects malformed, existing, or duplicate build
   declarations. It is not general WASM semantic or ABI validation; runtime
@@ -38,18 +45,24 @@ previous artifact even though the build returned an error.
 ## Compatibility and scope
 
 `OutputPath` still defaults to `policy.wasm`, and a successful result still has
-an absolute `WasmPath`. New files use 0644; existing regular-file permission bits
-are retained on Unix. Existing read-only outputs are rejected (including when
+an absolute `WasmPath`. New files retain `CreateTemp`'s private 0600 permissions,
+further restricted by the caller's umask on Unix. This is intentionally more
+restrictive than the previous 0644 creation request: no chmod widens new-file
+permissions past the caller's umask, and no process-wide umask is read or changed.
+Existing singly-linked regular-file permission bits are retained on Unix.
+Existing read-only outputs are rejected (including when
 rename permission on the parent would otherwise bypass them). Replacement
 changes the inode and does not promise to preserve ownership, ACLs, extended
-attributes, or hard-link identity. It is intended for compiler-owned artifacts
+attributes. Hard-linked destinations are rejected, not detached from their
+aliases. It is intended for compiler-owned artifacts
 in a caller-controlled, stable directory with one coordinated publisher, not
 as an attacker-writable-directory security boundary.
 
-Intentional tightening: symlink and special-file outputs, including FIFOs, are
-rejected rather than followed/written. Use a regular destination path instead.
-Cargo output is subject to the same regular-file restriction. Parent symlinks
-are not prohibited. The output leaf is opened without following symlinks and
+Intentional tightening: symlink, hard-linked, and special-file outputs, including
+FIFOs, are rejected rather than followed/written. Use a singly-linked regular
+destination path instead. Cargo output is subject to the same restriction.
+Unsupported platforms fail closed rather than skipping handle safety checks.
+Parent symlinks are not prohibited. The output leaf is opened without following symlinks and
 without truncation when checking existing permissions; replacement itself does
 not follow a destination symlink. This is not protection against a malicious
 same-user toolchain or concurrent replacement of parent directories.
@@ -73,6 +86,8 @@ overlap is `internal/compiler/build.go`:
 
 1. Keep PR #52's tool runner, deadline, cancellation, and diagnostic bounds in
    `checkCargoContext` and `cargoBuild`.
+   Retain this branch's `cargo rustc ... -- --emit=link=<private path>` arguments
+   so Cargo does not hard-link the candidate into its artifact cache.
 2. Keep `cargoBuild` returning **only** its private `builtPath`; discard its old
    destination resolution/read/write tail, including any pre-write context
    check there.
@@ -84,8 +99,11 @@ overlap is `internal/compiler/build.go`:
    signed-assignment/ABI test. No metadata should be removed while resolving
    the overlapping old-branch diff.
 
-Targeted validation uses Go 1.26 with `-p 2`: compiler/policybuild unit and race
+Targeted validation uses Go 1.26.11 with `-p 2`: compiler/policybuild unit and race
 tests, plus the real Cargo
 `TestCompiledAssignmentRetainsBuildContextSafeIdentifierAndMetadata` test in
 `internal/wasm`. Windows and Darwin build checks are compilation evidence only,
-not native filesystem/durability test results.
+not native filesystem/durability test results. The real-Cargo permissions test
+runs in a fresh shell subprocess with umask 077; it never changes the test
+runner's process-wide umask. Hard-link regressions check both Cargo output and
+destination rejection, preserved alias contents/identity, and staging cleanup.

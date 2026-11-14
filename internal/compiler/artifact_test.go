@@ -81,7 +81,7 @@ func TestArtifactPublicationFailures(t *testing.T) {
 
 func TestArtifactPublicationModesAndCommitBoundary(t *testing.T) {
 	for _, existing := range []bool{false, true} {
-		t.Run(map[bool]string{false: "new 0644", true: "preserve 0600"}[existing], func(t *testing.T) {
+		t.Run(map[bool]string{false: "new private", true: "preserve 0600"}[existing], func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "policy.wasm")
 			if existing {
@@ -113,10 +113,7 @@ func TestArtifactPublicationModesAndCommitBoundary(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				want := os.FileMode(0o644)
-				if existing {
-					want = 0o600
-				}
+				want := os.FileMode(0o600)
 				if info.Mode().Perm() != want {
 					t.Fatalf("mode = %o, want %o", info.Mode().Perm(), want)
 				}
@@ -233,6 +230,80 @@ func TestReadBuiltArtifactBoundAndFileType(t *testing.T) {
 	}
 }
 
+func TestArtifactHardLinksRejected(t *testing.T) {
+	for _, candidate := range []bool{false, true} {
+		t.Run(map[bool]string{false: "destination", true: "cargo output"}[candidate], func(t *testing.T) {
+			dir := t.TempDir()
+			path, alias := filepath.Join(dir, "policy.wasm"), filepath.Join(dir, "alias.wasm")
+			old := []byte("keep linked artifact")
+			if err := os.WriteFile(path, old, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(path, alias); err != nil {
+				t.Fatalf("create hard link: %v", err)
+			}
+			var err error
+			if candidate {
+				_, err = readBuiltArtifact(path)
+			} else {
+				_, err = newArtifactPublisher().publish(context.Background(), path, []byte("new"))
+			}
+			if err == nil || !strings.Contains(err.Error(), "singly-linked") || errors.Is(err, ErrArtifactPublicationIndeterminate) {
+				t.Fatalf("hard-linked artifact error = %v, want pre-commit link rejection", err)
+			}
+			assertArtifactContents(t, path, old)
+			assertArtifactContents(t, alias, old)
+			first, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := os.Stat(alias)
+			if err != nil || !os.SameFile(first, second) {
+				t.Fatalf("hard-link identity changed: %v", err)
+			}
+			assertOnlyOutput(t, dir, "alias.wasm", "policy.wasm")
+		})
+	}
+}
+
+func TestArtifactHandleChecksRejectChanges(t *testing.T) {
+	dir := t.TempDir()
+	path, other := filepath.Join(dir, "policy.wasm"), filepath.Join(dir, "other.wasm")
+	for _, name := range []string{path, other} {
+		if err := os.WriteFile(name, []byte("artifact"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f, err := openArtifact(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	info, err := checkedArtifactInfo(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkArtifactIdentity(other, f, info); err == nil {
+		t.Fatal("different pathname identity accepted")
+	}
+	if err := checkArtifactIdentity(path, f, info); err != nil {
+		t.Fatalf("unchanged pathname identity rejected: %v", err)
+	}
+	alias := filepath.Join(dir, "alias.wasm")
+	if err := os.Link(path, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := checkedArtifactInfo(f); err == nil || !strings.Contains(err.Error(), "singly-linked") {
+		t.Fatalf("new hard link on already-open handle: %v", err)
+	}
+	link := filepath.Join(dir, "symlink.wasm")
+	if err := os.Symlink(path, link); err == nil {
+		if err := checkArtifactIdentity(link, f, info); err == nil {
+			t.Fatal("symlink pathname identity accepted")
+		}
+	}
+}
+
 func TestBuildArtifactValidationBeforePublication(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake toolchain uses POSIX shell executables")
@@ -255,6 +326,8 @@ func TestBuildArtifactValidationBeforePublication(t *testing.T) {
 		{"already has metadata", withMetadata, "already present"},
 		{"duplicate metadata", duplicate, "duplicate build metadata"},
 		{"oversized", nil, "exceeds"},
+		{"hardlinked cargo output", raw, "singly-linked"},
+		{"hardlinked destination", raw, "singly-linked"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bin, work, outDir := t.TempDir(), t.TempDir(), t.TempDir()
@@ -274,7 +347,9 @@ func TestBuildArtifactValidationBeforePublication(t *testing.T) {
 			wasmFile := "warmor_policy_" + crateIdentifier(policy.Name) + ".wasm"
 			for tool, script := range map[string]string{
 				"rustup": "#!/bin/sh\necho wasm32-unknown-unknown\n",
-				"cargo":  "#!/bin/sh\nset -eu\nout=\"$CARGO_TARGET_DIR/wasm32-unknown-unknown/release\"\n/bin/mkdir -p \"$out\"\n/bin/cp \"$WARMOR_TEST_ARTIFACT\" \"$out/$WARMOR_TEST_WASM_FILE\"\n",
+				"cargo": "#!/bin/sh\nset -eu\n" +
+					"out=\nfor arg do\ncase \"$arg\" in --emit=link=*) out=${arg#--emit=link=};; esac\ndone\n" +
+					"test -n \"$out\"\n\"/bin/$WARMOR_TEST_COPY_TOOL\" \"$WARMOR_TEST_ARTIFACT\" \"$out\"\n",
 			} {
 				if err := os.WriteFile(filepath.Join(bin, tool), []byte(script), 0o700); err != nil {
 					t.Fatal(err)
@@ -283,11 +358,22 @@ func TestBuildArtifactValidationBeforePublication(t *testing.T) {
 			t.Setenv("PATH", bin)
 			t.Setenv("TMPDIR", work)
 			t.Setenv("WARMOR_TEST_ARTIFACT", fixture)
-			t.Setenv("WARMOR_TEST_WASM_FILE", wasmFile)
+			copyTool := "cp"
+			if tc.name == "hardlinked cargo output" {
+				copyTool = "ln"
+			}
+			t.Setenv("WARMOR_TEST_COPY_TOOL", copyTool)
 			path := filepath.Join(outDir, "policy.wasm")
 			old := []byte("last known good")
 			if err := os.WriteFile(path, old, 0o600); err != nil {
 				t.Fatal(err)
+			}
+			var alias string
+			if tc.name == "hardlinked destination" {
+				alias = filepath.Join(t.TempDir(), "alias.wasm")
+				if err := os.Link(path, alias); err != nil {
+					t.Fatal(err)
+				}
 			}
 			// Detached signatures are not published by Build (nor pair-atomic).
 			if err := os.WriteFile(path+".sig", []byte("old signature"), 0o600); err != nil {
@@ -309,12 +395,26 @@ func TestBuildArtifactValidationBeforePublication(t *testing.T) {
 				}
 				assertArtifactContents(t, path, want)
 				// Cargo's output remains private and unmodified by publication.
-				assertArtifactContents(t, filepath.Join(result.CratePath, "target", "wasm32-unknown-unknown", "release", wasmFile), raw)
+				assertArtifactContents(t, filepath.Join(result.CratePath, wasmFile), raw)
 				if info, err := os.Stat(result.CratePath); err != nil || info.Mode().Perm() != 0o700 {
 					t.Fatalf("crate must remain private: %v, %v", info, err)
 				}
 			}
 			Cleanup(result)
+			if tc.name != "oversized" {
+				assertArtifactContents(t, fixture, tc.data)
+			}
+			if alias != "" {
+				assertArtifactContents(t, alias, old)
+				first, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				second, err := os.Stat(alias)
+				if err != nil || !os.SameFile(first, second) {
+					t.Fatalf("Build detached destination alias: %v", err)
+				}
+			}
 			assertArtifactContents(t, path+".sig", []byte("old signature"))
 			assertOnlyOutput(t, outDir, "policy.wasm", "policy.wasm.sig")
 			assertOnlyOutput(t, work)
