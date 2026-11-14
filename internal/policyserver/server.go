@@ -293,7 +293,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		req.Fingerprint.AgentID = req.AgentID
 	}
 
-	if err := s.store.Heartbeat(req.AgentID, req.PolicyVersion); err != nil {
+	if err := s.store.HeartbeatRevision(req); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -339,13 +339,15 @@ func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Version-based long-poll: if agent already has this version, return 304.
-	// Any other version (including a newer one after a rollback) is re-sent.
+	w.Header().Set(RevisionIdentityHeader, "1")
+	// A version alone is ambiguous across policies. Legacy clients receive
+	// 200 rather than a potentially incorrect not-modified response.
 	ifVersion := r.URL.Query().Get("if_version")
 	if ifVersion != "" {
-		var v int64
-		_, _ = fmt.Sscanf(ifVersion, "%d", &v)
-		if v == assignment.Version {
+		v, err := strconv.ParseInt(ifVersion, 10, 64)
+		if err == nil && v == assignment.Version &&
+			r.URL.Query().Get("if_policy_id") == assignment.PolicyID &&
+			r.URL.Query().Get("if_hash") == assignment.WASMHash {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}

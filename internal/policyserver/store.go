@@ -404,19 +404,28 @@ func (s *Store) RegisterAgentChecked(req *RegisterRequest) (*Agent, error) {
 
 // Heartbeat updates an agent's last-seen time and policy version.
 func (s *Store) Heartbeat(agentID string, policyVersion int64) error {
+	return s.HeartbeatRevision(HeartbeatRequest{AgentID: agentID, PolicyVersion: policyVersion})
+}
+
+// HeartbeatRevision records active identity separately from desired assignment.
+// Version-only legacy reports deliberately leave ID and digest unknown.
+func (s *Store) HeartbeatRevision(req HeartbeatRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	a, ok := s.agents[agentID]
+	a, ok := s.agents[req.AgentID]
 	if !ok {
-		return fmt.Errorf("agent %s not registered", agentID)
+		return fmt.Errorf("agent %s not registered", req.AgentID)
 	}
 	return s.mutateLocked("", "", func() error {
 		a = cloneAgent(a)
 		a.LastHeartbeat = time.Now()
-		a.PolicyVersion = policyVersion
+		a.PolicyVersion = req.PolicyVersion
+		a.PolicyID = req.PolicyID
+		a.PolicyHash = req.PolicyHash
+		a.ActivationError = req.ActivationError
 		a.Status = AgentStatusActive
-		s.agents[agentID] = a
+		s.agents[req.AgentID] = a
 		return nil
 	})
 }

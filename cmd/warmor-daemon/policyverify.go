@@ -104,16 +104,17 @@ func writeDownloadedPolicy(path string, a *policyserver.PolicyAssignment, data [
 // stores the download (already vetted by verifyDownload) at policyPath and
 // signals a reload. The reload reads the file back and, with --verify-key,
 // verifies it again before loading.
-func policyUpdateHandler(policyPath string, reloadCh chan<- struct{}) func(*policyserver.PolicyAssignment, []byte) {
-	return func(a *policyserver.PolicyAssignment, data []byte) {
+func policyUpdateHandler(policyPath string, reloadCh chan<- struct{}) func(*policyserver.PolicyAssignment, []byte) error {
+	return func(a *policyserver.PolicyAssignment, data []byte) error {
 		if err := writeDownloadedPolicy(policyPath, a, data); err != nil {
 			log.Printf("❌ Failed to write policy %s v%d: %v", a.PolicyID, a.Version, err)
-			return
+			return err
 		}
 		log.Printf("📥 Received policy %s v%d from server", a.PolicyID, a.Version)
 		select {
 		case reloadCh <- struct{}{}:
 		default:
 		}
+		return fmt.Errorf("activation acknowledgement not yet wired")
 	}
 }

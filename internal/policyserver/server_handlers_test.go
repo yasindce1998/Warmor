@@ -183,7 +183,7 @@ func TestGetPolicyIfVersion(t *testing.T) {
 	}{
 		{"", http.StatusOK},
 		{"&if_version=1", http.StatusOK},
-		{"&if_version=2", http.StatusNotModified},
+		{"&if_version=2", http.StatusOK}, // version alone is ambiguous
 		{"&if_version=3", http.StatusOK}, // e.g. after a rollback; resend
 
 		{"&if_version=garbage", http.StatusOK},
