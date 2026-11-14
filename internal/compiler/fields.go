@@ -2,9 +2,10 @@ package compiler
 
 import (
 	"fmt"
-	"github.com/yasindce1998/warmor/internal/policymeta"
 	"sort"
 	"strings"
+
+	"github.com/yasindce1998/warmor/internal/policymeta"
 )
 
 // Field bits for the fields-read declaration a policy module exports as

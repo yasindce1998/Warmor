@@ -69,7 +69,7 @@ func TestMatchArtifactDoesNotAuthorizeOptimization(t *testing.T) {
 		t.Fatal("build snapshot aliases source")
 	}
 	for _, b := range []policybuild.Metadata{{Compiler: "", DefaultAction: "deny"}, {Compiler: "build\x00label", DefaultAction: "deny"}, {Compiler: "build", DefaultAction: "unknown"}} {
-		if policybuild.Validate(b) == nil {
+		if ValidateBuild(b) == nil {
 			t.Fatal("invalid build fields accepted")
 		}
 	}

@@ -1,8 +1,10 @@
 # Policy-host declarations: authenticated observations, explicit trust
 
-Status: optional backend/API checkpoint on `feat/policyhost-declarations`, based
-on PR45's frozen `f394546`, with only descriptor-sanitizer fix `84a8176`
-cherry-picked subsequently. **No enforcer routing, generation activation, kernel
+Status: optional backend/API integration on `feat/policyhost-metadata-integration`,
+based on freshly fetched `origin/main` at `9297209` (PR45 backend/sanitizer and
+PR42 release tests already present). Only metadata commits `d68d0af`, `48d5c41`,
+and `c7ff006` were cherry-picked; backend commits were not duplicated.
+The reviewed source branch remains unchanged. **No enforcer routing, generation activation, kernel
 map writes or default backend changes.** PR45's process-boundary limitations
 continue to apply.
 
@@ -20,13 +22,13 @@ generation-activation integration, not this branch.
 
 ### Shared signed-activation contract
 
-Read-only comparison with signed activation `f54480a` found an independent
-`policymeta.Metadata/Read/Append` custom-section codec, not a shared observation
-API. That agent's subsequent worktree moves the codec to `internal/policybuild`;
-this branch follows the same package split and preserves the exact
-`warmor.build.v1` canonical JSON format (`compiler`, `default_action`). It adds
-only stricter bounded text validation (`policybuild.Validate`). No signed agent
-or generation-activation branch is edited here.
+Read-only comparison with signed activation `f54480a` originally found an
+independent custom-section codec, not a shared observation API. The signed
+owner's new `.worktrees/signed-policy-integration` moves that codec to
+`internal/policybuild`. This integration retains the **identical parser source**
+and `warmor.build.v1` canonical JSON format (`compiler`, `default_action`).
+Stricter observation text checks live separately in `policymeta.ValidateBuild`,
+not a divergent parser. No signed or generation-activation branch is edited here.
 
 - `policybuild.Metadata` is an artifact-author-approved claim, parsed only in
   the child runtime for supervised loads; duplicate/malformed sections fail load.
@@ -104,15 +106,19 @@ per-event kernel entries must obey the same exact-key requirements.
   guest table is bounded before allocation (1,064,961 bytes), and publication
   independently checks the combined count. This is below the legacy 65,536-entry
   map capacity, but not a promise of free capacity in any particular map.
-- Paths/patterns are nonempty, valid UTF-8, NUL-free and at most 254 bytes.
-  Process entries have port zero. Event labels must match their enclosing domain.
-  For the current binary event ABI, process static rules must additionally be
-  **shorter than 128 bytes**: the guest path field has a 128-byte capacity with
-  no truncation marker. A 128-byte eq rule also matches longer truncation aliases;
-  a longer rule cannot match its own input. The existing compiler's static export
-  currently admits up to 254 bytes, so metadata declines the entire process
-  domain when such a rule is observed. JSON ABI metadata retains the 254-byte
-  kernel bound. This branch does not change compiler evaluation semantics.
+- Paths/patterns are nonempty, valid UTF-8 and NUL-free. The encoded pattern
+  framing cap is 254 bytes, but process rule admission uses the shared
+  **`kernelmap.MaxPolicyPathBytes = 127`** for both binary and JSON metadata.
+  Process entries have port zero; event labels match their enclosing domain.
+  This is the same constant as PR41/generation activation, not a new 254-byte
+  exception for JSON. A binary 128-byte eq rule may match longer truncation
+  aliases, so such tables are declined. The fetched `9297209` base does not yet
+  contain PR41's exact-key/127-byte changes: this branch supplies the identical
+  shared constant solely for metadata admission, without importing unrelated
+  kernel commits or modifying the base compiler/dynamic key paths. Combining
+  with PR41 must retain its compiler/runtime/dynamic 127-byte checks and remove
+  no allocator, preflight or endpoint validation. Historical old-base mismatch
+  fixtures are regression evidence, not a new vulnerability report on PR41.
 - Network entries require canonical unzoned IPv4/IPv6 text, not IPv4-mapped aliases
   or alternate textual spellings. Rewriting an alias would change guest string-eq
   semantics, so an unusable declaration declines the whole domain instead.

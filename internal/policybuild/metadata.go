@@ -1,8 +1,6 @@
 // Package policybuild stores artifact-author-approved build declarations in a
 // WASM custom section. These are authenticated by the artifact signature, not
 // proof of compiler provenance or a semantic analysis of arbitrary WASM.
-// Read/Append are compiler/worker functions: the supervised parent never calls
-// them and never parses module bytes.
 package policybuild
 
 import (
@@ -11,8 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
-	"unicode/utf8"
 )
 
 const Section = "warmor.build.v1"
@@ -30,9 +26,8 @@ func varint(b []byte) (uint32, int, error) {
 	return uint32(v), n, nil
 }
 
-// Read is shared with the signed-activation custom-section format. Missing
-// sections return nil, never inferred build identity or posture. Only the child
-// runtime calls this on untrusted bytes in supervised operation.
+// Read rejects duplicate/malformed declarations and bounds all section reads.
+// A missing declaration is acceptable only for legacy, non-assignment mode.
 func Read(wasm []byte) (*Metadata, error) {
 	if len(wasm) < 8 || !bytes.Equal(wasm[:8], []byte{0, 97, 115, 109, 1, 0, 0, 0}) {
 		return nil, errors.New("invalid WASM header")
@@ -76,21 +71,12 @@ func Read(wasm []byte) (*Metadata, error) {
 			return nil, err
 		}
 		canonical, err := json.Marshal(m)
-		if err != nil || !bytes.Equal(payload, canonical) || Validate(m) != nil {
+		if err != nil || !bytes.Equal(payload, canonical) || m.Compiler == "" || len(m.Compiler) > 256 || (m.DefaultAction != "allow" && m.DefaultAction != "deny" && m.DefaultAction != "log") {
 			return nil, errors.New("invalid build metadata")
 		}
 		found = &m
 	}
 	return found, nil
-}
-
-// Validate bounds declaration text. Valid values remain claims, never proof of
-// provenance or effective runtime posture.
-func Validate(m Metadata) error {
-	if m.Compiler == "" || len(m.Compiler) > 256 || !utf8.ValidString(m.Compiler) || strings.IndexFunc(m.Compiler, func(r rune) bool { return r < 32 || r == 127 }) >= 0 || m.DefaultAction != "allow" && m.DefaultAction != "deny" && m.DefaultAction != "log" {
-		return errors.New("invalid build metadata")
-	}
-	return nil
 }
 
 // Append must run before artifact signing. It never edits signed bytes in place.
