@@ -26,6 +26,10 @@ var (
 	verifyKey         = flag.String("verify-key", "", "ed25519 public key PEM (PKIX); refuse policy uploads without a detached signature (<wasm>.sig or the request's \"signature\") that verifies against it")
 	driftThreshold    = flag.Float64("drift-threshold", 3.0, "Z-score threshold for fleet drift anomalies computed from fingerprints in agent heartbeats")
 	serverMetricsPort = flag.Int("metrics-port", 0, "Prometheus metrics port for the server itself, e.g. fleet drift gauges (0 = off)")
+	stateFile         = flag.String("state-file", "", "Durable single-writer state snapshot path (required unless --insecure); parent directory must exist and be private")
+	stateMaxBytes     = flag.Int64("state-max-bytes", 256<<20, "Maximum retained state snapshot bytes (mutations exceeding this limit are rejected)")
+	stateMaxWASMBytes = flag.Int64("state-max-wasm-bytes", 128<<20, "Maximum total retained policy WASM bytes")
+	stateMaxAgents    = flag.Int("state-max-agents", 10000, "Maximum retained agent registrations")
 )
 
 func main() {
@@ -85,6 +89,15 @@ func main() {
 	if cfg.JWTSecret == nil && *caCert == "" && !*insecure {
 		log.Fatalf("refusing to start without authentication: set --jwt-secret and/or --ca-cert with --tls-cert/--tls-key (or --insecure for development only)")
 	}
+	if cfg.TLSConfig == nil && !*insecure {
+		log.Fatal("refusing plaintext transport: set --tls-cert/--tls-key (or --insecure for development only)")
+	}
+	if *stateFile == "" && !*insecure {
+		log.Fatal("--state-file is required outside explicit --insecure development mode")
+	}
+	if *stateMaxBytes <= 0 || *stateMaxWASMBytes <= 0 || *stateMaxAgents <= 0 {
+		log.Fatal("state resource limits must be positive")
+	}
 
 	if *policyDir == "" {
 		log.Println("no --policy-dir set; creating or updating policies via the admin API is disabled")
@@ -99,6 +112,19 @@ func main() {
 		}
 		cfg.VerifyKey = pub
 		log.Printf("policy uploads must be signed by %s", *verifyKey)
+	}
+	if *stateFile != "" {
+		store, err := policyserver.OpenStore(*stateFile, policyserver.StoreOptions{VerifyKey: cfg.VerifyKey, Limits: policyserver.StoreLimits{
+			MaxSnapshotBytes: *stateMaxBytes, MaxRetainedWASMBytes: *stateMaxWASMBytes, MaxAgents: *stateMaxAgents,
+		}})
+		if err != nil {
+			log.Fatalf("open policy state: %v", err)
+		}
+		defer store.Close()
+		cfg.Store = store
+		log.Printf("durable policy state: %s", *stateFile)
+	} else {
+		log.Println("WARNING: ephemeral development state; policies, registrations, and rollouts will be lost on restart")
 	}
 
 	srv := policyserver.NewServer(cfg)

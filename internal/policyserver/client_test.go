@@ -25,12 +25,13 @@ func newUpdateRecorder() *updateRecorder {
 	return &updateRecorder{notify: make(chan struct{}, 16)}
 }
 
-func (u *updateRecorder) onUpdate(a *PolicyAssignment, data []byte) {
+func (u *updateRecorder) onUpdate(a *PolicyAssignment, data []byte) error {
 	u.mu.Lock()
 	u.updates = append(u.updates, a)
 	u.wasm = append(u.wasm, data)
 	u.mu.Unlock()
 	u.notify <- struct{}{}
+	return nil
 }
 
 func (u *updateRecorder) count() int {
@@ -126,8 +127,8 @@ func TestClientPollWithoutCallback(t *testing.T) {
 	c.poll(context.Background())
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.policyVersion != 1 {
-		t.Errorf("expected version to advance to 1 without callback, got %d", c.policyVersion)
+	if c.policyVersion != 0 {
+		t.Errorf("version advanced without activation callback: %d", c.policyVersion)
 	}
 }
 
@@ -199,6 +200,7 @@ func TestClientPollSendsCurrentVersion(t *testing.T) {
 	gotVersion := make(chan string, 1)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotVersion <- r.URL.Query().Get("if_version") + "/" + r.URL.Query().Get("agent_id")
+		w.Header().Set(RevisionIdentityHeader, "1")
 		w.WriteHeader(http.StatusNotModified)
 	}))
 	defer ts.Close()

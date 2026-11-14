@@ -2,14 +2,13 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,7 +42,7 @@ type policyClientConfig struct {
 // newPolicyClient builds a policy server client. The agent authenticates
 // with an mTLS client certificate (CertFile/KeyFile), a JWT bearer token with
 // the agent role (Token, or WARMOR_SERVER_TOKEN), or both.
-func newPolicyClient(cfg policyClientConfig, onUpdate func(*policyserver.PolicyAssignment, []byte)) (*policyserver.Client, error) {
+func newPolicyClient(cfg policyClientConfig, onUpdate func(*policyserver.PolicyAssignment, []byte) error) (*policyserver.Client, error) {
 	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
 		return nil, fmt.Errorf("--tls-cert and --tls-key must be given together")
 	}
@@ -110,21 +109,23 @@ func newPolicyClient(cfg policyClientConfig, onUpdate func(*policyserver.PolicyA
 	}), nil
 }
 
-// resolveDriftImageKey returns the fleet grouping key for this daemon's
-// drift fingerprint: the --drift-image-key override if set, else the
-// SHA-256 of the current policy file. It is recomputed on every heartbeat
-// (the policy file is small), so a policy change re-groups the agent on
-// the next heartbeat instead of comparing against its old group forever.
-func resolveDriftImageKey(policyPath, override string) string {
-	if override != "" {
-		return override
+// identifiedDriftFingerprint withholds unidentified host observations rather
+// than inventing workload identity or sending a fingerprint that would make
+// the server reject an otherwise valid heartbeat. A future workload-scoped
+// collector must supply its own genuine ImageHash. It cannot be inferred here.
+func identifiedDriftFingerprint(source func() *drift.BehaviorFingerprint) func() *drift.BehaviorFingerprint {
+	if source == nil {
+		return nil
 	}
-	data, err := os.ReadFile(policyPath)
-	if err != nil {
-		return "unknown"
+	return func() *drift.BehaviorFingerprint {
+		fp := source()
+		if fp == nil || strings.TrimSpace(fp.ImageHash) == "" {
+			return nil
+		}
+		copy := *fp
+		copy.Vectors = maps.Clone(fp.Vectors)
+		return &copy
 	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }
 
 // runPolicyClient registers with the policy server (retrying until it
@@ -157,6 +158,10 @@ func writePolicyFile(path string, data []byte) error {
 	}
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
 	}

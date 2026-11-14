@@ -18,6 +18,8 @@ type testFunc struct {
 	params  int // number of i32 params
 	results int // 0 or 1 i32 results
 	ret     int32
+	body    []byte // optional instructions replacing the constant return
+	start   bool   // WASM start section (() -> ())
 }
 
 func uleb(v uint32) []byte {
@@ -75,7 +77,9 @@ func buildTestModule(funcs []testFunc) []byte {
 		exports = append(exports, uleb(uint32(i))...)
 
 		body := []byte{0x00} // no locals
-		if f.results == 1 {
+		if f.body != nil {
+			body = append(body, f.body...)
+		} else if f.results == 1 {
 			body = append(body, 0x41)
 			body = append(body, sleb(f.ret)...)
 		}
@@ -90,6 +94,11 @@ func buildTestModule(funcs []testFunc) []byte {
 	m = append(m, section(3, vec(len(funcs), fnIdx))...)
 	m = append(m, section(5, vec(1, []byte{0x00, 0x01}))...)
 	m = append(m, section(7, vec(len(funcs)+1, exports))...)
+	for i, f := range funcs {
+		if f.start {
+			m = append(m, section(8, uleb(uint32(i)))...)
+		}
+	}
 	m = append(m, section(10, vec(len(funcs), code))...)
 	return m
 }

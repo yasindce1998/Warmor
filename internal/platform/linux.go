@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -29,14 +31,17 @@ type LinuxConfig struct {
 	IntegrityDigests []string
 	UnixWatch        []string
 
-	LSMRingBufferSize uint32
-	OnEventLoss       string
+	LSMRingBufferSize       uint32
+	OnEventLoss             string
+	CgroupRoot              string
+	CgroupReconcileInterval time.Duration
 }
 
 type tracepointMonitor interface {
 	ReadProcessEvent() (*ebpf.Event, error)
 	ReadFileEvent() (*ebpf.Event, error)
 	ReadNetworkEvent() (*ebpf.Event, error)
+	ReplaceCgroupFilter([]uint64) error
 	StopReaders() error
 	Close() error
 }
@@ -51,9 +56,25 @@ type LinuxPlatform struct {
 	wg         sync.WaitGroup
 	config     LinuxConfig
 	lsmEnabled bool
+	scope      cgroupScope
 }
 
 func NewLinuxPlatform(config LinuxConfig) (Platform, error) {
+	if config.SkipLSM && config.RequireLSM {
+		return nil, fmt.Errorf("cannot skip LSM when LSM is required")
+	}
+	if config.CgroupRoot == "" {
+		config.CgroupRoot = "/sys/fs/cgroup"
+	}
+	if !filepath.IsAbs(config.CgroupRoot) {
+		return nil, fmt.Errorf("cgroup root must be an absolute host mount path")
+	}
+	if config.CgroupReconcileInterval < 0 {
+		return nil, fmt.Errorf("cgroup reconcile interval must be positive")
+	}
+	if config.CgroupReconcileInterval == 0 {
+		config.CgroupReconcileInterval = time.Second
+	}
 	if config.AuditMode {
 		config.LSMEnforce = false
 		if config.IntegrityMode == "enforce" {
@@ -70,7 +91,15 @@ func (p *LinuxPlatform) Name() string {
 	return "linux"
 }
 
-func (p *LinuxPlatform) Load(ctx context.Context) error {
+func (p *LinuxPlatform) Load(ctx context.Context) (loadErr error) {
+	defer func() {
+		if loadErr != nil {
+			_ = p.Close()
+			p.ebpfLoader = nil
+			p.lsmLoader = nil
+			p.lsmEnabled = false
+		}
+	}()
 	loader, err := ebpf.Load()
 	if err != nil {
 		return fmt.Errorf("load eBPF: %w", err)
@@ -79,23 +108,25 @@ func (p *LinuxPlatform) Load(ctx context.Context) error {
 
 	var cgroupIDs []uint64
 	if len(p.config.CgroupFilter) > 0 {
+		p.scope.enabled = true
+		if _, err := os.ReadFile(filepath.Join(p.config.CgroupRoot, "cgroup.controllers")); err != nil {
+			return fmt.Errorf("host cgroup v2 hierarchy not readable at %s: %w", p.config.CgroupRoot, err)
+		}
 		if len(p.config.CgroupFilter) == 1 && p.config.CgroupFilter[0] == "auto" {
-			cgroupIDs, err = ebpf.DiscoverPodCgroups("/sys/fs/cgroup")
+			cgroupIDs, err = ebpf.DiscoverPodCgroups(p.config.CgroupRoot)
 			if err != nil {
-				loader.Close()
 				return fmt.Errorf("discover pod cgroups: %w", err)
 			}
 		} else {
 			cgroupIDs, err = ebpf.ResolveCgroupIDs(p.config.CgroupFilter)
 			if err != nil {
-				loader.Close()
 				return fmt.Errorf("resolve cgroup filter: %w", err)
 			}
 		}
-		if err := loader.SetCgroupFilter(cgroupIDs); err != nil {
-			loader.Close()
+		if err := loader.ReplaceCgroupFilter(cgroupIDs); err != nil {
 			return fmt.Errorf("set cgroup filter: %w", err)
 		}
+		p.scope.accept(cgroupIDs, nil)
 	}
 
 	// Attempt to load LSM-BPF programs. By default this is a graceful
@@ -110,7 +141,6 @@ func (p *LinuxPlatform) Load(ctx context.Context) error {
 	}
 	onLoss, err := ebpf.ParseOnEventLoss(p.config.OnEventLoss)
 	if err != nil {
-		loader.Close()
 		return err
 	}
 	lsmLoader, err := ebpf.LoadLSMWithOptions(ebpf.LSMOptions{
@@ -119,7 +149,6 @@ func (p *LinuxPlatform) Load(ctx context.Context) error {
 	})
 	if err != nil {
 		if p.config.RequireLSM {
-			loader.Close()
 			return fmt.Errorf("LSM-BPF required (--require-lsm) but failed to load: %w", err)
 		}
 		fmt.Printf("WARNING: LSM-BPF load failed: %v (continuing with tracepoints only)\n", err)
@@ -127,7 +156,6 @@ func (p *LinuxPlatform) Load(ctx context.Context) error {
 	if lsmLoader == nil {
 		// Kernel does not support BPF LSM (LoadLSM returns nil,nil).
 		if p.config.RequireLSM {
-			loader.Close()
 			return fmt.Errorf("LSM-BPF required (--require-lsm) but the kernel does not support BPF LSM " +
 				"(need CONFIG_BPF_LSM=y and \"bpf\" in /sys/kernel/security/lsm); refusing to start")
 		}
@@ -140,18 +168,15 @@ func (p *LinuxPlatform) Load(ctx context.Context) error {
 		p.lsmLoader = lsmLoader
 		p.lsmEnabled = true
 
-		if err := lsmLoader.SetEnforceMode(p.config.LSMEnforce); err != nil {
-			if p.config.RequireLSM {
-				loader.Close()
-				return fmt.Errorf("LSM-BPF required (--require-lsm) but failed to set enforce mode: %w", err)
+		// Scope MUST be established before enabling blocking. Optional LSM
+		// does not make filter failures optional: never expand to the host.
+		if len(p.config.CgroupFilter) > 0 {
+			if err := lsmLoader.ReplaceCgroupFilter(cgroupIDs); err != nil {
+				return fmt.Errorf("set LSM cgroup filter: %w", err)
 			}
-			fmt.Printf("WARNING: failed to set LSM enforce mode: %v\n", err)
 		}
-
-		if len(cgroupIDs) > 0 {
-			if err := lsmLoader.SetCgroupFilter(cgroupIDs); err != nil {
-				fmt.Printf("WARNING: failed to set LSM cgroup filter: %v\n", err)
-			}
+		if err := lsmLoader.SetEnforceMode(p.config.LSMEnforce); err != nil {
+			return fmt.Errorf("set LSM enforce mode: %w", err)
 		}
 	}
 
@@ -162,7 +187,6 @@ func (p *LinuxPlatform) Load(ctx context.Context) error {
 	}
 
 	if err := p.loadIntegrity(); err != nil {
-		p.Close()
 		return err
 	}
 
@@ -230,6 +254,9 @@ func (p *LinuxPlatform) Start(ctx context.Context, eventChan chan<- *api.Event) 
 	if p.lsmEnabled {
 		goroutines = 5
 	}
+	if p.autoCgroups() {
+		goroutines++
+	}
 	p.wg.Add(goroutines)
 	go p.monitorProcessEvents(ctx)
 	go p.monitorFileEvents(ctx)
@@ -239,11 +266,18 @@ func (p *LinuxPlatform) Start(ctx context.Context, eventChan chan<- *api.Event) 
 		go p.monitorLSMEvents(ctx)
 		go p.monitorEventDrops(ctx)
 	}
+	if p.autoCgroups() {
+		go p.monitorCgroups(ctx)
+	}
 
 	return nil
 }
 
 func (p *LinuxPlatform) monitorProcessEvents(ctx context.Context) {
+	p.monitorProcessEventsFrom(ctx, p.ebpfLoader.ReadProcessEvent)
+}
+
+func (p *LinuxPlatform) monitorProcessEventsFrom(ctx context.Context, read func() (*ebpf.Event, error)) {
 	defer p.wg.Done()
 	for {
 		select {
@@ -254,8 +288,12 @@ func (p *LinuxPlatform) monitorProcessEvents(ctx context.Context) {
 		default:
 		}
 
-		ev, err := p.ebpfLoader.ReadProcessEvent()
+		ev, err := read()
 		if err != nil {
+			p.readerError(err)
+			return
+		}
+		if !p.scope.contains(ev.CgroupID) {
 			continue
 		}
 
@@ -297,6 +335,10 @@ func (p *LinuxPlatform) monitorProcessEvents(ctx context.Context) {
 }
 
 func (p *LinuxPlatform) monitorFileEvents(ctx context.Context) {
+	p.monitorFileEventsFrom(ctx, p.ebpfLoader.ReadFileEvent)
+}
+
+func (p *LinuxPlatform) monitorFileEventsFrom(ctx context.Context, read func() (*ebpf.Event, error)) {
 	defer p.wg.Done()
 	for {
 		select {
@@ -307,8 +349,12 @@ func (p *LinuxPlatform) monitorFileEvents(ctx context.Context) {
 		default:
 		}
 
-		ev, err := p.ebpfLoader.ReadFileEvent()
+		ev, err := read()
 		if err != nil {
+			p.readerError(err)
+			return
+		}
+		if !p.scope.contains(ev.CgroupID) {
 			continue
 		}
 
@@ -350,6 +396,10 @@ func (p *LinuxPlatform) monitorFileEvents(ctx context.Context) {
 }
 
 func (p *LinuxPlatform) monitorNetworkEvents(ctx context.Context) {
+	p.monitorNetworkEventsFrom(ctx, p.ebpfLoader.ReadNetworkEvent)
+}
+
+func (p *LinuxPlatform) monitorNetworkEventsFrom(ctx context.Context, read func() (*ebpf.Event, error)) {
 	defer p.wg.Done()
 	for {
 		select {
@@ -360,8 +410,12 @@ func (p *LinuxPlatform) monitorNetworkEvents(ctx context.Context) {
 		default:
 		}
 
-		ev, err := p.ebpfLoader.ReadNetworkEvent()
+		ev, err := read()
 		if err != nil {
+			p.readerError(err)
+			return
+		}
+		if !p.scope.contains(ev.CgroupID) {
 			continue
 		}
 
@@ -407,6 +461,10 @@ func (p *LinuxPlatform) monitorNetworkEvents(ctx context.Context) {
 }
 
 func (p *LinuxPlatform) monitorLSMEvents(ctx context.Context) {
+	p.monitorLSMEventsFrom(ctx, p.lsmLoader.ReadLSMEvent)
+}
+
+func (p *LinuxPlatform) monitorLSMEventsFrom(ctx context.Context, read func() (*ebpf.Event, error)) {
 	defer p.wg.Done()
 	for {
 		select {
@@ -417,8 +475,12 @@ func (p *LinuxPlatform) monitorLSMEvents(ctx context.Context) {
 		default:
 		}
 
-		ev, err := p.lsmLoader.ReadLSMEvent()
+		ev, err := read()
 		if err != nil {
+			p.readerError(err)
+			return
+		}
+		if !p.scope.contains(ev.CgroupID) {
 			continue
 		}
 		metrics.RecordLSMDecision(ebpf.LSMHookName(ev.LSMHook), ebpf.LSMDecisionAction(ev.LSMDecision))

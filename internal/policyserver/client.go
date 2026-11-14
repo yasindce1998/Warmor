@@ -3,8 +3,10 @@ package policyserver
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,17 +22,21 @@ import (
 
 // Client connects to the policy management server for policy distribution.
 type Client struct {
-	baseURL       string
-	agentID       string
-	hostname      string
-	labels        map[string]string
-	httpClient    *http.Client
-	token         string
-	policyVersion int64
-	mu            sync.Mutex
-	onUpdate      func(assignment *PolicyAssignment, wasmData []byte)
-	verify        func(assignment *PolicyAssignment, wasmData []byte) error
-	fingerprint   func() *drift.BehaviorFingerprint
+	baseURL         string
+	agentID         string
+	hostname        string
+	labels          map[string]string
+	httpClient      *http.Client
+	token           string
+	policyVersion   int64
+	policyID        string
+	policyHash      string
+	activationError string
+	mu              sync.Mutex
+	pollMu          sync.Mutex
+	onUpdate        func(assignment *PolicyAssignment, wasmData []byte) error
+	verify          func(assignment *PolicyAssignment, wasmData []byte) error
+	fingerprint     func() *drift.BehaviorFingerprint
 }
 
 // MaxWASMDownloadSize bounds a policy module download.
@@ -46,8 +52,11 @@ type ClientConfig struct {
 	// to authenticate with mTLS.
 	TLSConfig *tls.Config
 	// Token is a JWT bearer token with the agent role, sent on every request.
-	Token    string
-	OnUpdate func(assignment *PolicyAssignment, wasmData []byte)
+	Token string
+	// OnUpdate must wait for successful activation and durable publication.
+	// Errors retain the previous identity and retry on the next poll. A nil
+	// callback cannot acknowledge a downloaded revision.
+	OnUpdate func(assignment *PolicyAssignment, wasmData []byte) error
 	// Verify, if set, is called with each downloaded policy (and its
 	// signature in assignment.Signature) before OnUpdate. If it returns an
 	// error the download is discarded, OnUpdate is not called and the
@@ -136,61 +145,115 @@ func (c *Client) PollLoop(ctx context.Context, interval time.Duration) {
 }
 
 func (c *Client) poll(ctx context.Context) {
+	c.pollMu.Lock()
+	defer c.pollMu.Unlock()
+	err := c.pollOnce(ctx)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err != nil {
+		c.activationError = err.Error()
+	} else {
+		c.activationError = ""
+	}
+}
+
+func (c *Client) pollOnce(ctx context.Context) error {
 	c.mu.Lock()
 	version := c.policyVersion
+	id, digest := c.policyID, c.policyHash
 	c.mu.Unlock()
 
 	q := url.Values{}
 	q.Set("agent_id", c.agentID)
 	q.Set("if_version", strconv.FormatInt(version, 10))
+	q.Set("if_policy_id", id)
+	q.Set("if_hash", digest)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/policy?"+q.Encode(), nil)
 	if err != nil {
-		return
+		return err
 	}
 
 	resp, err := c.do(req)
 	if err != nil {
-		return
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotModified {
-		return
+		// Legacy servers compare only version; request a full assignment
+		// instead of trusting a potentially ambiguous 304.
+		if resp.Header.Get(RevisionIdentityHeader) == "1" {
+			return nil
+		}
+		q.Del("if_version")
+		retry, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/policy?"+q.Encode(), nil)
+		if err != nil {
+			return err
+		}
+		full, err := c.do(retry)
+		if err != nil {
+			return err
+		}
+		defer full.Body.Close()
+		resp = full
 	}
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return
+		return fmt.Errorf("policy assignment: status %d", resp.StatusCode)
 	}
 
 	var assignment PolicyAssignment
-	if err := json.NewDecoder(resp.Body).Decode(&assignment); err != nil {
-		return
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&assignment); err != nil {
+		return err
 	}
 
 	// A different version (newer, or older after a rollback) is applied.
-	if assignment.Version == version {
-		return
+	if assignment.PolicyID == id && assignment.Version == version && assignment.WASMHash == digest {
+		return nil
+	}
+	if assignment.PolicyID == "" || assignment.Version <= 0 {
+		return fmt.Errorf("invalid policy assignment identity")
 	}
 
 	// Fetch WASM binary
 	wasmData, sig, err := c.fetchWASM(ctx, assignment.PolicyID, assignment.Version)
 	if err != nil {
-		return
+		return err
+	}
+	sum := sha256.Sum256(wasmData)
+	if assignment.WASMHash != hex.EncodeToString(sum[:]) {
+		return fmt.Errorf("policy %s v%d: download digest mismatch", assignment.PolicyID, assignment.Version)
 	}
 	assignment.Signature = sig
+	activeID, activeVersion, activeHash := assignment.PolicyID, assignment.Version, assignment.WASMHash
 	if c.verify != nil {
 		if err := c.verify(&assignment, wasmData); err != nil {
-			return
+			return err
 		}
+	}
+	if c.onUpdate == nil {
+		return fmt.Errorf("policy activation callback is required")
+	}
+	if err := c.onUpdate(&assignment, wasmData); err != nil {
+		return fmt.Errorf("activate policy %s v%d: %w", activeID, activeVersion, err)
 	}
 
 	c.mu.Lock()
-	c.policyVersion = assignment.Version
+	c.policyVersion = activeVersion
+	c.policyID = activeID
+	c.policyHash = activeHash
+	c.activationError = ""
 	c.mu.Unlock()
+	return nil
+}
 
-	if c.onUpdate != nil {
-		c.onUpdate(&assignment, wasmData)
-	}
+// InvalidateActiveRevision forgets the fleet identity after an out-of-band reload.
+func (c *Client) InvalidateActiveRevision() {
+	c.pollMu.Lock()
+	defer c.pollMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.policyID, c.policyHash, c.policyVersion = "", "", 0
 }
 
 // fetchWASM downloads a policy version and its raw signature (nil if the
@@ -235,11 +298,15 @@ func (c *Client) SendHeartbeat(ctx context.Context) (err error) {
 	defer func() { metrics.RecordHeartbeat(c.agentID, err) }()
 	c.mu.Lock()
 	version := c.policyVersion
+	id, digest, activationError := c.policyID, c.policyHash, c.activationError
 	c.mu.Unlock()
 
 	req := HeartbeatRequest{
-		AgentID:       c.agentID,
-		PolicyVersion: version,
+		AgentID:         c.agentID,
+		PolicyVersion:   version,
+		PolicyID:        id,
+		PolicyHash:      digest,
+		ActivationError: activationError,
 	}
 	if c.fingerprint != nil {
 		if fp := c.fingerprint(); fp != nil {

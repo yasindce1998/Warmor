@@ -5,14 +5,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/crypto"
 )
 
-// Store manages policies and agent registrations in memory.
+// Store manages policies, registrations, bindings and rollouts. NewStore is
+// ephemeral; OpenStore adds synchronous transactional snapshot persistence.
 type Store struct {
 	mu       sync.RWMutex
 	policies map[string]*Policy
@@ -23,6 +25,13 @@ type Store struct {
 	// verifyKey, if set, makes every upload require a detached signature
 	// that verifies against it.
 	verifyKey ed25519.PublicKey
+	rollouts  map[string]*RolloutState
+	bindings  map[string]*ContainerBinding
+	audit     []AuditEntry
+	sequence  uint64
+	backend   *snapshotBackend
+	limits    StoreLimits
+	closed    bool
 }
 
 // policyVersion is one immutable uploaded revision of a policy's WASM.
@@ -39,6 +48,9 @@ func NewStore() *Store {
 		policies: make(map[string]*Policy),
 		agents:   make(map[string]*Agent),
 		versions: make(map[string]map[int64]*policyVersion),
+		rollouts: make(map[string]*RolloutState),
+		bindings: make(map[string]*ContainerBinding),
+		limits:   DefaultStoreLimits(),
 	}
 }
 
@@ -49,15 +61,15 @@ func NewStore() *Store {
 func (s *Store) SetVerifyKey(pub ed25519.PublicKey) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.verifyKey = pub
+	s.verifyKey = slices.Clone(pub)
 }
 
 // readPolicyVersion reads a WASM upload. sigFile is its detached signature
 // (the <policy>.sig file format, or a raw 64-byte signature), or nil for
 // an unsigned upload. A signature that is present must be well formed; with
 // a verify key it must also verify, and unsigned uploads are refused.
-func readPolicyVersion(wasmPath string, sigFile []byte, pub ed25519.PublicKey) (*policyVersion, error) {
-	data, err := os.ReadFile(wasmPath)
+func readPolicyVersion(wasmPath string, sigFile []byte, pub ed25519.PublicKey, maxBytes int64) (*policyVersion, error) {
+	data, err := crypto.ReadFileLimited(wasmPath, maxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read wasm: %w", err)
 	}
@@ -90,26 +102,32 @@ func (s *Store) CreateSignedPolicy(p *Policy, wasmPath string, sigFile []byte) e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if p == nil || !validStateID(p.ID) {
+		return fmt.Errorf("valid policy id required")
+	}
 	if _, exists := s.policies[p.ID]; exists {
 		return fmt.Errorf("policy %s already exists", p.ID)
 	}
 
-	v, err := readPolicyVersion(wasmPath, sigFile, s.verifyKey)
+	v, err := readPolicyVersion(wasmPath, sigFile, s.verifyKey, s.limits.MaxWASMBytes)
 	if err != nil {
 		return err
 	}
 
-	p.WASMHash = v.hash
-	p.WASMPath = v.path
-	p.Signed = v.sig != nil
-	p.Version = 1
-	p.ActiveVersion = 1
-	p.CreatedAt = time.Now()
-	p.UpdatedAt = p.CreatedAt
-
-	s.policies[p.ID] = p
-	s.versions[p.ID] = map[int64]*policyVersion{1: v}
-	return nil
+	cp := clonePolicy(p)
+	cp.WASMHash, cp.WASMPath, cp.Signed = v.hash, v.path, v.sig != nil
+	cp.Version, cp.ActiveVersion = 1, 1
+	cp.CreatedAt = time.Now()
+	cp.UpdatedAt = cp.CreatedAt
+	err = s.mutateLocked("policy.create", p.ID, func() error {
+		s.policies[cp.ID] = cp
+		s.versions[cp.ID] = map[int64]*policyVersion{1: v}
+		return nil
+	})
+	if err == nil {
+		*p = *clonePolicy(cp)
+	}
+	return err
 }
 
 // UpdatePolicy uploads a new version of a policy and makes it the active
@@ -136,22 +154,29 @@ func (s *Store) AddVersion(id, wasmPath string, sigFile []byte, activate bool) e
 		return fmt.Errorf("policy %s not found", id)
 	}
 
-	v, err := readPolicyVersion(wasmPath, sigFile, s.verifyKey)
+	if activate && s.activeRolloutLocked(id) {
+		return fmt.Errorf("policy %s has an active rollout", id)
+	}
+	v, err := readPolicyVersion(wasmPath, sigFile, s.verifyKey, s.limits.MaxWASMBytes)
 	if err != nil {
 		return err
 	}
 
-	p.WASMHash = v.hash
-	p.WASMPath = v.path
-	p.Signed = v.sig != nil
-	p.Version++
-	p.UpdatedAt = time.Now()
-	if activate {
-		p.ActiveVersion = p.Version
-	}
+	return s.mutateLocked("policy.revise", id, func() error {
+		p = clonePolicy(p)
+		p.WASMHash = v.hash
+		p.WASMPath = v.path
+		p.Signed = v.sig != nil
+		p.Version++
+		p.UpdatedAt = time.Now()
+		if activate {
+			p.ActiveVersion = p.Version
+		}
 
-	s.versions[id][p.Version] = v
-	return nil
+		s.versions[id][p.Version] = v
+		s.policies[id] = p
+		return nil
+	})
 }
 
 // SetActiveVersion changes which stored version of a policy is served to
@@ -167,9 +192,16 @@ func (s *Store) SetActiveVersion(id string, version int64) error {
 	if _, ok := s.versions[id][version]; !ok {
 		return fmt.Errorf("policy %s has no version %d", id, version)
 	}
-	p.ActiveVersion = version
-	p.UpdatedAt = time.Now()
-	return nil
+	if s.activeRolloutLocked(id) {
+		return fmt.Errorf("policy %s has an active rollout", id)
+	}
+	return s.mutateLocked("policy.activate", id, func() error {
+		p = clonePolicy(p)
+		p.ActiveVersion = version
+		p.UpdatedAt = time.Now()
+		s.policies[id] = p
+		return nil
+	})
 }
 
 // HasVersion reports whether the given version of a policy is stored.
@@ -180,24 +212,8 @@ func (s *Store) HasVersion(id string, version int64) bool {
 	return ok
 }
 
-// previousVersion returns the newest stored version of a policy older than
-// version, or 0 if there is none.
-func (s *Store) previousVersion(id string, version int64) int64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var prev int64
-	for v := range s.versions[id] {
-		if v < version && v > prev {
-			prev = v
-		}
-	}
-	return prev
-}
-
-// assignment builds the agent-facing assignment for a stored policy version.
-func (s *Store) assignment(id string, version int64) (*PolicyAssignment, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// assignmentLocked builds the agent-facing assignment under the store lock.
+func (s *Store) assignmentLocked(id string, version int64) (*PolicyAssignment, bool) {
 	v, ok := s.versions[id][version]
 	if !ok {
 		return nil, false
@@ -217,9 +233,19 @@ func (s *Store) DeletePolicy(id string) error {
 	if _, ok := s.policies[id]; !ok {
 		return fmt.Errorf("policy %s not found", id)
 	}
-	delete(s.policies, id)
-	delete(s.versions, id)
-	return nil
+	if s.activeRolloutLocked(id) {
+		return fmt.Errorf("policy %s has an active rollout", id)
+	}
+	return s.mutateLocked("policy.delete", id, func() error {
+		delete(s.policies, id)
+		delete(s.versions, id)
+		for rid, r := range s.rollouts {
+			if r.PolicyID == id {
+				delete(s.rollouts, rid)
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Store) GetPolicy(id string) (*Policy, bool) {
@@ -229,8 +255,7 @@ func (s *Store) GetPolicy(id string) (*Policy, bool) {
 	if !ok {
 		return nil, false
 	}
-	cp := *p
-	return &cp, true
+	return clonePolicy(p), true
 }
 
 func (s *Store) ListPolicies() []*Policy {
@@ -239,9 +264,9 @@ func (s *Store) ListPolicies() []*Policy {
 
 	result := make([]*Policy, 0, len(s.policies))
 	for _, p := range s.policies {
-		cp := *p
-		result = append(result, &cp)
+		result = append(result, clonePolicy(p))
 	}
+	slices.SortFunc(result, func(a, b *Policy) int { return stringsCompare(a.ID, b.ID) })
 	return result
 }
 
@@ -257,7 +282,7 @@ func (s *Store) GetWASM(policyID string) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
-	return v.data, true
+	return slices.Clone(v.data), true
 }
 
 // GetWASMVersion returns the WASM binary of a specific policy version.
@@ -282,28 +307,31 @@ func (s *Store) GetSignedWASM(policyID string, version int64) (data, sig []byte,
 	if !found {
 		return nil, nil, false
 	}
-	return v.data, v.sig, true
+	return slices.Clone(v.data), slices.Clone(v.sig), true
 }
 
 // MatchPolicy finds the highest-priority policy whose selector matches the agent labels.
 func (s *Store) MatchPolicy(labels map[string]string) *Policy {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.matchPolicyLocked(labels)
+}
+
+func (s *Store) matchPolicyLocked(labels map[string]string) *Policy {
 
 	var best *Policy
 	for _, p := range s.policies {
 		if !selectorMatches(p.Selector, labels) {
 			continue
 		}
-		if best == nil || p.Priority > best.Priority {
+		if best == nil || p.Priority > best.Priority || (p.Priority == best.Priority && p.ID < best.ID) {
 			best = p
 		}
 	}
 	if best == nil {
 		return nil
 	}
-	cp := *best
-	return &cp
+	return clonePolicy(best)
 }
 
 func selectorMatches(selector, labels map[string]string) bool {
@@ -318,40 +346,45 @@ func selectorMatches(selector, labels map[string]string) bool {
 	return true
 }
 
-// RegisterAgent adds or updates an agent registration and returns a copy of
-// the stored agent.
+// RegisterAgent returns a copy of the stored agent, or nil on failure. Network
+// handlers should use RegisterAgentChecked to report durability/limit errors.
 func (s *Store) RegisterAgent(req *RegisterRequest) *Agent {
+	a, _ := s.RegisterAgentChecked(req)
+	return a
+}
+
+// RegisterAgentChecked commits an agent registration before returning success.
+func (s *Store) RegisterAgentChecked(req *RegisterRequest) (*Agent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	a, exists := s.agents[req.ID]
-	if !exists {
-		a = &Agent{
-			ID: req.ID,
-		}
-		s.agents[req.ID] = a
+	if req == nil || !validStateID(req.ID) {
+		return nil, fmt.Errorf("valid agent id required")
 	}
-	a.Hostname = req.Hostname
-	a.Labels = req.Labels
-	a.LastHeartbeat = time.Now()
-	a.Status = AgentStatusActive
-	cp := *a
-	return &cp
+	var result *Agent
+	err := s.mutateLocked("agent.register", req.ID, func() error {
+		a, exists := s.agents[req.ID]
+		if !exists {
+			a = &Agent{
+				ID: req.ID,
+			}
+			s.agents[req.ID] = a
+		}
+		a.Hostname = req.Hostname
+		a.Labels = maps.Clone(req.Labels)
+		a.LastHeartbeat = time.Now()
+		a.Status = AgentStatusActive
+		result = cloneAgent(a)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // Heartbeat updates an agent's last-seen time and policy version.
 func (s *Store) Heartbeat(agentID string, policyVersion int64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	a, ok := s.agents[agentID]
-	if !ok {
-		return fmt.Errorf("agent %s not registered", agentID)
-	}
-	a.LastHeartbeat = time.Now()
-	a.PolicyVersion = policyVersion
-	a.Status = AgentStatusActive
-	return nil
+	return s.HeartbeatRevision(HeartbeatRequest{AgentID: agentID, PolicyVersion: policyVersion})
 }
 
 // GetAgent returns agent info.
@@ -362,8 +395,7 @@ func (s *Store) GetAgent(id string) (*Agent, bool) {
 	if !ok {
 		return nil, false
 	}
-	cp := *a
-	return &cp, true
+	return cloneAgent(a), true
 }
 
 // ListAgents returns all registered agents.
@@ -373,24 +405,42 @@ func (s *Store) ListAgents() []*Agent {
 
 	result := make([]*Agent, 0, len(s.agents))
 	for _, a := range s.agents {
-		cp := *a
-		result = append(result, &cp)
+		result = append(result, cloneAgent(a))
 	}
+	slices.SortFunc(result, func(a, b *Agent) int { return stringsCompare(a.ID, b.ID) })
 	return result
 }
 
 // MarkStaleAgents marks agents that haven't sent a heartbeat within the threshold.
 func (s *Store) MarkStaleAgents(threshold time.Duration) {
+	_ = s.MarkStaleAgentsChecked(threshold)
+}
+
+// MarkStaleAgentsChecked persists derived liveness state if it changed.
+func (s *Store) MarkStaleAgentsChecked(threshold time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now()
+	updates := make(map[string]*Agent)
 	for _, a := range s.agents {
+		previous := a.Status
+		a = cloneAgent(a)
 		if a.Status == AgentStatusActive && now.Sub(a.LastHeartbeat) > threshold {
 			a.Status = AgentStatusStale
 		}
 		if a.Status == AgentStatusStale && now.Sub(a.LastHeartbeat) > threshold*3 {
 			a.Status = AgentStatusDisconnected
 		}
+		if a.Status != previous {
+			updates[a.ID] = a
+		}
 	}
+	if len(updates) == 0 {
+		return nil
+	}
+	return s.mutateLocked("", "", func() error { maps.Copy(s.agents, updates); return nil })
 }
+
+func clonePolicy(p *Policy) *Policy { cp := *p; cp.Selector = maps.Clone(p.Selector); return &cp }
+func cloneAgent(a *Agent) *Agent    { cp := *a; cp.Labels = maps.Clone(a.Labels); return &cp }

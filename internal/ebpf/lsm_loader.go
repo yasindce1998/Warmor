@@ -524,6 +524,11 @@ func (l *LSMLoader) SetCgroupFilter(ids []uint64) error {
 	return SetLSMCgroupFilter(l.filterMap, ids)
 }
 
+// ReplaceCgroupFilter retains the active-scope sentinel for empty discovery.
+func (l *LSMLoader) ReplaceCgroupFilter(ids []uint64) error {
+	return replaceCgroupFilter(kernelCgroupFilter{l.filterMap}, ids, true)
+}
+
 // StopReaders wakes a blocked ReadLSMEvent without detaching enforcing hooks.
 // Its internal polling loop retries deadlines, so context cancellation alone
 // cannot interrupt an idle reader. Closing the reader returns ringbuf.ErrClosed.

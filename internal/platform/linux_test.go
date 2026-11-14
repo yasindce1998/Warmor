@@ -20,12 +20,17 @@ import (
 
 func TestConfigConvertsToLinuxConfig(t *testing.T) {
 	cfg := Config{
-		CgroupFilter: []string{"/sys/fs/cgroup/a", "/sys/fs/cgroup/b"},
-		LSMEnforce:   true,
-		RequireLSM:   true,
-		SkipLSM:      false,
+		CgroupFilter:            []string{"/sys/fs/cgroup/a", "/sys/fs/cgroup/b"},
+		LSMEnforce:              true,
+		RequireLSM:              true,
+		SkipLSM:                 false,
+		CgroupRoot:              "/host/cgroup",
+		CgroupReconcileInterval: 2 * time.Second,
 	}
 	lc := LinuxConfig(cfg)
+	if lc.CgroupRoot != "/host/cgroup" || lc.CgroupReconcileInterval != 2*time.Second {
+		t.Fatalf("options lost: %+v", lc)
+	}
 	if len(lc.CgroupFilter) != 2 || lc.CgroupFilter[1] != "/sys/fs/cgroup/b" {
 		t.Errorf("CgroupFilter not preserved: %v", lc.CgroupFilter)
 	}
@@ -164,6 +169,7 @@ func (m *idleTracepointMonitor) read() (*ebpf.Event, error) {
 func (m *idleTracepointMonitor) ReadProcessEvent() (*ebpf.Event, error) { return m.read() }
 func (m *idleTracepointMonitor) ReadFileEvent() (*ebpf.Event, error)    { return m.read() }
 func (m *idleTracepointMonitor) ReadNetworkEvent() (*ebpf.Event, error) { return m.read() }
+func (m *idleTracepointMonitor) ReplaceCgroupFilter([]uint64) error     { return nil }
 func (m *idleTracepointMonitor) StopReaders() error {
 	m.stops.Add(1)
 	m.once.Do(func() { close(m.unblock) })

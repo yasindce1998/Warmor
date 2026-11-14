@@ -35,7 +35,7 @@ func TestApplyDefaultDeny_MarksEligibleDomainsInOrder(t *testing.T) {
 	pm := &fakeEndpointPolicyMap{}
 	e := ddEnforcer(t, pm, false, false)
 
-	e.applyDefaultDeny(fakeStaticSource{
+	if err := e.applyDefaultDeny(fakeStaticSource{
 		proc: wasm.StaticDomain{
 			Eligible: true,
 			Rules: []compiler.StaticRule{
@@ -46,7 +46,9 @@ func TestApplyDefaultDeny_MarksEligibleDomainsInOrder(t *testing.T) {
 		net: wasm.StaticDomain{Eligible: true, Rules: []compiler.StaticRule{
 			{Event: "network", Action: 0, Pattern: "10.0.0.1", Port: 53},
 		}},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// The marking goes in last, after the entries it covers.
 	wantLog := []string{
@@ -79,10 +81,12 @@ func TestApplyDefaultDeny_IneligibleDomainNotMarked(t *testing.T) {
 	pm := &fakeEndpointPolicyMap{}
 	e := ddEnforcer(t, pm, false, false)
 
-	e.applyDefaultDeny(fakeStaticSource{
+	if err := e.applyDefaultDeny(fakeStaticSource{
 		proc: wasm.StaticDomain{Eligible: false}, // e.g. a glob rule
 		net:  wasm.StaticDomain{Eligible: true, Rules: []compiler.StaticRule{{Event: "network", Action: 0, Pattern: "10.0.0.1", Port: 53}}},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := pm.eventLog(); !reflect.DeepEqual(got, []string{"clear-dd", "endpoint:10.0.0.1:53", "mark:2:1"}) {
 		t.Errorf("event log = %v, want only the network domain", got)
@@ -99,9 +103,11 @@ func TestApplyDefaultDeny_AuditModeMarksAudit(t *testing.T) {
 	pm := &fakePolicyMap{}
 	e := ddEnforcer(t, pm, true, false)
 
-	e.applyDefaultDeny(fakeStaticSource{
+	if err := e.applyDefaultDeny(fakeStaticSource{
 		proc: wasm.StaticDomain{Eligible: true, Rules: []compiler.StaticRule{{Event: "process", Action: 0, Pattern: "/bin/sh"}}},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	want := []ddMark{{ebpf.EventTypeExec, ebpf.DefaultDenyModeAudit}}
 	if !reflect.DeepEqual(pm.ddMarks, want) {
@@ -113,9 +119,11 @@ func TestApplyDefaultDeny_LearningModeNeverMarks(t *testing.T) {
 	pm := &fakePolicyMap{}
 	e := ddEnforcer(t, pm, false, true)
 
-	e.applyDefaultDeny(fakeStaticSource{
+	if err := e.applyDefaultDeny(fakeStaticSource{
 		proc: wasm.StaticDomain{Eligible: true, Rules: []compiler.StaticRule{{Event: "process", Action: 0, Pattern: "/bin/sh"}}},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	if len(pm.ddMarks) != 0 {
 		t.Errorf("marks = %v, want none in learning mode", pm.ddMarks)
@@ -130,9 +138,11 @@ func TestApplyDefaultDeny_DisabledOnlyClears(t *testing.T) {
 	e := ddEnforcer(t, pm, false, false)
 	e.defaultDeny = false
 
-	e.applyDefaultDeny(fakeStaticSource{
+	if err := e.applyDefaultDeny(fakeStaticSource{
 		proc: wasm.StaticDomain{Eligible: true, Rules: []compiler.StaticRule{{Event: "process", Action: 0, Pattern: "/bin/sh"}}},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	if len(pm.ddMarks) != 0 || len(pm.snapshot()) != 0 {
 		t.Errorf("marks=%v rules=%v, want none with default-deny off", pm.ddMarks, pm.snapshot())
@@ -149,10 +159,12 @@ func TestApplyDefaultDeny_PreloadErrorLeavesDomainUnmarked(t *testing.T) {
 	pm.setErr = errDDTest
 	e := ddEnforcer(t, pm, false, false)
 
-	e.applyDefaultDeny(fakeStaticSource{
+	if err := e.applyDefaultDeny(fakeStaticSource{
 		proc: wasm.StaticDomain{Eligible: true, Rules: []compiler.StaticRule{{Event: "process", Action: 0, Pattern: "/bin/sh"}}},
 		net:  wasm.StaticDomain{Eligible: true, Rules: []compiler.StaticRule{{Event: "network", Action: 0, Pattern: "10.0.0.1", Port: 53}}},
-	})
+	}); !errors.Is(err, errDDTest) {
+		t.Fatalf("preload failure not returned: %v", err)
+	}
 
 	if len(pm.ddMarks) != 1 || pm.ddMarks[0].eventType != ebpf.EventTypeNetwork {
 		t.Errorf("marks = %v, want only connect", pm.ddMarks)
@@ -163,9 +175,11 @@ func TestApplyDefaultDeny_MarkErrorIsSurfacedNotFatal(t *testing.T) {
 	pm := &fakePolicyMap{ddMarkErr: errDDTest}
 	e := ddEnforcer(t, pm, false, false)
 
-	e.applyDefaultDeny(fakeStaticSource{
+	if err := e.applyDefaultDeny(fakeStaticSource{
 		proc: wasm.StaticDomain{Eligible: true, Rules: []compiler.StaticRule{{Event: "process", Action: 0, Pattern: "/bin/sh"}}},
-	})
+	}); !errors.Is(err, errDDTest) {
+		t.Fatalf("mark failure not returned: %v", err)
+	}
 
 	if len(pm.snapshot()) != 1 {
 		t.Errorf("rules = %+v, want the preloaded entry despite the mark error", pm.snapshot())
@@ -177,9 +191,11 @@ func TestApplyDefaultDeny_MapWithoutSupportIsSkipped(t *testing.T) {
 	// platform without the kernel map): nothing to clear or mark, no crash.
 	e, _ := newTestEnforcer(t, testEnforcerOpts{policyMap: plainPolicyMap{}})
 	e.defaultDeny = true
-	e.applyDefaultDeny(fakeStaticSource{
+	if err := e.applyDefaultDeny(fakeStaticSource{
 		proc: wasm.StaticDomain{Eligible: true, Rules: []compiler.StaticRule{{Event: "process", Action: 0, Pattern: "/bin/sh"}}},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // plainPolicyMap implements only PolicyMapSyncer.

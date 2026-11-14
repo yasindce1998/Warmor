@@ -1,0 +1,84 @@
+package protocol
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/yasindce1998/warmor/pkg/api"
+)
+
+func TestFrameBoundsAndStrictDecoding(t *testing.T) {
+	for _, n := range []uint32{0, MaxControl + 1, ^uint32(0)} {
+		var b [4]byte
+		binary.BigEndian.PutUint32(b[:], n)
+		if _, err := Read(bytes.NewReader(b[:]), MaxControl); !errors.Is(err, ErrProtocol) {
+			t.Fatalf("length %d: %v", n, err)
+		}
+	}
+	for _, body := range []string{`{"Version":1,"Unknown":true}`, `{} {}`, `{`, `null {}`} {
+		var buf bytes.Buffer
+		if err := Write(&buf, []byte(body), MaxControl); err != nil {
+			t.Fatal(err)
+		}
+		if err := Receive(&buf, new(Control), MaxControl); err == nil {
+			t.Fatalf("accepted %s", body)
+		}
+	}
+	for _, body := range []string{`{"Version":1,"Sequence":1}`, `{"Version":1,"Sequence":1,"Action":null,"Audit":false,"Reason":"","Failed":false}`, `{"Version":1,"Sequence":1,"Action":1,"Action":0,"Audit":false,"Reason":"","Failed":false}`} {
+		var buf bytes.Buffer
+		if err := Write(&buf, []byte(body), MaxResult); err != nil {
+			t.Fatal(err)
+		}
+		if err := Receive(&buf, new(Result), MaxResult); err == nil {
+			t.Fatal("accepted ambiguous/missing result")
+		}
+	}
+	if _, err := Read(bytes.NewReader([]byte{0, 0, 0, 2, 1}), MaxControl); err == nil {
+		t.Fatal("accepted truncated frame")
+	}
+}
+
+func TestSnapshotPreservesInputsWithoutRepair(t *testing.T) {
+	e := &api.Event{PID: 42, UID: 7, GID: 8, Comm: "bad\xff", Filename: "legacy", ParentComm: "parent", CgroupID: 99, Timestamp: time.Unix(5, 0).UTC(), ContainerStart: time.Unix(2, 0).UTC(), Process: &api.ProcessEvent{Filename: "tool", Args: []string{"tool", "\xff", ""}}, File: &api.FileEvent{Path: "file", Operation: "open", Flags: 7}, Network: &api.NetworkEvent{Operation: "recvfrom", Protocol: "udp", RemoteAddr: "::1", RemotePort: 53, LocalPort: 12}}
+	e.SetType(api.EventTypeProcess) // explicitly process despite other populated members
+	s, err := Snapshot(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	if err := Send(&b, s, MaxEvent); err != nil {
+		t.Fatal(err)
+	}
+	var r Event
+	if err := Receive(&b, &r, MaxEvent); err != nil {
+		t.Fatal(err)
+	}
+	got := r.API()
+	if got.GetType() != api.EventTypeProcess || !reflect.DeepEqual(got.Process.Args, e.Process.Args) || got.Comm != e.Comm || got.File.Path != e.File.Path || got.Network.Operation != e.Network.Operation || got.ParentComm != e.ParentComm || got.CgroupID != e.CgroupID || !got.Timestamp.Equal(e.Timestamp) || !got.ContainerStart.Equal(e.ContainerStart) {
+		t.Fatalf("snapshot changed policy inputs: %+v", got)
+	}
+	if e.Timestamp != s.Timestamp {
+		t.Fatal("mutated caller")
+	}
+}
+
+func TestSnapshotBoundsAndUnknown(t *testing.T) {
+	for _, e := range []*api.Event{nil, {Type: 99}, {Comm: strings.Repeat("x", MaxEvent)}, {Process: &api.ProcessEvent{Args: make([]string, 4097)}}} {
+		if _, err := Snapshot(e); err == nil {
+			t.Fatal("accepted invalid/oversized event")
+		}
+	}
+	// Unknown remains unknown; missing context is not invented by transport.
+	s, err := Snapshot(&api.Event{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.API().ContainerStart.IsZero() || s.API().Process != nil {
+		t.Fatal("invented context")
+	}
+}

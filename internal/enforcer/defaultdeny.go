@@ -1,6 +1,7 @@
 package enforcer
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
@@ -41,26 +42,30 @@ type staticRulesSource interface {
 //
 // The caller holds decisionMu exclusively (so no persistDecision can inter-
 // leave) and passes the evaluator of the *current* policy generation.
-func (e *Enforcer) applyDefaultDeny(src staticRulesSource) {
-	metrics.SetDefaultDeny("exec", false)
-	metrics.SetDefaultDeny("connect", false)
-
+func (e *Enforcer) applyDefaultDeny(src staticRulesSource) error {
 	dd, ok := e.policyMap.(defaultDenySyncer)
 	if !ok {
 		if e.defaultDeny {
 			e.logger.LogInfo("Kernel default-deny unavailable: no default-deny capable policy map" +
 				" (requires LSM enforcement; userspace enforcement is unchanged)")
 		}
-		return
+		return nil
 	}
 
 	// Unmark first: from here until the marking goes back in, misses allow.
 	if err := dd.ClearDefaultDeny(); err != nil {
 		e.logger.LogError(err, "clear kernel default-deny domains (old markings may remain)")
+		return err
 	}
+	return e.preloadDefaultDeny(src, dd)
+}
+
+func (e *Enforcer) preloadDefaultDeny(src staticRulesSource, dd defaultDenySyncer) error {
+	metrics.SetDefaultDeny("exec", false)
+	metrics.SetDefaultDeny("connect", false)
 
 	if !e.defaultDeny || e.learningMode {
-		return
+		return nil
 	}
 
 	// Audit mode marks the domains audit-only: the kernel emits the miss for
@@ -81,6 +86,7 @@ func (e *Enforcer) applyDefaultDeny(src staticRulesSource) {
 		{"connect", ebpf.EventTypeNetwork, src.StaticRulesNetwork()},
 	}
 
+	var failures []error
 	for _, d := range domains {
 		if !d.domain.Eligible {
 			e.logger.LogInfo(fmt.Sprintf(
@@ -90,6 +96,7 @@ func (e *Enforcer) applyDefaultDeny(src staticRulesSource) {
 			continue
 		}
 		if err := e.preloadDomain(dd, d.eventType, d.name, d.domain.Rules, mode); err != nil {
+			failures = append(failures, err)
 			e.logger.LogError(err, fmt.Sprintf("activate kernel default-deny for %s"+
 				" (misses stay allowed)", d.name))
 			continue
@@ -98,6 +105,26 @@ func (e *Enforcer) applyDefaultDeny(src staticRulesSource) {
 		e.logger.LogInfo(fmt.Sprintf(
 			"✓ Kernel default-deny active for %s (%d rules preloaded)", d.name, len(d.domain.Rules)))
 	}
+	return errors.Join(failures...)
+}
+
+// prepareKernel uses the legacy in-place map API. It cannot promise continuous
+// default-deny or atomic kernel generations. Callers must not acknowledge errors.
+func (e *Enforcer) prepareKernel(src staticRulesSource) error {
+	if dd, ok := e.policyMap.(defaultDenySyncer); ok {
+		if err := dd.ClearDefaultDeny(); err != nil {
+			return fmt.Errorf("unmark kernel domains: %w", err)
+		}
+	}
+	if e.policyMap != nil {
+		if err := e.policyMap.Clear(); err != nil {
+			return fmt.Errorf("clear kernel policy map: %w", err)
+		}
+	}
+	if dd, ok := e.policyMap.(defaultDenySyncer); ok {
+		return e.preloadDefaultDeny(src, dd)
+	}
+	return nil
 }
 
 // preloadDomain writes every static rule of one domain into the kernel

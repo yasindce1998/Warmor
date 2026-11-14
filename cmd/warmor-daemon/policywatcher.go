@@ -1,64 +1,78 @@
 package main
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
 
-// policyWatchInterval is how often the policy file's mtime is checked.
-// Polling (rather than inotify/fsnotify) keeps this dependency-free and
-// behaves identically on every platform.
 const policyWatchInterval = 2 * time.Second
 
-// startPolicyWatcher monitors the policy file for changes and sends on
-// reloadCh when a modification is detected. Returns a stop function.
-//
-// On Unix this complements SIGHUP: nothing sends SIGHUP inside Kubernetes,
-// where a ConfigMap update lands as a file swap that only a watcher sees.
-// On Windows it has always been the only reload trigger.
-func startPolicyWatcher(policyPath string, reloadCh chan<- struct{}) func() {
-	return watchPolicyFile(policyPath, reloadCh, policyWatchInterval)
+func policyContentIdentity(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		return "", err
+	}
+	sig, err := os.ReadFile(resolved + ".sig")
+	if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	return fmt.Sprintf("%x/%x", sha256.Sum256(data), sha256.Sum256(sig)), nil
 }
 
-// watchPolicyFile is startPolicyWatcher with an explicit poll interval;
-// tests pass a short one. The interval is a parameter, not shared state,
-// so shortening it in tests cannot race a running watcher.
-func watchPolicyFile(policyPath string, reloadCh chan<- struct{}, interval time.Duration) func() {
+// Hash content instead of increasing mtime, and acknowledge only a successful
+// activation. Unchanged bytes are retried after failures. Capture the baseline
+// synchronously so an immediate write cannot race goroutine initialization.
+func watchPolicyActivation(path string, activate func() error, interval time.Duration) func() {
+	active, _ := policyContentIdentity(path)
 	var once sync.Once
-	stopCh := make(chan struct{})
-
+	stop, done := make(chan struct{}), make(chan struct{})
 	go func() {
-		var lastMod time.Time
-		info, err := os.Stat(policyPath)
-		if err == nil {
-			lastMod = info.ModTime()
-		}
-
+		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-
 		for {
 			select {
-			case <-stopCh:
+			case <-stop:
 				return
 			case <-ticker.C:
-				info, err := os.Stat(policyPath)
-				if err != nil {
+				desired, err := policyContentIdentity(path)
+				if err != nil || desired == active {
 					continue
 				}
-				if info.ModTime().After(lastMod) {
-					lastMod = info.ModTime()
-					log.Println("Policy file changed on disk, triggering reload...")
-					select {
-					case reloadCh <- struct{}{}:
-					default:
-					}
+				if err := activate(); err != nil {
+					log.Printf("Policy activation failed (will retry): %v", err)
+					continue
+				}
+				if after, err := policyContentIdentity(path); err == nil && after == desired {
+					active = desired
 				}
 			}
 		}
 	}()
+	return func() { once.Do(func() { close(stop) }); <-done }
+}
 
-	return func() { once.Do(func() { close(stopCh) }) }
+// Channel adapters provide notifications only. The daemon uses the direct
+// activation callback above to receive real reload acknowledgement.
+func startPolicyWatcher(path string, reloadCh chan<- struct{}) func() {
+	return watchPolicyFile(path, reloadCh, policyWatchInterval)
+}
+
+func watchPolicyFile(path string, reloadCh chan<- struct{}, interval time.Duration) func() {
+	return watchPolicyActivation(path, func() error {
+		select {
+		case reloadCh <- struct{}{}:
+		default:
+		}
+		return nil
+	}, interval)
 }

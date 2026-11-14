@@ -38,7 +38,7 @@ Status as of current `main`. "Partial" means the phase's headline features are r
 | **Phase 6** | Partial | 7 LSM hooks attach (tested in a VM in CI). Kernel blocking happens only on a policy-map hit, and only exec and connect entries are ever written. A miss is allowed. | Linux |
 | **Phase 7** | Partial | Policy server with registration, heartbeats, versioned policies and percentage rollouts. The SIEM syslog sink ships (`--event-sink syslog:`); NetFilter and sandbox remain library-only. | All |
 | **Phase 8** | Partial | mTLS/JWT, signed OCI bundles (`warmor-policy-bundle`), daemon signature verification (`--verify-key`) and the `warmorctl` TUI work. The OCI hook is experimental (no auth, bindings unused). containerd and per-container policy are missing. | All |
-| **Phase 9** | Partial | `warmor-learn` and `warmor-simulate` ship. Escape detection, YAML temporal policies, the MITRE attack graph (`--attack-graph`), the SSE dashboard (`--dashboard-port`), the SIEM syslog sink and fleet drift detection (`--drift` + the server's admin API and metrics) ship; in-kernel integrity is experimental (unverified on an IMA kernel in CI). Canary auto-rollback is library-only (not wired into any binary). | Linux |
+| **Phase 9** | Partial | `warmor-learn` and `warmor-simulate` ship. Escape detection, YAML temporal policies, the MITRE attack graph (`--attack-graph`), the SSE dashboard (`--dashboard-port`), and the SIEM syslog sink ship. `--drift` collects locally; daemon fleet submission awaits real workload identity (server comparator/API/metrics exist). In-kernel integrity is experimental (unverified on an IMA kernel in CI). Canary auto-rollback is library-only (not wired into any binary). | Linux |
 
 ### Key Metrics
 
@@ -677,10 +677,12 @@ strength differs sharply by platform and event type.
 
 1. Network byte accounting: `sendto`/`recvfrom` hooks feeding `bytes_sent`/`bytes_recv` into the event stream and the WASM ABI (the v4 `direction` field already flows to policies)
 
-Done recently: fleet drift detection — agents with `--drift` fingerprint
-behavior (event-type+comm rates) and ship it in heartbeats; the server
-runs the z-score detector, exposes anomalies at `/api/v1/admin/drift`
-and serves `warmor_drift_*` gauges (see
+Done recently: bounded drift observations — agents with `--drift` collect
+rolling event-type+comm rates locally. Daemon heartbeat submission is withheld
+until real workload identity and per-workload collection exist; policy hashes
+and deprecated `--drift-image-key` overrides are not image identity. The server
+comparator exposes `/api/v1/admin/drift` and `warmor_drift_*` gauges for identified
+integrations (see
 [design/fleet-drift.md](design/fleet-drift.md)); and the node-side
 intelligence chain — `--attack-graph` correlates events to MITRE
 techniques, labels every streamed event and exports attack-graph/

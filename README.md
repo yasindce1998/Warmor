@@ -95,7 +95,7 @@ The daemon prints a `Security posture:` line at startup that tells you whether L
 |----------|-----------|------|
 | **Linux** | eBPF tracepoints + LSM-BPF (7 hooks) | Most mature. Kernel blocking for cached exec/connect denies, and detect-then-`SIGKILL` for everything else. LSM attach is tested in a VM in CI. |
 | **Windows** | ETW, plus eBPF-for-Windows | **Experimental beta.** The ETW path (detect, then `TerminateProcess`) is what is tested in CI. The eBPF-for-Windows programs have never been built or run in CI, so their kernel blocking is unverified. |
-| **macOS** | Endpoint Security Framework | **Experimental, detection only.** Every AUTH event is answered ALLOW. The cgo ESF code is not compiled in CI, and release binaries are built without cgo. |
+| **macOS** | Endpoint Security Framework | **Experimental, detection only.** Every AUTH event is answered ALLOW. The cgo ESF code is unverified in CI; release archives contain tools only, **no daemon**. |
 
 ### Performance (measured)
 
@@ -180,9 +180,9 @@ Serves a live SSE view of policy evaluations (comm, PID, decision, reason) at `/
 
 Streams CEF-formatted events to a syslog collector over UDP or TCP: `--event-sink syslog:siem.example.com:514` (UDP) or `syslog:tcp://siem.example.com:514`. Combine with `--attack-graph` to attach MITRE technique labels.
 
-### Drift Detection — Shipped (`--drift` on agents, `--drift-threshold` on the server)
+### Drift — Local collection; workload-scoped fleet integration pending
 
-Agents with `--drift` fingerprint observed behavior (event-type+comm rate vectors) and ship a fingerprint in every policy-server heartbeat. The server compares agents reporting the same grouping key (default: the policy-file hash; override with `--drift-image-key`) and flags z-score outliers and unique patterns as drift anomalies — view them at `/api/v1/admin/drift` or alert on `warmor_drift_anomalies` (server `--metrics-port`). See [the fleet-drift design](docs/design/fleet-drift.md).
+`--drift` collects bounded host behavior rates over a rolling ten-minute window. The daemon omits these fingerprints from policy-server heartbeats until real workload identity and per-workload collection are available; a policy hash is not an image identity. `--drift-image-key` is deprecated and ignored. The server comparison API and metrics remain available for genuinely identified integrations. See [the fleet-drift design and migration notes](docs/design/fleet-drift.md).
 
 ### Canary Rollout — Partial (manual ramp; auto-rollback is library only)
 
@@ -298,7 +298,7 @@ internal/                                      (status on main)
   policygen/ sbompolicy/ policydiff/ policymerge/ policybundle/          Shipped (CLI tools)
   container/      — Cgroup→container resolver, container start times     Shipped (escape, temporal); containerd monitor library-only
   escape/         — Container escape pattern correlator                  Shipped (--escape-detect)
-  drift/          — Behavioral fingerprint + z-score detection           Shipped (--drift + server)
+  drift/          — Bounded rolling host observations + fleet comparator (workload integration pending)
   attackgraph/    — MITRE ATT&CK correlation + kill-chain DAG            Shipped (--attack-graph)
   blastradius/    — Container relationship graph + BFS reachability      Shipped (--attack-graph metrics)
   temporal/       — Temporal constraint types + reference semantics      Shipped (compiled into YAML policies)

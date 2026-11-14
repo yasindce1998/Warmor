@@ -67,7 +67,7 @@ type received struct {
 	got  chan struct{}
 }
 
-func (r *received) onUpdate(_ *policyserver.PolicyAssignment, data []byte) {
+func (r *received) onUpdate(_ *policyserver.PolicyAssignment, data []byte) error {
 	r.mu.Lock()
 	r.data = data
 	r.mu.Unlock()
@@ -75,6 +75,7 @@ func (r *received) onUpdate(_ *policyserver.PolicyAssignment, data []byte) {
 	case r.got <- struct{}{}:
 	default:
 	}
+	return nil
 }
 
 // startPolicyServer runs a policy server with one policy matching env=prod.

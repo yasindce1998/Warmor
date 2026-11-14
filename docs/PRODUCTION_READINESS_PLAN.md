@@ -28,7 +28,7 @@ and build/release workflows. It is not an exhaustive security audit.
 
 ## What is already working
 
-### Implementation progress (first safety batch)
+### Implementation progress (2026-11-14)
 
 Implemented after the initial review: strict YAML/operand/variable validation;
 real argv and network-operation compilation via ABI 5 callbacks; rejection of
@@ -39,9 +39,30 @@ assigned-revision downloads. Regression tests and migration notes accompany
 these changes. Historical findings below describe the reviewed baseline, not
 claims that every listed defect remains unchanged.
 
-Still outstanding: exact kernel identities, verified process targeting,
-transactional activation, runtime binding authorization/attested labels,
-controller last-known-good/workload isolation, and the remaining release gates.
+Merged, reviewed batches (a merged PR is not a production-readiness certificate):
+
+| PR | Delivered | Evidence / remaining qualification |
+|---|---|---|
+| [#28](https://github.com/yasindce1998/Warmor/pull/28), [#29](https://github.com/yasindce1998/Warmor/pull/29) | Strict semantics, audit safeguards, credential-bound agent APIs; bounded variable expansion and unknown-input rule posture | Race/compiled-WASM/CI tests; #29 fixes review findings in the initial batch |
+| [#31](https://github.com/yasindce1998/Warmor/pull/31) | Verified pidfd termination with no numeric-PID fallback; attempted/failed/refused/succeeded outcomes | Isolated child tests and platform/kernel CI; accepted SIGKILL is not syscall prevention |
+| [#32](https://github.com/yasindce1998/Warmor/pull/32) | Independent bounded sink queues, network deadlines/retry budgets and loss metrics | Repeated race/outage tests; cooperative custom sinks and blocking filesystem/stdout remain limitations |
+| [#30](https://github.com/yasindce1998/Warmor/pull/30) | Loopback dashboard, optional auth, HTTP safeguards and text-only event rendering | HTTP/SSE tests; remote access requires an explicit protected transport |
+| [#34](https://github.com/yasindce1998/Warmor/pull/34) | Bounded rolling canary analyzer, validated config, truthful rollback errors | Library safety only; automatic fleet rollback remains unwired |
+| [#33](https://github.com/yasindce1998/Warmor/pull/33) | Guest initialization/export limits, allocator/source-generation safety, ABI-aware cache keys and module-complexity preflight | Hard host-side compilation CPU/RSS/deadline isolation is **not** implemented; see the [isolation gate](design/wasm-compilation-isolation.md) |
+| [#35](https://github.com/yasindce1998/Warmor/pull/35) | Real CRI identity/selector preparation package and documented trust boundaries | Fake-gRPC/unit evidence only; production coordinator and policy routing are not wired |
+
+Open implementation/review/CI batches include dependency remediation (#36),
+intelligence lifecycle (#37), durable fleet activation (#38), private recording
+and tool contracts (#39), controller/Kubernetes deployment safety (#40), exact
+kernel keys plus disposable-VM outcome gates (#41), and tested release-artifact
+publication (#42). Their code must not be described as shipped until merged.
+
+Major remaining gates: generation-atomic kernel activation; attested workload
+identity and actual per-workload routing; authenticated node application feedback;
+safe automatic rollout telemetry/actions; hard compilation-process isolation;
+real-node/CNI/capability/architecture tests; and native ESF/Windows-driver release
+validation. Work continues in dependency-ordered batches rather than treating
+unit coverage or a runnable chart as proof of enforcement isolation.
 
 - Linux tracepoint monitoring, LSM loading, bounded WASM evaluation, decision
   caching, signed-policy verification, and kernel default-deny for an eligible

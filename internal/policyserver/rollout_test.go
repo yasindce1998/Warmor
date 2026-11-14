@@ -326,7 +326,12 @@ func TestResolvePolicyEdgeCases(t *testing.T) {
 	if a.Version != 1 {
 		t.Errorf("expected aborted rollout to fall back to base version, got %d", a.Version)
 	}
-	base, _ := store.assignment("web-policy", 1)
+	store.mu.RLock()
+	base, ok := store.assignmentLocked("web-policy", 1)
+	store.mu.RUnlock()
+	if !ok {
+		t.Fatal("missing base version assignment")
+	}
 	if a.WASMHash != base.WASMHash || a.WASMPath != base.WASMPath {
 		t.Errorf("assignment should carry base version wasm metadata: %+v", a)
 	}

@@ -5,9 +5,11 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,12 +34,15 @@ import (
 
 // Options configures the enforcer at startup
 type Options struct {
-	AuditMode    bool
-	LearningMode bool
-	CgroupFilter []string
-	MetricsPort  int
-	LogLevel     string
-	LSMEnforce   bool
+	AuditMode               bool
+	LearningMode            bool
+	CgroupFilter            []string
+	CgroupRoot              string
+	CgroupReconcileInterval time.Duration
+	MetricsBindAddress      string
+	MetricsPort             int
+	LogLevel                string
+	LSMEnforce              bool
 	// RequireLSM refuses to start unless BPF-LSM kernel enforcement can be
 	// established (fail-closed startup). Without it, an unsupported kernel
 	// degrades to tracepoint-only observation.
@@ -80,10 +85,10 @@ type Options struct {
 	// metrics (see docs/design/intelligence-chain.md).
 	AttackGraph bool
 
-	// Drift enables behavioral fingerprinting for fleet drift detection:
-	// event-type+comm rates are counted in the streaming pipeline and
-	// shipped to the policy server in heartbeats (see
-	// docs/design/fleet-drift.md). Requires --server to reach anyone.
+	// Drift enables bounded local event-type+comm rates in the streaming
+	// pipeline. Host aggregates are not submitted for fleet comparison until
+	// genuine workload identity and scoped collection are available (see
+	// docs/design/fleet-drift.md); no server is required for local collection.
 	Drift bool
 
 	// Streaming pipeline configuration
@@ -107,10 +112,15 @@ type PolicyMapSyncer interface {
 // Enforcer integrates platform-specific event capture (eBPF/ETW/ESF) with
 // WASM policy evaluation.
 type Enforcer struct {
-	platform      platform.Platform
-	eventChan     chan *api.Event
-	wasmRuntime   *wasm.Runtime
-	evaluatorMu   sync.RWMutex
+	platform    platform.Platform
+	eventChan   chan *api.Event
+	wasmRuntime *wasm.Runtime
+	evaluatorMu sync.RWMutex
+	// An event holds the drain barrier through cache lookup, evaluation,
+	// persistence, action and reporting. Reload/close retire only drained pools.
+	activationMu  sync.Mutex
+	eventMu       sync.RWMutex
+	closed        bool
 	evaluator     *wasm.PolicyEvaluator
 	pool          *wasm.Pool
 	cache         *cache.DecisionCache
@@ -133,8 +143,8 @@ type Enforcer struct {
 	// intelligence is non-nil when --attack-graph is set (MITRE attack
 	// graph + blast radius).
 	intelligence *intelligence
-	// driftCollector is non-nil when --drift is set (fleet drift
-	// fingerprinting; snapshots ship in policy server heartbeats).
+	// driftCollector is non-nil when --drift is set (local host observations;
+	// fleet submission requires real workload identity, not a policy hash).
 	driftCollector *drift.FingerprintCollector
 	netFilter      *NetFilter
 	sandbox        *SandboxManager
@@ -153,6 +163,7 @@ type Enforcer struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
+	processing      atomic.Bool
 }
 
 // newPlatform constructs the platform monitor. It is a variable so tests can
@@ -229,7 +240,11 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	// (which only applies to container cgroups) and dates containers for
 	// temporal policies. The detector is built before the platform so a bad
 	// mode can't leak it.
-	cgroups := container.NewCgroupResolver("/sys/fs/cgroup")
+	cgroupRoot := opts.CgroupRoot
+	if cgroupRoot == "" {
+		cgroupRoot = "/sys/fs/cgroup"
+	}
+	cgroups := container.NewCgroupResolver(cgroupRoot)
 	escapeDetector, err := newEscapeDetector(opts.EscapeDetect, cgroups.IsContainer)
 	if err != nil {
 		return nil, err
@@ -242,11 +257,13 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	// Initialize the platform-specific monitor (eBPF on Linux, ETW on
 	// Windows, ESF on macOS).
 	plat, err := newPlatform(platform.Config{
-		CgroupFilter: opts.CgroupFilter,
-		LSMEnforce:   opts.LSMEnforce,
-		RequireLSM:   opts.RequireLSM,
-		SkipLSM:      opts.SkipLSM,
-		AuditMode:    opts.AuditMode || opts.LearningMode,
+		CgroupFilter:            opts.CgroupFilter,
+		CgroupRoot:              cgroupRoot,
+		CgroupReconcileInterval: opts.CgroupReconcileInterval,
+		LSMEnforce:              opts.LSMEnforce,
+		RequireLSM:              opts.RequireLSM,
+		SkipLSM:                 opts.SkipLSM,
+		AuditMode:               opts.AuditMode || opts.LearningMode,
 
 		IntegrityMode:    opts.IntegrityMode,
 		IntegrityDigests: opts.IntegrityDigests,
@@ -343,6 +360,9 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 
 	// Initialize metrics server
 	metricsServer := metrics.NewServer(port)
+	if opts.MetricsBindAddress != "" {
+		metricsServer = metrics.NewServerAddress(net.JoinHostPort(opts.MetricsBindAddress, strconv.Itoa(port)))
+	}
 	metrics.SetPolicyInfo(policyPath, version.Version)
 	logger.LogInfo(fmt.Sprintf("✓ Metrics server initialized on :%d", port))
 
@@ -421,12 +441,18 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		cancel:          cancel,
 	}
 
+	metricsServer.SetReadinessCheck(e.Ready)
+
 	// Preload the kernel default-deny domains from the policy's static
 	// rules. No events flow yet; decisionMu is uncontended but held for
 	// symmetry with the reload path.
 	e.decisionMu.Lock()
-	e.applyDefaultDeny(evaluator)
+	activationErr := e.applyDefaultDeny(evaluator)
 	e.decisionMu.Unlock()
+	if activationErr != nil {
+		e.Close()
+		return nil, fmt.Errorf("activate kernel default-deny: %w", activationErr)
+	}
 
 	return e, nil
 }
@@ -457,6 +483,7 @@ func (e *Enforcer) Start() error {
 		e.wg.Add(1)
 		go e.attackGraphMetricsLoop(attackGraphMetricsInterval)
 	}
+	e.startStateMaintenance()
 
 	e.logger.LogInfo("Enforcer started, processing events...")
 	return nil
@@ -466,6 +493,8 @@ func (e *Enforcer) Start() error {
 // them with the WASM policy.
 func (e *Enforcer) eventLoop() {
 	defer e.wg.Done()
+	e.processing.Store(true)
+	defer e.processing.Store(false)
 
 	for {
 		select {
@@ -482,6 +511,11 @@ func (e *Enforcer) eventLoop() {
 
 // handleEvent processes a single event with caching and metrics
 func (e *Enforcer) handleEvent(event *api.Event) {
+	e.eventMu.RLock()
+	defer e.eventMu.RUnlock()
+	if e.closed {
+		return
+	}
 	metrics.RecordEventProcessed(event.GetType().String())
 	if e.checkEscape(event) {
 		return
@@ -1021,10 +1055,26 @@ func (e *Enforcer) PrintStats() {
 // verification key, a policy whose signature is missing or invalid is
 // refused and the current policy stays active.
 func (e *Enforcer) ReloadPolicy() error {
-	e.logger.LogInfo(fmt.Sprintf("Reloading policy from: %s", e.policyPath))
+	return e.ActivatePolicy(e.policyPath, nil)
+}
+
+// ActivatePolicy prepares a candidate, drains old events and prepares kernel
+// state before durable publication and evaluator swap. The legacy single map
+// is NOT generation-atomic: default-deny misses may allow during rebuild and
+// rollback errors indicate degraded kernel enforcement.
+func (e *Enforcer) ActivatePolicy(path string, commit func() error) error {
+	e.activationMu.Lock()
+	defer e.activationMu.Unlock()
+	e.eventMu.RLock()
+	closed := e.closed
+	e.eventMu.RUnlock()
+	if closed {
+		return errors.New("enforcer closed")
+	}
+	e.logger.LogInfo(fmt.Sprintf("Reloading policy from: %s", path))
 
 	pid := policyID(e.policyPath)
-	newRuntime, newPool, err := e.loadPolicy()
+	newRuntime, newPool, err := e.loadPolicyPath(path)
 	metrics.RecordPolicyLoad(pid, err)
 	if err != nil {
 		return err
@@ -1034,6 +1084,31 @@ func (e *Enforcer) ReloadPolicy() error {
 	hostname, _ := os.Hostname()
 	newEvaluator := wasm.NewPolicyEvaluator(newPool, hostname)
 	newEvaluator.SetTimeout(e.evalTimeout)
+	activated := false
+	defer func() {
+		if !activated {
+			newEvaluator.Close(e.ctx)
+			newPool.Close(e.ctx)
+			newRuntime.Close(e.ctx)
+		}
+	}()
+
+	e.eventMu.Lock()
+	defer e.eventMu.Unlock()
+	e.decisionMu.Lock()
+	err = e.prepareKernel(newEvaluator)
+	if err == nil && commit != nil {
+		err = commit()
+	}
+	if err != nil {
+		// Dynamic cached kernel entries cannot be restored transactionally.
+		restoreErr := e.prepareKernel(e.evaluator)
+		e.decisionMu.Unlock()
+		if restoreErr != nil {
+			return fmt.Errorf("activation failed: %w; kernel rollback failed (enforcement degraded): %v", err, restoreErr)
+		}
+		return fmt.Errorf("activation failed (previous userspace policy retained): %w", err)
+	}
 
 	// Atomic swap with mutex protection
 	e.evaluatorMu.Lock()
@@ -1046,24 +1121,9 @@ func (e *Enforcer) ReloadPolicy() error {
 	e.policyID = pid
 	e.policyGen.Add(1)
 	e.evaluatorMu.Unlock()
-
-	// Drop every decision the old policy made: the userspace cache (whose
-	// keying also follows the new policy's declaration) and the kernel map,
-	// otherwise the kernel keeps enforcing old decisions until the entries
-	// are evicted. Holding decisionMu exclusively waits out any
-	// persistDecision already past its generation check; later ones from
-	// the old policy see the bumped generation and are dropped.
-	// applyDefaultDeny then rebuilds the static allowlist and re-marks the
-	// default-deny domains from the *new* policy (unmarking first, so a
-	// policy that loses eligibility cannot keep denying misses).
-	var clearErr error
-	e.decisionMu.Lock()
 	setCacheDependencies(e.cache, newEvaluator)
-	if e.policyMap != nil {
-		clearErr = e.policyMap.Clear()
-	}
-	e.applyDefaultDeny(newEvaluator)
 	e.decisionMu.Unlock()
+	activated = true
 	e.updateMapEntries()
 
 	// Clean up old resources
@@ -1078,23 +1138,17 @@ func (e *Enforcer) ReloadPolicy() error {
 	}
 
 	metrics.SetPolicyInfo(e.policyPath, version.Version)
-	if clearErr != nil {
-		// The new policy is active in userspace, but stale kernel decisions
-		// may remain; surface it rather than report a clean reload.
-		e.logger.LogError(clearErr, "clear kernel policy map after reload")
-		return fmt.Errorf("policy reloaded, but clearing the kernel policy map failed (stale kernel decisions may remain): %w", clearErr)
-	}
 	e.logger.LogInfo("✓ Policy reloaded successfully")
 	return nil
 }
 
-// loadPolicy compiles e.policyPath into a fresh runtime and instance pool.
-func (e *Enforcer) loadPolicy() (*wasm.Runtime, *wasm.Pool, error) {
+// loadPolicyPath compiles a candidate into a fresh runtime and instance pool.
+func (e *Enforcer) loadPolicyPath(path string) (*wasm.Runtime, *wasm.Pool, error) {
 	// With a verify key, read the file once, verify it and load exactly
 	// those bytes, before creating anything.
 	var verifiedPolicy []byte
 	if e.verifyKey != nil {
-		data, err := ReadVerifiedPolicy(e.policyPath, e.verifyKey)
+		data, err := ReadVerifiedPolicy(path, e.verifyKey)
 		if err != nil {
 			return nil, nil, fmt.Errorf("verify new policy: %w", err)
 		}
@@ -1116,13 +1170,13 @@ func (e *Enforcer) loadPolicy() (*wasm.Runtime, *wasm.Pool, error) {
 			newRuntime.Close(e.ctx)
 			return nil, nil, fmt.Errorf("load new policy: %w", err)
 		}
-	} else if wasm.IsYAMLPolicy(e.policyPath) {
-		if err := newRuntime.LoadPolicyFromYAML(e.ctx, e.policyPath); err != nil {
+	} else if wasm.IsYAMLPolicy(path) {
+		if err := newRuntime.LoadPolicyFromYAML(e.ctx, path); err != nil {
 			newRuntime.Close(e.ctx)
 			return nil, nil, fmt.Errorf("load new YAML policy: %w", err)
 		}
 	} else {
-		if err := newRuntime.LoadPolicy(e.ctx, e.policyPath); err != nil {
+		if err := newRuntime.LoadPolicy(e.ctx, path); err != nil {
 			newRuntime.Close(e.ctx)
 			return nil, nil, fmt.Errorf("load new policy: %w", err)
 		}
@@ -1171,6 +1225,14 @@ func (e *Enforcer) Stop() {
 
 // Close cleans up resources
 func (e *Enforcer) Close() error {
+	e.activationMu.Lock()
+	defer e.activationMu.Unlock()
+	e.eventMu.Lock()
+	defer e.eventMu.Unlock()
+	if e.closed {
+		return nil
+	}
+	e.closed = true
 	e.logger.LogShutdown()
 
 	// Flush and close the streaming pipeline

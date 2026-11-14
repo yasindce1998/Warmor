@@ -178,7 +178,7 @@ func TestPolicyMatching(t *testing.T) {
 	}
 
 	// Version-based long-poll: should return 304 if agent already has version 1
-	resp, err = http.Get(ts.URL + "/api/v1/policy?agent_id=agent-prod&if_version=1")
+	resp, err = http.Get(ts.URL + "/api/v1/policy?agent_id=agent-prod&if_version=1&if_policy_id=prod-policy&if_hash=" + assignment.WASMHash)
 	if err != nil {
 		t.Fatal(err)
 	}
