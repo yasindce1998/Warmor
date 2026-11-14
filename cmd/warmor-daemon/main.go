@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -64,6 +65,8 @@ var (
 	cgroupRoot              = flag.String("cgroup-root", "/sys/fs/cgroup", "Host cgroup v2 mount visible to the daemon (automatic discovery and container resolution)")
 	cgroupReconcileInterval = flag.Duration("cgroup-reconcile-interval", time.Second, "Automatic discovery interval; new pods are not covered until discovery")
 	metricsBindAddress      = flag.String("metrics-bind-address", "", "Metrics/probe bind IP (empty listens on all interfaces; hostNetwork exposure is CNI-dependent)")
+	dashboardBind           = flag.String("dashboard-bind", dashboard.DefaultBind, "Dashboard listen IP (remote/all-interface access requires an explicit address; use a TLS reverse proxy)")
+	dashboardTokenFile      = flag.String("dashboard-token-file", "", "Dashboard HTTP Basic password file (user: warmor); alternatively set $"+dashboard.TokenEnv)
 )
 
 func main() {
@@ -194,20 +197,29 @@ func runDaemon(stop <-chan struct{}) {
 
 	// Web dashboard (--dashboard-port): served on its own HTTP server so
 	// the SSE stream is not cut by the metrics server's write timeout.
-	var dashboardServer *http.Server
-	if *dashboardPort > 0 {
-		dashHandler := dashboard.New(200)
-		sinks = append(sinks, dashboard.NewSink(dashHandler))
-		mux := http.NewServeMux()
-		mux.Handle("/dashboard", dashHandler)
-		mux.Handle("/dashboard/events", dashHandler)
-		dashboardServer = &http.Server{
-			Addr:    fmt.Sprintf(":%d", *dashboardPort),
-			Handler: mux,
-			// No WriteTimeout: /dashboard/events is a long-lived SSE stream.
+	if *dashboardPort < 0 || *dashboardPort > 65535 {
+		log.Fatal("dashboard port must be between 0 (off) and 65535")
+	}
+	if *dashboardPort != 0 {
+		token, err := dashboard.LoadToken(*dashboardTokenFile)
+		if err != nil {
+			log.Fatalf("dashboard authentication: %v", err)
 		}
+		dashHandler := dashboard.New(200)
+		dashboardServer, err := dashboard.NewServer(dashboard.ServerConfig{
+			Bind: *dashboardBind, Port: *dashboardPort, Token: token,
+		}, dashHandler)
+		if err != nil {
+			log.Fatalf("dashboard server: %v", err)
+		}
+		listener, err := net.Listen("tcp", dashboardServer.Addr)
+		if err != nil {
+			log.Fatalf("dashboard listen: %v", err)
+		}
+		defer dashboardServer.Close()
+		sinks = append(sinks, dashboard.NewSink(dashHandler))
 		go func() {
-			if err := dashboardServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := dashboardServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Fatalf("dashboard server: %v", err)
 			}
 		}()
@@ -217,7 +229,10 @@ func runDaemon(stop <-chan struct{}) {
 			defer cancel()
 			_ = dashboardServer.Shutdown(shutdownCtx)
 		}()
-		log.Printf("✓ Web dashboard on http://localhost:%d/dashboard", *dashboardPort)
+		log.Printf("✓ Web dashboard listening on http://%s/dashboard (authentication enabled: %t)", listener.Addr(), token != "")
+		if addr, ok := listener.Addr().(*net.TCPAddr); !ok || !addr.IP.IsLoopback() {
+			log.Print("⚠ Dashboard remote access explicitly enabled; restrict network access and use a trusted TLS/authenticating reverse proxy (dashboard HTTP is plaintext)")
+		}
 	}
 
 	// Parse event labels
