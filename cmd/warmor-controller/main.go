@@ -29,6 +29,7 @@ var (
 	defaultPolicyPath = flag.String("default-policy", "/etc/warmor-controller/default-policy.wasm", "Compiled policy synced while no WarmorPolicy exists (the cluster's baked default)")
 	cacheDir          = flag.String("cache-dir", "/var/lib/warmor-controller/cache", "Directory caching compiled policies across restarts (empty: no cache)")
 	resyncPeriod      = flag.Duration("resync-period", 10*time.Minute, "Re-reconcile this often even without events, healing out-of-band edits to the policy ConfigMap (0 disables)")
+	compileTimeout    = flag.Duration("compile-timeout", 2*time.Minute, "Maximum time allowed for one policy compilation (must be positive)")
 	showVersion       = flag.Bool("version", false, "Print version and exit")
 )
 
@@ -40,6 +41,9 @@ func main() {
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	if *compileTimeout <= 0 {
+		log.Fatal("--compile-timeout must be positive")
+	}
 	defer stop()
 
 	cfg := loadConfig()
@@ -69,6 +73,7 @@ func main() {
 		DefaultPolicyPath:  *defaultPolicyPath,
 		CacheDir:           *cacheDir,
 		ResyncPeriod:       *resyncPeriod,
+		CompileTimeout:     *compileTimeout,
 	}
 	ctl := controller.New(kube.New(cfg), opts)
 

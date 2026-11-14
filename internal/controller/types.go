@@ -2,11 +2,12 @@
 // WarmorPolicy custom resources, validates and compiles them into one
 // effective node policy, and syncs the compiled module into a ConfigMap
 // the agent DaemonSet mounts. Agents pick changes up through their
-// policy-file watcher, so a WarmorPolicy update reaches every node
-// without restarting anything.
+// policy-file watcher. Publication is not acknowledgement of node activation.
 package controller
 
 import (
+	"encoding/json"
+
 	"github.com/yasindce1998/warmor/internal/policymerge"
 )
 
@@ -20,6 +21,8 @@ type ObjectMeta struct {
 	CreationTimestamp string            `json:"creationTimestamp,omitempty"`
 	Labels            map[string]string `json:"labels,omitempty"`
 	Annotations       map[string]string `json:"annotations,omitempty"`
+	OwnerReferences   []json.RawMessage `json:"ownerReferences,omitempty"`
+	Finalizers        []string          `json:"finalizers,omitempty"`
 }
 
 // WarmorPolicy is the warmorpolicies.warmor.io custom resource. It mirrors
@@ -105,6 +108,11 @@ type WarmorPolicyStatus struct {
 	Conditions         []PolicyCondition `json:"conditions,omitempty"`
 	LastApplied        string            `json:"lastApplied,omitempty"`
 	NodesApplied       int               `json:"nodesApplied,omitempty"`
+	AcceptedGeneration int64             `json:"acceptedGeneration,omitempty"`
+	DesiredRevision    string            `json:"desiredRevision,omitempty"`
+	DesiredDigest      string            `json:"desiredDigest,omitempty"`
+	PublishedDigest    string            `json:"publishedDigest,omitempty"`
+	LastPublished      string            `json:"lastPublished,omitempty"`
 
 	// rendered carries the validated policy between Reconcile steps. It
 	// is unexported, so it is never serialized to the API server.
@@ -113,9 +121,10 @@ type WarmorPolicyStatus struct {
 
 // Policy phases (from the CRD's status.phase enum).
 const (
-	PhasePending = "Pending"
-	PhaseActive  = "Active"
-	PhaseError   = "Error"
+	PhasePending   = "Pending"
+	PhaseActive    = "Active"
+	PhasePublished = "Published"
+	PhaseError     = "Error"
 )
 
 // PolicyCondition is one status condition.

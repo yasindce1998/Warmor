@@ -170,7 +170,7 @@ func stubCompile(t *testing.T) (*[]string, func()) {
 	t.Helper()
 	original := compilePolicy
 	var seen []string
-	compilePolicy = func(policy *compiler.Policy, yamlBytes []byte, cacheDir string) ([]byte, error) {
+	compilePolicy = func(_ context.Context, policy *compiler.Policy, yamlBytes []byte, cacheDir string) ([]byte, error) {
 		seen = append(seen, string(yamlBytes))
 		return []byte("wasm(" + policy.Name + ")"), nil
 	}
@@ -224,11 +224,11 @@ func TestReconcile_SyncsActivePolicyAndStatus(t *testing.T) {
 	}
 
 	cr := api.policies["warmor-system/alpha"]
-	if cr.Status == nil || cr.Status.Phase != PhaseActive {
-		t.Fatalf("status = %+v, want Active", cr.Status)
+	if cr.Status == nil || cr.Status.Phase != PhasePublished {
+		t.Fatalf("status = %+v, want Published", cr.Status)
 	}
-	if cr.Status.LastApplied == "" {
-		t.Error("lastApplied not set on a syncing reconcile")
+	if cr.Status.LastPublished == "" || cr.Status.LastApplied != "" || cr.Status.NodesApplied != 0 {
+		t.Error("publication must not claim node application")
 	}
 }
 
@@ -312,12 +312,12 @@ func TestReconcile_InvalidPolicyIsErrorOthersStillSync(t *testing.T) {
 	if bad.Status.Phase != PhaseError {
 		t.Errorf("bad status = %+v, want Error", bad.Status)
 	}
-	if !strings.Contains(bad.Status.Conditions[0].Message, "syscall") {
-		t.Errorf("error message = %q, want the parse error", bad.Status.Conditions[0].Message)
+	if bad.Status.Conditions[0].Reason != "InvalidPolicy" {
+		t.Errorf("condition = %+v, want validation failure", bad.Status.Conditions[0])
 	}
 	good := api.policies["warmor-system/good"]
-	if good.Status.Phase != PhaseActive {
-		t.Errorf("good status = %+v, want Active (one bad CR must not block the fleet)", good.Status)
+	if good.Status.Phase != PhasePublished {
+		t.Errorf("good status = %+v, want Published (one bad CR must not block the fleet)", good.Status)
 	}
 	cm := api.configMaps["warmor-system/warmor-effective-policy"]
 	if cm == nil || !strings.Contains(cm.Metadata.Annotations[AnnotationSources], "warmor-system/good") {
@@ -398,7 +398,6 @@ func TestReconcile_OverwritesDriftedConfigMap(t *testing.T) {
 
 	cm := api.configMaps["warmor-system/warmor-effective-policy"]
 	cm.BinaryData[PolicyDataKey] = []byte("tampered")
-	cm.Metadata.Annotations[AnnotationPolicySHA] = "wrong"
 
 	if _, err := ctl.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
