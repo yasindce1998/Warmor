@@ -387,11 +387,14 @@ func TestHandleEvent_PolicyDeny(t *testing.T) {
 
 func TestHandleEvent_PolicyLog(t *testing.T) {
 	e, _ := newTestEnforcer(t, testEnforcerOpts{})
+	// Exercise LOG semantics, not scheduler speed under native CI contention.
+	// Default and looping-policy deadline contracts have independent coverage.
+	e.evaluator.SetTimeout(5 * time.Second)
 
 	e.handleEvent(&api.Event{PID: 0, UID: 1000, Comm: "python3", Filename: "/usr/bin/python3"})
 
 	stats := e.GetStats()
-	if stats.Logged != 1 || stats.Denied != 0 || stats.AuditDenied != 0 {
+	if stats.Logged != 1 || stats.Denied != 0 || stats.AuditDenied != 0 || stats.EnforcementAttempted != 0 || stats.EnforcementSucceeded != 0 {
 		t.Fatalf("stats = %+v, want 1 logged", stats)
 	}
 }
