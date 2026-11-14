@@ -118,7 +118,7 @@ rules:
 
 ## LSM-BPF Kernel Enforcement
 
-With `--lsm-enforce`, deny rules can be enforced synchronously in the kernel via LSM-BPF hooks — but on `main` only for **exec** (exact path) and **connect** (remote address and port), and only **after** the WASM policy has seen that exact operation once:
+With `--lsm-enforce`, deny rules can be enforced synchronously via LSM-BPF for **exec** (literal path) and **connect** (remote address and port). Dynamic entries protect repeats **after** WASM has seen the complete operation once. Opt-in `--default-deny` additionally supports eligible static allowlists without waiting for a first observation; see [kernel default-deny](design/kernel-default-deny.md).
 
 - **Denied exec operations return EPERM** on repeat attempts — the process never starts
 - **Denied connections fail at connect()** on repeat attempts — no network handshake occurs
@@ -128,14 +128,15 @@ With `--lsm-enforce`, deny rules can be enforced synchronously in the kernel via
 
 1. The first time an event matches a deny rule, the kernel map has no entry: the operation is allowed, the event reaches WASM, and the decision is compiled into a BPF hash map (exec and connect only)
 2. On subsequent identical events, the kernel LSM hook looks up the hash map and returns `-EPERM` without any userspace round-trip
-3. The hash key uses FNV-1a over the filename or endpoint, scoped by cgroup ID and event type
+3. The map compares full literal filename or structured family/address/port keys, scoped by cgroup ID and hook type; 32-bit hash collisions do not share verdicts
 
 ### Policy Design for LSM
 
-- **Glob patterns** (`/tmp/**`) are matched in userspace WASM on the first hit, then the specific filename that was observed is hashed into the BPF map — not the pattern itself
+- **Glob patterns** (`/tmp/**`) are matched in userspace WASM on the first hit, then the complete specific filename is keyed in the BPF map — not the pattern itself
 - **`any_of` lists** are also matched in userspace first; a map entry is written only for the specific value that was observed (other elements get entries once they are seen and denied)
-- **Network rules** hash the observed destination IP+port, so `remote_port: { any_of: [22, 4444] }` populates map entries per observed connection
-- **Cgroup scoping** — entries are written with the cgroup of the event that triggered them; there is no way to request a global (cgroup 0) entry from YAML
+- **Network rules** key the complete observed destination IP+port, so `remote_port: { any_of: [22, 4444] }` populates map entries per observed connection
+- **Cgroup scoping** — dynamic entries use the observed cgroup; unknown scope is refused. With opt-in `--default-deny`, eligible compiled allowlists are preloaded globally, subject to the configured cgroup filter
+- **Complete identity** — policy-derived exec fast paths cap at 127 UTF-8 bytes (the shared sensor/WASM limit), with no embedded NUL. Long inputs do not persist. Literal path matching does not resolve symlinks, mount namespaces or file content. Canonical IP strings are required for static endpoint rules. See [exact identity limitations](design/kernel-default-deny.md#exact-identity-contract-and-limitations)
 - **Temporal rules** are never compiled into the BPF map (no kernel key holds time), and decisions for their event type are not cached; every such event is evaluated in WASM
 
 ### Audit vs Enforce Mode

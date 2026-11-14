@@ -13,6 +13,7 @@ import (
 	"github.com/tetratelabs/wazero"
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/crypto/assignment"
+	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/policybuild"
 	"github.com/yasindce1998/warmor/internal/wasm"
 	"github.com/yasindce1998/warmor/pkg/api"
@@ -91,6 +92,78 @@ func compileSelection(t *testing.T, b *Bundle, s Selection) *wasm.PolicyEvaluato
 	ev := wasm.NewPolicyEvaluator(pool, "node")
 	ev.SetTimeout(5 * time.Second)
 	return ev
+}
+
+// Compiler upgrades must preserve composition semantics while tightening the
+// exported kernel fast-path boundary. Inspect real compiled declarations rather
+// than treating a supported-version constant as compatibility evidence.
+func TestCargoCompilerSevenExactStaticIdentityContract(t *testing.T) {
+	requireCargo(t)
+	for _, tc := range []struct {
+		name, event, path, address string
+		eligible                   bool
+	}{
+		{
+			name: "complete path", event: "process", eligible: true,
+			path: "/" + strings.Repeat("x", kernelmap.MaxPolicyPathBytes-1),
+		},
+		{
+			name: "overlong path", event: "process", eligible: false,
+			path: "/" + strings.Repeat("x", kernelmap.MaxPolicyPathBytes),
+		},
+		{
+			name: "canonical IPv6", event: "network", eligible: true,
+			address: "2001:db8::1",
+		},
+		{
+			name: "noncanonical IPv6", event: "network", eligible: false,
+			address: "2001:0db8::1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conditions := "[{path: " + strconv.Quote(tc.path) + "}]"
+			if tc.event == "network" {
+				conditions = "[{remote_addr: " + strconv.Quote(tc.address) + "}, {remote_port: 443}]"
+			}
+			raw := "name: static-baseline\nversion: 1\nrules:\n" +
+				"  - name: exact-allow\n    event: " + tc.event +
+				"\n    conditions: {all: " + conditions + "}\n    action: allow\ndefault_action: deny\n"
+			doc, _ := fixture()
+			base := source("system", "static-baseline", raw)
+			doc.Baseline = &base
+			doc.Additions = nil
+			m := mustManifest(t, doc)
+			b := mustBundle(t, m, map[digest.Digest][]byte{base.Artifact.Digest: []byte(raw)})
+			ev := compileSelection(t, b, selectPod(t, m, "alpha"))
+			declaration := ev.StaticRulesProcess()
+			if tc.event == "network" {
+				declaration = ev.StaticRulesNetwork()
+			}
+			if declaration.Eligible != tc.eligible {
+				t.Fatalf("static eligibility = %v, want %v", declaration.Eligible, tc.eligible)
+			}
+			if tc.eligible && len(declaration.Rules) != 1 {
+				t.Fatalf("static rules = %d, want exactly one", len(declaration.Rules))
+			}
+			if !tc.eligible && len(declaration.Rules) != 0 {
+				t.Fatalf("ineligible identity exported %d kernel rules", len(declaration.Rules))
+			}
+			if !tc.eligible {
+				return
+			}
+			event := &api.Event{Process: &api.ProcessEvent{Filename: tc.path}}
+			event.SetType(api.EventTypeProcess)
+			if tc.event == "network" {
+				event.Process = nil
+				event.Network = &api.NetworkEvent{RemoteAddr: tc.address, RemotePort: 443}
+				event.SetType(api.EventTypeNetwork)
+			}
+			got, err := ev.Evaluate(context.Background(), event)
+			if err != nil || got.Action != api.ActionAllow {
+				t.Fatalf("exact identity decision = %+v, error %v; want allow", got, err)
+			}
+		})
+	}
 }
 
 func TestCargoDefaultDenyBaselineWithRestrictiveAddition(t *testing.T) {

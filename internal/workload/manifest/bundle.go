@@ -223,8 +223,9 @@ func sourceBudget(root *yaml.Node, budget *expansionBudget) error {
 	return visit(root, 0)
 }
 
-// exactABI mirrors reviewed compiler v7 code generation (unchanged from v6).
-// New rejects any compiler version change until this contract is reviewed again.
+// exactABI mirrors compiler v7 code generation. Version 7 tightens static
+// kernel identities without changing the ABI 3/5 selection or deny-first order.
+// Future compiler changes remain rejected until explicitly reviewed.
 func exactABI(p *compiler.Policy) uint32 {
 	f := compiler.FieldsRead(p)
 	if f[0]&compiler.FieldBitArgs != 0 || f[2]&compiler.FieldBitOperation != 0 {

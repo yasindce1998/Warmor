@@ -529,21 +529,22 @@ func (l *LSMLoader) ReplaceCgroupFilter(ids []uint64) error {
 	return replaceCgroupFilter(kernelCgroupFilter{l.filterMap}, ids, true)
 }
 
-// InterruptReader wakes capture without detaching LSM protection.
-func (l *LSMLoader) InterruptReader() {
+// StopReaders wakes a blocked ReadLSMEvent without detaching enforcing hooks.
+// Its internal polling loop retries deadlines, so context cancellation alone
+// cannot interrupt an idle reader. Closing the reader returns ringbuf.ErrClosed.
+func (l *LSMLoader) StopReaders() error {
 	if l.lsmReader != nil {
-		_ = l.lsmReader.Close()
+		return l.lsmReader.Close()
 	}
+	return nil
 }
 
 // Close releases all LSM resources.
 func (l *LSMLoader) Close() error {
 	var errs []error
 
-	if l.lsmReader != nil {
-		if err := l.lsmReader.Close(); err != nil {
-			errs = append(errs, err)
-		}
+	if err := l.StopReaders(); err != nil {
+		errs = append(errs, err)
 	}
 
 	// Detach integrity before the exec objects whose maps it shares.
