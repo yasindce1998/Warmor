@@ -87,8 +87,12 @@ source "$TEST_SCRIPT"
 				}
 			}
 			for _, container := range []string{"validate-policy", "warmor", "controller"} {
+				component := "daemon"
+				if container == "controller" {
+					component = "controller"
+				}
 				for _, suffix := range []string{" --tail=100", " --previous --tail=100"} {
-					if !strings.Contains(calls, "-c "+container+suffix) {
+					if !strings.Contains(calls, "-l app.kubernetes.io/instance=warmor-e2e,component="+component+" -c "+container+suffix) {
 						t.Fatalf("missing current/previous bounded %s logs: %s", container, calls)
 					}
 				}

@@ -32,13 +32,15 @@ collect_diagnostics() {
     -l "app.kubernetes.io/instance=$RELEASE" || true
   kubectl "${KCTX[@]}" --request-timeout=10s get events \
     --sort-by=.metadata.creationTimestamp || true
-  local container
+  local container component
   for container in validate-policy warmor controller; do
+    component=daemon
+    if [ "$container" = controller ]; then component=controller; fi
     kubectl "${KCTX[@]}" --request-timeout=10s logs \
-      -l "app.kubernetes.io/instance=$RELEASE" -c "$container" \
+      -l "app.kubernetes.io/instance=$RELEASE,component=$component" -c "$container" \
       --tail=100 --timestamps=true --prefix=true || true
     kubectl "${KCTX[@]}" --request-timeout=10s logs \
-      -l "app.kubernetes.io/instance=$RELEASE" -c "$container" \
+      -l "app.kubernetes.io/instance=$RELEASE,component=$component" -c "$container" \
       --previous --tail=100 --timestamps=true --prefix=true || true
   done
 }
@@ -227,10 +229,19 @@ deny_count() {
 }
 MARKER="/var/tmp/warmor-cr-marker-$$"
 PROBE="warmor-audit-probe"
+# BusyBox has no /var/tmp; UID 10001 cannot create it under root-owned /var.
+# Provide a pod-local writable volume at the CR-only marker path, retaining
+# non-root execution and the default policy's separate /tmp/** coverage.
 kubectl "${KCTX[@]}" run "$PROBE" --image=busybox:1.37 --restart=Never \
-  --overrides='{"spec":{"securityContext":{"runAsUser":10001,"runAsGroup":10001,"runAsNonRoot":true}}}' \
+  --overrides='{"spec":{"securityContext":{"runAsUser":10001,"runAsGroup":10001,"runAsNonRoot":true,"fsGroup":10001},"containers":[{"name":"warmor-audit-probe","image":"busybox:1.37","command":["sleep","600"],"volumeMounts":[{"name":"marker","mountPath":"/var/tmp"}]}],"volumes":[{"name":"marker","emptyDir":{}}]}}' \
   --command -- sleep 600
 kubectl "${KCTX[@]}" wait --for=condition=Ready "pod/$PROBE" --timeout=120s
+prepare_audit_marker() {
+  # Setup is not retryable policy propagation. Surface path/permission errors
+  # immediately rather than spending four minutes retrying an exec never made.
+  kubectl "${KCTX[@]}" exec "$PROBE" -- sh -c 'printf "#!/bin/sh\nexit 0\n" > "$1" && chmod 755 "$1" && test -x "$1"' sh "$MARKER"
+}
+prepare_audit_marker
 # The counter family only exists after the daemon's first deny ever, so a
 # fresh daemon scraping 0 denies returns nothing — treat that as 0.
 BEFORE_DENIES=$(deny_count)
@@ -239,7 +250,7 @@ policy_audit_observed() {
   # Re-exec per retry: the daemon's reload lags the ConfigMap update by
   # kubelet propagation plus its 2s mtime poll, and until it lands the
   # marker exec is allowed (the default policy does not cover /var/tmp).
-  kubectl "${KCTX[@]}" exec "$PROBE" -- sh -c 'printf "#!/bin/sh\nexit 0\n" > "$1" && chmod 755 "$1" && "$1"' sh "$MARKER" >/dev/null 2>&1 || return 1
+  kubectl "${KCTX[@]}" exec "$PROBE" -- sh -c '"$1"' sh "$MARKER" >/dev/null 2>&1 || return 1
   local now
   now=$(deny_count)
   [ -n "$now" ] && [ "$now" -gt "$BEFORE_DENIES" ]
