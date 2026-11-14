@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/platform"
 	"github.com/yasindce1998/warmor/internal/telemetry"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -180,5 +181,20 @@ func TestLegacyTelemetryCannotAttributeOverlappingGenerationLeases(t *testing.T)
 	}
 	if e.telemetry.Snapshot() != nil {
 		t.Fatal("generic generation activation retained stale legacy attribution")
+	}
+}
+
+func TestGenerationTelemetryOptionsRejectBeforePlatformAndPolicyIO(t *testing.T) {
+	old := newPlatform
+	called := false
+	newPlatform = func(platform.Config) (platform.Platform, error) {
+		called = true
+		t.Fatal("unsupported generation telemetry reached platform setup")
+		return nil, nil
+	}
+	t.Cleanup(func() { newPlatform = old })
+	collector := &telemetry.Collector{}
+	if e, err := New(context.Background(), "not-read.wasm", &Options{AtomicGenerations: true, Telemetry: collector}); err == nil || e != nil || called || !strings.Contains(err.Error(), "telemetry attribution with atomic generations is unsupported") {
+		t.Fatal("generation telemetry startup did not reject before side effects", err)
 	}
 }

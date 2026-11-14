@@ -228,6 +228,9 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		}
 	}
 	opts = &effective
+	if opts.AtomicGenerations && opts.Telemetry != nil {
+		return nil, errors.New("legacy telemetry attribution with atomic generations is unsupported")
+	}
 	if opts.ExpectedAssignment != nil && opts.AtomicGenerations {
 		return nil, errors.New("signed assignments with atomic generations are unsupported until one commit/recovery model is validated")
 	}
@@ -251,7 +254,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	if opts.ExpectedAssignment != nil && len(opts.PolicyVerifyKey) != ed25519.PublicKeySize {
 		return nil, errors.New("signed assignment mode requires an artifact verification key")
 	}
-	if (opts.ExpectedAssignment != nil || opts.AtomicGenerations) && opts.Telemetry != nil {
+	if opts.ExpectedAssignment != nil && opts.Telemetry != nil {
 		// Schema-1 attribution requires a fully drained legacy activation.
 		// Neither signed deployment nor overlapping captured generations may
 		// reuse that single collector without its own reviewed identity model.
