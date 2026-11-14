@@ -244,7 +244,10 @@ func forEachMutation(t *testing.T, mk func() *api.Event, visit func(desc string,
 					*n++
 					return false
 				}
-				tv, _ := v.Interface().(time.Time)
+				tv, ok := v.Interface().(time.Time)
+				if !ok {
+					t.Fatalf("%s has type %T, want time.Time", path, v.Interface())
+				}
 				v.Set(reflect.ValueOf(tv.Add(25*time.Hour + time.Minute)))
 				visit(path, ev)
 				return true
