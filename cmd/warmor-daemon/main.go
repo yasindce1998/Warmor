@@ -62,8 +62,11 @@ var (
 )
 
 var (
-	dashboardBind      = flag.String("dashboard-bind", dashboard.DefaultBind, "Dashboard listen IP (remote/all-interface access requires an explicit address; use a TLS reverse proxy)")
-	dashboardTokenFile = flag.String("dashboard-token-file", "", "Dashboard HTTP Basic password file (user: warmor); alternatively set $"+dashboard.TokenEnv)
+	cgroupRoot              = flag.String("cgroup-root", "/sys/fs/cgroup", "Host cgroup v2 mount visible to the daemon (automatic discovery and container resolution)")
+	cgroupReconcileInterval = flag.Duration("cgroup-reconcile-interval", time.Second, "Automatic discovery interval; new pods are not covered until discovery")
+	metricsBindAddress      = flag.String("metrics-bind-address", "", "Metrics/probe bind IP (empty listens on all interfaces; hostNetwork exposure is CNI-dependent)")
+	dashboardBind           = flag.String("dashboard-bind", dashboard.DefaultBind, "Dashboard listen IP (remote/all-interface access requires an explicit address; use a TLS reverse proxy)")
+	dashboardTokenFile      = flag.String("dashboard-token-file", "", "Dashboard HTTP Basic password file (user: warmor); alternatively set $"+dashboard.TokenEnv)
 )
 
 func main() {
@@ -271,15 +274,18 @@ func runDaemon(stop <-chan struct{}) {
 
 	// Create enforcer with options
 	enf, err := enforcer.New(ctx, *policyPath, &enforcer.Options{
-		AuditMode:    *auditMode,
-		CgroupFilter: cgroupPaths,
-		MetricsPort:  *metricsPort,
-		LogLevel:     *logLevel,
-		LSMEnforce:   *lsmEnforce,
-		RequireLSM:   *requireLSM,
-		SkipLSM:      *noLSM,
-		StreamSinks:  sinks,
-		Labels:       labels,
+		AuditMode:               *auditMode,
+		CgroupFilter:            cgroupPaths,
+		CgroupRoot:              *cgroupRoot,
+		CgroupReconcileInterval: *cgroupReconcileInterval,
+		MetricsBindAddress:      *metricsBindAddress,
+		MetricsPort:             *metricsPort,
+		LogLevel:                *logLevel,
+		LSMEnforce:              *lsmEnforce,
+		RequireLSM:              *requireLSM,
+		SkipLSM:                 *noLSM,
+		StreamSinks:             sinks,
+		Labels:                  labels,
 
 		PolicyVerifyKey:  pub,
 		EvalTimeout:      *evalTimeout,

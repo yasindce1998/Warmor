@@ -9,6 +9,9 @@ CHART ?= deploy/helm/warmor
 POLICY ?= examples/policies/kubernetes-hardening.yaml
 IMAGE ?= ghcr.io/yasindce1998/warmor
 TAG ?= latest
+DRY_RUN ?= false
+KUBE_CONTEXT ?=
+CONFIRM_NODE_WIDE_POLICY ?= false
 
 # Cross-platform support
 ifeq ($(OS),Windows_NT)
@@ -62,6 +65,9 @@ help:
 	@echo "  POLICY        - Policy file to use (default: examples/policies/kubernetes-hardening.yaml)"
 	@echo "  IMAGE         - Container image (default: ghcr.io/yasindce1998/warmor)"
 	@echo "  TAG           - Image tag (default: latest)"
+	@echo "  DRY_RUN       - true compiles/validates/renders without cluster access"
+	@echo "  KUBE_CONTEXT  - Explicit context required for live deployment"
+	@echo "  CONFIRM_NODE_WIDE_POLICY - true required for enforcement"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make docker-build TAG=v0.2.0                   # Build image"
@@ -161,25 +167,19 @@ deps:
 
 # --- Deployment Targets ---
 
-# Deploy in enforce mode
+# Compile and validate the selected policy into a mounted binary ConfigMap.
 deploy:
-	@echo "==> Deploying warmor (enforce mode)..."
-	helm upgrade --install $(RELEASE) $(CHART) \
-		--namespace $(NAMESPACE) --create-namespace \
-		--set image.repository=$(IMAGE) \
-		--set image.tag=$(TAG) \
-		--set daemon.auditMode=false \
-		--set-file policy.yaml=$(POLICY)
+	NAMESPACE="$(NAMESPACE)" RELEASE="$(RELEASE)" CHART="$(CHART)" \
+		IMAGE="$(IMAGE)" TAG="$(TAG)" DRY_RUN="$(DRY_RUN)" \
+		KUBE_CONTEXT="$(KUBE_CONTEXT)" CONFIRM_NODE_WIDE_POLICY="$(CONFIRM_NODE_WIDE_POLICY)" \
+		bash scripts/kubernetes-deploy.sh --mode enforce --policy "$(POLICY)"
 
 # Deploy in audit-only mode (safe for initial rollout)
 deploy-audit:
-	@echo "==> Deploying warmor (audit mode - no blocking)..."
-	helm upgrade --install $(RELEASE) $(CHART) \
-		--namespace $(NAMESPACE) --create-namespace \
-		--set image.repository=$(IMAGE) \
-		--set image.tag=$(TAG) \
-		--set daemon.auditMode=true \
-		--set-file policy.yaml=$(POLICY)
+	NAMESPACE="$(NAMESPACE)" RELEASE="$(RELEASE)" CHART="$(CHART)" \
+		IMAGE="$(IMAGE)" TAG="$(TAG)" DRY_RUN="$(DRY_RUN)" \
+		KUBE_CONTEXT="$(KUBE_CONTEXT)" \
+		bash scripts/kubernetes-deploy.sh --mode audit --policy "$(POLICY)"
 
 # Upgrade existing deployment
 upgrade:

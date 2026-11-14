@@ -174,6 +174,15 @@ func (l *Loader) readEvent(rd *ringbuf.Reader, kind EventKind) (*Event, error) {
 // A sentinel key=0 is inserted to mark the filter as active. Pass nil or empty
 // to clear the filter (allow all cgroups).
 func (l *Loader) SetCgroupFilter(ids []uint64) error {
+	return l.setCgroupFilter(ids, len(ids) > 0)
+}
+
+// ReplaceCgroupFilter keeps filtering active even for an empty scope.
+func (l *Loader) ReplaceCgroupFilter(ids []uint64) error {
+	return l.setCgroupFilter(ids, true)
+}
+
+func (l *Loader) setCgroupFilter(ids []uint64, scoped bool) error {
 	maps := []*ebpf.Map{
 		l.execveObjs.CgroupFilter,
 		l.openatObjs.CgroupFilter,
@@ -182,31 +191,10 @@ func (l *Loader) SetCgroupFilter(ids []uint64) error {
 
 	for _, m := range maps {
 		if m == nil {
-			continue
+			return fmt.Errorf("cgroup filter map is not loaded")
 		}
-		// Clear existing entries by iterating and deleting
-		var key uint64
-		iter := m.Iterate()
-		for iter.Next(&key, new(uint8)) {
-			_ = m.Delete(key)
-		}
-
-		if len(ids) == 0 {
-			continue
-		}
-
-		// Insert sentinel key=0 to activate the filter
-		var sentinel uint64
-		var val uint8 = 1
-		if err := m.Put(sentinel, val); err != nil {
-			return fmt.Errorf("set cgroup filter sentinel: %w", err)
-		}
-
-		// Insert each allowed cgroup ID
-		for _, id := range ids {
-			if err := m.Put(id, val); err != nil {
-				return fmt.Errorf("set cgroup filter id %d: %w", id, err)
-			}
+		if err := replaceCgroupFilter(kernelCgroupFilter{m}, ids, scoped); err != nil {
+			return err
 		}
 	}
 
@@ -216,6 +204,15 @@ func (l *Loader) SetCgroupFilter(ids []uint64) error {
 // ClearCgroupFilter removes all entries from the cgroup filter maps, disabling filtering.
 func (l *Loader) ClearCgroupFilter() error {
 	return l.SetCgroupFilter(nil)
+}
+
+// InterruptReaders wakes idle readers without detaching protection.
+func (l *Loader) InterruptReaders() {
+	for _, rd := range []*ringbuf.Reader{l.processReader, l.fileReader, l.networkReader} {
+		if rd != nil {
+			_ = rd.Close()
+		}
+	}
 }
 
 func (l *Loader) Close() error {

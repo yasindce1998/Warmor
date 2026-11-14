@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -53,6 +54,8 @@ type Options struct {
 	// ResyncPeriod forces a full reconcile this often (self-healing: a
 	// ConfigMap edited by hand is overwritten back). 0 disables.
 	ResyncPeriod time.Duration
+	// CompileTimeout bounds builds, including Rust toolchain checks.
+	CompileTimeout time.Duration
 }
 
 // Controller watches WarmorPolicy resources and keeps the effective
@@ -61,7 +64,8 @@ type Controller struct {
 	kube *kube.Client
 	opts Options
 	// now is stubbed in tests.
-	now func() time.Time
+	now        func() time.Time
+	operations operations
 }
 
 // New builds a controller.
@@ -69,12 +73,15 @@ func New(client *kube.Client, opts Options) *Controller {
 	if opts.PolicyName == "" {
 		opts.PolicyName = "warmor-effective"
 	}
+	if opts.CompileTimeout <= 0 {
+		opts.CompileTimeout = 2 * time.Minute
+	}
 	return &Controller{kube: client, opts: opts, now: time.Now}
 }
 
 // compilePolicy compiles a parsed policy to WASM. It is a variable so
 // tests can avoid needing the Rust toolchain.
-var compilePolicy = func(policy *compiler.Policy, yamlBytes []byte, cacheDir string) ([]byte, error) {
+var compilePolicy = func(ctx context.Context, policy *compiler.Policy, yamlBytes []byte, cacheDir string) ([]byte, error) {
 	key, err := policyCacheKey(yamlBytes, policy)
 	if err != nil {
 		return nil, err
@@ -91,8 +98,13 @@ var compilePolicy = func(policy *compiler.Policy, yamlBytes []byte, cacheDir str
 
 	// Build to a temporary path and rename into the cache, so an
 	// interrupted build never leaves a truncated module at the cache key.
-	outPath := filepath.Join(os.TempDir(), "warmor-controller-"+key+".wasm")
-	result, err := compiler.Build(policy, compiler.BuildOptions{OutputPath: outPath})
+	outDir, err := os.MkdirTemp("", "warmor-controller-*")
+	if err != nil {
+		return nil, fmt.Errorf("create build output dir: %w", err)
+	}
+	defer os.RemoveAll(outDir)
+	outPath := filepath.Join(outDir, "policy.wasm")
+	result, err := compiler.Build(policy, compiler.BuildOptions{OutputPath: outPath, Context: ctx})
 	defer compiler.Cleanup(result)
 	if err != nil {
 		return nil, fmt.Errorf("compile policy: %w", err)
@@ -103,12 +115,16 @@ var compilePolicy = func(policy *compiler.Policy, yamlBytes []byte, cacheDir str
 	}
 	if cacheDir != "" {
 		// Best effort: a failed cache write only costs a rebuild later.
-		if err := os.WriteFile(filepath.Join(cacheDir, key+".wasm"), data, 0o640); err != nil {
+		if err := writeCache(cacheDir, key, data); err != nil {
 			log.Printf("⚠️  Policy cache write failed: %v", err)
 		}
 	}
 	return data, nil
 }
+
+// Bump the profile when build flags or ABI contracts change. Generated Rust
+// and Cargo.toml are additionally included in each revision/cache key.
+var compilerIdentity = compiler.Version + "/controller-v2/wasm32-release"
 
 // policyCacheKey identifies a compiled policy: sha256 over the compiler
 // version, the policy YAML and the generated Rust source (which changes
@@ -120,11 +136,29 @@ func policyCacheKey(yamlBytes []byte, policy *compiler.Policy) (string, error) {
 		return "", err
 	}
 	h := sha256.New()
-	fmt.Fprintf(h, "warmor-controller\x00%s\x00%d\x00", compiler.Version, len(yamlBytes))
+	fmt.Fprintf(h, "warmor-controller\x00%s\x00%d\x00", compilerIdentity, len(yamlBytes))
 	h.Write(yamlBytes)
 	h.Write([]byte{0})
 	h.Write([]byte(src))
+	h.Write([]byte{0})
+	h.Write([]byte(compiler.GenerateCargoToml(policy.Name)))
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func writeCache(dir, key string, data []byte) error {
+	f, err := os.CreateTemp(dir, ".policy-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), filepath.Join(dir, key+".wasm"))
 }
 
 // policiesPath is the REST path for listing/watching WarmorPolicies.
@@ -153,6 +187,7 @@ func configMapsPath(namespace string) string {
 // level-triggered: it converges to the desired state no matter what it
 // missed while down.
 func (c *Controller) Run(ctx context.Context) error {
+	defer c.operations.stop()
 	backoff := time.Second
 	const maxBackoff = time.Minute
 	for {
@@ -221,7 +256,12 @@ func (c *Controller) watchUntilEvent(ctx context.Context, rv string) error {
 // Reconcile lists the WarmorPolicies, compiles the effective policy and
 // syncs it into the ConfigMap, then updates every CR's status. It returns
 // the list's resourceVersion to resume watching from.
-func (c *Controller) Reconcile(ctx context.Context) (string, error) {
+func (c *Controller) Reconcile(ctx context.Context) (rv string, reconcileErr error) {
+	started := c.now()
+	defer func() {
+		finished := c.now()
+		c.operations.record(finished, finished.Sub(started), reconcileErr)
+	}()
 	var list WarmorPolicyList
 	if err := c.kube.Get(ctx, c.policiesPath(), &list); err != nil {
 		return "", fmt.Errorf("list WarmorPolicies: %w", err)
@@ -240,117 +280,215 @@ func (c *Controller) Reconcile(ctx context.Context) (string, error) {
 		return items[i].Metadata.Name < items[j].Metadata.Name
 	})
 
-	// Render and validate each policy on its own, so a bad CR is reported
-	// on that CR instead of failing the whole fleet silently.
-	type accepted struct {
-		cr       *WarmorPolicy
-		rendered *policymerge.PolicyYAML
-	}
-	var ok []accepted
-	statuses := make(map[string]*WarmorPolicyStatus, len(items)) // "ns/name" -> desired status
+	statuses := make(map[string]*WarmorPolicyStatus, len(items))
 	for _, cr := range items {
-		status, err := c.classify(cr)
-		if err != nil {
-			return "", err
-		}
-		statuses[cr.Metadata.Namespace+"/"+cr.Metadata.Name] = status
-		if status.Phase == PhaseActive {
-			ok = append(ok, accepted{cr: cr, rendered: status.rendered})
-		}
+		status, _ := c.classify(cr)
+		statuses[sourceKey(cr)] = status
 	}
-
-	// Build the desired effective policy (or fall back to the baked
-	// default when no CR applies) and sync it. Compilation is lazy: it
-	// only runs when the ConfigMap does not already carry this content's
-	// hash, so a no-op reconcile costs one GET, not a build.
-	var hash string
-	var sources []string
-	var compile func() ([]byte, error)
-	switch {
-	case len(ok) == 0:
-		data, err := os.ReadFile(c.opts.DefaultPolicyPath)
-		if err != nil {
-			return "", fmt.Errorf("no WarmorPolicy applies and no default policy at %s: %w", c.opts.DefaultPolicyPath, err)
-		}
-		sum := sha256.Sum256(data)
-		hash = "default:" + hex.EncodeToString(sum[:])
-		compile = func() ([]byte, error) { return data, nil }
-	default:
-		rendered := make([]*policymerge.PolicyYAML, len(ok))
-		for i, a := range ok {
-			rendered[i] = a.rendered
-			sources = append(sources, a.cr.Metadata.Namespace+"/"+a.cr.Metadata.Name)
-		}
-		effective := effectivePolicy(c.opts.PolicyName, rendered)
-		yamlBytes, err := policymerge.Marshal(effective)
-		if err != nil {
-			return "", fmt.Errorf("render effective policy: %w", err)
-		}
-		parsed, err := compiler.Parse(yamlBytes)
-		if err != nil {
-			// Every CR validated individually, so a failure here is a
-			// merge-level interaction (a controller bug, not user error).
-			return "", fmt.Errorf("effective policy does not compile: %w", err)
-		}
-		sum := sha256.Sum256(yamlBytes)
-		hash = "effective:" + hex.EncodeToString(sum[:])
-		compile = func() ([]byte, error) { return compilePolicy(parsed, yamlBytes, c.opts.CacheDir) }
+	// Acceptance is committed only in the atomic ConfigMap write containing
+	// both source snapshots and compiled bytes. Status is never the journal.
+	existing, err := c.readConfigMap(ctx)
+	if err == nil {
+		err = c.reconcilePublication(ctx, items, statuses, existing)
+	} else {
+		c.publicationFailure(items, statuses, "PublicationFailed", err)
 	}
-
-	synced, err := c.syncConfigMap(ctx, compile, hash, sources)
-	if err != nil {
-		return "", err
-	}
-
-	// lastApplied moves only when a new policy was actually written; on
-	// no-op reconciles the existing timestamp is carried over so the
-	// status PUT below stays a no-op too.
-	now := c.now().UTC().Format(time.RFC3339)
-	for _, a := range ok {
-		status := statuses[a.cr.Metadata.Namespace+"/"+a.cr.Metadata.Name]
-		if synced {
-			status.LastApplied = now
-		} else if a.cr.Status != nil {
-			status.LastApplied = a.cr.Status.LastApplied
-		}
-	}
+	var statusErr error
 	for _, cr := range items {
-		if err := c.updateStatus(ctx, cr, statuses[cr.Metadata.Namespace+"/"+cr.Metadata.Name]); err != nil {
-			log.Printf("⚠️  Status update for %s/%s failed: %v", cr.Metadata.Namespace, cr.Metadata.Name, err)
+		if updateErr := c.updateStatus(ctx, cr, statuses[sourceKey(cr)]); updateErr != nil {
+			statusErr = errors.Join(statusErr, fmt.Errorf("update status %s/%s: %w", cr.Metadata.Namespace, cr.Metadata.Name, updateErr))
 		}
 	}
-	return list.Metadata.ResourceVersion, nil
+	return list.Metadata.ResourceVersion, errors.Join(err, statusErr)
 }
 
-// classify renders and validates one CR and returns its desired status.
-// Phase Active means the rendered policy is stored in the status' private
-// rendered field for the merge step.
+func (c *Controller) reconcilePublication(ctx context.Context, items []*WarmorPolicy, statuses map[string]*WarmorPolicyStatus, existing *ConfigMap) (err error) {
+	stage := "CompilationFailed"
+	defer func() {
+		if err != nil {
+			c.publicationFailure(items, statuses, stage, err)
+		}
+	}()
+	previous, err := c.readSnapshot(existing)
+	if err != nil {
+		stage = "SnapshotUnavailable"
+		return err
+	}
+	snapshot := sourceSnapshot{Version: 1, WatchNamespace: c.opts.Namespace}
+	var rendered []*policymerge.PolicyYAML
+	var sources []string
+	for _, cr := range items {
+		key := sourceKey(cr)
+		status := statuses[key]
+		if existing != nil && existing.Data[SnapshotDataKey] == "" && status.rendered == nil {
+			for _, legacySource := range strings.Split(existing.Metadata.Annotations[AnnotationSources], ",") {
+				if legacySource == cr.Metadata.Namespace+"/"+cr.Metadata.Name {
+					stage = "SnapshotUnavailable"
+					return fmt.Errorf("legacy publication lacks accepted snapshot for invalid source %s; retaining complete previous publication", legacySource)
+				}
+			}
+		}
+		var source acceptedSource
+		if status.rendered != nil {
+			source = snapshotSource(cr)
+		} else if old, found := previous[key]; found {
+			// Invalid edits (including unsupported selectors) are not deletions.
+			// Another UID can never inherit a deleted object's snapshot.
+			source = old
+			oldStatus, _ := c.classify(old.policy())
+			status.rendered = oldStatus.rendered
+		} else {
+			continue
+		}
+		snapshot.Sources = append(snapshot.Sources, source)
+		rendered = append(rendered, status.rendered)
+		sources = append(sources, source.Namespace+"/"+source.Name)
+		if old, found := previous[key]; found {
+			status.AcceptedGeneration = old.Generation
+			status.PublishedDigest = existing.Metadata.Annotations[AnnotationArtifactSHA]
+		}
+	}
+	// Only present UIDs survive. Explicit deletion of the final source
+	// restores the baked default rather than retaining a deleted object.
+	snapshotBytes, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("encode accepted sources: %w", err)
+	}
+	if len(snapshotBytes) > maxSnapshotBytes {
+		return fmt.Errorf("accepted-source snapshot exceeds %d-byte budget", maxSnapshotBytes)
+	}
+	ruleCount := 0
+	for _, source := range rendered {
+		ruleCount += len(source.Rules)
+	}
+	if ruleCount > maxEffectiveRules {
+		return fmt.Errorf("effective policy exceeds %d-rule budget", maxEffectiveRules)
+	}
+	var revision string
+	var compile func() ([]byte, error)
+	if len(rendered) == 0 {
+		data, readErr := os.ReadFile(c.opts.DefaultPolicyPath)
+		if readErr != nil {
+			return fmt.Errorf("read baked default policy: %w", readErr)
+		}
+		revision = "default:" + digest([]byte(compilerIdentity+"\x00"+digest(data)))
+		compile = func() ([]byte, error) { return data, nil }
+	} else {
+		yamlBytes, marshalErr := policymerge.Marshal(effectivePolicy(c.opts.PolicyName, rendered))
+		if marshalErr != nil {
+			return fmt.Errorf("render effective policy: %w", marshalErr)
+		}
+		parsed, parseErr := compiler.Parse(yamlBytes)
+		if parseErr != nil {
+			return fmt.Errorf("validate effective policy: %w", parseErr)
+		}
+		key, keyErr := policyCacheKey(yamlBytes, parsed)
+		if keyErr != nil {
+			return keyErr
+		}
+		revision = "effective:" + key
+		compile = func() ([]byte, error) {
+			buildCtx, cancel := context.WithTimeout(ctx, c.opts.CompileTimeout)
+			defer cancel()
+			return compilePolicy(buildCtx, parsed, yamlBytes, c.opts.CacheDir)
+		}
+	}
+	for _, status := range statuses {
+		if status.rendered != nil {
+			status.DesiredRevision = revision
+		}
+	}
+	// Hash the actual bytes, not just source annotations. This is an integrity
+	// checksum, not authentication against an authorized ConfigMap writer.
+	var wasm []byte
+	if existing != nil && existing.Metadata.Annotations[AnnotationPolicySHA] == revision &&
+		existing.Metadata.Annotations[AnnotationCompiler] == compilerIdentity &&
+		len(existing.BinaryData[PolicyDataKey]) > 0 &&
+		digest(existing.BinaryData[PolicyDataKey]) == existing.Metadata.Annotations[AnnotationArtifactSHA] {
+		wasm = existing.BinaryData[PolicyDataKey]
+	} else {
+		wasm, err = compile()
+		if err != nil {
+			return err
+		}
+	}
+	if len(wasm) == 0 {
+		return fmt.Errorf("compiler produced an empty artifact")
+	}
+	artifactDigest := digest(wasm)
+	for _, status := range statuses {
+		if status.rendered != nil {
+			status.DesiredDigest = artifactDigest
+		}
+	}
+	stage = "PublicationFailed"
+	synced, err := c.syncConfigMap(ctx, existing, wasm, revision, sources, string(snapshotBytes))
+	if err != nil {
+		return err
+	}
+	for _, cr := range items {
+		status := statuses[sourceKey(cr)]
+		if status.rendered == nil {
+			continue
+		}
+		for _, source := range snapshot.Sources {
+			if sourceKey(source.policy()) == sourceKey(cr) {
+				status.AcceptedGeneration = source.Generation
+			}
+		}
+		status.PublishedDigest = artifactDigest
+		if synced {
+			status.LastPublished = c.now().UTC().Format(time.RFC3339)
+		} else if cr.Status != nil {
+			status.LastPublished = cr.Status.LastPublished
+		}
+		c.setCondition(status, "Compiled", "True", "Compiled", "accepted source is part of the compiled effective artifact")
+		c.setCondition(status, "Published", "True", "Published", "accepted source is published; node activation is not acknowledged")
+		if status.Phase == PhasePublished {
+			c.setCondition(status, "Ready", "False", "AwaitingNodeAcknowledgement", "publication does not prove that any node loaded or enforced this digest")
+		} else {
+			c.setCondition(status, "Published", "True", "LastKnownGoodPublished", "previous accepted generation remains published; desired spec was not accepted")
+		}
+	}
+	return nil
+}
+
+// classify validates desired syntax, not compilation, publication or activation.
 func (c *Controller) classify(cr *WarmorPolicy) (*WarmorPolicyStatus, error) {
 	generation := cr.Metadata.Generation
 	if generation == 0 {
 		generation = 1
 	}
 
-	switch {
-	case cr.Spec.Selector != nil && !cr.Spec.Selector.Empty():
-		return &WarmorPolicyStatus{
-			Phase:              PhasePending,
-			ObservedGeneration: generation,
-			Conditions: []PolicyCondition{{
-				Type:               "Ready",
-				Status:             "False",
-				LastTransitionTime: c.now().UTC().Format(time.RFC3339),
-				Reason:             "SelectorNotSupported",
-				Message:            "spec.selector is not evaluated yet: enforcement is node-wide until per-workload policies ship, so this policy is held Pending rather than applied beyond its intended scope",
-			}},
-		}, nil
+	status := &WarmorPolicyStatus{Phase: PhasePending, ObservedGeneration: generation}
+	c.setCondition(status, "Ready", "False", "AwaitingPublication", "desired policy has not been published")
+	c.setCondition(status, "Validated", "Unknown", "NotValidated", "desired policy has not been validated")
+	c.setCondition(status, "Compiled", "Unknown", "NotCompiled", "desired policy has not been compiled")
+	c.setCondition(status, "Published", "Unknown", "NotPublished", "desired policy has not been published")
+	c.setCondition(status, "Applied", "Unknown", "NoNodeAcknowledgements", "no authenticated per-node acknowledgement is available; nodesApplied and lastApplied are not asserted")
+	if cr.Metadata.Namespace == "" || cr.Metadata.Name == "" || cr.Metadata.UID == "" {
+		status.Phase = PhaseError
+		c.setCondition(status, "Ready", "False", "InvalidIdentity", "namespace, name and UID are required for durable source identity")
+		c.setCondition(status, "Validated", "False", "InvalidIdentity", "namespace, name and UID are required")
+		return status, nil
+	}
+	if cr.Spec.Selector != nil {
+		c.setCondition(status, "Ready", "False", "SelectorNotSupported", "spec.selector (including {}) is not evaluated: policy remains Pending; any previous node-wide accepted generation is retained until explicit deletion")
+		c.setCondition(status, "Validated", "False", "SelectorNotSupported", "workload-scoped execution is not implemented; omit spec.selector only when node-wide publication is intended")
+		return status, nil
+	}
+	specBytes, specErr := json.Marshal(cr.Spec)
+	if specErr != nil || len(specBytes) > maxSourceBytes || len(cr.Spec.Rules) > maxSourceRules {
+		status.Phase = PhaseError
+		c.setCondition(status, "Ready", "False", "PolicyBudgetExceeded", "desired spec exceeds source byte or rule budget; previous accepted generation retained")
+		c.setCondition(status, "Validated", "False", "PolicyBudgetExceeded", fmt.Sprintf("maximum source size is %d bytes and %d rules", maxSourceBytes, maxSourceRules))
+		return status, nil
 	}
 
 	rendered, err := renderPolicy(cr)
 	if err == nil {
 		// Validate the rendered policy with the same parser the daemon
-		// uses at load time, so a CR is only marked Active when the
-		// module it contributes to would actually load on a node.
+		// uses for syntax validation. This does not prove node activation.
 		var yamlBytes []byte
 		yamlBytes, err = policymerge.Marshal(rendered)
 		if err == nil {
@@ -358,43 +496,93 @@ func (c *Controller) classify(cr *WarmorPolicy) (*WarmorPolicyStatus, error) {
 		}
 	}
 	if err != nil {
-		return &WarmorPolicyStatus{
-			Phase:              PhaseError,
-			ObservedGeneration: generation,
-			Conditions: []PolicyCondition{{
-				Type:               "Ready",
-				Status:             "False",
-				LastTransitionTime: c.now().UTC().Format(time.RFC3339),
-				Reason:             "InvalidPolicy",
-				Message:            err.Error(),
-			}},
-		}, nil
+		status.Phase = PhaseError
+		// Parser diagnostics may include policy operands; do not copy raw
+		// source values (which users sometimes put secrets in) into status.
+		c.setCondition(status, "Ready", "False", "InvalidPolicy", "desired spec failed policy validation; any previous accepted generation is retained")
+		c.setCondition(status, "Validated", "False", "InvalidPolicy", "desired spec failed policy validation")
+		return status, nil
 	}
-
-	status := &WarmorPolicyStatus{
-		Phase:              PhaseActive,
-		ObservedGeneration: generation,
-		Conditions: []PolicyCondition{{
-			Type:               "Ready",
-			Status:             "True",
-			LastTransitionTime: c.now().UTC().Format(time.RFC3339),
-			Reason:             "Compiled",
-			Message:            fmt.Sprintf("part of the effective policy (%d rules)", len(rendered.Rules)),
-		}},
-	}
+	status.Phase = PhasePublished // provisional; failure handling changes it
+	c.setCondition(status, "Validated", "True", "Validated", fmt.Sprintf("desired spec validates (%d rules)", len(rendered.Rules)))
 	// rendered rides along privately; it is stripped before the status is
 	// sent to the API server.
 	status.rendered = rendered
 	return status, nil
 }
 
-// syncConfigMap ensures the ConfigMap holds exactly the policy compile
-// produces, creating or updating it as needed. compile runs only when the
-// stored hash does not match. It returns true when a write happened.
-func (c *Controller) syncConfigMap(ctx context.Context, compile func() ([]byte, error), hash string, sources []string) (bool, error) {
+func (c *Controller) setCondition(status *WarmorPolicyStatus, typ, value, reason, message string) {
+	condition := PolicyCondition{Type: typ, Status: value, Reason: reason, Message: message, LastTransitionTime: c.now().UTC().Format(time.RFC3339)}
+	for i := range status.Conditions {
+		if status.Conditions[i].Type == typ {
+			status.Conditions[i] = condition
+			return
+		}
+	}
+	status.Conditions = append(status.Conditions, condition)
+}
+
+func (c *Controller) publicationFailure(items []*WarmorPolicy, statuses map[string]*WarmorPolicyStatus, stage string, err error) {
+	// Do not copy compiler stderr or source operands into status. Expose safe
+	// actionable categories while the reconcile error retains details.
+	detail := ""
+	var apiError *kube.StatusError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		detail = "; compilation deadline exceeded"
+	case errors.Is(err, context.Canceled):
+		detail = "; operation cancelled"
+	case errors.As(err, &apiError):
+		detail = fmt.Sprintf("; Kubernetes API HTTP %d", apiError.Code)
+	}
+	for _, cr := range items {
+		status := statuses[sourceKey(cr)]
+		if cr.Status != nil {
+			if status.AcceptedGeneration == 0 {
+				status.AcceptedGeneration = cr.Status.AcceptedGeneration
+			}
+			status.LastPublished = cr.Status.LastPublished
+			// Historical publication digest, never an active digest.
+			if status.PublishedDigest == "" {
+				status.PublishedDigest = cr.Status.PublishedDigest
+			}
+		}
+		if status.Phase == PhasePublished {
+			status.Phase = PhaseError
+			c.setCondition(status, "Ready", "False", stage, "effective policy update failed; previous publication has not been replaced")
+		}
+		if stage == "CompilationFailed" {
+			c.setCondition(status, "Compiled", "False", stage, "effective artifact compilation failed; previous publication retained"+detail)
+		} else if stage == "PublicationFailed" && status.DesiredDigest != "" {
+			c.setCondition(status, "Compiled", "True", "Compiled", "desired effective artifact compiled but could not be published")
+		}
+		c.setCondition(status, "Published", "False", stage, "desired publication failed; controller will retry without replacing previous bytes or accepted snapshots"+detail)
+	}
+}
+
+func (c *Controller) readConfigMap(ctx context.Context) (*ConfigMap, error) {
+	var existing ConfigMap
+	err := c.kube.Get(ctx, configMapPath(c.opts.ConfigMapNamespace, c.opts.ConfigMapName), &existing)
+	if kube.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read ConfigMap: %w", err)
+	}
+	if existing.Metadata.Labels["app.kubernetes.io/managed-by"] != "warmor-controller" {
+		return nil, fmt.Errorf("refusing to overwrite ConfigMap not managed by warmor-controller")
+	}
+	return &existing, nil
+}
+
+// syncConfigMap commits artifact and accepted sources together. Conflicts are
+// retried by Run using a fresh CR list AND snapshot, never a stale PUT.
+func (c *Controller) syncConfigMap(ctx context.Context, existing *ConfigMap, wasm []byte, hash string, sources []string, snapshot string) (bool, error) {
 	annotations := map[string]string{
-		AnnotationPolicySHA: hash,
-		AnnotationCompiler:  compiler.Version,
+		AnnotationPolicySHA:   hash,
+		AnnotationCompiler:    compilerIdentity,
+		AnnotationArtifactSHA: digest(wasm),
+		AnnotationSnapshotSHA: digest([]byte(snapshot)),
 	}
 	if len(sources) > 0 {
 		annotations[AnnotationSources] = strings.Join(sources, ",")
@@ -405,20 +593,6 @@ func (c *Controller) syncConfigMap(ctx context.Context, compile func() ([]byte, 
 		"app.kubernetes.io/managed-by": "warmor-controller",
 	}
 
-	var existing ConfigMap
-	err := c.kube.Get(ctx, configMapPath(c.opts.ConfigMapNamespace, c.opts.ConfigMapName), &existing)
-	switch {
-	case err == nil && existing.Metadata.Annotations[AnnotationPolicySHA] == hash:
-		return false, nil // already in sync
-	case err != nil && !kube.IsNotFound(err):
-		return false, fmt.Errorf("read ConfigMap: %w", err)
-	}
-
-	wasm, compileErr := compile()
-	if compileErr != nil {
-		return false, compileErr
-	}
-
 	desired := &ConfigMap{
 		Metadata: ObjectMeta{
 			Name:        c.opts.ConfigMapName,
@@ -427,9 +601,31 @@ func (c *Controller) syncConfigMap(ctx context.Context, compile func() ([]byte, 
 			Annotations: annotations,
 		},
 		BinaryData: map[string][]byte{PolicyDataKey: wasm},
+		Data:       map[string]string{SnapshotDataKey: snapshot},
 	}
-
-	if err == nil {
+	if len(wasm)+len(snapshot) > maxConfigMapBytes {
+		return false, fmt.Errorf("artifact and accepted sources exceed %d-byte ConfigMap budget", maxConfigMapBytes)
+	}
+	if existing != nil {
+		matches := string(existing.BinaryData[PolicyDataKey]) == string(wasm) && existing.Data[SnapshotDataKey] == snapshot
+		for key, value := range annotations {
+			matches = matches && existing.Metadata.Annotations[key] == value
+		}
+		if matches {
+			return false, nil
+		}
+		if existing.Immutable != nil && *existing.Immutable {
+			return false, fmt.Errorf("managed ConfigMap is immutable; cannot publish new artifact or accepted sources")
+		}
+		// Preserve unowned metadata, including ownerReferences and labels.
+		metadata := existing.Metadata
+		if metadata.Annotations == nil {
+			metadata.Annotations = make(map[string]string)
+		}
+		for key, value := range annotations {
+			metadata.Annotations[key] = value
+		}
+		desired.Metadata = metadata
 		desired.Metadata.ResourceVersion = existing.Metadata.ResourceVersion
 		if err := c.kube.Update(ctx, configMapPath(c.opts.ConfigMapNamespace, c.opts.ConfigMapName), desired, nil); err != nil {
 			return false, fmt.Errorf("update ConfigMap: %w", err)
@@ -448,6 +644,16 @@ func (c *Controller) syncConfigMap(ctx context.Context, compile func() ([]byte, 
 // differs from what the CR already carries.
 func (c *Controller) updateStatus(ctx context.Context, cr *WarmorPolicy, desired *WarmorPolicyStatus) error {
 	desired.rendered = nil // private field, never serialized
+	if cr.Status != nil {
+		for i := range desired.Conditions {
+			for _, previous := range cr.Status.Conditions {
+				current := &desired.Conditions[i]
+				if previous.Type == current.Type && previous.Status == current.Status {
+					current.LastTransitionTime = previous.LastTransitionTime
+				}
+			}
+		}
+	}
 	if statusEqual(cr.Status, desired) {
 		return nil
 	}
@@ -478,7 +684,9 @@ func statusEqual(a, b *WarmorPolicyStatus) bool {
 	if a == nil {
 		return true
 	}
-	if a.Phase != b.Phase || a.ObservedGeneration != b.ObservedGeneration || a.LastApplied != b.LastApplied {
+	if a.Phase != b.Phase || a.ObservedGeneration != b.ObservedGeneration || a.LastApplied != b.LastApplied ||
+		a.AcceptedGeneration != b.AcceptedGeneration || a.DesiredRevision != b.DesiredRevision ||
+		a.DesiredDigest != b.DesiredDigest || a.PublishedDigest != b.PublishedDigest || a.LastPublished != b.LastPublished || a.NodesApplied != b.NodesApplied {
 		return false
 	}
 	if len(a.Conditions) != len(b.Conditions) {

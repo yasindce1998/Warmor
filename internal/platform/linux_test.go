@@ -15,12 +15,17 @@ import (
 
 func TestConfigConvertsToLinuxConfig(t *testing.T) {
 	cfg := Config{
-		CgroupFilter: []string{"/sys/fs/cgroup/a", "/sys/fs/cgroup/b"},
-		LSMEnforce:   true,
-		RequireLSM:   true,
-		SkipLSM:      false,
+		CgroupFilter:            []string{"/sys/fs/cgroup/a", "/sys/fs/cgroup/b"},
+		LSMEnforce:              true,
+		RequireLSM:              true,
+		SkipLSM:                 false,
+		CgroupRoot:              "/host/cgroup",
+		CgroupReconcileInterval: 2 * time.Second,
 	}
 	lc := LinuxConfig(cfg)
+	if lc.CgroupRoot != "/host/cgroup" || lc.CgroupReconcileInterval != 2*time.Second {
+		t.Fatalf("options lost: %+v", lc)
+	}
 	if len(lc.CgroupFilter) != 2 || lc.CgroupFilter[1] != "/sys/fs/cgroup/b" {
 		t.Errorf("CgroupFilter not preserved: %v", lc.CgroupFilter)
 	}
