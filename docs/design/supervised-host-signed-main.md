@@ -152,3 +152,37 @@ Logs: `/tmp/opencode/supervised-signed-main-{full,race,focused-race,manifest-rac
 `object-abi,gates,vet,lint,build,windows,darwin,integration-build}.log`.
 No push, PR/main coordination action, source-branch edit, VM-owner worktree edit,
 live cluster, host-wide enforcement or native cross-platform execution occurred.
+
+## Refresh to externally merged PR41 main `ce1d5ab`
+
+Merge **`3fa712a`** has parents `745231f` and **`ce1d5ab`** (PR41 exact checkpoint
+`1ea758e`). Four manifest files conflicted: `README.md`, `bundle.go`,
+`cargo_test.go`, and `manifest.go`. Resolution retains main's explicit compiler-7
+static identity/ABI/deny-first review and compiled path/endpoint boundary tests,
+plus this branch's canonical `policybuild` claims assertion and explicit
+old/future-version refusal. The two imports required by those separate checks
+are both present. The compiler remains 7; exact policy paths/keys stay 127/288.
+
+Main's private guest recording helpers and event-outcome VM fixtures, and its
+scheduling-independent cache/statistics tests, are imported. Two new test-only
+`e.evaluator.SetTimeout` calls are adapted in **`162587d`** to the existing checked
+in-process accessor because this branch uses the common evaluator interface.
+Their five-second fixture budgets/assertions are unchanged; production limits
+and Host behavior are untouched.
+
+There is **no production code delta** from `745231f` in Host metadata/trust,
+signature/absolute-path staging, effective initialized blocking, signed mode
+guards/sole-agentstore commit, private-output snapshot clearing, readiness,
+generation old-host leases, reader Stop/Close or BPF layouts. The separately
+reviewed Clang/BTF fixes remain included without duplication. No gate is removed.
+
+External PR41 kernel/VM results reported by its owner are not a local Host
+whole-daemon result. Local validation remains unprivileged tests and offline
+gate/oracle checks; the separate Host VM packaging owner keeps its own worktree
+and review pin. No edits are made there.
+
+Validation after the settled `162587d` checkpoint is one **sequential** run of
+fresh full tests, full race tests, vet and lint, with Go **1.26.11**,
+`GOMAXPROCS=2`, package parallelism **`-p 2`** and Cargo required. The initial
+pre-settled run is not counted as passing evidence. Logs use
+`/tmp/opencode/supervised-ce1-{full,race,vet,lint}.log`.
