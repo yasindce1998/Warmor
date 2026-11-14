@@ -191,3 +191,11 @@ No production code changed during validation. Logs use
 - Sequential phase 1, `WARMOR_REQUIRE_CARGO=1 go test -count=1 -p 2 ./...`:
   pass, including the imported compiler-7 static identity and private evidence
   helper tests. No skip/timeout assertion or production limit was relaxed.
+- Sequential phase 2, `WARMOR_REQUIRE_CARGO=1 go test -race -count=1 -p 2 ./...`:
+  pass, including signed mode, real Host deadlines/shutdown, private recordings
+  and manifest tests.
+- Sequential phase 3, `go vet -p 2 ./...`: pass.
+- Sequential phase 4, configured golangci-lint v1.64.8 with
+  `--allow-serial-runners --concurrency 2 --timeout 5m ./...`: pass.
+  The complete sequential pipeline exited successfully; no overlapping local
+  validation pipeline was started and no kernel/Host VM execution is implied.
