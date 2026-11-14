@@ -71,3 +71,18 @@ test and the merged compiler artifact checks. An initial run without a
 under host load; no deadline settings were changed. Full test/race and lint
 results are reported in the integration handoff rather than inferred from the
 earlier branch CI.
+
+## Main-side compatibility blocker discovered by full tests
+
+At `98d2b90`, `internal/workload/manifest/manifest.go` deliberately pins
+`SupportedCompilerVersion = "6"` and requires it to equal `compiler.Version`.
+Signed main has bumped the latter to `7`. Consequently the full manifest suite,
+including its real-Cargo cases, rejects setup with `unsupported manifest
+version, generation, compiler, composition or posture`. This reproduces from
+the main sources without changing any subprocess behavior. This integration
+does not weaken that fail-closed check or silently approve compiler-7 workload
+composition; the workload owner/controller must reconcile the explicit pin.
+
+The full non-race run also encountered `TestHandleEvent_PolicyLog`'s 50ms
+evaluation deadline and `TestCPURlimitKillsOwnedWorker`'s wall-clock deadline
+under shared-host load. No production/test deadlines or CPU limits were edited.
