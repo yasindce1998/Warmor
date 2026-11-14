@@ -53,13 +53,14 @@ type LSMEvent struct {
 // ToEvent converts an LSMEvent to a unified Event.
 func (e *LSMEvent) ToEvent() Event {
 	ev := Event{
-		PID:       e.PID,
-		UID:       e.UID,
-		GID:       e.GID,
-		Comm:      nullTerminatedString(e.Comm[:]),
-		Filename:  nullTerminatedString(e.Filename[:]),
-		Timestamp: bootTimeToWallClock(e.Timestamp),
-		CgroupID:  e.CgroupID,
+		PID:               e.PID,
+		UID:               e.UID,
+		GID:               e.GID,
+		Comm:              nullTerminatedString(e.Comm[:]),
+		Filename:          nullTerminatedString(e.Filename[:]),
+		Timestamp:         bootTimeToWallClock(e.Timestamp),
+		KernelTimestampNS: e.Timestamp,
+		CgroupID:          e.CgroupID,
 
 		LSMHook:     e.EventType,
 		LSMDecision: e.Decision,

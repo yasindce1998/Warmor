@@ -52,9 +52,11 @@ func TestPipelineEmit(t *testing.T) {
 		},
 	}
 	result := &api.ActionResult{
-		Action:  api.ActionDeny,
-		Reason:  "blocked by policy",
-		Latency: 150 * time.Microsecond,
+		Action:               api.ActionDeny,
+		Reason:               "blocked by policy",
+		Latency:              150 * time.Microsecond,
+		Enforced:             true,
+		EnforcementAttempted: true,
 	}
 
 	p.Emit(ev, result)
@@ -80,7 +82,7 @@ func TestPipelineEmit(t *testing.T) {
 		t.Errorf("expected filename=/usr/bin/test, got %s", got.Filename)
 	}
 	if !got.Enforced {
-		t.Error("expected enforced=true for deny without audit")
+		t.Error("expected reported successful enforcement")
 	}
 	if got.LatencyUS != 150 {
 		t.Errorf("expected latency_us=150, got %d", got.LatencyUS)

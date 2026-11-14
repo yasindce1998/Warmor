@@ -283,16 +283,17 @@ func (p *LinuxPlatform) monitorProcessEvents(ctx context.Context) {
 		}
 
 		event := &api.Event{
-			Type:       api.EventTypeProcess,
-			PID:        ev.PID,
-			UID:        ev.UID,
-			GID:        ev.GID,
-			Comm:       ev.Comm,
-			Filename:   ev.Filename,
-			Timestamp:  ev.Timestamp,
-			CgroupID:   ev.CgroupID,
-			PPID:       ev.PPID,
-			ParentComm: ev.ParentComm,
+			Type:              api.EventTypeProcess,
+			PID:               ev.PID,
+			UID:               ev.UID,
+			GID:               ev.GID,
+			Comm:              ev.Comm,
+			Filename:          ev.Filename,
+			Timestamp:         ev.Timestamp,
+			KernelTimestampNS: ev.KernelTimestampNS,
+			CgroupID:          ev.CgroupID,
+			PPID:              ev.PPID,
+			ParentComm:        ev.ParentComm,
 			Process: &api.ProcessEvent{
 				BaseEvent: api.BaseEvent{
 					Type:      api.EventTypeProcess,
@@ -339,14 +340,15 @@ func (p *LinuxPlatform) monitorFileEvents(ctx context.Context) {
 		}
 
 		event := &api.Event{
-			Type:      api.EventTypeFile,
-			PID:       ev.PID,
-			UID:       ev.UID,
-			GID:       ev.GID,
-			Comm:      ev.Comm,
-			Filename:  ev.Filename,
-			Timestamp: ev.Timestamp,
-			CgroupID:  ev.CgroupID,
+			Type:              api.EventTypeFile,
+			PID:               ev.PID,
+			UID:               ev.UID,
+			GID:               ev.GID,
+			Comm:              ev.Comm,
+			Filename:          ev.Filename,
+			Timestamp:         ev.Timestamp,
+			KernelTimestampNS: ev.KernelTimestampNS,
+			CgroupID:          ev.CgroupID,
 			File: &api.FileEvent{
 				BaseEvent: api.BaseEvent{
 					Type:      api.EventTypeFile,
@@ -400,13 +402,14 @@ func (p *LinuxPlatform) monitorNetworkEvents(ctx context.Context) {
 		}
 
 		event := &api.Event{
-			Type:      api.EventTypeNetwork,
-			PID:       ev.PID,
-			UID:       ev.UID,
-			GID:       ev.GID,
-			Comm:      ev.Comm,
-			Timestamp: ev.Timestamp,
-			CgroupID:  ev.CgroupID,
+			Type:              api.EventTypeNetwork,
+			PID:               ev.PID,
+			UID:               ev.UID,
+			GID:               ev.GID,
+			Comm:              ev.Comm,
+			Timestamp:         ev.Timestamp,
+			KernelTimestampNS: ev.KernelTimestampNS,
+			CgroupID:          ev.CgroupID,
 			Network: &api.NetworkEvent{
 				BaseEvent: api.BaseEvent{
 					Type:      api.EventTypeNetwork,
@@ -456,15 +459,16 @@ func (p *LinuxPlatform) monitorLSMEvents(ctx context.Context) {
 		metrics.RecordLSMDecision(ebpf.LSMHookName(ev.LSMHook), ebpf.LSMDecisionAction(ev.LSMDecision))
 
 		event := &api.Event{
-			Type:      api.EventType(ev.Kind),
-			PID:       ev.PID,
-			UID:       ev.UID,
-			GID:       ev.GID,
-			Comm:      ev.Comm,
-			Filename:  ev.Filename,
-			Timestamp: ev.Timestamp,
-			CgroupID:  ev.CgroupID,
-			LSMEvent:  true,
+			Type:              api.EventType(ev.Kind),
+			PID:               ev.PID,
+			UID:               ev.UID,
+			GID:               ev.GID,
+			Comm:              ev.Comm,
+			Filename:          ev.Filename,
+			Timestamp:         ev.Timestamp,
+			KernelTimestampNS: ev.KernelTimestampNS,
+			CgroupID:          ev.CgroupID,
+			LSMEvent:          true,
 
 			KernelDenied:       ev.KernelDenied,
 			IntegrityViolation: ev.IntegrityViolation,
