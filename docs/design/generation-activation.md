@@ -153,6 +153,18 @@ kernel preparation or durable commit. Generic reload remains forbidden in signed
 mode, and fleet SIGHUP remains forbidden. The separate signed-generation adapter
 is not imported by this merge; its commit/recovery ownership still needs review.
 
+Main's optional schema-1 telemetry collector is also **unsupported with atomic
+generations**. Its single collector replacement assumes a full event drain before
+new evaluation, unlike this branch's overlapping captured-generation leases.
+Supplying both options rejects startup before artifact/platform work and seals
+the supplied collector. `ActivatePolicyTelemetry` and generic activation with a
+collector reject before generation preparation/live commit, and generation
+decisions never enter legacy telemetry. No assignment/cohort identity is invented
+from a kernel generation ID. Supporting this combination needs separately reviewed
+per-generation attribution and acknowledgement tests; plain generation operation
+without telemetry is unchanged. Legacy telemetry and signed-mode refusal rules
+remain as on main.
+
 ### Shared metadata API coordination
 
 Main's canonical `internal/policybuild.Metadata{Compiler,DefaultAction}` custom

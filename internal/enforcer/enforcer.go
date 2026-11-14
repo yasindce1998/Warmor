@@ -29,6 +29,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/internal/platform"
 	"github.com/yasindce1998/warmor/internal/streaming"
+	"github.com/yasindce1998/warmor/internal/telemetry"
 	"github.com/yasindce1998/warmor/internal/version"
 	"github.com/yasindce1998/warmor/internal/wasm"
 	"github.com/yasindce1998/warmor/pkg/api"
@@ -101,6 +102,11 @@ type Options struct {
 	// genuine workload identity and scoped collection are available (see
 	// docs/design/fleet-drift.md); no server is required for local collection.
 	Drift bool
+	// Telemetry is an optional bounded per-activation collector. No fleet gate
+	// is enabled by supplying it; activation must use ActivatePolicyTelemetry.
+	// SignedAssignment seals/disables legacy telemetry until a signed attribution
+	// contract exists; it cannot authorize a signed deployment's collector.
+	Telemetry *telemetry.Collector
 
 	// Streaming pipeline configuration
 	StreamSinks []streaming.Sink
@@ -158,6 +164,7 @@ type Enforcer struct {
 	// driftCollector is non-nil when --drift is set (local host observations;
 	// fleet submission requires real workload identity, not a policy hash).
 	driftCollector *drift.FingerprintCollector
+	telemetry      *telemetry.Collector
 	netFilter      *NetFilter
 	sandbox        *SandboxManager
 	escape         *escape.Detector
@@ -194,6 +201,10 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	if opts.AtomicGenerations && opts.SignedAssignment != nil {
 		return nil, errors.New("signed assignments with atomic generations require a separately reviewed activation integration")
 	}
+	if opts.AtomicGenerations && opts.Telemetry != nil {
+		opts.Telemetry.Seal()
+		return nil, errGenerationTelemetryUnsupported
+	}
 	if opts.SignedAssignment != nil && len(opts.PolicyVerifyKey) != ed25519.PublicKeySize {
 		return nil, errors.New("signed assignment requires artifact verification key")
 	}
@@ -213,6 +224,11 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	}
 	if opts.AtomicGenerations && wasm.IsYAMLPolicy(policyPath) {
 		return nil, errors.New("atomic generations require a compiled WASM startup policy")
+	}
+	if opts.SignedAssignment != nil && opts.Telemetry != nil {
+		// Schema-1 legacy attribution cannot authorize signed deployment data.
+		opts.Telemetry.Seal()
+		opts.Telemetry = nil
 	}
 
 	port := opts.MetricsPort
@@ -469,6 +485,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		lineageTracker:   tracker,
 		intelligence:     intel,
 		driftCollector:   driftCollector,
+		telemetry:        opts.Telemetry,
 		netFilter:        netFilter,
 		sandbox:          sandboxMgr,
 		escape:           escapeDetector,
@@ -703,6 +720,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 		e.logger.LogEvent(event, result)
 		metrics.RecordEvent(result.Action.String())
 		metrics.RecordLatency(float64(result.Latency.Microseconds()))
+		e.recordTelemetryDecision(result, nil)
 		if e.pipeline != nil {
 			e.pipeline.Emit(event, result)
 		}
@@ -749,6 +767,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 
 	// Enforce the decision
 	_ = e.actionHandler.Enforce(e.ctx, event, result)
+	e.recordTelemetryDecision(result, err)
 
 	// Log the event
 	e.logger.LogEvent(event, result)
@@ -1176,10 +1195,10 @@ func (e *Enforcer) ActivatePolicy(path string, durableCommit func() error) error
 	if e.signedAssignment {
 		return errors.New("signed assignment mode refuses generic reload/activation")
 	}
-	return e.activatePolicy(path, nil, durableCommit)
+	return e.activatePolicy(path, nil, durableCommit, nil)
 }
 
-func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, durableCommit func() error) error {
+func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, durableCommit func() error, snapshot *telemetry.Snapshot) error {
 	e.activationMu.Lock()
 	defer e.activationMu.Unlock()
 	e.eventMu.RLock()
@@ -1191,6 +1210,12 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, dura
 	if e.generations != nil {
 		if expected != nil || e.signedAssignment {
 			return errors.New("signed assignments with atomic generations require a separately reviewed activation integration")
+		}
+		if snapshot != nil || e.telemetry != nil {
+			if e.telemetry != nil {
+				e.telemetry.Seal()
+			}
+			return errGenerationTelemetryUnsupported
 		}
 		return e.activateGeneration(path, durableCommit)
 	}
@@ -1250,6 +1275,13 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, dura
 	e.wasmRuntime = newRuntime
 	e.policyID = pid
 	e.policyGen.Add(1)
+	if e.telemetry != nil {
+		if snapshot == nil {
+			e.telemetry.Seal()
+		} else {
+			e.telemetry.Replace(*snapshot)
+		}
+	}
 	e.evaluatorMu.Unlock()
 	setCacheDependencies(e.cache, newEvaluator)
 	e.decisionMu.Unlock()
@@ -1372,6 +1404,9 @@ func (e *Enforcer) Close() error {
 		return nil
 	}
 	e.closed = true
+	if e.telemetry != nil {
+		e.telemetry.Seal()
+	}
 	e.logger.LogShutdown()
 
 	// Flush and close the streaming pipeline
