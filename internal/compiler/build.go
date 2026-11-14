@@ -149,7 +149,9 @@ func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) 
 	// Cargo normally hard-links release artifacts to its deps directory. Have
 	// rustc emit the final link output directly into our private crate instead,
 	// so strict rejection of hard-linked tool output also works with real Cargo.
-	args := []string{"rustc", "--target", "wasm32-unknown-unknown", "--release", "--lib", "--", "--emit=link=" + builtPath}
+	// rustc parses commas inside --emit even in a single argv entry. Use only
+	// the sanitized basename, relative to cmd.Dir, not a caller's temp parent.
+	args := []string{"rustc", "--target", "wasm32-unknown-unknown", "--release", "--lib", "--", "--emit=link=" + wasmFile}
 	ctx := opts.Context
 	if ctx == nil {
 		ctx = context.Background()

@@ -12,9 +12,12 @@ previous artifact even though the build returned an error.
   staged beside the destination. Failed builds remove the crate; successful
   callers retain the existing `Cleanup(result)` responsibility.
 - Cargo normally hard-links its release artifact into `deps`. Use `cargo rustc`
-  with `--emit=link=<private crate path>` to get a singly-linked output directly
-  from rustc, rather than accepting or copying a multiply-linked input. Release
-  profile and generated code are unchanged.
+  with `--emit=link=<sanitized WASM basename>` and the private crate as its working
+  directory to get a singly-linked output directly from rustc, rather than
+  accepting or copying a multiply-linked input. Never put the full temp path in
+  `--emit`: rustc treats commas as emission separators even in one argv entry.
+  The full crate path is retained for reading. Release profile and generated code
+  are unchanged.
 - Read only singly-linked regular, non-symlink Cargo output. Check its size
   before reading, verify the opened handle's link count and pathname identity,
   and also limit the read to 64 MiB plus one byte to detect growth. Recheck the
@@ -86,8 +89,9 @@ overlap is `internal/compiler/build.go`:
 
 1. Keep PR #52's tool runner, deadline, cancellation, and diagnostic bounds in
    `checkCargoContext` and `cargoBuild`.
-   Retain this branch's `cargo rustc ... -- --emit=link=<private path>` arguments
-   so Cargo does not hard-link the candidate into its artifact cache.
+   Retain this branch's `cargo rustc ... -- --emit=link=<sanitized basename>`
+   arguments with `cmd.Dir = crateDir`, so Cargo does not hard-link the candidate
+   into its artifact cache and comma-containing temp parents remain valid.
 2. Keep `cargoBuild` returning **only** its private `builtPath`; discard its old
    destination resolution/read/write tail, including any pre-write context
    check there.
@@ -107,3 +111,7 @@ not native filesystem/durability test results. The real-Cargo permissions test
 runs in a fresh shell subprocess with umask 077; it never changes the test
 runner's process-wide umask. Hard-link regressions check both Cargo output and
 destination rejection, preserved alias contents/identity, and staging cleanup.
+The comma-TMPDIR regression also uses a fresh child and real Cargo: it checks the
+raw output is singly-linked, final bytes equal raw WASM plus metadata, and signed
+loading retains the expected ABI/declarations. A real rustc option failure must
+preserve the previous signed artifact and leave no staging files or crate.
