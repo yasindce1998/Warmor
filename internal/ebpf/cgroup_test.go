@@ -3,6 +3,9 @@
 package ebpf
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -26,9 +29,49 @@ func TestResolveCgroupID_Self(t *testing.T) {
 }
 
 func TestResolveCgroupID_NotExist(t *testing.T) {
-	_, err := ResolveCgroupID("/nonexistent/path")
-	if err == nil {
-		t.Fatal("expected error for non-existent path")
+	_, err := ResolveCgroupID(filepath.Join(t.TempDir(), "missing"))
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("resolver must preserve wrapped ENOENT: %v", err)
+	}
+}
+
+func TestDiscoverPodCgroupsWrappedResolverChurn(t *testing.T) {
+	root := t.TempDir()
+	pod := filepath.Join(root, "kubepods", "podabcd")
+	child := filepath.Join(pod, "container")
+	if err := os.MkdirAll(child, 0755); err != nil {
+		t.Fatal(err)
+	}
+	podID, err := ResolveCgroupID(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed := false
+	ids, err := discoverPodCgroups(root, func(path string) (uint64, error) {
+		if path == child {
+			// Walk has already stat'ed this directory. Delete it just before
+			// the actual resolver's Statx, as happens during container churn.
+			if err := os.Remove(child); err != nil {
+				t.Fatal(err)
+			}
+			removed = true
+		}
+		id, err := ResolveCgroupID(path)
+		if err != nil {
+			return 0, fmt.Errorf("additional resolver context: %w", err)
+		}
+		return id, nil
+	})
+	if err != nil || !removed || len(ids) != 1 || ids[0] != podID {
+		t.Fatalf("wrapped ENOENT during churn should skip only vanished child: ids=%v removed=%v err=%v", ids, removed, err)
+	}
+	// Non-churn resolver failures must still fail discovery, not be mistaken
+	// for a harmless deletion and silently shrink coverage.
+	_, err = discoverPodCgroups(root, func(string) (uint64, error) {
+		return 0, fmt.Errorf("statx permission: %w", fs.ErrPermission)
+	})
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("wrapped permission error was swallowed: %v", err)
 	}
 }
 
