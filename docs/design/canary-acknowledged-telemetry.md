@@ -139,6 +139,73 @@ abort separately from **baseline activation convergence**; and exercise real
 end-to-end activation, rollback, offline/failed-revert nodes and restart gates.
 Do not enable the existing local analyzer's `AutoRollback` with remote data.
 
+### Integration boundary and quality authority
+
+This integration starts at durable activation `e4203dc`, merges main `173b118`,
+and imports only telemetry commits `88af39c`, `3d0cd28`, and `abdec83`. It retains
+main's dependency fixes, rolling drift windows, checked `Detector.Submit`,
+unidentified-host fingerprint withholding, private sink queues, and per-event
+enforcement outcomes. It does not import the telemetry branch's merge commits
+or the separate foundation review-followup branch.
+
+There are two intentionally different authorities:
+
+- **Control-plane eligibility:** the fleet store's durable acknowledgement and
+  server-resolved assignment generation/roster are authoritative. Neither a
+  heartbeat HTTP success nor telemetry counters can substitute for them. Drift
+  is validated before the ordinary acknowledgement; optional telemetry is
+  checked after it commits. A telemetry conflict/unavailability response does
+  not mean that the ordinary acknowledgement was rolled back.
+- **Decision quality:** the drained enforcer collector, not lifetime metrics,
+  cached outcomes, drift fingerprints, or a policy hash used as an image ID, is
+  the source for this population's quality counters. The report's `verdict`,
+  `reason`, `population`, coverage and `report_only` fields must be interpreted
+  together. Known errors/exclusions/loss/overflow make retained evidence pending;
+  zero reported loss is **not** authoritative proof of healthy or complete sensor
+  coverage. A future lifecycle integration must provide authoritative sensor
+  health/loss inputs before treating their absence as good quality. This schema
+  does not independently attest agent claims or distinguish every missing input.
+
+No daemon or server CLI flags are added here. In particular, the shipping daemon
+does not negotiate/renew collector sessions, activate with the shared collector,
+or begin reporting this evidence. Library tests cover those pieces separately;
+they are not a production collector-to-report lifecycle acceptance test. A
+future explicitly opt-in report-only integration must wire registration, session
+authorization/expiry, verified durable activation, bootstrap, heartbeat and
+shutdown together without blocking ordinary heartbeat liveness. Full sensor
+loss/health coverage remains missing. No report path advances, aborts, rolls back,
+or otherwise acts on a rollout, even when it says `degraded`.
+
+**Server-owner overlap:** `internal/policyserver/server.go` changes the shared
+heartbeat and conditional-assignment handlers. `client.go`, `types.go`, and the
+new `telemetry_*` files also depend on durable-activation semantics. Coordinate
+later server lifecycle/configuration and heartbeat review fixes here; do not
+replace the checked drift submission, pre-ack fingerprint validation, post-ack
+telemetry failure handling, or fail-closed invalidation poison while resolving
+that overlap. Foundation review fixes/re-review continue independently on main.
+
+### Integration validation (2026-11-14)
+
+Validated locally on Linux/amd64 with `GOTOOLCHAIN=go1.26.11`:
+
+| Check | Result |
+| --- | --- |
+| `go test -p 2 ./...` | Pass |
+| `go test -race -p 2 ./...` | Pass |
+| `go test -race -p 2 ./internal/enforcer ./internal/policyserver ./internal/telemetry -run 'TestTelemetry\|TestCollector' -count=10` | Pass |
+| `go vet -p 2 ./...` | Pass |
+| `GOFLAGS='-p=2' golangci-lint run --concurrency 2 --timeout 10m ./...` (v1.64.8) | Pass |
+
+Integration regressions exercise real userspace evaluation and cache hits,
+audit/log/bypass population boundaries, repeated evaluation-error quality, and
+the HTTP drift-admission/durable-ack/optional-telemetry ordering. The imported
+regressions retain coverage for precommit invalidation poison and long-gap
+clean/overflow/error/excluded/loss returns. This is ordinary package/race-test
+evidence, not a native kernel/ETW/ESF run, a production collector-to-report
+lifecycle, full sensor-loss coverage, capacity certification, or automatic
+rollback acceptance. Repository opt-in external-tool/platform test requirements
+were not enabled for this validation.
+
 ## Original integration proposal and acceptance checklist
 
 The original analyzer-only hardening described below added no heartbeat field,
