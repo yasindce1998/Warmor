@@ -4,7 +4,14 @@ Initially validated on branch `fix/vulnerability-dependency-updates`, created fr
 fetch of `origin/main` at `9ea4594`. This task changes dependency pins/checksums
 and this record only; no release-workflow documents or source code are changed.
 
-## Verified advisories and least fixed versions
+## Initial standalone validation (historical; superseded by integrated results)
+
+The pins, toolchain requirements and scan/build results in this section describe
+the original standalone source, not the final integrated graph. The integrated
+CRI validation below is authoritative for the current branch; its `x/*` modules
+require Go 1.26.0, not the Go 1.25 minimum of the initial five upgrades.
+
+### Verified advisories and least fixed versions
 
 The following exact module paths and fixed-version events were read directly
 from the Go vulnerability database, not inferred from similarly named packages:
@@ -31,7 +38,7 @@ upstream GitHub release APIs. Module origin commits reported by Go:
 - x/sys `v0.44.0`: `fb1facd76f95fa87c151018200ea5e4892ff115d`;
 - x/text `v0.41.0`: `acdba6655fd45cdb5ab73c9d6a8981333bd65a39`.
 
-## Toolchain, scan scope and results
+### Toolchain, scan scope and results
 
 - Test/analyzed Go toolchain: **go1.26.11**, Linux AMD64.
 - Scanner: **golang.org/x/vuln/cmd/govulncheck v1.9.0**, installed with that
@@ -69,7 +76,7 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 "$scanner" -show verbose ./...
 GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 "$scanner" ./...
 ```
 
-## Build/test results
+### Build/test results
 
 All passed with the final five dependency pins:
 
@@ -84,7 +91,7 @@ Passing scans only describe the database/toolchain/targets above. They do not
 certify image/OS dependencies, production enforcement, native driver builds or
 future advisories. No native macOS ESF or Windows driver infrastructure was used.
 
-## Workload dependency union — no downgrades
+## Initial isolated workload dependency union (historical)
 
 Inspected dependency-only commit
 `9924c17eced30cf56bf557755aba67f5a8a817f9` and the workload branch's manifest.
