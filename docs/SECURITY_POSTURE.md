@@ -55,8 +55,8 @@ linear memory, and each evaluation has a deadline (`--eval-timeout`, default
 initialization timeout covers start functions, ABI exports and allocations,
 not all module decoding/validation/native compilation in wazero 1.11. Those
 stages run in-process and do not consistently honor cancellation, even on
-compilation-cache hits. Module byte-size limits reduce exposure; they do not
-establish a wall-time or host
+compilation-cache hits. Preflight byte/count/locals/code limits and disabled
+DWARF decoding reduce exposure; they do not establish a wall-time or host
 memory guarantee. A signature authenticates the publisher, not the cost of
 compiling its module. Treat binary policy publishers as trusted until the
 [process-isolation release gate](design/wasm-compilation-isolation.md) is met.

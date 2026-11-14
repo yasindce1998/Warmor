@@ -94,6 +94,8 @@ func NewRuntime(ctx context.Context, cfgs ...RuntimeConfig) (*Runtime, error) {
 	// a cancelled or timed-out call closes the module and aborts infinite loops.
 	runtimeCfg := wazero.NewRuntimeConfig().
 		WithMemoryLimitPages(memPages).
+		// Policy execution needs no attacker-supplied DWARF metadata.
+		WithDebugInfoEnabled(false).
 		WithCloseOnContextDone(true)
 
 	var compilationCache wazero.CompilationCache
@@ -178,12 +180,21 @@ func (r *Runtime) LoadPolicyBytes(ctx context.Context, wasmBytes []byte) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.initTimeout)
 	defer cancel()
+	if err := preflightModule(ctx, wasmBytes); err != nil {
+		return fmt.Errorf("policy preflight: %w", err)
+	}
 	// This is synchronous by design: racing CompileModule against a timer
 	// would abandon non-interruptible work in a goroutine. The context is
 	// NOT a hard wall-time/RSS bound on the compiler itself.
 	compiled, err := r.runtime.CompileModule(ctx, wasmBytes)
 	if err != nil {
 		return fmt.Errorf("compile module: %w", err)
+	}
+	// Compilation may ignore cancellation; this rejects its late result but
+	// does not retroactively bound the CPU/RSS/time it already consumed.
+	if err := ctx.Err(); err != nil {
+		_ = compiled.Close(context.Background())
+		return fmt.Errorf("compilation exceeded initialization budget: %w", err)
 	}
 
 	if err := r.validateModule(ctx, compiled); err != nil {

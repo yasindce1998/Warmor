@@ -13,18 +13,18 @@ functions either. A context is not a way to forcibly interrupt these stages.
 `WithCloseOnContextDone` interrupts guest execution, not arbitrary host compiler
 code. Switching to the interpreter still decodes and validates the binary.
 
-Warmor passes the initialization context through. It calls synchronously:
-a timer race with a goroutine
+Warmor passes the initialization context through, rejects an already-canceled
+load before wazero, and discards compilation results if the budget has elapsed
+when compilation returns. It calls synchronously: a timer race with a goroutine
 would return sooner but leave CPU/memory-consuming work alive in the daemon.
 This limitation also applies to initial startup and policy replacement, not
 only to hot reload. YAML-to-Rust compilation is a separate external-toolchain
 boundary; bounding Cargo does not bound subsequent WASM loading.
 
-## Follow-up mitigation (not the hard-deadline gate)
+## Present mitigations and compatibility
 
-The planned `internal/wasm/preflight.go` follow-up is a non-recursive, zero-copy
-framing scan before **every** binary load, including signatures and
-compilation-cache hits. Proposed admission limits:
+`internal/wasm/preflight.go` is a non-recursive, zero-copy framing scan before
+**every** binary load, including signatures and compilation-cache hits:
 
 | Input | Admission limit |
 |---|---:|
@@ -43,13 +43,13 @@ Element initializer vectors are individually capped at 65,536 and share the
 aggregate vector budget. Counts are checked before allocating expanded locals
 or asking wazero to allocate vectors. Section/body/name lengths must be framed
 within their own payloads; duplicate standard sections are rejected. DWARF
-decoding should be disabled. Instruction bytes remain opaque to preflight; semantic
+decoding is disabled. Instruction bytes remain opaque to preflight; semantic
 validation remains wazero's responsibility. Unknown sections, constant forms,
 and shared/64-bit limits are rejected rather than guessed.
 
 These limits deliberately reject previously accepted unusually large/complex
-modules. Test normal YAML-generated modules and the checked-in JSON fixture
-before shipping. These are not a complete upper bound on compiler RSS, stack usage,
+modules. Normal YAML-generated modules and the checked-in JSON fixture are
+tested. They are not a complete upper bound on compiler RSS, stack usage,
 algorithmic complexity, native code size, table growth during execution, or
 wall time. An adversarial function below the size cap can still be expensive.
 There is no configuration switch that makes the current path isolated.
@@ -121,8 +121,8 @@ Implementation contract:
   parity, audit behavior, cross-platform packaging and helper-path permissions.
 - Check memory/CPU/file limits with OS counters, not just Go allocation stats.
 
-The follow-up tests should pin the limitation by compiling a substantive valid
-module (128 functions / about 918 KiB / 131,072 integer adds) with an already-canceled raw wazero
-context. Separate admission tests should use a compiler spy to prove dangerous count
+Current tests deliberately pin the limitation by compiling a substantive valid
+module (128 functions / about 897 KiB / 131,072 integer adds) with an
+already-canceled raw wazero context. Separate admission tests use a compiler spy to prove dangerous count
 and size fixtures never enter wazero. These are mitigation tests, **not** the
 process-isolation acceptance gate above.
