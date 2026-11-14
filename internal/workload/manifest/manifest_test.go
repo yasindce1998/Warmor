@@ -42,9 +42,9 @@ func fixture() (Document, map[digest.Digest][]byte) {
 	a := source("alpha", "same-uid", aRaw)
 	b := source("beta", "same-uid", bRaw)
 	return Document{Version: Version, Generation: 1, Compiler: compiler.Version, Composition: CompositionVersion, Posture: Posture,
-			Baseline: &base, Unknown: ScopeHandling{Mode: "audit-only"}, KnownHost: ScopeHandling{Mode: "audit-only"},
-			Additions: []Addition{{Source: a}, {Source: b}}}, map[digest.Digest][]byte{
-			base.Artifact.Digest: []byte(baseRaw), a.Artifact.Digest: []byte(aRaw), b.Artifact.Digest: []byte(bRaw)}
+		Baseline: &base, Unknown: ScopeHandling{Mode: "audit-only"}, KnownHost: ScopeHandling{Mode: "audit-only"},
+		Additions: []Addition{{Source: a}, {Source: b}}}, map[digest.Digest][]byte{
+		base.Artifact.Digest: []byte(baseRaw), a.Artifact.Digest: []byte(aRaw), b.Artifact.Digest: []byte(bRaw)}
 }
 
 func identity(t *testing.T, ns string, labels map[string]string) workload.Identity {
@@ -146,6 +146,19 @@ func TestManifestValidation(t *testing.T) {
 				t.Fatal("accepted invalid manifest")
 			}
 		})
+	}
+}
+
+func TestReviewedCompiler7PinRejectsOldAndFutureVersions(t *testing.T) {
+	if SupportedCompilerVersion != "7" || compiler.Version != "7" || compiler.Identity != "warmor-yaml/7" {
+		t.Fatal("reviewed build-claims-only compiler transition changed")
+	}
+	for _, version := range []string{"6", "8", "future"} {
+		doc, _ := fixture()
+		doc.Compiler = version
+		if _, err := New(doc); err == nil {
+			t.Fatal("unreviewed compiler version admitted", version)
+		}
 	}
 }
 

@@ -24,7 +24,7 @@ identity join exposes namespace names, not Namespace UIDs. Namespace recreation
 and stale-policy retirement must be fenced by controller/identity snapshots;
 this package does not invent Namespace UID evidence.
 
-The manifest pins compiler `6`, composition `deny-first/v1`, and posture
+The manifest pins compiler `7`, composition `deny-first/v1`, and posture
 `per-rule/v1`. A compiler version change fails closed until reviewed, rather
 than automatically accepting new code generation. `New` deep copies inputs;
 `Decode` additionally rejects non-exact schema field names (including case

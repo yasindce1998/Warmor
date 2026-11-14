@@ -27,7 +27,9 @@ const (
 	Posture            = "per-rule/v1"
 	// Pin, rather than follow compiler.Version automatically: changed compiler
 	// semantics require an explicit review of exactABI and deny-first behavior.
-	SupportedCompilerVersion = "6"
+	// v7 adds authenticated build claims; codegen/field ABI and composition
+	// ordering are unchanged. Real compiled composition tests cover this pin.
+	SupportedCompilerVersion = "7"
 	SourceMediaType          = "application/vnd.warmor.accepted-policy.v1+yaml"
 	MaxManifestBytes         = 256 << 10
 	MaxSources               = 128

@@ -12,6 +12,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/tetratelabs/wazero"
 	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 	"github.com/yasindce1998/warmor/internal/wasm"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -46,6 +47,10 @@ func compileSelection(t *testing.T, b *Bundle, s Selection) *wasm.PolicyEvaluato
 	wasmBytes, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	build, err := policybuild.Read(wasmBytes)
+	if err != nil || build == nil || build.Compiler != "warmor-yaml/7" || build.DefaultAction != g.Policy().DefaultAction {
+		t.Fatal("composed v7 artifact lost canonical build claims", build, err)
 	}
 	module, err := probe.Instantiate(ctx, wasmBytes)
 	if err != nil {
