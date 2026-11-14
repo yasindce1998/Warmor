@@ -58,10 +58,18 @@ func DiscoverPodCgroups(cgroupRoot string) ([]uint64, error) {
 
 	var baseDir string
 	for _, d := range kubepodsDirs {
-		if info, err := os.Stat(d); err == nil && info.IsDir() {
-			baseDir = d
-			break
+		info, err := os.Stat(d)
+		if os.IsNotExist(err) {
+			continue
 		}
+		if err != nil {
+			return nil, fmt.Errorf("stat kubepods: %w", err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("kubepods path %s is not a directory", d)
+		}
+		baseDir = d
+		break
 	}
 	if baseDir == "" {
 		return nil, fmt.Errorf("kubepods cgroup directory not found under %s", cgroupRoot)
@@ -75,7 +83,10 @@ func DiscoverPodCgroups(cgroupRoot string) ([]uint64, error) {
 	var podDir string
 	err := filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil
+			if os.IsNotExist(err) && path != baseDir {
+				return nil
+			} // ordinary pod churn
+			return err
 		}
 		if !info.IsDir() {
 			return nil
@@ -93,7 +104,10 @@ func DiscoverPodCgroups(cgroupRoot string) ([]uint64, error) {
 		}
 		id, err := ResolveCgroupID(path)
 		if err != nil {
-			return nil
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
 		}
 		ids = append(ids, id)
 		return nil
@@ -102,9 +116,6 @@ func DiscoverPodCgroups(cgroupRoot string) ([]uint64, error) {
 		return nil, fmt.Errorf("walk kubepods: %w", err)
 	}
 
-	if len(ids) == 0 {
-		return nil, fmt.Errorf("no pod cgroups found under %s", baseDir)
-	}
 	return ids, nil
 }
 

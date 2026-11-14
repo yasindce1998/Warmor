@@ -523,6 +523,18 @@ func (l *LSMLoader) SetCgroupFilter(ids []uint64) error {
 	return SetLSMCgroupFilter(l.filterMap, ids)
 }
 
+// ReplaceCgroupFilter retains the active-scope sentinel for empty discovery.
+func (l *LSMLoader) ReplaceCgroupFilter(ids []uint64) error {
+	return replaceCgroupFilter(kernelCgroupFilter{l.filterMap}, ids, true)
+}
+
+// InterruptReader wakes capture without detaching LSM protection.
+func (l *LSMLoader) InterruptReader() {
+	if l.lsmReader != nil {
+		_ = l.lsmReader.Close()
+	}
+}
+
 // Close releases all LSM resources.
 func (l *LSMLoader) Close() error {
 	var errs []error

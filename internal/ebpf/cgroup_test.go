@@ -72,9 +72,9 @@ func TestDiscoverPodCgroups_EmptyKubepods(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := DiscoverPodCgroups(tmpDir)
-	if err == nil {
-		t.Fatal("expected error when no pod cgroups found")
+	ids, err := DiscoverPodCgroups(tmpDir)
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("empty hierarchy must be an empty scoped set: %v, %v", ids, err)
 	}
 }
 
@@ -248,8 +248,8 @@ func TestDiscoverPodCgroups_NoMatchingDirs(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(tmpDir, "kubepods", "besteffort", "system"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DiscoverPodCgroups(tmpDir); err == nil {
-		t.Fatal("expected error when no pod-like directories exist")
+	if ids, err := DiscoverPodCgroups(tmpDir); err != nil || len(ids) != 0 {
+		t.Fatalf("no pods must be an empty scoped set: %v, %v", ids, err)
 	}
 }
 
