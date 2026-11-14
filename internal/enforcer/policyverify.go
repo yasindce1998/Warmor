@@ -31,7 +31,7 @@ func ReadVerifiedPolicy(path string, pub ed25519.PublicKey) ([]byte, error) {
 		return nil, fmt.Errorf("%s: signature verification requires a compiled .wasm policy (YAML policies are compiled at load time and cannot be signed)", path)
 	}
 	// Resolve the immutable revision pointer once for a consistent pair.
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := resolvePolicyRevisionPath(path)
 	if err != nil {
 		return nil, err
 	}

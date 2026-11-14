@@ -207,3 +207,22 @@ the changed Linux packages; its Windows analysis reports only the pre-existing
 reports only existing cleanup/print exclusions. No CI threshold, durability
 barrier, permission boundary or supported-backend recovery assertion was weakened.
 See [PLATFORM_WINDOWS.md](../PLATFORM_WINDOWS.md#policy-distribution-and-durable-activation).
+
+## macOS concurrent-resolution CI correction
+
+Run `43609771669`, job `132492027223`, failed only
+`TestPolicyRevisionConcurrentPairConsistency`: `readlink .../current: invalid
+argument` during rapid atomic symlink replacement. No evaluation deadline,
+signature failure or mixed-pair success was reported. The consistency test and
+publication/migration code are unchanged. The verified reader now retries path
+resolution on Darwin at most four times, only for a readlink `EINVAL` whose
+reported entry is still a symlink according to `Lstat`. It reads module/signature
+bytes only after resolution succeeds once. Non-links, missing/permission errors,
+other operations and persistent errors fail closed; signature verification is
+never retried or bypassed. Production evaluation deadlines are unchanged.
+
+Deterministic portable unit tests inject the exact transient error, verify path
+and operation checks, and prove the finite retry bound and fail-closed cases.
+Linux full tests pass; the existing pair-consistency and cleared migration/fsync
+tests pass ten repeated race runs. Darwin arm64 enforcer tests cross-compile.
+A native macOS rerun is still required to validate the CI filesystem behavior.

@@ -35,6 +35,11 @@ revision pointer, switched by atomic rename. Enforcer signature readers resolve
 the module pointer **once**, then read that immutable revision's sibling
 signature. Independently opening the two public aliases is not a consistent
 snapshot API while switching revisions.
+On Darwin, a concurrent symlink replacement can make path resolution report
+`readlink: invalid argument`. The verified reader allows at most four resolution
+attempts, only for that error and only while `Lstat` confirms the reported entry
+is still a symlink. It reads no module/signature bytes until resolution succeeds,
+does not retry signature failures, and fails closed on other/persistent errors.
 For any symlinked policy path, the signature must live next to the resolved
 module; an unrelated `<alias>.sig` alongside a module-only symlink is not used.
 
