@@ -176,6 +176,7 @@ func TestGetPolicyIfVersion(t *testing.T) {
 	_ = srv.Store().CreatePolicy(&Policy{ID: "p"}, w)
 	_ = srv.Store().UpdatePolicy("p", w) // version 2
 	srv.Store().RegisterAgent(&RegisterRequest{ID: "a"})
+	assignment := srv.Rollouts().ResolvePolicy("a", nil)
 
 	tests := []struct {
 		query string
@@ -184,6 +185,9 @@ func TestGetPolicyIfVersion(t *testing.T) {
 		{"", http.StatusOK},
 		{"&if_version=1", http.StatusOK},
 		{"&if_version=2", http.StatusOK}, // version alone is ambiguous
+		{"&if_version=2&if_policy_id=p&if_hash=" + assignment.WASMHash, http.StatusNotModified},
+		{"&if_version=2&if_policy_id=other&if_hash=" + assignment.WASMHash, http.StatusOK},
+		{"&if_version=2&if_policy_id=p&if_hash=wrong", http.StatusOK},
 		{"&if_version=3", http.StatusOK}, // e.g. after a rollback; resend
 
 		{"&if_version=garbage", http.StatusOK},
