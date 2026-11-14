@@ -25,6 +25,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/lineage"
 	"github.com/yasindce1998/warmor/internal/logging"
 	"github.com/yasindce1998/warmor/internal/metrics"
+	"github.com/yasindce1998/warmor/internal/nodereceipt"
 	"github.com/yasindce1998/warmor/internal/platform"
 	"github.com/yasindce1998/warmor/internal/streaming"
 	"github.com/yasindce1998/warmor/internal/version"
@@ -155,11 +156,13 @@ type Enforcer struct {
 	policyPath      string
 	verifyKey       ed25519.PublicKey
 	evalTimeout     time.Duration
-	policyID        string // metrics label (see policyID()); guarded by evaluatorMu
+	policyID        string                 // metrics label (see policyID()); guarded by evaluatorMu
+	activation      nodereceipt.Activation // guarded by activationMu; never candidate state
 	syncFailLog     logLimiter
 	auditMode       bool
 	learningMode    bool
 	defaultDeny     bool
+	lsmEnforce      bool // actual requested mode, separate from loaded LSM capability
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
@@ -437,6 +440,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		auditMode:       opts.AuditMode,
 		learningMode:    opts.LearningMode,
 		defaultDeny:     opts.DefaultDeny,
+		lsmEnforce:      opts.LSMEnforce,
 		ctx:             ctx,
 		cancel:          cancel,
 	}
@@ -453,6 +457,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		e.Close()
 		return nil, fmt.Errorf("activate kernel default-deny: %w", activationErr)
 	}
+	e.activation = e.captureActivation()
 
 	return e, nil
 }
@@ -1105,6 +1110,7 @@ func (e *Enforcer) ActivatePolicy(path string, commit func() error) error {
 		restoreErr := e.prepareKernel(e.evaluator)
 		e.decisionMu.Unlock()
 		if restoreErr != nil {
+			e.activation = nodereceipt.Activation{} // kernel state is no longer acknowledged
 			return fmt.Errorf("activation failed: %w; kernel rollback failed (enforcement degraded): %v", err, restoreErr)
 		}
 		return fmt.Errorf("activation failed (previous userspace policy retained): %w", err)
@@ -1120,6 +1126,7 @@ func (e *Enforcer) ActivatePolicy(path string, commit func() error) error {
 	e.wasmRuntime = newRuntime
 	e.policyID = pid
 	e.policyGen.Add(1)
+	e.activation = e.captureActivation()
 	e.evaluatorMu.Unlock()
 	setCacheDependencies(e.cache, newEvaluator)
 	e.decisionMu.Unlock()

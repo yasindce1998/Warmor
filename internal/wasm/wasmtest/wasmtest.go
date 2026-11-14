@@ -137,6 +137,11 @@ func ConstPolicy(action int32, masks *[3]uint32) []byte {
 	return withFields(fn{export: "evaluate_event", body: i32Const(action)}, masks)
 }
 
+// ConstPolicyABI explicitly declares the ABI used in activation receipt tests.
+func ConstPolicyABI(action int32, abi uint32) []byte {
+	return assemble(mallocFn, fn{export: "evaluate_event", body: i32Const(action)}, fn{export: "abi_version", body: i32Const(int32(abi)), noArg: true})
+}
+
 // UIDPolicy denies (1) events with uid 0 and allows (0) everything else.
 func UIDPolicy(masks *[3]uint32) []byte {
 	var b []byte

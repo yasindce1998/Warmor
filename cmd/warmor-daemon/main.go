@@ -342,6 +342,15 @@ func runDaemon(stop <-chan struct{}) {
 	if err := enf.Start(); err != nil {
 		log.Fatalf("❌ Failed to start enforcer: %v", err)
 	}
+	receiptClient, err := newNodeReceiptClient(enf)
+	if err != nil {
+		log.Fatalf("Node receipts: %v", err)
+	}
+	if receiptClient != nil {
+		receiptCtx, stopReceipts := context.WithCancel(ctx)
+		defer stopReceipts()
+		go runNodeReceipts(receiptCtx, receiptClient)
+	}
 
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)

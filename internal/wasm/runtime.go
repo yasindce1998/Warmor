@@ -59,12 +59,14 @@ func DefaultCacheDir() string {
 
 // Runtime wraps the WASM runtime
 type Runtime struct {
-	runtime     wazero.Runtime
-	module      wazero.CompiledModule
-	config      wazero.ModuleConfig
-	cache       wazero.CompilationCache
-	poolSize    int
-	initTimeout time.Duration
+	// loadedDigest hashes the exact bytes accepted by LoadPolicyBytes.
+	loadedDigest string
+	runtime      wazero.Runtime
+	module       wazero.CompiledModule
+	config       wazero.ModuleConfig
+	cache        wazero.CompilationCache
+	poolSize     int
+	initTimeout  time.Duration
 	// cacheDir is RuntimeConfig.CacheDir; compiled YAML policies are kept
 	// under it (see LoadPolicyFromYAML).
 	cacheDir string
@@ -203,8 +205,14 @@ func (r *Runtime) LoadPolicyBytes(ctx context.Context, wasmBytes []byte) error {
 	}
 
 	r.module = compiled
+	sum := sha256.Sum256(wasmBytes)
+	r.loadedDigest = hex.EncodeToString(sum[:])
 	return nil
 }
+
+// LoadedDigest is only a preparation identity; callers must wait for actual
+// activation before exposing it as an active digest.
+func (r *Runtime) LoadedDigest() string { return r.loadedDigest }
 
 // validateModule rejects modules that do not implement a host ABI the host
 // can call, or that declare an unsupported abi_version, so a bad policy fails

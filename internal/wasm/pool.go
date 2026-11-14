@@ -15,6 +15,7 @@ var ErrPoolClosed = errors.New("policy pool is closed")
 // Pool manages a set of pre-instantiated WASM policy instances for
 // lock-free parallel evaluation.
 type Pool struct {
+	abi       uint32
 	instances chan *Policy
 	runtime   *Runtime
 	module    wazero.CompiledModule
@@ -64,6 +65,7 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 			return nil, fmt.Errorf("instantiate pool member %d: %w", i, err)
 		}
 		if i == 0 {
+			p.abi = policy.abiVersion
 			p.fields = readFieldsDeclaration(ctx, policy)
 			p.temporal = policy.temporal()
 			p.staticProcess = readStaticDomain(ctx, policy, 0)
@@ -79,6 +81,9 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 
 	return p, nil
 }
+
+// ABIVersion is the version declared by the instantiated module (0 for legacy).
+func (p *Pool) ABIVersion() uint32 { return p.abi }
 
 func (p *Pool) instantiate(ctx context.Context) (*Policy, error) {
 	// Anonymous instances allow multiple pools to coexist in one runtime.
