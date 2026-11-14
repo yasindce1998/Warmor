@@ -2,6 +2,14 @@ package wasmtest
 
 import "bytes"
 
+// InitializationLoopPolicy has valid ABI exports but never returns from the
+// initialization-time abi_version call. It is not compiler-workload padding.
+func InitializationLoopPolicy() []byte {
+	return assemble(mallocFn,
+		fn{export: "evaluate_event", body: i32Const(0)},
+		fn{export: "abi_version", noArg: true, body: []byte{opLoop, opBlockVoid, opBr, 0, opEnd, opI32Const, 5}})
+}
+
 // DeclaredPolicy is a constant ABI-5 policy with finite field declarations and
 // complete empty process/network static domains. Intended only for fake-kernel
 // lifecycle tests; it is not an artifact-provenance attestation.

@@ -20,3 +20,10 @@ tests silently marked successful.
 `warmor-compile` needs a Rust toolchain and the `wasm32-unknown-unknown` target
 to compile policies on the user's machine. The daemon container includes a
 precompiled default policy; the controller image includes its Rust toolchain.
+
+Linux archives and the daemon image also include the optional experimental
+`warmor-policy-host` built with the daemon. It is disabled by default and has no
+Windows/macOS equivalent. The exact executable pin, signed module and physical
+root-owned installation path must be configured explicitly; see
+[supervised host deployment](design/supervised-host-deployment.md). Inclusion is
+not proof of native-code isolation or supported-kernel VM enforcement outcomes.

@@ -20,7 +20,7 @@ tools=(warmorctl warmor-server warmor-compile warmor-learn warmor-simulate
   warmor-policy-gen warmor-policy-merge warmor-policy-diff warmor-policy-bundle
   warmor-integrity-scan warmor-sbom-policy)
 if [[ "$GOOS" != darwin ]]; then tools+=(warmor-daemon); fi
-if [[ "$GOOS" == linux ]]; then tools+=(warmor-oci-hook); fi
+if [[ "$GOOS" == linux ]]; then tools+=(warmor-oci-hook warmor-policy-host); fi
 for tool in "${tools[@]}"; do
   go build -mod=readonly -trimpath -buildvcs=false \
     -ldflags="-s -w -buildid= -X github.com/yasindce1998/warmor/internal/version.Version=${VERSION}" \
@@ -28,6 +28,17 @@ for tool in "${tools[@]}"; do
 done
 cp LICENSE "$out/"
 cp docs/RELEASE_SUPPORT.md "$out/RELEASE_SUPPORT.md"
+if [[ "$GOOS" == linux ]]; then
+  # Public metadata only; never install a key or silently opt the daemon in.
+  cp docs/design/supervised-host-deployment.md "$out/SUPERVISED_HOST.md"
+  python3 - "$out" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+(root / "POLICY_HOST_SHA256").write_text(hashlib.sha256((root / "warmor-policy-host").read_bytes()).hexdigest() + "\n", encoding="ascii")
+PY
+fi
 # Test the extracted bytes of the final archive, not just build-directory files.
 # Python's print uses CRLF on Windows. Never derive a shell filename from it.
 python3 scripts/release-package.py "$out" "${SOURCE_DATE_EPOCH:?set SOURCE_DATE_EPOCH}" "$GOOS"
@@ -49,6 +60,9 @@ for line in (root / "SHA256SUMS").read_text().splitlines():
     checksum, name = line.split("  ", 1)
     if hashlib.sha256((root / name).read_bytes()).hexdigest() != checksum:
         raise SystemExit(f"release checksum mismatch: {name}")
+host = root / "warmor-policy-host"
+if host.exists() and (root / "POLICY_HOST_SHA256").read_text().strip() != hashlib.sha256(host.read_bytes()).hexdigest():
+    raise SystemExit("release policy host pin mismatch")
 PY
 # No root, drivers, entitlements or production cluster needed.
 "$out/warmor-compile$ext" --version | grep -F -- "$VERSION"

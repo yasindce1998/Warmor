@@ -19,9 +19,9 @@ func checkSignedBackendCombination(signed, atomic, host bool) error {
 	return nil
 }
 
-func supervisedBackendConfig(enabled bool, path, digest, declarations string, timeout time.Duration) (*policyhost.Config, error) {
+func supervisedBackendConfig(enabled bool, path, digest, declarations string, timeout, loadTimeout time.Duration) (*policyhost.Config, error) {
 	if !enabled {
-		if path != "" || digest != "" || declarations != "" {
+		if path != "" || digest != "" || declarations != "" || loadTimeout != 5*time.Second {
 			return nil, errors.New("policy-host configuration requires --experimental-supervised-policy-host")
 		}
 		return nil, nil
@@ -30,6 +30,10 @@ func supervisedBackendConfig(enabled bool, path, digest, declarations string, ti
 		return nil, errors.New("supervised backend requires --policy-host and --policy-host-sha256")
 	}
 	c := enforcer.DefaultSupervisedConfig(path, digest, timeout)
+	if loadTimeout <= 0 || loadTimeout > c.InitializationTimeout {
+		return nil, errors.New("--policy-host-load-timeout must be positive and at most 10s")
+	}
+	c.LoadTimeout = loadTimeout
 	if declarations != "" {
 		c.TrustedDeclarationDigests = strings.Split(declarations, ",")
 	}

@@ -115,6 +115,18 @@ func runHelper() int {
 		fmt.Fprintln(os.Stderr, "helper must actually run as uid/euid 65534")
 		return 90
 	}
+	if os.Getenv("WARMOR_OUTCOME_CACHE_PROBE") == "1" {
+		fmt.Println("READY uid=65534")
+		for {
+			var trigger [1]byte
+			if n, err := os.Stdin.Read(trigger[:]); err != nil || n != 1 {
+				return 0
+			}
+			if _, err := os.ReadFile(os.Getenv("WARMOR_OUTCOME_FILE")); err != nil {
+				return 92
+			}
+		}
+	}
 	if os.Getenv("WARMOR_OUTCOME_FILE") != "" {
 		fmt.Println("READY uid=65534")
 		var trigger [1]byte

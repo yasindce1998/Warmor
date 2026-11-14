@@ -22,8 +22,9 @@ and the still-open whole-daemon Host VM gate.
 Explicit opt-in is `--experimental-supervised-policy-host`, with `--verify-key`,
 an absolute `--policy-host` executable path, and lowercase
 `--policy-host-sha256`. There is no PATH search, environment inheritance, shared
-compilation cache, automatic fallback or worker respawn. The standalone command
-must currently be built/installed separately; release packaging is follow-up.
+compilation cache, automatic fallback or worker respawn. Linux packaging now
+includes the standalone command without enabling it; see
+`supervised-host-deployment.md` for exact pin and physical installation rules.
 The flags select an active backend, not an informational readiness label.
 
 `--policy-declaration-digests` is an optional comma-separated, administrator-owned
@@ -100,7 +101,7 @@ load deadline while active-generation events continue; immediate next activation
 checks killed-child reaping/capacity release. No sleeper/mock worker stands in
 for compilation.
 
-Whole-daemon supported-kernel VM evidence, release packaging, sustained resource
+Whole-daemon supported-kernel VM evidence, sustained resource
 and event-loss tests, native non-Linux execution, restart/power-loss continuity,
 and the combined signed/atomic commit model remain open. No host-wide enforcing
 run or BPF feature/object change is claimed here. Validation commands/results

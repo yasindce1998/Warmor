@@ -3,21 +3,35 @@
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
+# Go 1.26's VCS discovery recognizes .git directories but not worktree .git
+# files and otherwise stamps the enclosing checkout's HEAD. Bind Git queries
+# to this exact worktree; never bless mismatched embedded revision metadata.
+export GIT_DIR="$(git rev-parse --absolute-git-dir)"
+export GIT_WORK_TREE="$ROOT"
 
 usage() {
-  echo 'Usage: tests/integration/run-outcomes.sh [--build-only]'
+  echo 'Usage: tests/integration/run-outcomes.sh [--build-only] [--policy-host [--atomic-generations]]'
   echo 'Requires Go, Rust wasm32-unknown-unknown; full run also needs vimto and QEMU.'
   echo 'Optional: VIMTO=/path/to/vimto KERNEL=/absolute/vmlinuz-or-OCI-reference'
 }
 BUILD_ONLY=false
+POLICY_HOST=false
+ATOMIC=false
 # vimto executes the exact prepared, hashed test binaries, not a second build.
-case "${1:-}" in
-  --build-only) BUILD_ONLY=true ;;
-  --help|-h) usage; exit 0 ;;
-  '') ;;
-  *) usage >&2; exit 2 ;;
-esac
-if (( $# > 1 )); then usage >&2; exit 2; fi
+for arg in "$@"; do
+  case "$arg" in
+    --build-only) ! "$BUILD_ONLY" || exit 2; BUILD_ONLY=true ;;
+    --policy-host) ! "$POLICY_HOST" || exit 2; POLICY_HOST=true ;;
+    --atomic-generations) ! "$ATOMIC" || exit 2; ATOMIC=true ;;
+    --help|-h) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+if "$ATOMIC" && ! "$POLICY_HOST"; then usage >&2; exit 2; fi
+# Inherited controls must never silently alter the legacy gate.
+unset WARMOR_OUTCOME_POLICY_HOST WARMOR_OUTCOME_ATOMIC_GENERATIONS
+if "$POLICY_HOST"; then export WARMOR_OUTCOME_POLICY_HOST=1; fi
+if "$ATOMIC"; then export WARMOR_OUTCOME_ATOMIC_GENERATIONS=1; fi
 
 for tool in go cargo rustup sha256sum; do
   command -v "$tool" >/dev/null || { echo "error: $tool is required" >&2; exit 1; }
@@ -41,9 +55,15 @@ chmod 0755 "$ARTIFACTS"
 echo "Outcome artifacts: $ARTIFACTS (retained on success and failure)"
 export CGO_ENABLED=0
 export WARMOR_OUTCOME_ARTIFACTS="$ARTIFACTS"
+git rev-parse HEAD > "$ARTIFACTS/source-sha.txt"
 go build -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon
+if "$POLICY_HOST"; then
+  go build -o "$ARTIFACTS/warmor-policy-host" ./cmd/warmor-policy-host
+  sha256sum "$ARTIFACTS/warmor-policy-host" | cut -d ' ' -f1 > "$ARTIFACTS/POLICY_HOST_SHA256"
+fi
 go test -c -tags integration -o "$ARTIFACTS/outcomes.test" ./tests/integration
 go test -c -tags integration -o "$ARTIFACTS/kernel.test" ./internal/ebpf
+test "$(git rev-parse HEAD)" = "$(cat "$ARTIFACTS/source-sha.txt")"
 WARMOR_OUTCOME_PREPARE=1 "$ARTIFACTS/outcomes.test" \
   -test.v -test.run '^TestPrepareOutcomeArtifacts$' | tee "$ARTIFACTS/build.log"
 {
@@ -52,11 +72,17 @@ WARMOR_OUTCOME_PREPARE=1 "$ARTIFACTS/outcomes.test" \
   go version
   rustc --version
   echo "kernel=$KERNEL"
+  echo "policy_host=$POLICY_HOST atomic_generations=$ATOMIC"
   echo 'BPF objects below are the exact go:embed inputs used by both binaries.'
 } > "$ARTIFACTS/build-info.txt"
-sha256sum "$ARTIFACTS/warmor-daemon" "$ARTIFACTS/outcomes.test" "$ARTIFACTS/kernel.test" \
+sha256sum "$ARTIFACTS/source-sha.txt" "$ARTIFACTS/warmor-daemon" "$ARTIFACTS/outcomes.test" "$ARTIFACTS/kernel.test" \
   "$ARTIFACTS/"*.wasm "$ROOT"/internal/ebpf/*_bpf*.o \
   "$ROOT"/internal/ebpf/*_bpf*.go "$ROOT"/bpf/*.bpf.c "$ROOT"/bpf/*.h > "$ARTIFACTS/SHA256SUMS"
+if "$POLICY_HOST"; then
+  sha256sum "$ARTIFACTS/warmor-policy-host" "$ARTIFACTS/POLICY_HOST_SHA256" \
+    "$ARTIFACTS/fixture-public.pem" "$ARTIFACTS/"*.sig \
+    "$ARTIFACTS/reviewed-declaration-digests.txt" >> "$ARTIFACTS/SHA256SUMS"
+fi
 if "$BUILD_ONLY"; then
   echo 'BUILD ONLY: artifacts validated; no kernel prevention or termination claim.'
   exit 0
@@ -77,3 +103,6 @@ WARMOR_OUTCOME_VM=1 bash tests/integration/run-vm.sh outcomes "$ARTIFACTS" \
 # A skipped/mis-selected suite must not turn a successful go-test exit into
 # enforcement proof. The guest writes this only after every outcome/cleanup.
 grep -qx 'whole-daemon outcomes passed in vimto' "$ARTIFACTS/outcome-success.txt"
+if "$POLICY_HOST"; then
+  bash tests/integration/check-host-outcomes.sh "$ARTIFACTS/outcomes.log"
+fi

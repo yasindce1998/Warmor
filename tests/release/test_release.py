@@ -32,6 +32,39 @@ artifacts = load("release-artifacts")
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_host_packaged_only_with_linux_daemon_and_exact_public_pin(self):
+        for goos in ("linux", "darwin", "windows"):
+            with self.subTest(goos=goos), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "scripts").mkdir()
+                (root / "docs/design").mkdir(parents=True)
+                (root / "bin").mkdir()
+                for name in ("release-package.py", "release-extract.py"):
+                    shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+                (root / "LICENSE").write_text("license")
+                (root / "docs/RELEASE_SUPPORT.md").write_text("support")
+                (root / "docs/design/supervised-host-deployment.md").write_text("experimental")
+                go = root / "bin/go"
+                go.write_text(f'#!{sys.executable}\nimport pathlib,sys\n'
+                              'out=pathlib.Path(sys.argv[sys.argv.index("-o")+1])\n'
+                              'out.write_text("#!/usr/bin/env bash\\necho 1.2.3\\n")\n'
+                              'out.chmod(0o755)\n')
+                go.chmod(0o755)
+                env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+                           VERSION="1.2.3", GOOS=goos, GOARCH="amd64", SOURCE_DATE_EPOCH="1700000000")
+                result = subprocess.run(["bash", str(ROOT / "scripts/release-build.sh")], cwd=root, env=env, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr.decode())
+                extractor.extract(root / "dist", root / "extracted")
+                payload = root / "extracted" / f"warmor-1.2.3-{goos}-amd64"
+                host = payload / "warmor-policy-host"
+                self.assertEqual(host.exists(), goos == "linux")
+                self.assertFalse((payload / "warmor-policy-host.exe").exists())
+                self.assertEqual((payload / "POLICY_HOST_SHA256").exists(), goos == "linux")
+                if goos == "linux":
+                    self.assertTrue((payload / "warmor-daemon").exists())
+                    self.assertEqual((payload / "POLICY_HOST_SHA256").read_text().strip(), hashlib.sha256(host.read_bytes()).hexdigest())
+                    self.assertIn("  POLICY_HOST_SHA256\n", (payload / "SHA256SUMS").read_text())
+
     def test_windows_packager_crlf_stdout_does_not_enter_archive_filename(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -203,6 +236,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("-trimpath -buildvcs=false", dockerfile)
         self.assertIn("CARGO_NET_OFFLINE=true", dockerfile)
         self.assertIn("GOTOOLCHAIN=local", dockerfile)
+
+    def test_daemon_image_host_is_same_stage_root_physical_path_not_opted_in(self):
+        text = (ROOT / "deploy/Dockerfile").read_text()
+        builder = text.split(" AS builder\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertIn("./cmd/warmor-policy-host", builder)
+        self.assertIn("sha256sum /warmor-policy-host > /POLICY_HOST_SHA256SUMS", builder)
+        daemon = text.split(" AS daemon\n", 1)[1]
+        self.assertIn("COPY --from=builder --chown=0:0 --chmod=0755 /warmor-policy-host /usr/local/libexec/warmor-policy-host", daemon)
+        self.assertIn("/usr/share/warmor/POLICY_HOST_SHA256SUMS", daemon)
+        self.assertNotIn("experimental-supervised-policy-host", daemon)
+        self.assertNotIn("PRIVATE KEY", text)
 
     def test_controller_inherits_exact_debian_security_package_fixes(self):
         dockerfile = (ROOT / "deploy/Dockerfile").read_text()

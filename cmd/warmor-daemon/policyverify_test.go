@@ -77,6 +77,7 @@ func TestMain_ValidatePolicy(t *testing.T) {
 		{"host validator forbidden", []string{"--experimental-supervised-policy-host", "--validate-policy", unsigned}, 1, "", "do not combine with supervised backend flags"},
 		{"host path validator forbidden", []string{"--policy-host", "/not-executed", "--validate-policy", unsigned}, 1, "", "do not combine with supervised backend flags"},
 		{"host pin validator forbidden", []string{"--policy-host-sha256", strings.Repeat("a", 64), "--validate-policy", unsigned}, 1, "", "do not combine with supervised backend flags"},
+		{"host deadline validator forbidden", []string{"--policy-host-load-timeout", "1s", "--validate-policy", unsigned}, 1, "", "do not combine with supervised backend flags"},
 		{"host declaration validator forbidden", []string{"--policy-declaration-digests", strings.Repeat("b", 64), "--validate-policy", unsigned}, 1, "", "do not combine with supervised backend flags"},
 	}
 	for _, tc := range tests {

@@ -72,7 +72,7 @@ func TestPrepareOutcomeArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"allowed", "first-denied", "reload-denied", "rule-audit", "global-audit", "file-victim"} {
+	for _, name := range []string{"allowed", "first-denied", "reload-denied", "rule-audit", "global-audit", "file-victim", "compile-heavy-denied", "init-loop-denied", "signed-malformed-denied"} {
 		copyExecutable(t, self, filepath.Join(dir, name))
 	}
 	if !compiler.CargoAvailable() {
@@ -142,6 +142,9 @@ rules:
 		t.Logf("compiled and runtime-validated %s.wasm", name)
 	}
 	mustWrite(t, filepath.Join(dir, "watched-file"), []byte("readable without daemon\n"), 0644)
+	if os.Getenv("WARMOR_OUTCOME_POLICY_HOST") == "1" {
+		prepareSignedHostFixtures(t)
+	}
 }
 
 func validatePreparedPolicy(t *testing.T, name string, rt *wasm.Runtime) {
@@ -177,6 +180,9 @@ func validatePreparedPolicy(t *testing.T, name string, rt *wasm.Runtime) {
 	if name == "static" {
 		if domain := evaluator.StaticRulesProcess(); !domain.Eligible || len(domain.Rules) != 2 {
 			t.Fatalf("prepared static policy must expose eligible exec domain with 2 entries: %+v", domain)
+		}
+		if domain := evaluator.StaticRulesNetwork(); !domain.Eligible || len(domain.Rules) != 0 {
+			t.Fatalf("prepared static policy must expose complete empty network deny domain: %+v", domain)
 		}
 		check(api.EventTypeProcess, filepath.Join(guestFixtureDir, "allowed"), 65534, api.ActionAllow, false)
 		check(api.EventTypeProcess, filepath.Join(guestFixtureDir, "first-denied"), 65534, api.ActionDeny, false)
@@ -233,6 +239,7 @@ type outcomeFixture struct {
 	recordings string
 	cgroup     string
 	fd         *os.File
+	hostFlags  []string
 }
 
 func newFixture(t *testing.T) *outcomeFixture {
@@ -248,7 +255,7 @@ func newFixture(t *testing.T) *outcomeFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"allowed", "first-denied", "reload-denied", "rule-audit", "global-audit", "file-victim"} {
+	for _, name := range []string{"allowed", "first-denied", "reload-denied", "rule-audit", "global-audit", "file-victim", "compile-heavy-denied", "init-loop-denied", "signed-malformed-denied"} {
 		copyExecutable(t, filepath.Join(f.dir, name), filepath.Join(f.work, name))
 	}
 	mustWrite(t, filepath.Join(f.work, "watched-file"), []byte("readable without daemon\n"), 0644)
@@ -260,6 +267,9 @@ func newFixture(t *testing.T) *outcomeFixture {
 		t.Fatal(err)
 	}
 	f.fd = fd
+	if os.Getenv("WARMOR_OUTCOME_POLICY_HOST") == "1" {
+		f.installPolicyHost(t)
+	}
 	t.Cleanup(func() {
 		if err := fd.Close(); err != nil {
 			t.Errorf("close fixture cgroup: %v", err)
@@ -427,6 +437,7 @@ type daemonProcess struct {
 	metrics string
 	events  string
 	log     string
+	hosts   []int
 }
 
 func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ...string) *daemonProcess {
@@ -456,6 +467,7 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 	}
 	args := []string{"--policy", policy, "--require-lsm", "--lsm-enforce", "--cgroup-filter", f.cgroup,
 		"--metrics-port", fmt.Sprint(port), "--event-sink", "file:" + d.events, "--stats-interval", "1h"}
+	args = append(args, f.hostFlags...)
 	d.cmd = exec.Command(filepath.Join(f.dir, "warmor-daemon"), append(args, flags...)...)
 	d.cmd.Stdout, d.cmd.Stderr = log, log
 	if err := d.cmd.Start(); err != nil {
@@ -483,6 +495,11 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 		if err := log.Close(); err != nil {
 			t.Errorf("close daemon log: %v", err)
 		}
+		for _, pid := range d.hosts {
+			if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); !os.IsNotExist(err) {
+				t.Errorf("supervised child %d not reaped after clean SIGTERM: %v", pid, err)
+			}
+		}
 		if t.Failed() {
 			data, _ := os.ReadFile(d.log)
 			t.Logf("daemon log (%s):\n%s", d.log, data)
@@ -500,6 +517,12 @@ func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ..
 		t.Fatal(err)
 	}
 	mustWrite(t, filepath.Join(f.dir, name+"-process-status.txt"), status, 0644)
+	if len(f.hostFlags) != 0 {
+		d.hosts = d.hostPIDs(t)
+		if len(d.hosts) != 1 {
+			t.Fatalf("supervised daemon must own one actual host at readiness, got %v", d.hosts)
+		}
+	}
 	return d
 }
 
@@ -581,6 +604,13 @@ func (f *outcomeFixture) activePolicy(t *testing.T, name, source string) string 
 	}
 	active := filepath.Join(f.dir, name+".wasm")
 	mustWrite(t, active, data, 0644)
+	if len(f.hostFlags) != 0 {
+		sig, err := os.ReadFile(source + ".sig")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, active+".sig", sig, 0644)
+	}
 	return active
 }
 
@@ -598,7 +628,7 @@ func TestDaemonOutcomes(t *testing.T) {
 	// Without any daemon, demonstrate DAC, mounts and uid do not account for
 	// later failures. All paths are real ELF executables, not missing utilities.
 	t.Run("baseline-without-daemon", func(t *testing.T) {
-		for _, name := range []string{"allowed", "first-denied", "reload-denied", "rule-audit", "global-audit"} {
+		for _, name := range []string{"allowed", "first-denied", "reload-denied", "rule-audit", "global-audit", "compile-heavy-denied", "init-loop-denied", "signed-malformed-denied"} {
 			f.runAllowed(t, name, "baseline-"+name, 0)
 		}
 		cmd := f.helper(t, "file-victim", "baseline-file", filepath.Join(f.work, "watched-file"), 0)
@@ -614,9 +644,15 @@ func TestDaemonOutcomes(t *testing.T) {
 	t.Run("allow-first-deny-and-rejected-reload-LKG", func(t *testing.T) {
 		active := f.activePolicy(t, "active", staticPolicy)
 		d := f.startDaemon(t, "default-deny", active, "--default-deny")
-		waitFor(t, "exec allowlist active", func() bool {
-			return strings.Contains(d.scrape(), "warmor_kernel_default_deny_active{event_type=\"exec\"} 1")
-		})
+		// This gauge belongs to the legacy single-map adapter. Generation
+		// startup requires complete static domains before Activate and Start;
+		// it does not publish the legacy gauge. Real first-exec EPERM below
+		// remains mandatory in BOTH modes, never replaced by readiness.
+		if os.Getenv("WARMOR_OUTCOME_ATOMIC_GENERATIONS") != "1" {
+			waitFor(t, "exec allowlist active", func() bool {
+				return strings.Contains(d.scrape(), "warmor_kernel_default_deny_active{event_type=\"exec\"} 1")
+			})
+		}
 		f.runAllowed(t, "allowed", "allowed-before-reload", 100*time.Millisecond)
 		f.requireFirstDenied(t, "first-denied", "denied-first")
 		// Per-rule audit is tested while global/kernel enforcement is active.
@@ -685,6 +721,11 @@ func TestDaemonOutcomes(t *testing.T) {
 		// is asynchronous containment, not synchronous file-open prevention.
 		mustWrite(t, filepath.Join(f.dir, "termination.metrics"), []byte(d.scrape()), 0644)
 	})
+	if len(f.hostFlags) != 0 {
+		t.Run("signed-host-load-failures-keep-LKG", f.hostLoadFailures)
+		t.Run("dead-host-never-serves-cached-allow", f.deadHostCache)
+		t.Run("SIGTERM-cancels-candidate-and-reaps-hosts", f.cancelHostLoad)
+	}
 }
 
 func verifyPreparedHashes(t *testing.T) {

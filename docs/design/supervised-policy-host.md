@@ -4,7 +4,8 @@ Status: **implemented and tested as an optional Linux API, not the enforcer's
 default backend or a completed isolation release gate**. The experimental
 adapter in `supervised-evaluator-integration.md` adds explicit daemon flags and
 backend lifecycle ownership; the in-process backend remains the default.
-Release packaging is still not integrated.
+Linux archive/image packaging now includes the opt-in helper; see
+`supervised-host-deployment.md`. Actual VM results remain required.
 
 ## Ownership and trust boundary
 
@@ -182,8 +183,9 @@ under a trusted wazero/Go host**, not a sandbox for a compromised native worker:
 - The adapter drains old hosts with captured generation leases and never
   automatically respawns failed hosts. Whole-daemon supported-kernel VM evidence,
   workload scope and packaging remain required **before making it the default**.
-- Release artifacts, container/service packaging and installed-host trust/upgrade
-  tests are not provided by this checkpoint. No shipped isolation claim is made.
+- Linux archives and the daemon image include the helper without enabling it.
+  The dedicated VM gate and installed-host trust/upgrade evidence remain required;
+  no shipped isolation claim is made by packaging alone.
 
 ## Verification
 

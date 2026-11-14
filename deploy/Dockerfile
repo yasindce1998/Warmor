@@ -10,6 +10,8 @@ COPY go.mod go.sum ./
 RUN go mod download && go mod verify
 COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -mod=readonly -trimpath -buildvcs=false -ldflags="-s -w -buildid= -X github.com/yasindce1998/warmor/internal/version.Version=${VERSION}" -o /warmor-daemon ./cmd/warmor-daemon \
+ && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -mod=readonly -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o /warmor-policy-host ./cmd/warmor-policy-host \
+ && sha256sum /warmor-policy-host > /POLICY_HOST_SHA256SUMS \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -mod=readonly -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o /warmor-compile ./cmd/warmor-compile \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -mod=readonly -trimpath -buildvcs=false -ldflags="-s -w -buildid= -X github.com/yasindce1998/warmor/internal/version.Version=${VERSION}" -o /warmor-controller ./cmd/warmor-controller
 
@@ -57,6 +59,8 @@ ENTRYPOINT ["/warmor-controller"]
 
 FROM gcr.io/distroless/static-debian12:latest@sha256:d75cdd72874d4790092fcb1b058493ecf6bb5bf2b2b897045b00ff01d91843f2 AS daemon
 COPY --from=builder /warmor-daemon /warmor-daemon
+COPY --from=builder --chown=0:0 --chmod=0755 /warmor-policy-host /usr/local/libexec/warmor-policy-host
+COPY --from=builder /POLICY_HOST_SHA256SUMS /usr/share/warmor/POLICY_HOST_SHA256SUMS
 COPY --from=policy /work/policy.wasm /etc/warmor/policy.wasm
 EXPOSE 9090
 ENTRYPOINT ["/warmor-daemon"]

@@ -49,6 +49,7 @@ var (
 	supervisedPolicyHost     = flag.Bool("experimental-supervised-policy-host", false, "Run all policy decoding/compilation/evaluation in a pinned child process (Linux, requires --verify-key; experimental)")
 	policyHostPath           = flag.String("policy-host", "", "Absolute path to trusted warmor-policy-host executable (requires explicit experimental opt-in)")
 	policyHostSHA256         = flag.String("policy-host-sha256", "", "Lowercase SHA-256 pin of trusted policy host executable")
+	policyHostLoadTimeout    = flag.Duration("policy-host-load-timeout", 5*time.Second, "Supervised child compilation/initialization deadline (positive, at most 10s)")
 	policyDeclarationDigests = flag.String("policy-declaration-digests", "", "Administrator-attested deterministic/exhaustive module SHA-256 digests, comma-separated; empty disables supervised caches/static rules")
 
 	integrityDB   = flag.String("integrity-db", "", "Integrity database from warmor-integrity-scan; its SHA-256 digests become the kernel exec allowlist")
@@ -98,7 +99,7 @@ func main() {
 	}
 
 	if *validatePolicy != "" {
-		if *supervisedPolicyHost || *policyHostPath != "" || *policyHostSHA256 != "" || *policyDeclarationDigests != "" {
+		if *supervisedPolicyHost || *policyHostPath != "" || *policyHostSHA256 != "" || *policyDeclarationDigests != "" || *policyHostLoadTimeout != 5*time.Second {
 			log.Fatal("--validate-policy uses the legacy in-process validator; do not combine with supervised backend flags")
 		}
 		if *signedAssignments {
@@ -122,7 +123,7 @@ func runDaemon(stop <-chan struct{}) {
 	if err := checkSignedBackendCombination(*signedAssignments, *atomicGenerations, *supervisedPolicyHost); err != nil {
 		log.Fatal(err)
 	}
-	hostConfig, err := supervisedBackendConfig(*supervisedPolicyHost, *policyHostPath, *policyHostSHA256, *policyDeclarationDigests, *evalTimeout)
+	hostConfig, err := supervisedBackendConfig(*supervisedPolicyHost, *policyHostPath, *policyHostSHA256, *policyDeclarationDigests, *evalTimeout, *policyHostLoadTimeout)
 	if err != nil {
 		log.Fatal(err)
 	}

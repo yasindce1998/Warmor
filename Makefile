@@ -1,4 +1,4 @@
-.PHONY: all clean build-bpf build-policy build-daemon generate test help \
+.PHONY: all clean build-bpf build-policy build-daemon build-policy-host generate test help \
 	deploy deploy-audit undeploy status logs policy-check upgrade \
 	docker-build docker-push build-policy-merge build-policy-diff build-policy-bundle \
 	tools build-tests deps bench bench-kernel
@@ -40,6 +40,7 @@ help:
 	@echo "  generate      - Generate eBPF Go bindings"
 	@echo "  build-policy  - Build WASM policy"
 	@echo "  build-daemon  - Build warmor daemon"
+	@echo "  build-policy-host - Build optional supervised Linux policy host"
 	@echo "  tools         - Build every cmd/* binary into ./bin"
 	@echo "  test          - Run tests"
 	@echo "  bench         - Userspace performance harness (docs/PERFORMANCE.md)"
@@ -96,6 +97,10 @@ build-daemon:
 	@echo "==> Building warmor daemon..."
 	go build -o warmor-daemon$(BINARY_EXT) ./cmd/warmor-daemon
 
+# Optional Linux backend; building does not enable it or install a trust pin.
+build-policy-host:
+	go build -o warmor-policy-host$(BINARY_EXT) ./cmd/warmor-policy-host
+
 # Build every command under cmd/ into ./bin (go adds .exe on Windows).
 # Uses the committed eBPF bindings; run `make generate` first to refresh them.
 tools:
@@ -150,7 +155,7 @@ clean:
 	@echo "==> Cleaning build artifacts..."
 	cd bpf && $(MAKE) clean
 	cd policies/example && $(MAKE) clean
-	$(RM) warmor-daemon$(BINARY_EXT) test-ebpf$(BINARY_EXT) test-wasm$(BINARY_EXT)
+	$(RM) warmor-daemon$(BINARY_EXT) warmor-policy-host$(BINARY_EXT) test-ebpf$(BINARY_EXT) test-wasm$(BINARY_EXT)
 	$(RMDIR) bin
 	$(RM) internal/ebpf/execve_monitor_bpfeb.go
 	$(RM) internal/ebpf/execve_monitor_bpfeb.o

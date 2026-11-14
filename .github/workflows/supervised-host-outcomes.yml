@@ -1,0 +1,88 @@
+name: Supervised host outcomes
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supervised-host-outcomes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  supervised-host-outcomes:
+    name: Signed supervised host (${{ matrix.maps }}, VM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        maps: [legacy, atomic]
+    env:
+      KERNEL: ghcr.io/cilium/ci-kernels:stable-selftests
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.2'
+      - name: Configure VM cache outside shared checkout
+        run: |
+          mkdir -p "$RUNNER_TEMP/warmor-host-cache"
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/warmor-host-cache" >> "$GITHUB_ENV"
+      - name: Install VM and BPF dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 clang llvm libbpf-dev gcc-multilib iproute2
+          if [ -e /dev/kvm ]; then
+            sudo chmod a+rw /dev/kvm
+          else
+            echo VIMTO_DISABLE_KVM=1 >> "$GITHUB_ENV"
+          fi
+          CGO_ENABLED=0 go install lmb.io/vimto@v0.4.0
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+      - name: Offline harness and owned-host lifetime tests
+        run: |
+          bash -n tests/integration/run-outcomes.sh tests/integration/check-host-outcomes.sh tests/integration/run-vm.sh
+          go test -race -count=1 ./tests/integration ./cmd/warmor-daemon
+          go test -race -count=1 ./internal/enforcer -run '^TestSupervised'
+      - name: Regenerate BPF from tested source
+        env:
+          BPF2GO_CFLAGS: -D__TARGET_ARCH_x86 -mcpu=v1
+        run: go generate ./internal/ebpf
+      - name: Real signed host outcomes in disposable VM only
+        env:
+          MAP_MODE: ${{ matrix.maps }}
+        run: |
+          args=(--policy-host)
+          if [ "$MAP_MODE" = atomic ]; then args+=(--atomic-generations); fi
+          bash tests/integration/run-outcomes.sh "${args[@]}"
+      - name: Retain public evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: supervised-host-${{ matrix.maps }}
+          path: |
+            tests/integration/artifacts/run.*/build-info.txt
+            tests/integration/artifacts/run.*/SHA256SUMS
+            tests/integration/artifacts/run.*/POLICY_HOST_SHA256
+            tests/integration/artifacts/run.*/fixture-public.pem
+            tests/integration/artifacts/run.*/*.sig
+            tests/integration/artifacts/run.*/*.log
+            tests/integration/artifacts/run.*/*.txt
+            tests/integration/artifacts/run.*/*.yaml
+            tests/integration/artifacts/run.*/*.wasm
+            tests/integration/artifacts/run.*/*.ndjson
+            tests/integration/artifacts/run.*/*.metrics
+            tests/integration/artifacts/run.*/marker-*
+          if-no-files-found: warn
+          retention-days: 14

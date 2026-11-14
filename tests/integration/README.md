@@ -2,6 +2,33 @@
 
 This is a **disposable-VM-only** test of the real `cmd/warmor-daemon`, compiler-generated WASM policies, and BPF-LSM hooks. It does not run an enforcing daemon on the host, in kind, or in the current Kubernetes cluster. `tests/e2e_enforcement_test.sh` is a compatibility wrapper for this runner; the old unsafe standalone shell test has been removed.
 
+## Optional supervised host gate
+
+`bash tests/integration/run-outcomes.sh --policy-host` runs the same outcome
+oracle with a separately built signed-policy host. Add `--atomic-generations`
+to select generation maps; without it the legacy single-map mode is explicit.
+Add `--build-only` for preparation without starting a VM or daemon. The existing
+default run and kernel-generation gates remain independent and required.
+
+The helper and daemon come from the same revision; the guest checks all retained
+hashes, copies the helper to a physical root-owned `/run/warmor-outcomes` path,
+and supplies its exact SHA-256 pin explicitly. Ed25519 private keys exist only
+in host preparation memory. Public keys, signatures, signed malformed/init-loop
+and real compile-heavy modules are retained. Declaration trust is limited to the
+reviewed compiler-generated static/file fixtures, not all signed modules.
+
+Additional probes require compile/init deadline rejection with LKG still
+allowing/refusing real operations, reaped failed candidates, no cached allow or
+automatic respawn after an active host dies, and clean SIGTERM cancellation of a
+watcher-owned candidate. `check-host-outcomes.sh` rejects skips, duplicates,
+missing nested PASS evidence, and final success without all selected fixtures.
+`.github/workflows/supervised-host-outcomes.yml` requires separate legacy/atomic
+VM jobs using Go 1.26.2 and the existing `/dev/null` transport/deadline launcher.
+These are new CI gates, not locally claimed VM results. Deterministic real-host,
+fake-kernel tests retain the precise old-lease/maps-until-Close ordering oracle;
+the process-level VM test does not pretend to observe every teardown instant.
+See [deployment assumptions](../../docs/design/supervised-host-deployment.md).
+
 ## What a passing VM run proves
 
 | Gate | Required observable outcome |
