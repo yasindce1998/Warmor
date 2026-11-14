@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,10 +11,106 @@ import (
 
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
+	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 func staticTestTable(pattern string, action byte, port uint16) []byte {
 	return append([]byte{action, 0, byte(port), byte(port >> 8), byte(len(pattern)), byte(len(pattern) >> 8)}, pattern...)
+}
+
+// Exercise the real compiled evaluator and its static exports together: exact
+// identity changes must not change declaration-order first-match or defaults.
+func TestCompiledStaticCollisionsAndLengthBoundary(t *testing.T) {
+	if testing.Short() || !compiler.CargoAvailable() {
+		t.Skip("needs cargo and wasm32-unknown-unknown target")
+	}
+	a, b := "/opt/warmor/collision-000079bb", "/opt/warmor/collision-00044848"
+	boundary := "/" + strings.Repeat("x", 126)
+	yaml := fmt.Sprintf(`name: exact-identity
+version: 1
+default_action: deny
+rules:
+  - name: first-allow
+    event: process
+    conditions:
+      all:
+        - path: %q
+    action: allow
+  - name: colliding-deny
+    event: process
+    conditions:
+      all:
+        - path: %q
+    action: deny
+  - name: shadowed-deny
+    event: process
+    conditions:
+      all:
+        - path: %q
+    action: deny
+  - name: shared-length-boundary
+    event: process
+    conditions:
+      all:
+        - path: %q
+    action: allow
+  - name: endpoint-allow
+    event: network
+    conditions:
+      all:
+        - remote_addr: 127.1.156.58
+        - remote_port: 8644
+    action: allow
+  - name: endpoint-colliding-deny
+    event: network
+    conditions:
+      all:
+        - remote_addr: 127.1.248.57
+        - remote_port: 24525
+    action: deny
+`, a, b, a, boundary)
+	ctx := context.Background()
+	file := filepath.Join(t.TempDir(), "identity.yaml")
+	if err := os.WriteFile(file, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := NewRuntime(ctx, RuntimeConfig{CacheDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close(ctx)
+	if err := rt.LoadPolicyFromYAML(ctx, file); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := NewPolicy(ctx, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer policy.Close(ctx)
+	process := readStaticDomain(ctx, policy, 0)
+	network := readStaticDomain(ctx, policy, 2)
+	if !process.Eligible || len(process.Rules) != 3 || process.Rules[0].Action != 0 || process.Rules[1].Action != 1 ||
+		!network.Eligible || len(network.Rules) != 2 {
+		t.Fatalf("static exports: %+v %+v", process, network)
+	}
+	for _, tc := range []struct {
+		event *api.Event
+		want  api.Action
+	}{
+		{&api.Event{Filename: a}, api.ActionAllow},
+		{&api.Event{Filename: b}, api.ActionDeny},
+		{&api.Event{Filename: "/unknown"}, api.ActionDeny},
+		{&api.Event{Filename: boundary}, api.ActionAllow},
+		{&api.Event{Filename: boundary + "x"}, api.ActionDeny},
+		{&api.Event{Type: api.EventTypeNetwork, Network: &api.NetworkEvent{Operation: "connect", RemoteAddr: "127.1.156.58", RemotePort: 8644}}, api.ActionAllow},
+		{&api.Event{Type: api.EventTypeNetwork, Network: &api.NetworkEvent{Operation: "connect", RemoteAddr: "127.1.248.57", RemotePort: 24525}}, api.ActionDeny},
+		{&api.Event{Type: api.EventTypeNetwork, Network: &api.NetworkEvent{Operation: "connect", RemoteAddr: "127.1.156.58", RemotePort: 8645}}, api.ActionDeny},
+	} {
+		got, err := policy.Evaluate(ctx, tc.event)
+		if err != nil || got != tc.want {
+			t.Fatalf("%+v: action %v want %v error %v", tc.event, got, tc.want, err)
+		}
+	}
 }
 
 func TestParseStaticTableIdentityContractAndFirstMatch(t *testing.T) {

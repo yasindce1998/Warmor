@@ -37,7 +37,8 @@ int BPF_PROG(lsm_connect_check, struct socket *sock, struct sockaddr *address, i
 			__u32 sin6_flowinfo;
 			__u8  sin6_addr[16];
 		} sin6;
-		if (addrlen < 28 || bpf_probe_read_kernel(&sin6, sizeof(sin6), address))
+		// The RFC2133 form is 24 bytes (no scope_id) and is still valid.
+		if (addrlen < (int)sizeof(sin6) || bpf_probe_read_kernel(&sin6, sizeof(sin6), address))
 			return 0;
 		port = sin6.sin6_port;
 		__builtin_memcpy(addr_v6, sin6.sin6_addr, 16);

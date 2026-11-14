@@ -261,3 +261,25 @@ func TestHashPatternUnixWatchVectors(t *testing.T) {
 		t.Fatal("unix watch hash changed")
 	}
 }
+
+func TestExactEndpointKeySeparatesFamilyPortAndAddressTail(t *testing.T) {
+	base, err := endpointPolicyKey(42, EventTypeNetwork, "2001:db8::1", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		addr string
+		port uint16
+	}{
+		{"2001:db8::2", 443}, {"2001:db8:1::1", 443},
+		{"2001:db8::1", 444}, {"32.1.13.184", 443},
+	} {
+		key, err := endpointPolicyKey(42, EventTypeNetwork, tc.addr, tc.port)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if key == base {
+			t.Fatalf("endpoint alias: %+v", tc)
+		}
+	}
+}

@@ -3,6 +3,7 @@
 package ebpf
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
 )
@@ -57,7 +59,14 @@ func collidingExecPaths(t *testing.T, dir string) (string, string) {
 
 func TestLSM_ExactExecCollisionFirstMatchDefaultDenyAndScope(t *testing.T) {
 	l, cgid := identityTestLoader(t)
-	a, b := collidingExecPaths(t, t.TempDir())
+	// t.TempDir includes the long test name, which can exceed the shared
+	// 127-byte policy-path bound before the fixture filename is added.
+	dir, err := os.MkdirTemp("/tmp", "warmor-id-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	a, b := collidingExecPaths(t, dir)
 	bin, err := os.ReadFile("/bin/true")
 	if err != nil {
 		t.Fatal(err)
@@ -207,5 +216,58 @@ func TestLSM_TruncatedExecCannotHitExactAllow(t *testing.T) {
 	t.Cleanup(func() { pm.ClearDefaultDeny() })
 	if err := exec.Command(path).Run(); !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("truncated exec = %v, want EPERM", err)
+	}
+}
+
+func TestLSM_ExactIPv6AndMappedEndpointIdentities(t *testing.T) {
+	l, _ := identityTestLoader(t)
+	pm := l.PolicyMap()
+	for _, tc := range []struct {
+		name, network, bind, policyAddr string
+		addr                            [16]byte
+	}{
+		{"ipv6", "tcp6", "[::1]:0", "::1", [16]byte{15: 1}},
+		{"mapped-ipv4", "tcp4", "127.0.0.1:0", "127.0.0.1", [16]byte{10: 255, 11: 255, 12: 127, 15: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln, err := net.Listen(tc.network, tc.bind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close()
+			port := uint16(ln.Addr().(*net.TCPAddr).Port)
+			connect := func(length uintptr) error {
+				// Force sockaddr_in6, including for mapped IPv4; net.Dial
+				// would otherwise select an IPv4 socket automatically.
+				fd, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_STREAM, 0)
+				if err != nil {
+					return err
+				}
+				defer syscall.Close(fd)
+				var address [28]byte
+				binary.NativeEndian.PutUint16(address[:2], syscall.AF_INET6)
+				binary.BigEndian.PutUint16(address[2:4], port)
+				copy(address[8:24], tc.addr[:])
+				_, _, errno := syscall.Syscall(syscall.SYS_CONNECT, uintptr(fd), uintptr(unsafe.Pointer(&address[0])), length)
+				if errno != 0 {
+					return errno
+				}
+				return nil
+			}
+			if err := pm.SetEndpointRule(0, EventTypeNetwork, tc.policyAddr, port, ActionDeny, false); err != nil {
+				t.Fatal(err)
+			}
+			for _, length := range []uintptr{24, 28} {
+				if err := connect(length); !errors.Is(err, syscall.EPERM) {
+					t.Fatalf("IPv6 length %d exact deny = %v, want kernel EPERM", length, err)
+				}
+			}
+			if err := pm.SetEndpointRule(0, EventTypeNetwork, tc.policyAddr, port, ActionAllow, false); err != nil {
+				t.Fatal(err)
+			}
+			if err := connect(28); err != nil {
+				t.Fatalf("IPv6 exact allow = %v", err)
+			}
+		})
 	}
 }
