@@ -38,7 +38,9 @@ applies in that mode.
   inheritance through snapshot replacement rather than interpreting mode bits.
 - Corrupt/unsupported state fails startup, without resetting state. Checksums
   detect accidental corruption, not administrator modification or backup replay.
-  Assignment authentication and anti-replay are separate protocol concerns. Drift
+  Assignment authentication and anti-replay are separate protocol concerns (see
+  the [signed-assignment library and required integration hooks](SIGNED_POLICY_ASSIGNMENTS.md),
+  not yet enabled in the server/daemon). Drift
   data and canary counters are not retained; this does not enable auto-rollback.
 - Runtime owners derive from the authenticated JWT subject or verified
   certificate identity, never JSON. Other runtimes cannot replace/delete an
