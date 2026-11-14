@@ -97,11 +97,6 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, "node outside desired roster", http.StatusForbidden)
 			return
 		}
-		m, err := s.cfg.Desired(ctx)
-		if err != nil || m.Validate() != nil {
-			http.Error(w, "no eligible desired publication", http.StatusServiceUnavailable)
-			return
-		}
 		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10))
 		dec.DisallowUnknownFields()
 		decode := func(v any) bool {
@@ -111,6 +106,11 @@ func (s *Server) Handler() http.Handler {
 			return dec.Decode(new(any)) == io.EOF
 		}
 		if r.URL.Path == "/v1/node-receipts/register" {
+			m, err := s.cfg.Desired(ctx)
+			if err != nil || m.Validate() != nil {
+				http.Error(w, "no eligible desired publication", http.StatusServiceUnavailable)
+				return
+			}
 			var registration Registration
 			if !decode(&registration) || len(registration.BootEpoch) != 64 {
 				http.Error(w, "invalid boot epoch", http.StatusBadRequest)
@@ -141,11 +141,35 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, "invalid receipt", http.StatusBadRequest)
 			return
 		}
+		// A withdrawal does not depend on a healthy desired-publication read.
+		// Even for positive reports, an API/read error must not preserve older
+		// evidence once a valid, increasing current-session report is received.
+		var m Manifest
+		var desiredErr error
+		if !receipt.Withdrawn {
+			m, desiredErr = s.cfg.Desired(ctx)
+		}
 		now := s.now()
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		v := s.sessions[p.podUID]
-		if v == nil || v.principal != p || v.challenge.Nonce != receipt.Challenge || v.challenge.BootEpoch != receipt.BootEpoch || !now.Before(v.challenge.ExpiresAt) || v.challenge.Manifest.ID() != m.ID() || receipt.Manifest.ID() != m.ID() || receipt.Sequence == 0 || receipt.Sequence <= v.sequence || !receipt.MeasuredAt.After(now.Add(-s.cfg.MaxAge)) || receipt.MeasuredAt.After(now.Add(5*time.Second)) || receipt.Active.ActivatedAt.IsZero() || receipt.Active.ActivatedAt.After(receipt.MeasuredAt) || receipt.Active.Digest != m.Digest || receipt.Active.ABI != m.ABI || receipt.Active.Posture != m.Posture {
+		// FIRST establish current authenticated session, strictly increasing
+		// sequence and freshness. Old/replayed negative or contradictory reports
+		// must not revoke newer evidence (including another registration).
+		if v == nil || v.principal != p || v.challenge.Nonce != receipt.Challenge || v.challenge.BootEpoch != receipt.BootEpoch || !now.Before(v.challenge.ExpiresAt) || receipt.Sequence == 0 || receipt.Sequence <= v.sequence || !receipt.MeasuredAt.After(now.Add(-s.cfg.MaxAge)) || receipt.MeasuredAt.After(now.Add(5*time.Second)) {
+			http.Error(w, "receipt is outside current session or sequence", http.StatusConflict)
+			return
+		}
+		v.sequence, v.receipt, v.received = receipt.Sequence, nil, time.Time{}
+		if receipt.Withdrawn {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if desiredErr != nil || m.Validate() != nil {
+			http.Error(w, "no eligible desired publication; previous evidence withdrawn", http.StatusServiceUnavailable)
+			return
+		}
+		if v.challenge.Manifest.ID() != m.ID() || receipt.Manifest.ID() != m.ID() || receipt.Active.ActivatedAt.IsZero() || receipt.Active.ActivatedAt.After(receipt.MeasuredAt) || receipt.Active.Digest != m.Digest || receipt.Active.ABI != m.ABI || receipt.Active.Posture != m.Posture {
 			http.Error(w, "receipt does not prove current registered activation", http.StatusConflict)
 			return
 		}

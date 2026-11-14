@@ -31,14 +31,17 @@ type Source struct {
 // Manifest is committed atomically alongside the artifact and accepted source
 // snapshot. Its ID binds exact accepted generations even when bytes are equal.
 type Manifest struct {
-	Version        int      `json:"version"`
-	Revision       string   `json:"revision"`
-	Digest         string   `json:"digest"`
-	SnapshotDigest string   `json:"snapshotDigest"`
-	Compiler       string   `json:"compiler"`
-	ABI            uint32   `json:"abi"`
-	Posture        Posture  `json:"posture"`
-	Sources        []Source `json:"sources"`
+	Version int `json:"version"`
+	// PublicationEpoch is random per committed publication transition. Content
+	// hashes alone are reusable after A->B->A and must not revive old evidence.
+	PublicationEpoch string   `json:"publicationEpoch"`
+	Revision         string   `json:"revision"`
+	Digest           string   `json:"digest"`
+	SnapshotDigest   string   `json:"snapshotDigest"`
+	Compiler         string   `json:"compiler"`
+	ABI              uint32   `json:"abi"`
+	Posture          Posture  `json:"posture"`
+	Sources          []Source `json:"sources"`
 }
 
 func Digest(data []byte) string {
@@ -56,7 +59,7 @@ func (m Manifest) Validate() error {
 		b, err := hex.DecodeString(s)
 		return err == nil && len(b) == 32 && hex.EncodeToString(b) == s
 	}
-	if m.Version != 1 || m.Revision == "" || m.Compiler == "" || !validDigest(m.Digest) || !validDigest(m.SnapshotDigest) || len(m.Sources) == 0 || m.ABI == 0 {
+	if m.Version != 1 || !validDigest(m.PublicationEpoch) || m.Revision == "" || m.Compiler == "" || !validDigest(m.Digest) || !validDigest(m.SnapshotDigest) || len(m.Sources) == 0 || m.ABI == 0 {
 		return fmt.Errorf("no eligible desired manifest")
 	}
 	seen := map[string]bool{}
@@ -90,12 +93,16 @@ type Activation struct {
 }
 
 type Receipt struct {
-	Challenge  string     `json:"challenge"`
-	BootEpoch  string     `json:"bootEpoch"`
-	Sequence   uint64     `json:"sequence"`
-	MeasuredAt time.Time  `json:"measuredAt"`
-	Manifest   Manifest   `json:"manifest"`
-	Active     Activation `json:"active"`
+	Challenge  string    `json:"challenge"`
+	BootEpoch  string    `json:"bootEpoch"`
+	Sequence   uint64    `json:"sequence"`
+	MeasuredAt time.Time `json:"measuredAt"`
+	// Withdrawn revokes earlier evidence in this session without asserting an
+	// active identity (e.g. the local enforcer is not ready). It shares the
+	// same challenge, boot epoch, sequence and freshness fences as positives.
+	Withdrawn bool       `json:"withdrawn,omitempty"`
+	Manifest  Manifest   `json:"manifest"`
+	Active    Activation `json:"active"`
 }
 
 type Result struct {

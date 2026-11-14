@@ -22,7 +22,8 @@ import (
 // live cluster or real token requests are used, and this is NOT attestation.
 func TestActualActivationReceiptHTTPS(t *testing.T) {
 	isolateCacheDir(t)
-	stubPlatform(t, &fakePlatform{}, nil)
+	pm := &fakePolicyMap{}
+	stubPlatform(t, &activationBootPlatform{pm: pm}, nil)
 	data := wasmtest.ConstPolicyABI(0, 3)
 	path := filepath.Join(t.TempDir(), "policy.wasm")
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -58,7 +59,7 @@ func TestActualActivationReceiptHTTPS(t *testing.T) {
 		t.Fatal("active identity is not exact runtime bytes")
 	}
 	k := receipttest.NewKube(t)
-	m := nodereceipt.Manifest{Version: 1, Revision: "effective:actual", Digest: active.Digest, SnapshotDigest: nodereceipt.Digest([]byte("snapshot")), Compiler: "test-compiler", ABI: active.ABI, Posture: active.Posture, Sources: []nodereceipt.Source{{Namespace: "security", Name: "p", UID: "policy-uid", Generation: 1}}}
+	m := nodereceipt.Manifest{Version: 1, PublicationEpoch: nodereceipt.Digest([]byte("publication-a")), Revision: "effective:actual", Digest: active.Digest, SnapshotDigest: nodereceipt.Digest([]byte("snapshot")), Compiler: "test-compiler", ABI: active.ABI, Posture: active.Posture, Sources: []nodereceipt.Source{{Namespace: "security", Name: "p", UID: "policy-uid", Generation: 1}}}
 	if active.ABI == 0 {
 		t.Fatal("fixture must declare an ABI for real receipt test")
 	}
@@ -87,6 +88,53 @@ func TestActualActivationReceiptHTTPS(t *testing.T) {
 	if result, err := s.Aggregate(context.Background(), m); err != nil || !result.All {
 		t.Fatalf("actual activation not acknowledged: %+v %v", result, err)
 	}
+	originalManifest := m
+	originalManifest.Sources = append([]nodereceipt.Source(nil), m.Sources...)
+	validPath := filepath.Join(t.TempDir(), "valid.wasm")
+	candidate := wasmtest.ConstPolicyABI(1, 3)
+	if err := os.WriteFile(validPath, candidate, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The real runtime moves A->B while desired publication remains A. The
+	// client must send an authenticated withdrawal, not only forget locally.
+	if err := e.ActivatePolicy(validPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Report(context.Background()); err == nil {
+		t.Fatal("actual runtime drift acknowledged as A")
+	}
+	if result, err := s.Aggregate(context.Background(), m); err != nil || result.All || result.Applied != 0 {
+		t.Fatalf("old A survived real activation B: %+v %v", result, err)
+	}
+	if err := e.ActivatePolicy(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Report(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Real kernel-preparation AND rollback failure invalidates the enforcer's
+	// acknowledgement. The real ActiveReceipt error must withdraw prior A.
+	pm.clearErr = errors.New("kernel preparation and rollback unavailable")
+	if err := e.ActivatePolicy(validPath, nil); err == nil {
+		t.Fatal("kernel failure acknowledged")
+	}
+	if err := c.Report(context.Background()); err == nil {
+		t.Fatal("unacknowledged activation accepted")
+	}
+	if result, err := s.Aggregate(context.Background(), m); err != nil || result.All {
+		t.Fatalf("active error retained A: %+v %v", result, err)
+	}
+	pm.clearErr = nil
+	if err := e.ActivatePolicy(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Report(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	active, err = e.ActiveReceipt()
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Reading changed content from disk must NOT change the reported active
 	// digest; it has not passed WASM validation or evaluator/kernel commit.
 	if err := os.WriteFile(path, []byte("downloaded-invalid-candidate"), 0600); err != nil {
@@ -101,12 +149,8 @@ func TestActualActivationReceiptHTTPS(t *testing.T) {
 	}
 	// Even a valid module must not advance the activation timestamp/digest
 	// before the durable publication callback succeeds.
-	validPath := filepath.Join(t.TempDir(), "valid.wasm")
-	candidate := wasmtest.ConstPolicyABI(1, 3)
-	if err := os.WriteFile(validPath, candidate, 0600); err != nil {
-		t.Fatal(err)
-	}
 	m.Digest = nodereceipt.Digest(candidate)
+	m.PublicationEpoch = nodereceipt.Digest([]byte("publication-b"))
 	m.Revision = "effective:next"
 	m.Sources[0].Generation++
 	b, _ = json.Marshal(m)
@@ -138,6 +182,37 @@ func TestActualActivationReceiptHTTPS(t *testing.T) {
 	}
 	if result, err := s.Aggregate(context.Background(), m); err != nil || !result.All {
 		t.Fatalf("committed evaluator not acknowledged: %+v %v", result, err)
+	}
+	// Return the publication to byte-identical A, but never reactivate A. Old
+	// A's still-young receipt cannot resurrect across the new durable epoch.
+	m = originalManifest
+	m.PublicationEpoch = nodereceipt.Digest([]byte("publication-a-again"))
+	b, _ = json.Marshal(m)
+	if err := os.WriteFile(manifestPath, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := s.Aggregate(context.Background(), m); err != nil || result.All {
+		t.Fatalf("ABA revived A while B active: %+v %v", result, err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := c.Report(context.Background()); err == nil {
+			t.Fatal("B active falsely acknowledged returned A")
+		}
+		if result, err := s.Aggregate(context.Background(), m); err != nil || result.All {
+			t.Fatalf("ABA mismatch retained evidence: %+v %v", result, err)
+		}
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ActivatePolicy(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Report(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := s.Aggregate(context.Background(), m); err != nil || !result.All {
+		t.Fatalf("fresh A activation missing: %+v %v", result, err)
 	}
 }
 

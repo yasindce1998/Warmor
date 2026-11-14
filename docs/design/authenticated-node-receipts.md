@@ -45,6 +45,15 @@ bytes and the accepted-source journal. It binds source namespace/name/UID and
 **accepted generation**, snapshot SHA-256, desired revision, artifact SHA-256,
 compiler identity, generated ABI and expected actual audit/learning/LSM posture.
 Even byte-identical output for a new source generation invalidates old receipts.
+It also includes a **nonreusable random `publicationEpoch`**, persisted atomically
+with each changed publication. No-op reconciliation preserves the committed
+epoch, including across controller restarts; failed/conflicting writes do not
+advance it. A successful A→B→A transition creates a new epoch for the returned A,
+even with identical bytes, revision and accepted generations. Consequently no
+old A receipt can resurrect if aggregation/watch processing misses B entirely.
+Epochs are integrity-bound by the manifest ID, mounted manifest and authenticated
+session; they do not add a signature or authentication against trusted ConfigMap
+writers. Legacy manifests without an epoch are ineligible and must be republished.
 The node must have the matching mounted manifest, not merely copy a challenge's
 revision into a generic heartbeat.
 
@@ -66,6 +75,26 @@ daemon re-registration fences old receipts; authoritative container restart and
 Pod/node/SA replacement invalidate prior evidence during aggregation. A process
 restart not yet visible in Kubernetes has a bounded stale window until fresh
 registration, API status propagation or receipt expiry—not a hardware boot proof.
+
+Every current-session report first passes bound-pod authentication, challenge,
+boot epoch, strictly increasing sequence and measurement freshness checks. Only
+then does it consume the sequence and revoke the prior positive evidence. A fresh
+contradictory digest/ABI/posture/manifest or missing activation therefore cannot
+leave the previous positive counted, even though its positive claim is rejected.
+Stale, out-of-order or other-session reports cannot revoke newer evidence.
+Explicit `withdrawn=true` reports use the same fences and do not require a healthy
+desired-publication read. They assert no active digest. The daemon attempts this
+authenticated withdrawal on any local Active error, readiness/identity mismatch,
+or mounted-manifest failure before discarding its session. A new successful
+registration and genuine matching active report can restore eligibility.
+
+This is **not instantaneous failure detection**. If authentication, network, API
+access or the controller endpoint is unavailable (including cancelled requests),
+withdrawal cannot be confirmed. Previously accepted evidence may remain counted
+until its existing challenge/receipt expiry; the client explicitly reports this
+expiry-only bound and does not claim successful revocation. Between reporting
+intervals there is likewise a detection window. Consumers must honor the hard
+expiry below, and status only reflects revocation after a successful reconcile.
 
 Aggregation re-reads the desired publication and live DS/SA/Pod/Node identities.
 It requires a nonempty **operator-supplied complete desired node roster**, a
@@ -143,6 +172,10 @@ implementations, real HTTPS client/endpoint transport, forged identity/replay/
 restart/offline cases, byte-identical generation changes and controller status
 aggregation. An enforcer test drives actual WASM initialization, real Start and
 ActivatePolicy commit/rollback through the receipt client, with only the platform
-backend faked. Helm contract tests check opt-in gates, named-node RBAC, projected
+backend faked, including A→B local activation drift and A→B→A publication epochs.
+Fault tests cover fresh contradictions, explicit withdrawals, stale positive/
+negative replay, failed/conflicting publication writes, no-op/restart epoch
+stability, and transitions with no intermediate aggregation tick. Helm contract
+tests check opt-in gates, named-node RBAC, projected
 audience tokens and separated TLS service. These are not live-cluster acceptance,
 real credentials, privileged kernel enforcement or hardware attestation tests.

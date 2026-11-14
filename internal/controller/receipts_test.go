@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -86,10 +87,35 @@ func TestAuthenticatedReceiptStatusExactAcceptedGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	active := nodereceipt.Activation{Digest: m.Digest, ABI: m.ABI, Posture: posture, ActivatedAt: time.Now().Add(-time.Second)}
-	client, err := nodereceipt.NewClient(nodereceipt.ClientConfig{URL: server.URL, TLS: receipttest.Trust(server), TokenPath: tokenPath, ManifestPath: manifestPath, Active: func() (nodereceipt.Activation, error) { return active, nil }})
+	var activeErr error
+	client, err := nodereceipt.NewClient(nodereceipt.ClientConfig{URL: server.URL, TLS: receipttest.Trust(server), TokenPath: tokenPath, ManifestPath: manifestPath, Active: func() (nodereceipt.Activation, error) { return active, activeErr }})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := client.Report(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reconcile()
+	assertApplied(true)
+	active.Digest = nodereceipt.Digest([]byte("active-b-while-desired-a"))
+	if err := client.Report(context.Background()); err == nil {
+		t.Fatal("local activation drift accepted")
+	}
+	reconcile()
+	assertApplied(false)
+	active.Digest = m.Digest
+	if err := client.Report(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reconcile()
+	assertApplied(true)
+	activeErr = errors.New("activation not acknowledged")
+	if err := client.Report(context.Background()); err == nil {
+		t.Fatal("activation error accepted")
+	}
+	reconcile()
+	assertApplied(false)
+	activeErr = nil
 	if err := client.Report(context.Background()); err != nil {
 		t.Fatal(err)
 	}

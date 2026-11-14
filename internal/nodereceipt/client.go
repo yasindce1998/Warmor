@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -85,10 +86,19 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 
 // Report never treats download, file presence or pool preparation as activation.
 // Local mounted manifest must match the controller's challenge AND the actual
-// active runtime identity. A failed report forces fresh registration next time.
+// active runtime identity. Any failure after registration attempts an authenticated
+// increasing-sequence withdrawal before forgetting the session. If the endpoint
+// cannot be reached/authenticated, earlier evidence is bounded only by expiry.
 func (c *Client) Report(ctx context.Context) (err error) {
 	defer func() {
 		if err != nil {
+			if c.challenge != nil {
+				c.sequence++
+				withdrawErr := c.post(ctx, "/v1/node-receipts", Receipt{Challenge: c.challenge.Nonce, BootEpoch: c.epoch, Sequence: c.sequence, MeasuredAt: time.Now().UTC(), Withdrawn: true}, nil)
+				if withdrawErr != nil {
+					err = errors.Join(err, fmt.Errorf("previous receipt withdrawal unconfirmed (expiry bound only): %w", withdrawErr))
+				}
+			}
 			c.challenge = nil
 		}
 	}()

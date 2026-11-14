@@ -621,6 +621,33 @@ func (c *Controller) syncConfigMap(ctx context.Context, existing *ConfigMap, was
 		for _, source := range accepted.Sources {
 			manifest.Sources = append(manifest.Sources, nodereceipt.Source{Namespace: source.Namespace, Name: source.Name, UID: source.UID, Generation: source.Generation})
 		}
+		// Reuse the epoch ONLY for an unchanged, intact durable publication.
+		// Every changed successful ConfigMap write gets a new random epoch,
+		// even A->B->A with identical accepted source identities/bytes. Failed
+		// writes do not advance it. No aggregate/watch tick is needed to fence B.
+		if existing != nil {
+			var previous nodereceipt.Manifest
+			decodeErr := json.Unmarshal([]byte(existing.Data[nodereceipt.ManifestDataKey]), &previous)
+			epochBytes, epochErr := hex.DecodeString(previous.PublicationEpoch)
+			if decodeErr == nil && epochErr == nil && len(epochBytes) == 32 && hex.EncodeToString(epochBytes) == previous.PublicationEpoch {
+				epoch := previous.PublicationEpoch
+				previous.PublicationEpoch = ""
+				unchanged := previous.ID() == manifest.ID() && string(existing.BinaryData[PolicyDataKey]) == string(wasm) && existing.Data[SnapshotDataKey] == snapshot
+				for key, value := range annotations {
+					unchanged = unchanged && existing.Metadata.Annotations[key] == value
+				}
+				if unchanged {
+					manifest.PublicationEpoch = epoch
+				}
+			}
+		}
+		if manifest.PublicationEpoch == "" {
+			epoch, err := nodereceipt.RandomEpoch()
+			if err != nil {
+				return false, fmt.Errorf("create publication epoch: %w", err)
+			}
+			manifest.PublicationEpoch = epoch
+		}
 		encoded, err := json.Marshal(manifest)
 		if err != nil {
 			return false, err

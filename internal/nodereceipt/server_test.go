@@ -20,7 +20,7 @@ import (
 )
 
 func manifest() nodereceipt.Manifest {
-	return nodereceipt.Manifest{Version: 1, Revision: "effective:test", Digest: nodereceipt.Digest([]byte("active")), SnapshotDigest: nodereceipt.Digest([]byte("snapshot")), Compiler: "compiler/test", ABI: 3, Posture: nodereceipt.Posture{Audit: true}, Sources: []nodereceipt.Source{{Namespace: "security", Name: "policy", UID: "policy-uid", Generation: 1}}}
+	return nodereceipt.Manifest{Version: 1, PublicationEpoch: nodereceipt.Digest([]byte("publication-a")), Revision: "effective:test", Digest: nodereceipt.Digest([]byte("active")), SnapshotDigest: nodereceipt.Digest([]byte("snapshot")), Compiler: "compiler/test", ABI: 3, Posture: nodereceipt.Posture{Audit: true}, Sources: []nodereceipt.Source{{Namespace: "security", Name: "policy", UID: "policy-uid", Generation: 1}}}
 }
 
 type fixture struct {
@@ -289,6 +289,7 @@ func TestClientHTTPSManifestActiveBindingAndTokenRotation(t *testing.T) {
 	if err := c.Report(context.Background()); err == nil {
 		t.Fatal("non-active digest acknowledged")
 	}
+	f.all(t, false) // the locally rejected report must withdraw old server evidence
 	active.Digest = f.m.Digest
 	// Rotated invalid token must be used rather than an in-memory token cache.
 	write(token, []byte("expired-token"))
