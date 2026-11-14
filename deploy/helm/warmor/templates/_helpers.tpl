@@ -98,6 +98,12 @@ Create the name of the priority class to use
 {{- if and .Values.controller.enabled .Values.policy.existingConfigMap -}}
 {{- fail "controller.enabled and policy.existingConfigMap are mutually exclusive" -}}
 {{- end -}}
+{{- if .Values.controller.nodeReceipts.enabled -}}
+{{- if not .Values.controller.enabled -}}{{- fail "nodeReceipts requires controller.enabled" -}}{{- end -}}
+{{- if or (empty .Values.controller.nodeReceipts.audience) (empty .Values.controller.nodeReceipts.tlsSecretName) (empty .Values.controller.nodeReceipts.caConfigMapName) (empty .Values.controller.nodeReceipts.requiredNodes) -}}
+{{- fail "nodeReceipts requires dedicated audience, provisioned TLS secret, CA ConfigMap and explicit complete requiredNodes roster" -}}
+{{- end -}}
+{{- end -}}
 {{- if or (ne (index .Values.nodeSelector "kubernetes.io/os") "linux") (ne (index .Values.nodeSelector "kubernetes.io/arch") "amd64") -}}
 {{- fail "nodeSelector must retain kubernetes.io/os=linux and kubernetes.io/arch=amd64 (current images)" -}}
 {{- end -}}

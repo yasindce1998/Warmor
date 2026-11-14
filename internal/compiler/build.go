@@ -1,7 +1,6 @@
 package compiler
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -14,8 +13,9 @@ import (
 )
 
 type BuildOptions struct {
-	// Context bounds toolchain checks and compilation. Nil preserves the
-	// historical unbounded CLI behavior for existing callers.
+	// Context bounds toolchain checks and compilation. Nil leaves the overall
+	// CLI build without a deadline (the historical unbounded behavior for
+	// existing callers); tool discovery always has its own short timeout.
 	Context context.Context
 
 	// OutputPath defaults to policy.wasm. Build replaces a regular file only
@@ -24,7 +24,8 @@ type BuildOptions struct {
 	// further restricted by umask); existing permission bits are preserved.
 	OutputPath string
 	RustOnly   bool
-	Verbose    bool
+	// Verbose prints bounded tool output after the command completes.
+	Verbose bool
 }
 
 type BuildResult struct {
@@ -120,14 +121,14 @@ func checkCargo() error {
 }
 
 func checkCargoContext(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, toolCheckTimeout)
+	defer cancel()
 	_, err := exec.LookPath("cargo")
 	if err != nil {
 		return fmt.Errorf("cargo not found in PATH. Install Rust from https://rustup.rs and run: rustup target add wasm32-unknown-unknown")
 	}
 
-	cmd := exec.CommandContext(ctx, "rustup", "target", "list", "--installed")
-	cmd.WaitDelay = 5 * time.Second
-	output, err := cmd.Output()
+	output, err := runTool(ctx, exec.Command("rustup", "target", "list", "--installed"))
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -135,7 +136,7 @@ func checkCargoContext(ctx context.Context) error {
 		return fmt.Errorf("failed to check rust targets (is rustup installed?): %w", err)
 	}
 
-	if !strings.Contains(string(output), "wasm32-unknown-unknown") {
+	if !strings.Contains(output.stdout, "wasm32-unknown-unknown") {
 		return fmt.Errorf("wasm32-unknown-unknown target not installed. Run: rustup target add wasm32-unknown-unknown")
 	}
 
@@ -161,19 +162,14 @@ func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) 
 	cmd.Dir = crateDir
 	cmd.Env = append(os.Environ(), "CARGO_TARGET_DIR="+filepath.Join(crateDir, "target"))
 
-	var stderr bytes.Buffer
+	output, err := runTool(opts.Context, cmd)
 	if opts.Verbose {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-	} else {
-		cmd.Stderr = &stderr
+		fmt.Fprint(os.Stdout, output.stdout)
+		fmt.Fprint(os.Stderr, output.stderr)
 	}
 
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		return "", fmt.Errorf("cargo build failed: %w\n%s", err, stderr.String())
+	if err != nil {
+		return "", fmt.Errorf("cargo build failed: %w\n%s", err, output.stderr)
 	}
 
 	// Cargo never receives or writes the caller's destination. Build reads this

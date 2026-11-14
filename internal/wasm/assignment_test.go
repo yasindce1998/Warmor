@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -34,8 +35,16 @@ func TestAssignmentChecksPoolCapturedModuleAfterRuntimeReload(t *testing.T) {
 	}
 	defer pool.Close(ctx)
 	want := assignment.Policy{ID: "first", Version: 1, SHA256: assignment.Digest(first), ABI: 1, Compiler: "build-first", Posture: assignment.Posture{Mode: "audit", DefaultAction: "allow"}}
+	wantIdentity := ArtifactIdentity{Digest: want.SHA256, ABI: want.ABI, Compiler: want.Compiler, DefaultAction: want.Posture.DefaultAction}
+	if pool.Identity() != wantIdentity {
+		t.Fatalf("receipt and assignment identities differ: %+v", pool.Identity())
+	}
 	if err := pool.CheckAssignment(want); err != nil {
 		t.Fatal(err)
+	}
+	observed := pool.Metadata()
+	if err := observed.MatchArtifact(want.SHA256, want.ABI, want.Compiler, want.Posture.DefaultAction); err != nil {
+		t.Fatal("observations disagree with signed pool identity", err)
 	}
 	second, err := policybuild.Append(wasmtest.VersionedConstPolicy(1, 2), policybuild.Metadata{Compiler: "build-second", DefaultAction: "deny"})
 	if err != nil {
@@ -47,6 +56,9 @@ func TestAssignmentChecksPoolCapturedModuleAfterRuntimeReload(t *testing.T) {
 	if err := pool.CheckAssignment(want); err != nil {
 		t.Fatal("runtime reload changed captured pool identity", err)
 	}
+	if pool.Identity() != wantIdentity {
+		t.Fatal("runtime candidate changed receipt pool identity")
+	}
 	borrowed, err := pool.Get(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -57,6 +69,9 @@ func TestAssignmentChecksPoolCapturedModuleAfterRuntimeReload(t *testing.T) {
 	if err := pool.CheckAssignment(want); err != nil {
 		t.Fatal(err)
 	}
+	if pool.Identity() != wantIdentity {
+		t.Fatal("pool replacement changed receipt identity")
+	}
 	wrong := want
 	wrong.ABI = 2
 	wrong.Compiler = "build-second"
@@ -64,6 +79,12 @@ func TestAssignmentChecksPoolCapturedModuleAfterRuntimeReload(t *testing.T) {
 	wrong.Posture.DefaultAction = "deny"
 	if err := pool.CheckAssignment(wrong); err == nil {
 		t.Fatal("old pool accepted unrelated current-runtime declarations")
+	}
+	if !reflect.DeepEqual(pool.Metadata(), observed) {
+		t.Fatal("runtime reload/replacement changed captured observations")
+	}
+	if err := pool.Metadata().MatchArtifact(wrong.SHA256, wrong.ABI, wrong.Compiler, wrong.Posture.DefaultAction); err == nil {
+		t.Fatal("observations accepted unrelated runtime claims")
 	}
 }
 
@@ -122,6 +143,9 @@ func TestCompiledAssignmentRetainsBuildContextSafeIdentifierAndMetadata(t *testi
 	want := assignment.Policy{ID: "signed-policy", Version: 1, SHA256: assignment.Digest(module), ABI: 3, Compiler: compiler.Identity, Posture: assignment.Posture{Mode: "enforce", DefaultAction: "deny"}}
 	if err := pool.CheckAssignment(want); err != nil {
 		t.Fatal("context-aware compiler output lost signed metadata", err)
+	}
+	if err := pool.Metadata().MatchArtifact(want.SHA256, want.ABI, want.Compiler, want.Posture.DefaultAction); err != nil {
+		t.Fatal("compiled observations disagree with signed pool claims", err)
 	}
 	if compiler.Version != "7" || compiler.Identity != "warmor-yaml/7" {
 		t.Fatal("compiler cache identity regressed")

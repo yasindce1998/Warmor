@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/yasindce1998/warmor/internal/policymeta"
 )
 
 // Field bits for the fields-read declaration a policy module exports as
@@ -21,29 +23,29 @@ import (
 // the declaration must be exhaustive or cached and kernel-compiled decisions
 // will be applied to events the policy would have decided differently.
 const (
-	FieldBitPID uint32 = 1 << iota
-	FieldBitUID
-	FieldBitGID
-	FieldBitComm
-	FieldBitPath
-	FieldBitArgs
-	FieldBitFlags
-	FieldBitOperation
-	FieldBitProtocol
-	FieldBitRemoteAddr
-	FieldBitRemotePort
-	FieldBitLocalPort
+	FieldBitPID        = policymeta.FieldBitPID
+	FieldBitUID        = policymeta.FieldBitUID
+	FieldBitGID        = policymeta.FieldBitGID
+	FieldBitComm       = policymeta.FieldBitComm
+	FieldBitPath       = policymeta.FieldBitPath
+	FieldBitArgs       = policymeta.FieldBitArgs
+	FieldBitFlags      = policymeta.FieldBitFlags
+	FieldBitOperation  = policymeta.FieldBitOperation
+	FieldBitProtocol   = policymeta.FieldBitProtocol
+	FieldBitRemoteAddr = policymeta.FieldBitRemoteAddr
+	FieldBitRemotePort = policymeta.FieldBitRemotePort
+	FieldBitLocalPort  = policymeta.FieldBitLocalPort
 
 	// FieldBitTime and FieldBitContainerAge are not event fields but the
 	// temporal context the host sends to ABI >= 3 modules (the event's wall
 	// clock and its container's age). A decision depending on either can
 	// change for the same event over time, so the host never caches it
 	// and no kernel key covers it.
-	FieldBitTime
-	FieldBitContainerAge
+	FieldBitTime         = policymeta.FieldBitTime
+	FieldBitContainerAge = policymeta.FieldBitContainerAge
 
 	// FieldsUnknown means the decision may depend on any part of the event.
-	FieldsUnknown uint32 = 0xFFFFFFFF
+	FieldsUnknown = policymeta.FieldsUnknown
 )
 
 // FieldsReadExport is the name of the exported fields-read declaration.
