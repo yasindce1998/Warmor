@@ -12,6 +12,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/tetratelabs/wazero"
 	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/policybuild"
 	"github.com/yasindce1998/warmor/internal/wasm"
@@ -49,9 +50,12 @@ func compileSelection(t *testing.T, b *Bundle, s Selection) *wasm.PolicyEvaluato
 	if err != nil {
 		t.Fatal(err)
 	}
-	build, err := policybuild.Read(wasmBytes)
-	if err != nil || build == nil || build.Compiler != "warmor-yaml/7" || build.DefaultAction != g.Policy().DefaultAction {
-		t.Fatal("composed v7 artifact lost canonical build claims", build, err)
+	claims, err := policybuild.Read(wasmBytes)
+	if err != nil || claims == nil {
+		t.Fatal("composed artifact missing valid compiler build claims", err)
+	}
+	if claims.Compiler != "warmor-yaml/7" || claims.DefaultAction != g.Policy().DefaultAction {
+		t.Fatalf("composed artifact claims do not match reviewed compiler/default: %+v", claims)
 	}
 	module, err := probe.Instantiate(ctx, wasmBytes)
 	if err != nil {
@@ -74,6 +78,17 @@ func compileSelection(t *testing.T, b *Bundle, s Selection) *wasm.PolicyEvaluato
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = pool.Close(ctx) })
+	// This compares loaded bytes/ABI/claims only; it does not authenticate a
+	// publisher, verify a signature or activate signed/workload routing.
+	want := assignment.Policy{ID: "composed-test", Version: 1, SHA256: assignment.Digest(wasmBytes), ABI: g.ABI(), Compiler: compiler.Identity,
+		Posture: assignment.Posture{Mode: "enforce", DefaultAction: g.Policy().DefaultAction}}
+	if err := pool.CheckAssignment(want); err != nil {
+		t.Fatal("loaded composed ABI/build claims/digest mismatch", err)
+	}
+	want.Compiler = "warmor-yaml/6"
+	if err := pool.CheckAssignment(want); err == nil {
+		t.Fatal("compiler-7 artifact accepted compiler-6 build identity")
+	}
 	ev := wasm.NewPolicyEvaluator(pool, "node")
 	ev.SetTimeout(5 * time.Second)
 	return ev

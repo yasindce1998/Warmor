@@ -225,11 +225,17 @@ func TestSignedStartupRetainsCgroupOptionsAndCaptureReadiness(t *testing.T) {
 	p := &readinessPlatform{}
 	cfg := stubPlatform(t, p, nil)
 	opts := &Options{AuditMode: true, MetricsPort: -1, MetricsBindAddress: "127.0.0.1", CgroupFilter: []string{"auto"}, CgroupRoot: "/host/cgroup", CgroupReconcileInterval: 2 * time.Second, PolicyVerifyKey: artifact.Public, SignedAssignment: &want}
+	legacy, _ := newTestEnforcer(t, testEnforcerOpts{})
+	attachTestTelemetry(t, legacy)
+	opts.Telemetry = legacy.telemetry
 	e, err := New(context.Background(), path, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer e.Close()
+	if e.telemetry != nil || opts.Telemetry.Snapshot() != nil {
+		t.Fatal("signed startup retained legacy telemetry attribution")
+	}
 	if cfg.CgroupRoot != opts.CgroupRoot || cfg.CgroupReconcileInterval != opts.CgroupReconcileInterval || len(cfg.CgroupFilter) != 1 || cfg.CgroupFilter[0] != "auto" || !cfg.AuditMode {
 		t.Fatalf("signed startup lost scoped capture configuration: %+v", cfg)
 	}

@@ -39,6 +39,7 @@ type Server struct {
 	insecure        bool
 	policyDir       string
 	assignmentTrust assignment.Trust
+	telemetry       *TelemetryStore
 
 	// Background loop lifecycle; stopped by Shutdown.
 	staleInterval time.Duration
@@ -76,6 +77,11 @@ type ServerConfig struct {
 	DriftThreshold float64
 	// Store injects an already-opened store; the caller owns its lifecycle.
 	Store *Store
+	// Telemetry enables opt-in, report-only acknowledged aggregate collection.
+	// The caller owns its lifecycle; nil leaves the existing protocol unchanged.
+	// AssignmentTrust disables telemetry attribution/report verdicts: the legacy
+	// assignment domain does not prove authorization for signed deployments.
+	Telemetry *TelemetryStore
 }
 
 // NewServer creates a policy management server.
@@ -96,6 +102,7 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 	s := &Server{
 		store:           store,
+		telemetry:       cfg.Telemetry,
 		rollouts:        NewRolloutManager(store),
 		addr:            cfg.Addr,
 		staleCheck:      cfg.StaleThreshold,
@@ -121,6 +128,8 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("/api/v1/heartbeat", s.requireAgent(s.handleHeartbeat))
 	mux.HandleFunc("/api/v1/policy", s.requireAgent(s.handleGetPolicy))
 	mux.HandleFunc("/api/v1/policy/wasm", s.requireAgent(s.handleGetWASM))
+	mux.HandleFunc("/api/v1/telemetry/session", s.requireAgent(s.handleTelemetrySession))
+	mux.HandleFunc("/api/v1/admin/telemetry", s.requireJWT(s.handleTelemetryReport))
 	mux.HandleFunc("/api/v1/deployment", s.requireAgent(s.handleGetDeployment))
 
 	// Container runtime endpoints (mTLS client cert or runtime token)
@@ -258,7 +267,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -285,7 +294,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req HeartbeatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -312,6 +321,20 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, err.Error(), status)
 		return
+	}
+	// A telemetry failure never fabricates, rolls back or replaces the durable
+	// revision acknowledgement. Retrying an already committed snapshot is safe.
+	if s.telemetry != nil {
+		if err := s.telemetry.observeAcknowledgement(req); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+	}
+	if req.Telemetry != nil {
+		if err := s.ingestHeartbeatTelemetry(r, req); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 	}
 
 	if req.Fingerprint != nil {
@@ -357,6 +380,10 @@ func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no matching policy", http.StatusNotFound)
 		return
 	}
+	if err := s.attachTelemetryAssignment(r, agentID, assignment); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 
 	w.Header().Set(RevisionIdentityHeader, "1")
 	// A version alone is ambiguous across policies. Legacy clients receive
@@ -364,7 +391,7 @@ func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request) {
 	ifVersion := r.URL.Query().Get("if_version")
 	if ifVersion != "" {
 		v, err := strconv.ParseInt(ifVersion, 10, 64)
-		if err == nil && v == assignment.Version &&
+		if err == nil && assignment.Telemetry == nil && v == assignment.Version &&
 			r.URL.Query().Get("if_policy_id") == assignment.PolicyID &&
 			r.URL.Query().Get("if_hash") == assignment.WASMHash {
 			w.WriteHeader(http.StatusNotModified)

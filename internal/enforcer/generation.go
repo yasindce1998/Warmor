@@ -74,6 +74,9 @@ func (e *Enforcer) enableGenerations(gp platform.GenerationPlatform) error {
 	}
 	old := &evaluationGeneration{id: 0, evaluator: e.evaluator, backend: e.ownedBackend(), cache: e.cache, policyID: e.policyID}
 	e.generations = &generationDispatch{states: map[uint64]*evaluationGeneration{0: old}, kernel: kernel}
+	if e.telemetry != nil {
+		e.telemetry.Seal() // a single legacy collector cannot own overlapping leases
+	}
 	gp.SetEventCapture(e.captureGeneration)
 	// Startup has no userspace work yet, but legacy samples can already be
 	// queued. Keep ID 0 until the reader starts and proves the first flush.
@@ -320,6 +323,9 @@ func (e *Enforcer) activateGeneration(path string, commit func() error) error {
 	e.evaluator, e.pool, e.wasmRuntime = evaluator, backend.pool, backend.runtime
 	e.backend = backend
 	e.policyID = state.policyID
+	if e.telemetry != nil {
+		e.telemetry.Seal() // generic generation activation never carries legacy attribution
+	}
 	e.evaluatorMu.Unlock()
 	g.mu.Unlock()
 	e.decisionMu.Unlock()
