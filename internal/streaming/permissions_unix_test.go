@@ -105,6 +105,8 @@ func TestFileRecordingPermissionsUmask022(t *testing.T) {
 	if s, err := NewFileSink(filepath.Join(alias, "new"), 0); err == nil {
 		_ = s.Close()
 		t.Fatal("followed symlink directory")
+	} else if !strings.Contains(err.Error(), "physical directory path") {
+		t.Fatalf("file sink/CLI error lost physical-path guidance: %v", err)
 	}
 	shared := filepath.Join(dir, "shared")
 	if err := os.Mkdir(shared, 0777); err != nil {

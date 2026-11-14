@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -37,7 +38,15 @@ func directory(path string, privateLeaf, create bool) (int, error) {
 		}
 		_ = unix.Close(fd)
 		if err != nil {
-			return -1, err
+			component := "/" + strings.Join(parts[:i+1], "/")
+			if err == unix.ENOTDIR || err == unix.ELOOP {
+				hint := "configure a physical directory path without symlink components; recording does not follow symlink parents"
+				if runtime.GOOS == "darwin" {
+					hint += " (macOS: use /private/var instead of /var, or /private/tmp instead of /tmp)"
+				}
+				return -1, fmt.Errorf("open recording parent %q: %s: %w", component, hint, err)
+			}
+			return -1, fmt.Errorf("open recording parent %q: %w", component, err)
 		}
 		fd = next
 		var st unix.Stat_t

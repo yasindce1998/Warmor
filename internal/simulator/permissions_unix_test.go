@@ -112,5 +112,7 @@ func TestEventStorePermissionsUmask022(t *testing.T) {
 	if s, err := NewEventStore(alias); err == nil {
 		_ = s.Close()
 		t.Fatal("followed store directory symlink")
+	} else if !strings.Contains(err.Error(), "physical directory path") {
+		t.Fatalf("event store error lost physical-path guidance: %v", err)
 	}
 }

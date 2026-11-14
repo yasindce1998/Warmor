@@ -73,6 +73,11 @@ does not call `EvalSymlinks` on user-supplied paths. Tests resolve only their
 newly allocated temporary fixture root before constructing recording paths, so
 native macOS temporary-directory aliases work without accepting symlinks planted
 inside the fixture or weakening the production no-follow checks.
+For concrete macOS commands and upgrading existing `/var/...` configurations,
+see [private recording paths and migration](PLATFORM_MACOS.md#private-recording-paths-and-migration).
+Rejected parent components report a physical-path configuration hint rather than
+only the operating system's `not a directory`/symlink error; no path is followed
+or retried with weaker checks as part of reporting that error.
 
 Tightening cannot revoke access via descriptors already opened by other users or
 undo previous disclosure: treat credentials captured by older permissive logs as

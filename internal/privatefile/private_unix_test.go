@@ -3,11 +3,15 @@
 package privatefile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/yasindce1998/warmor/internal/testutil"
+	"golang.org/x/sys/unix"
 )
 
 func TestOpenAppendProtectsOnlyPrivateLeafAndRecording(t *testing.T) {
@@ -135,6 +139,18 @@ func TestPhysicalFixtureRootStillRejectsSymlinkParents(t *testing.T) {
 		if f, err := OpenAppend(path, true, true); err == nil {
 			_ = f.Close()
 			t.Fatalf("followed attacker-controlled parent: %s", path)
+		} else {
+			if !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.ELOOP) {
+				t.Fatalf("lost underlying no-follow error: %v", err)
+			}
+			for _, want := range []string{alias, "physical directory path", "does not follow symlink parents"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error missing actionable %q: %v", want, err)
+				}
+			}
+			if runtime.GOOS == "darwin" && (!strings.Contains(err.Error(), "/private/var") || !strings.Contains(err.Error(), "/private/tmp")) {
+				t.Errorf("missing macOS alias migration hint: %v", err)
+			}
 		}
 	}
 	info, err := os.Stat(target)
