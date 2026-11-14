@@ -25,12 +25,14 @@ Merge `e25546c` subsequently incorporates `1e49aa7`, also without textual
 conflicts. This is a local merge into the integration branch, not a merge into
 main or a remote publication.
 
-During final handoff `origin/main` advanced independently to `89e6ff1` (PR #32,
-isolated streaming sinks). That later work is not incorporated or validated on
-this branch. Use pinned base `1e49aa7` for the integration delta, or a three-dot
-merge-base diff; do not interpret a two-dot diff against a moving main as intended
-reverts of later commits. The coordinator must re-test after combining newer
-streaming work with this branch.
+The coordinator subsequently initiated a merge of `origin/main` at `78471f6`,
+including PR #32 isolated streaming sinks, PR #30 dashboard HTTP safety and PR #34
+canary analysis. Merge `1ffc00f` completes that merge. Its only textual conflict
+was the daemon flag declaration block: both dashboard bind/auth flags and the
+metrics/cgroup flags are retained. Dashboard literal-IP validation, token loading
+and dedicated HTTP serving remain intact alongside scoped runtime options and
+readiness. Use pinned base `78471f6` for the current integration delta, or a
+three-dot merge-base diff if main advances again.
 
 ## Integration follow-ups
 
@@ -96,7 +98,8 @@ Helm lint advisory is the recommended chart icon.
 
 Final settled-tree full tests, full race tests, vet, shell syntax and all four
 strict Helm lint profiles passed after PR #31 integration and empty-selector
-hardening. An earlier background race invocation overlapped the coordinator's
+hardening, and were all rerun successfully after merge `1ffc00f` incorporated
+main at `78471f6` (dashboard, streaming and canary safety). An earlier background race invocation overlapped the coordinator's
 requested main merge and produced mixed-tree build failures; it is superseded
 by the clean sequential full runs above, not counted as passing evidence.
 
