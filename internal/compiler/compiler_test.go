@@ -321,7 +321,7 @@ default_action: allow
 	foundAuditRule := false
 	foundEnforceRule := false
 	for i, line := range lines {
-		if strings.Contains(line, "Rule: audit-tmp-exec") {
+		if strings.Contains(line, `Rule: "audit-tmp-exec"`) {
 			// Next return statement should be AUDIT_DENY
 			for j := i + 1; j < len(lines) && j < i+5; j++ {
 				if strings.Contains(lines[j], "return ACTION_AUDIT_DENY") {
@@ -330,7 +330,7 @@ default_action: allow
 				}
 			}
 		}
-		if strings.Contains(line, "Rule: enforce-etc-write") {
+		if strings.Contains(line, `Rule: "enforce-etc-write"`) {
 			for j := i + 1; j < len(lines) && j < i+5; j++ {
 				if strings.Contains(lines[j], "return ACTION_DENY") {
 					foundEnforceRule = true

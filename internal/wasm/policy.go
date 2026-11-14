@@ -56,22 +56,57 @@ func (p *Policy) temporal() bool { return p.abiVersion >= TemporalABIVersion }
 
 // NewPolicy creates a new policy instance from a compiled module.
 func NewPolicy(ctx context.Context, runtime *Runtime) (*Policy, error) {
-	instance, err := runtime.runtime.InstantiateModule(ctx, runtime.module, runtime.config)
+	policy, err := runtime.instantiatePolicy(ctx, runtime.module, runtime.config.WithName(""))
 	if err != nil {
 		return nil, fmt.Errorf("instantiate module: %w", err)
 	}
 
-	return initPolicy(ctx, runtime, instance)
+	return policy, nil
+}
+
+// malloc validates before the host reads/writes the returned region. Address
+// zero is valid WASM memory but is a failed allocation under the policy ABI.
+// Transient buffers must not alias the persistent binary event buffer.
+func (p *Policy) malloc(ctx context.Context, size uint32) (uint32, error) {
+	results, err := p.instance.ExportedFunction(exportMalloc).Call(ctx, uint64(size))
+	if err != nil {
+		return 0, err
+	}
+	if len(results) != 1 {
+		return 0, fmt.Errorf("malloc returned no pointer")
+	}
+	ptr := uint32(results[0])
+	if ptr == 0 {
+		return 0, fmt.Errorf("malloc returned null for %d bytes", size)
+	}
+	if _, ok := p.instance.Memory().Read(ptr, size); !ok {
+		return 0, fmt.Errorf("malloc returned out-of-bounds region %d + %d", ptr, size)
+	}
+	if p.eventBufPtr != 0 && uint64(ptr) < uint64(p.eventBufPtr)+eventStructSize && uint64(p.eventBufPtr) < uint64(ptr)+uint64(size) {
+		return 0, fmt.Errorf("malloc region overlaps event buffer")
+	}
+	return ptr, nil
 }
 
 // Evaluate evaluates an event against the policy.
 func (p *Policy) Evaluate(ctx context.Context, event *api.Event) (api.Action, error) {
+	ctx, cancel := boundedEvaluationContext(ctx)
+	defer cancel()
 	ctx = contextWithEvent(ctx, event)
 
 	if p.useBinaryABI {
 		return p.evaluateBinary(ctx, event)
 	}
 	return p.evaluateJSON(ctx, event)
+}
+
+// Pool-backed calls carry their configured deadline. Direct Policy callers
+// get a safe fallback too, without imposing a tighter budget on slow clients.
+func boundedEvaluationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, DefaultInitializationTimeout)
 }
 
 func (p *Policy) evaluateBinary(ctx context.Context, event *api.Event) (api.Action, error) {
@@ -91,26 +126,24 @@ func (p *Policy) evaluateBinary(ctx context.Context, event *api.Event) (api.Acti
 	return decodePolicyAction(results[0])
 }
 
-func (p *Policy) evaluateJSON(ctx context.Context, event *api.Event) (api.Action, error) {
+func (p *Policy) evaluateJSON(ctx context.Context, event *api.Event) (action api.Action, retErr error) {
 	eventJSON, err := marshalEventForWASM(event, p.abiVersion)
 	if err != nil {
 		return api.ActionDeny, fmt.Errorf("marshal event: %w", err)
 	}
 
-	malloc := p.instance.ExportedFunction("malloc")
-	if malloc == nil {
-		return api.ActionDeny, fmt.Errorf("malloc function not found")
+	if uint64(len(eventJSON)) > math.MaxUint32 {
+		return api.ActionDeny, fmt.Errorf("event JSON too large")
 	}
-
-	results, err := malloc.Call(ctx, uint64(len(eventJSON)))
+	ptr, err := p.malloc(ctx, uint32(len(eventJSON)))
 	if err != nil {
 		return api.ActionDeny, fmt.Errorf("malloc failed: %w", err)
 	}
-	ptr := uint32(results[0])
-
 	defer func() {
 		if freeFn := p.instance.ExportedFunction("free"); freeFn != nil {
-			_, _ = freeFn.Call(ctx, uint64(ptr), uint64(len(eventJSON)))
+			if _, err := freeFn.Call(ctx, uint64(ptr), uint64(len(eventJSON))); err != nil && retErr == nil {
+				action, retErr = api.ActionDeny, fmt.Errorf("free event buffer: %w", err)
+			}
 		}
 	}()
 
@@ -123,7 +156,7 @@ func (p *Policy) evaluateJSON(ctx context.Context, event *api.Event) (api.Action
 		return api.ActionDeny, fmt.Errorf("evaluate_syscall function not found")
 	}
 
-	results, err = evaluateFn.Call(ctx, uint64(ptr), uint64(len(eventJSON)))
+	results, err := evaluateFn.Call(ctx, uint64(ptr), uint64(len(eventJSON)))
 	if err != nil {
 		return api.ActionDeny, fmt.Errorf("evaluate_syscall failed: %w", err)
 	}
@@ -145,43 +178,48 @@ func decodePolicyAction(raw uint64) (api.Action, error) {
 
 // GetMatchedRule reads the last matched rule reason from the WASM module.
 func (p *Policy) GetMatchedRule(ctx context.Context) string {
+	reason, _ := p.getMatchedRule(ctx)
+	return reason
+}
+
+func (p *Policy) getMatchedRule(ctx context.Context) (reason string, retErr error) {
+	ctx, cancel := boundedEvaluationContext(ctx)
+	defer cancel()
 	fn := p.instance.ExportedFunction("get_last_matched_rule")
 	if fn == nil {
-		return ""
+		return "", nil
 	}
 
 	const reasonBufSize = 512
-	malloc := p.instance.ExportedFunction("malloc")
-	if malloc == nil {
-		return ""
-	}
-
-	results, err := malloc.Call(ctx, reasonBufSize)
+	bufPtr, err := p.malloc(ctx, reasonBufSize)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("malloc reason buffer: %w", err)
 	}
-	bufPtr := uint32(results[0])
-
 	defer func() {
 		if freeFn := p.instance.ExportedFunction("free"); freeFn != nil {
-			_, _ = freeFn.Call(ctx, uint64(bufPtr), reasonBufSize)
+			if _, err := freeFn.Call(ctx, uint64(bufPtr), reasonBufSize); err != nil && retErr == nil {
+				reason, retErr = "", fmt.Errorf("free reason buffer: %w", err)
+			}
 		}
 	}()
 
-	results, err = fn.Call(ctx, uint64(bufPtr), reasonBufSize)
+	results, err := fn.Call(ctx, uint64(bufPtr), reasonBufSize)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("read matched rule: %w", err)
 	}
 	written := uint32(results[0])
+	if written > reasonBufSize {
+		return "", fmt.Errorf("matched rule length %d exceeds capacity %d", written, reasonBufSize)
+	}
 	if written == 0 {
-		return ""
+		return "", nil
 	}
 
 	data, ok := p.instance.Memory().Read(bufPtr, written)
 	if !ok {
-		return ""
+		return "", fmt.Errorf("matched rule outside WASM memory")
 	}
-	return string(data)
+	return string(data), nil
 }
 
 // Binary ABI offsets of the temporal fields (ABI version 3).
