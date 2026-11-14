@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -221,5 +222,67 @@ func TestFleetLegacyHeartbeatClearsUnknownIdentityDurably(t *testing.T) {
 	w := postFleetJSON(t, NewServer(ServerConfig{Store: s, Insecure: true}).Handler(), "/api/v1/heartbeat", HeartbeatRequest{AgentID: "missing"})
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("unknown agent: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestFleetRevisionMetadataLimitsRollback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s := openTestStore(t, path, StoreOptions{})
+	if _, err := s.RegisterAgentChecked(&RegisterRequest{ID: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.GetAgent("agent")
+	for name, req := range map[string]HeartbeatRequest{
+		"policy id":        {AgentID: "agent", PolicyID: strings.Repeat("p", 257)},
+		"digest":           {AgentID: "agent", PolicyHash: strings.Repeat("a", 65)},
+		"activation error": {AgentID: "agent", ActivationError: strings.Repeat("e", 4097)},
+		"negative version": {AgentID: "agent", PolicyVersion: -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := s.HeartbeatRevision(req); err == nil {
+				t.Fatal("invalid revision metadata persisted")
+			}
+			if got, _ := s.GetAgent("agent"); !sameFleetAgent(got, before) {
+				t.Fatalf("rejected metadata changed active acknowledgement: %+v", got)
+			}
+		})
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = openTestStore(t, path, StoreOptions{})
+	if got, _ := s.GetAgent("agent"); !sameFleetAgent(got, before) {
+		t.Fatalf("rejected revision metadata changed restart state: %+v", got)
+	}
+}
+
+func TestFleetHTTPFaultedStoreRefusesSuccessUntilRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s := openTestStore(t, path, StoreOptions{})
+	if _, err := s.RegisterAgentChecked(&RegisterRequest{ID: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.GetAgent("agent")
+	// Model the store's fail-stop state after replacement succeeded but the
+	// directory durability barrier failed. Recovery must reopen disk state.
+	s.backend.fault = errors.New("injected post-replacement sync failure")
+	handler := NewServer(ServerConfig{Store: s, Insecure: true}).Handler()
+	for endpoint, req := range map[string]any{
+		"/api/v1/register":  RegisterRequest{ID: "new"},
+		"/api/v1/heartbeat": HeartbeatRequest{AgentID: "agent", PolicyID: "p", PolicyVersion: 1},
+	} {
+		if w := postFleetJSON(t, handler, endpoint, req); w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("faulted store returned success for %s: %d %s", endpoint, w.Code, w.Body.String())
+		}
+	}
+	if got, _ := s.GetAgent("agent"); !sameFleetAgent(got, before) {
+		t.Fatalf("faulted store accepted new acknowledgement: %+v", got)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = openTestStore(t, path, StoreOptions{})
+	if w := postFleetJSON(t, NewServer(ServerConfig{Store: s, Insecure: true}).Handler(), "/api/v1/heartbeat", HeartbeatRequest{AgentID: "agent", PolicyID: "p", PolicyVersion: 1}); w.Code != http.StatusOK {
+		t.Fatalf("reopened store did not recover: %d %s", w.Code, w.Body.String())
 	}
 }

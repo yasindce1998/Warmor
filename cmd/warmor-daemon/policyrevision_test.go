@@ -209,3 +209,22 @@ func TestPolicyRevisionBootRecoveryAndPublicationRetry(t *testing.T) {
 		t.Fatalf("retry removed an unrelated interrupted candidate: %v", err)
 	}
 }
+
+func TestPolicyRevisionRejectsYAMLRestartPathBeforeMutation(t *testing.T) {
+	for _, ext := range []string{".yaml", ".yml"} {
+		t.Run(ext, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "policy"+ext)
+			old := "version: 1\ndefault_action: allow\n"
+			writeFile(t, path, old)
+			if _, err := stagePolicyRevision(path, &policyserver.PolicyAssignment{}, readFixture(t)); err == nil {
+				t.Fatal("accepted path that cannot load downloaded WASM on restart")
+			}
+			if got, err := os.ReadFile(path); err != nil || string(got) != old {
+				t.Fatalf("rejected candidate changed old policy: %q %v", got, err)
+			}
+			if _, err := os.Lstat(path + ".revisions"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rejected candidate created revision layout: %v", err)
+			}
+		})
+	}
+}

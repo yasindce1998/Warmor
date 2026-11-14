@@ -12,6 +12,7 @@ import (
 
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/platform"
+	"github.com/yasindce1998/warmor/internal/streaming"
 	"github.com/yasindce1998/warmor/internal/wasm"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 	"github.com/yasindce1998/warmor/pkg/api"
@@ -230,3 +231,67 @@ func TestBootKernelPreparationFailureClosesAndCanRetry(t *testing.T) {
 		t.Fatalf("recovered boot leaked platform: closed=%d", recovered.closed)
 	}
 }
+
+func TestActivationDrainsProcessActionAndPreservesActualOutcome(t *testing.T) {
+	isolateCacheDir(t)
+	sink := &activationOutcomeSink{events: make(chan streaming.SecurityEvent, 1)}
+	e, _ := newTestEnforcer(t, testEnforcerOpts{policyWasm: wasmtest.ConstPolicy(1, &[3]uint32{})})
+	e.pipeline = streaming.NewPipeline(streaming.PipelineConfig{Sinks: []streaming.Sink{sink}})
+	t.Cleanup(func() {
+		if err := e.pipeline.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	entered, release, handled := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	stamp := time.Now()
+	e.actionHandler.terminate = func(event *api.Event) (bool, error) {
+		if !event.Timestamp.Equal(stamp) {
+			t.Errorf("activation integration lost event identity timestamp: %v", event.Timestamp)
+		}
+		close(entered)
+		<-release
+		return false, errors.New("injected identity refusal")
+	}
+	go func() {
+		e.handleEvent(&api.Event{PID: 123, UID: 1000, Timestamp: stamp, Filename: "/bin/test"})
+		close(handled)
+	}()
+	<-entered
+	committed, activated := make(chan struct{}), make(chan error, 1)
+	go func() {
+		activated <- e.ActivatePolicy(testPolicyPath, func() error { close(committed); return nil })
+	}()
+	select {
+	case <-committed:
+		t.Fatal("activation crossed an unfinished old-generation process action")
+	case <-time.After(30 * time.Millisecond):
+	}
+	unblock()
+	<-handled
+	if err := <-activated; err != nil {
+		t.Fatal(err)
+	}
+	if err := e.pipeline.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.events) != 1 {
+		t.Fatalf("expected one old-generation outcome: %d", len(sink.events))
+	}
+	outcome := <-sink.events
+	if outcome.Enforced || outcome.EnforcementAttempted || outcome.EnforcementError != "injected identity refusal" || outcome.Decision != "deny" {
+		t.Fatalf("activation lost actual refusal outcome: %+v", outcome)
+	}
+}
+
+type activationOutcomeSink struct{ events chan streaming.SecurityEvent }
+
+func (s *activationOutcomeSink) Write(_ context.Context, event *streaming.SecurityEvent) error {
+	s.events <- *event
+	return nil
+}
+func (*activationOutcomeSink) Flush(context.Context) error { return nil }
+func (*activationOutcomeSink) Close() error                { return nil }
+func (*activationOutcomeSink) Name() string                { return "activation-outcome" }
