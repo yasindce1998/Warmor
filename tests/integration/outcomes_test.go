@@ -350,7 +350,7 @@ func (f *outcomeFixture) runAudited(t *testing.T, d *daemonProcess, binary, mark
 	// Keep the child alive through actual policy evaluation (and event
 	// delivery), rather than allowing a fast exit to outrun a mistaken kill.
 	d.requireEvent(t, func(e streaming.SecurityEvent) bool {
-		return e.PID == uint32(cmd.Process.Pid) && e.UID == 65534 && e.Decision == "deny" && e.AuditOnly && !e.Enforced && !e.EnforcementAttempted && e.EnforcementError == ""
+		return e.PID == uint32(cmd.Process.Pid) && e.UID == 65534 && e.Decision == "deny" && e.AuditOnly && !e.KernelEnforced && !e.Enforced && !e.EnforcementAttempted && e.EnforcementError == ""
 	})
 	if _, err := input.Write([]byte{'x'}); err != nil {
 		t.Fatalf("audit-only child did not survive evaluation: %v", err)
