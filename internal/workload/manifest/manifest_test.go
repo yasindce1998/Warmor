@@ -42,9 +42,9 @@ func fixture() (Document, map[digest.Digest][]byte) {
 	a := source("alpha", "same-uid", aRaw)
 	b := source("beta", "same-uid", bRaw)
 	return Document{Version: Version, Generation: 1, Compiler: compiler.Version, Composition: CompositionVersion, Posture: Posture,
-			Baseline: &base, Unknown: ScopeHandling{Mode: "audit-only"}, KnownHost: ScopeHandling{Mode: "audit-only"},
-			Additions: []Addition{{Source: a}, {Source: b}}}, map[digest.Digest][]byte{
-			base.Artifact.Digest: []byte(baseRaw), a.Artifact.Digest: []byte(aRaw), b.Artifact.Digest: []byte(bRaw)}
+		Baseline: &base, Unknown: ScopeHandling{Mode: "audit-only"}, KnownHost: ScopeHandling{Mode: "audit-only"},
+		Additions: []Addition{{Source: a}, {Source: b}}}, map[digest.Digest][]byte{
+		base.Artifact.Digest: []byte(baseRaw), a.Artifact.Digest: []byte(aRaw), b.Artifact.Digest: []byte(bRaw)}
 }
 
 func identity(t *testing.T, ns string, labels map[string]string) workload.Identity {
@@ -103,6 +103,8 @@ func TestManifestValidation(t *testing.T) {
 		{"version", func(d *Document) { d.Version = "future" }},
 		{"generation", func(d *Document) { d.Generation = 0 }},
 		{"compiler", func(d *Document) { d.Compiler = "5" }},
+		{"previous compiler", func(d *Document) { d.Compiler = "6" }},
+		{"future compiler", func(d *Document) { d.Compiler = "8" }},
 		{"composition", func(d *Document) { d.Composition = "merge-verdicts" }},
 		{"posture", func(d *Document) { d.Posture = "enforce-everything" }},
 		{"namespace", func(d *Document) { d.Additions[0].Source.Namespace = "" }},
