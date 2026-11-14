@@ -12,7 +12,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yasindce1998/warmor/internal/policybuild"
 )
+
+const fakeToolWasm = "\x00asm\x01\x00\x00\x00"
 
 func init() {
 	// Fake tools are exec'd with real cargo/rustup arguments, not test flags.
@@ -130,7 +134,7 @@ func writeToolTestArtifact() {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		panic(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "warmor_policy_safe.wasm"), []byte("fake wasm"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "warmor_policy_safe.wasm"), []byte(fakeToolWasm), 0o600); err != nil {
 		panic(err)
 	}
 }
@@ -286,8 +290,13 @@ func TestBuildWithOwnedToolSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data, err := os.ReadFile(result.WasmPath); err != nil || string(data) != "fake wasm" {
-		t.Fatalf("successful artifact: %q, %v", data, err)
+	data, err := os.ReadFile(result.WasmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := policybuild.Read(data)
+	if err != nil || metadata == nil || metadata.Compiler != Identity || metadata.DefaultAction != "allow" || !strings.HasPrefix(string(data), fakeToolWasm) {
+		t.Fatalf("successful artifact lost compiler metadata: %+v, %v", metadata, err)
 	}
 }
 
@@ -312,6 +321,10 @@ func TestBuildActualCargoWithContext(t *testing.T) {
 	data, err := os.ReadFile(result.WasmPath)
 	if err != nil || len(data) < 8 || string(data[:4]) != "\x00asm" {
 		t.Fatalf("actual Cargo build did not produce Wasm: %v", err)
+	}
+	metadata, err := policybuild.Read(data)
+	if err != nil || metadata == nil || metadata.Compiler != Identity || metadata.DefaultAction != "allow" {
+		t.Fatalf("actual Cargo artifact lost compiler metadata: %+v, %v", metadata, err)
 	}
 }
 

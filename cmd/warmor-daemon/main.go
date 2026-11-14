@@ -12,6 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/agentstore"
+
+	"github.com/yasindce1998/warmor/internal/crypto"
+	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/dashboard"
 	"github.com/yasindce1998/warmor/internal/enforcer"
 	"github.com/yasindce1998/warmor/internal/policyserver"
@@ -56,8 +60,14 @@ var (
 	agentID      = flag.String("agent-id", "", "Agent ID reported to the policy server (default: hostname)")
 	pollInterval = flag.Duration("poll-interval", 30*time.Second, "Policy server poll and heartbeat interval")
 
-	verifyKey      = flag.String("verify-key", "", "ed25519 public key PEM (PKIX, from warmor-policy-bundle --keygen); refuse any policy (startup, reload, server download) without a valid detached signature (<policy>.sig)")
-	validatePolicy = flag.String("validate-policy", "", "Validate the policy at this path in the WASM runtime (and its signature with --verify-key), print the result and exit 0/1; needs no root or BPF")
+	verifyKey            = flag.String("verify-key", "", "ed25519 public key PEM (PKIX, from warmor-policy-bundle --keygen); refuse any policy (startup, reload, server download) without a valid detached signature (<policy>.sig)")
+	validatePolicy       = flag.String("validate-policy", "", "Validate the policy at this path in the WASM runtime (and its signature with --verify-key), print the result and exit 0/1; needs no root or BPF")
+	signedAssignments    = flag.Bool("signed-assignments", false, "Require signed deployment intent, durable anti-replay state and artifact verification (no legacy fallback)")
+	assignmentConfigPath = flag.String("assignment-config", "", "Administrator-managed public assignment trust/target/compiler configuration JSON")
+	assignmentClockPath  = flag.String("assignment-clock-health", "", "Local time-health supervisor attestation JSON (maximum 60-second lease)")
+	assignmentStateDir   = flag.String("assignment-state-dir", "", "Existing private directory for signed deployment state and immutable revisions")
+	assignmentBootstrap  = flag.String("assignment-bootstrap", "", "Explicit FIRST enrollment bundle; refuses existing assignment state; omit on subsequent boots")
+	assignmentRecovery   = flag.String("assignment-recovery", "", "Fresh signed bundle to recover existing signed state before starting capture; never resets marks")
 )
 
 var (
@@ -83,6 +93,9 @@ func main() {
 	}
 
 	if *validatePolicy != "" {
+		if *signedAssignments {
+			log.Fatal("--validate-policy checks only artifact validity; it cannot be combined with --signed-assignments")
+		}
 		os.Exit(runValidatePolicy(*validatePolicy, *verifyKey, os.Stdout, os.Stderr))
 	}
 
@@ -116,6 +129,25 @@ func runDaemon(stop <-chan struct{}) {
 	pub, err := loadVerifyKey(*verifyKey)
 	if err != nil {
 		log.Fatalf("❌ %v", err)
+	}
+	var signedManager *signedPolicyManager
+	if *signedAssignments {
+		if *assignmentBootstrap != "" && *assignmentRecovery != "" {
+			log.Fatal("assignment bootstrap and recovery are mutually exclusive")
+		}
+		if *serverURL == "" || *agentID == "" || *policyFallback != "" {
+			log.Fatal("signed assignments require --server and explicit --agent-id, and forbid --policy-fallback")
+		}
+		signedManager, err = openSignedPolicy(*assignmentConfigPath, *assignmentClockPath, *assignmentStateDir, pub, *assignmentBootstrap != "")
+		if err != nil {
+			log.Fatalf("signed assignment configuration/state: %v", err)
+		}
+		defer signedManager.store.Close()
+		if signedManager.target.Audience != *agentID {
+			log.Fatal("assignment audience must equal explicitly configured --agent-id")
+		}
+	} else if *assignmentConfigPath != "" || *assignmentClockPath != "" || *assignmentStateDir != "" || *assignmentBootstrap != "" || *assignmentRecovery != "" {
+		log.Fatal("assignment options require --signed-assignments; refusing to ignore trust configuration")
 	}
 
 	log.Printf("Policy: %s", *policyPath)
@@ -267,12 +299,14 @@ func runDaemon(stop <-chan struct{}) {
 
 	// Bootstrap server-managed deployments: seed the policy path from the
 	// fallback if nothing is there yet (see seedPolicyFile).
-	if err := seedPolicyFile(*policyPath, *policyFallback, pub != nil); err != nil {
-		log.Fatalf("❌ %v", err)
+	if signedManager == nil {
+		if err := seedPolicyFile(*policyPath, *policyFallback, pub != nil); err != nil {
+			log.Fatalf("❌ %v", err)
+		}
 	}
 
 	// Create enforcer with options
-	enf, err := enforcer.New(ctx, *policyPath, &enforcer.Options{
+	enforcerOpts := &enforcer.Options{
 		AuditMode:               *auditMode,
 		CgroupFilter:            cgroupPaths,
 		CgroupRoot:              *cgroupRoot,
@@ -297,7 +331,44 @@ func runDaemon(stop <-chan struct{}) {
 		DefaultDeny:       *defaultDeny,
 		AttackGraph:       *attackGraph,
 		Drift:             *driftEnabled,
-	})
+	}
+	var enf *enforcer.Enforcer
+	var restored assignment.Deployment
+	if signedManager == nil {
+		enf, err = enforcer.New(ctx, *policyPath, enforcerOpts)
+	} else if *assignmentBootstrap != "" || *assignmentRecovery != "" {
+		bundlePath := *assignmentBootstrap
+		if bundlePath == "" {
+			bundlePath = *assignmentRecovery
+		}
+		wire, readErr := crypto.ReadFileLimited(bundlePath, assignment.MaxBundleBytes)
+		if readErr != nil {
+			log.Fatal(readErr)
+		}
+		bundle, decodeErr := assignment.DecodeBundle(wire)
+		if decodeErr != nil {
+			log.Fatal(decodeErr)
+		}
+		enf, err = signedManager.bootstrap(ctx, bundle, enforcerOpts)
+		if err == nil {
+			_, restored, err = signedManager.restore()
+		}
+	} else {
+		var path string
+		path, restored, err = signedManager.restore()
+		if err == nil {
+			enforcerOpts.SignedAssignment = &restored.Policy
+			enf, err = enforcer.New(ctx, path, enforcerOpts)
+			// Compilation/preparation may outlast the lease or a trust update.
+			// Recheck immediately before a restored evaluator becomes ready.
+			if err == nil {
+				_, _, err = signedManager.restore()
+				if err != nil {
+					enf.Close()
+				}
+			}
+		}
+	}
 	if err != nil {
 		log.Fatalf("❌ Failed to create enforcer: %v", err)
 	}
@@ -327,7 +398,29 @@ func runDaemon(stop <-chan struct{}) {
 			clientCfg.Fingerprint = identifiedDriftFingerprint(enf.DriftFingerprint)
 		}
 		var err error
-		policyClient, err = newPolicyClient(clientCfg, policyUpdateHandler(*policyPath, pub, enf.ActivatePolicy))
+		update := policyUpdateHandler(*policyPath, pub, enf.ActivatePolicy)
+		if signedManager != nil {
+			st, stateErr := signedManager.store.Snapshot()
+			if stateErr != nil {
+				log.Fatal(stateErr)
+			}
+			clientCfg.SignedAssignments = true
+			clientCfg.InitialAssignment = &policyserver.PolicyAssignment{PolicyID: restored.Policy.ID, Version: int64(restored.Policy.Version), WASMHash: restored.Policy.SHA256, Envelope: st.Active.Envelope, DeploymentSequence: restored.Sequence}
+			clientCfg.Verify = func(a *policyserver.PolicyAssignment, data []byte) error {
+				signedManager.mu.Lock()
+				defer signedManager.mu.Unlock()
+				_, err := signedManager.verify(assignment.Bundle{Envelope: a.Envelope, WASM: data, ArtifactSignature: a.Signature})
+				return err
+			}
+			update = func(a *policyserver.PolicyAssignment, data []byte) error {
+				err := signedManager.update(a, data, enf.ActivateAssignment)
+				if signedManager.fatal != nil {
+					log.Fatalf("signed activation requires restart/reconciliation: %v", signedManager.fatal)
+				}
+				return err
+			}
+		}
+		policyClient, err = newPolicyClient(clientCfg, update)
 		if err != nil {
 			log.Fatalf("❌ Policy server: %v", err)
 		}
@@ -339,7 +432,18 @@ func runDaemon(stop <-chan struct{}) {
 	log.Println("")
 
 	// Start enforcer
-	if err := enf.Start(); err != nil {
+	start := enf.Start
+	if signedManager != nil {
+		start = func() error {
+			return agentstore.WithConfigurationLock(signedManager.configPath+".lock", func() error {
+				if _, _, err := signedManager.restore(); err != nil {
+					return err
+				}
+				return enf.Start()
+			})
+		}
+	}
+	if err := start(); err != nil {
 		log.Fatalf("❌ Failed to start enforcer: %v", err)
 	}
 
@@ -371,6 +475,10 @@ func runDaemon(stop <-chan struct{}) {
 		select {
 		case sig := <-sigChan:
 			if isReloadSignal(sig) {
+				if signedManager != nil {
+					log.Print("signed assignment mode refuses out-of-band reload; deploy fresh signed intent")
+					continue
+				}
 				log.Println("")
 				log.Println("📥 Received reload signal, reloading policy...")
 				if err := enf.ReloadPolicy(); err != nil {

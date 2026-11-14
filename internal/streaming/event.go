@@ -1,14 +1,27 @@
 package streaming
 
-import "time"
+import (
+	"time"
+
+	"github.com/yasindce1998/warmor/pkg/api"
+)
+
+// Missing/1 denotes legacy summaries; version 2 preserves evaluator inputs.
+const EventSchemaVersion = 2
 
 // SecurityEvent is the unified, enriched event structure emitted by the
 // streaming pipeline. It carries both the raw syscall data and the policy
 // decision, suitable for SIEM ingestion, fleet aggregation, and A/B analysis.
 type SecurityEvent struct {
-	ID        string    `json:"id"`
-	Timestamp time.Time `json:"timestamp"`
-	Hostname  string    `json:"hostname"`
+	SchemaVersion int `json:"schema_version,omitempty"`
+	// PolicyInput is authoritative for replay; summary keys are for SIEMs.
+	PolicyInput *api.Event `json:"policy_input,omitempty"`
+	// Redactors must edit PolicyInput too and append an issue. Field paths are
+	// relative to policy_input, e.g. process.args. Never silently erase evidence.
+	InputIssues []InputIssue `json:"input_issues,omitempty"`
+	ID          string       `json:"id"`
+	Timestamp   time.Time    `json:"timestamp"`
+	Hostname    string       `json:"hostname"`
 
 	// Source context
 	EventType string `json:"event_type"` // exec, file, network, bind, listen, ptrace, mount
@@ -55,6 +68,24 @@ type SecurityEvent struct {
 
 	// Labels for fleet/A/B context
 	Labels map[string]string `json:"labels,omitempty"`
+}
+
+type InputIssue struct {
+	Field string `json:"field"`
+	State string `json:"state"` // unknown, truncated, redacted
+}
+
+// SummaryForExport removes the full evaluator snapshot without mutating the
+// recording. General-purpose stdout/webhook exports opt in to sensitive inputs;
+// private file recordings and the simulator store retain them for replay.
+func (e *SecurityEvent) SummaryForExport() *SecurityEvent {
+	if e == nil || e.PolicyInput == nil {
+		return e
+	}
+	copy := *e
+	copy.PolicyInput = nil
+	copy.InputIssues = append(append([]InputIssue(nil), e.InputIssues...), InputIssue{"policy_input", "redacted"})
+	return &copy
 }
 
 // LineageEntry represents one ancestor in the process tree.

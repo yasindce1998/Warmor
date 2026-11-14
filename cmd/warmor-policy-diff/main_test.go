@@ -63,6 +63,7 @@ func TestDiff_Detailed(t *testing.T) {
 	_, a, b := writePolicies(t)
 	out, _ := runMain(t, "", a, b)
 	assertContains(t, "detailed diff", out,
+		"Effective default action: allow -> deny",
 		"Only in a.yaml (1 rules)", "deny-tmp",
 		"Only in b.yaml (1 rules)", "log-etc")
 	if strings.Contains(out, "Only in a.yaml (2") {
@@ -78,6 +79,19 @@ func TestDiff_Summary(t *testing.T) {
 	if strings.Contains(out, "deny-tmp") {
 		t.Errorf("summary should not list rule names:\n%s", out)
 	}
+}
+
+func TestDiff_VariablesAndOrder(t *testing.T) {
+	const prefix = "name: input\nversion: 1\nvariables:\n  tool: %s\nrules:\n"
+	const allow = "- name: permit\n  event: process\n  action: allow\n  conditions:\n    all:\n    - comm: $tool\n"
+	const deny = "- name: forbid\n  event: process\n  action: deny\n  conditions:\n    all:\n    - comm: $tool\n"
+	dir := t.TempDir()
+	a := writeFile(t, filepath.Join(dir, "a.yaml"), strings.Replace(prefix, "%s", "sh", 1)+allow+deny)
+	b := writeFile(t, filepath.Join(dir, "b.yaml"), strings.Replace(prefix, "%s", "bash", 1)+deny+allow)
+	out, _ := runMain(t, "", a, b)
+	assertContains(t, "detailed", out, `Variable tool: "sh" -> "bash"`, "Rule order changed (first match wins)")
+	out, _ = runMain(t, "", "--summary", a, b)
+	assertContains(t, "summary", out, "Variable changes: 1", "Rule order changed: true", "not a proof")
 }
 
 func TestDiff_IdenticalPolicies(t *testing.T) {

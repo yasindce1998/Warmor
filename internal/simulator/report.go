@@ -18,10 +18,24 @@ func FormatJSON(w io.Writer, result *SimulationResult) error {
 
 // FormatText writes a human-readable simulation report.
 func FormatText(w io.Writer, result *SimulationResult) error {
+	var output strings.Builder
+	formatText(&output, result)
+	_, err := io.WriteString(w, output.String())
+	return err
+}
+
+func formatText(w *strings.Builder, result *SimulationResult) {
 	fmt.Fprintf(w, "Policy Simulation Report\n")
 	fmt.Fprintf(w, "========================\n\n")
 	fmt.Fprintf(w, "Events replayed: %d\n", result.TotalEvents)
 	fmt.Fprintf(w, "Duration:        %s\n\n", result.Duration.Round(1e6))
+	if result.IncompleteEvents > 0 || result.EvaluationErrors > 0 {
+		fmt.Fprintf(w, "WARNING: %d events have incomplete evidence; %d evaluations failed. Replay is not proof of live equivalence.\n", result.IncompleteEvents, result.EvaluationErrors)
+		for _, warning := range result.Warnings {
+			fmt.Fprintf(w, "  - %s\n", warning)
+		}
+		fmt.Fprintln(w)
+	}
 
 	fmt.Fprintf(w, "Decision breakdown:\n")
 	fmt.Fprintf(w, "  ALLOW: %d (%.1f%%)\n", result.WouldAllow, pct(result.WouldAllow, result.TotalEvents))
@@ -42,7 +56,11 @@ func FormatText(w io.Writer, result *SimulationResult) error {
 		}
 		fmt.Fprintln(w)
 	} else {
-		fmt.Fprintf(w, "No new denials — all previously-allowed events remain allowed.\n\n")
+		if result.IncompleteEvents > 0 || result.EvaluationErrors > 0 {
+			fmt.Fprintf(w, "No new denials identified in the available evidence.\n\n")
+		} else {
+			fmt.Fprintf(w, "No new denials — all previously-allowed events remain allowed.\n\n")
+		}
 	}
 
 	if len(result.UniqueNewAllows) > 0 {
@@ -58,10 +76,12 @@ func FormatText(w io.Writer, result *SimulationResult) error {
 		}
 		fmt.Fprintln(w)
 	} else {
-		fmt.Fprintf(w, "No new allows — all previously-denied events remain denied.\n\n")
+		if result.IncompleteEvents > 0 || result.EvaluationErrors > 0 {
+			fmt.Fprintf(w, "No new allows identified in the available evidence.\n\n")
+		} else {
+			fmt.Fprintf(w, "No new allows — all previously-denied events remain denied.\n\n")
+		}
 	}
-
-	return nil
 }
 
 func pct(n, total int) float64 {
