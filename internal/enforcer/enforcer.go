@@ -29,6 +29,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/nodereceipt"
 	"github.com/yasindce1998/warmor/internal/platform"
 	"github.com/yasindce1998/warmor/internal/streaming"
+	"github.com/yasindce1998/warmor/internal/telemetry"
 	"github.com/yasindce1998/warmor/internal/version"
 	"github.com/yasindce1998/warmor/internal/wasm"
 	"github.com/yasindce1998/warmor/pkg/api"
@@ -98,6 +99,11 @@ type Options struct {
 	// genuine workload identity and scoped collection are available (see
 	// docs/design/fleet-drift.md); no server is required for local collection.
 	Drift bool
+	// Telemetry is an optional bounded per-activation collector. No fleet gate
+	// is enabled by supplying it; activation must use ActivatePolicyTelemetry.
+	// SignedAssignment seals/disables legacy telemetry until a signed attribution
+	// contract exists; it cannot authorize a signed deployment's collector.
+	Telemetry *telemetry.Collector
 
 	// Streaming pipeline configuration
 	StreamSinks []streaming.Sink
@@ -154,6 +160,7 @@ type Enforcer struct {
 	// driftCollector is non-nil when --drift is set (local host observations;
 	// fleet submission requires real workload identity, not a policy hash).
 	driftCollector *drift.FingerprintCollector
+	telemetry      *telemetry.Collector
 	netFilter      *NetFilter
 	sandbox        *SandboxManager
 	escape         *escape.Detector
@@ -203,6 +210,11 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		}
 	}
 	opts = &effective
+	if opts.SignedAssignment != nil && opts.Telemetry != nil {
+		// Schema-1 legacy attribution cannot authorize signed deployment data.
+		opts.Telemetry.Seal()
+		opts.Telemetry = nil
+	}
 
 	port := opts.MetricsPort
 	if port == 0 {
@@ -458,6 +470,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		lineageTracker:   tracker,
 		intelligence:     intel,
 		driftCollector:   driftCollector,
+		telemetry:        opts.Telemetry,
 		netFilter:        netFilter,
 		sandbox:          sandboxMgr,
 		escape:           escapeDetector,
@@ -656,6 +669,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 		e.logger.LogEvent(event, result)
 		metrics.RecordEvent(result.Action.String())
 		metrics.RecordLatency(float64(result.Latency.Microseconds()))
+		e.recordTelemetryDecision(result, nil)
 		if e.pipeline != nil {
 			e.pipeline.Emit(event, result)
 		}
@@ -699,6 +713,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 
 	// Enforce the decision
 	_ = e.actionHandler.Enforce(e.ctx, event, result)
+	e.recordTelemetryDecision(result, err)
 
 	// Log the event
 	e.logger.LogEvent(event, result)
@@ -1102,10 +1117,10 @@ func (e *Enforcer) ActivatePolicy(path string, commit func() error) error {
 	if e.signedAssignment {
 		return errors.New("signed assignment mode refuses generic reload/activation")
 	}
-	return e.activatePolicy(path, nil, commit)
+	return e.activatePolicy(path, nil, commit, nil)
 }
 
-func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, commit func() error) error {
+func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, commit func() error, snapshot *telemetry.Snapshot) error {
 	e.activationMu.Lock()
 	defer e.activationMu.Unlock()
 	e.eventMu.RLock()
@@ -1171,7 +1186,17 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, comm
 	e.wasmRuntime = newRuntime
 	e.policyID = pid
 	e.policyGen.Add(1)
+	// Receipt evidence is the committed pool's identity, never the optional
+	// fleet telemetry snapshot/revision supplied by the caller. Publish both
+	// under the same drain/activation locks before admitting new events.
 	e.activation = e.captureActivation()
+	if e.telemetry != nil {
+		if snapshot == nil {
+			e.telemetry.Seal()
+		} else {
+			e.telemetry.Replace(*snapshot)
+		}
+	}
 	e.evaluatorMu.Unlock()
 	setCacheDependencies(e.cache, newEvaluator)
 	e.decisionMu.Unlock()
@@ -1285,6 +1310,9 @@ func (e *Enforcer) Close() error {
 		return nil
 	}
 	e.closed = true
+	if e.telemetry != nil {
+		e.telemetry.Seal()
+	}
 	e.logger.LogShutdown()
 
 	// Flush and close the streaming pipeline

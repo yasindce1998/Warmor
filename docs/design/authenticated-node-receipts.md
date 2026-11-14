@@ -189,6 +189,19 @@ operators using artifact verification must provision a matching signed module
 pair. The mounted controller ConfigMap remains the trusted desired-publication
 channel, not a signed fleet-intent envelope.
 
+Optional acknowledged-decision telemetry remains a separate contract. Controller
+receipt mode does **not** supply `Options.Telemetry`, create a telemetry lease,
+or use decision counters/activation labels as Applied evidence. For embedded
+callers that do supply a collector, the shared enforcer transaction captures
+`Pool.Identity()` and performs telemetry Replace/Seal only after kernel
+preparation and durable commit, under the existing activation/evaluator/drain
+locks. A caller-supplied telemetry revision cannot substitute for the pool's
+actual artifact digest/ABI/build claims. Failed commits retain the previous
+evaluator (never acknowledge the candidate); a failed kernel rollback invalidates
+receipt acknowledgement and the client withdraws prior evidence. Ordinary
+activation seals telemetry attribution without discarding a genuine committed
+receipt identity. None of this wires canary telemetry into controller status.
+
 ## Evidence and limitations
 
 Tests use owned fake HTTPS Kubernetes servers and real REST TokenReview/GET
