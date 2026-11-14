@@ -11,25 +11,27 @@ import (
 	"syscall"
 
 	"github.com/yasindce1998/warmor/internal/crypto"
+	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/internal/policyserver"
 )
 
 var (
-	addr              = flag.String("addr", ":8443", "Server listen address")
-	caCert            = flag.String("ca-cert", "", "CA certificate PEM path used to verify agent client certificates (enables mTLS; requires --tls-cert and --tls-key)")
-	tlsCert           = flag.String("tls-cert", "", "Server TLS certificate PEM path")
-	tlsKey            = flag.String("tls-key", "", "Server TLS private key PEM path")
-	jwtSecret         = flag.String("jwt-secret", "", "JWT secret for bearer-token auth (env WARMOR_JWT_SECRET); required for the admin API")
-	policyDir         = flag.String("policy-dir", "", "Directory admin requests may load policy WASM files from")
-	insecure          = flag.Bool("insecure", false, "Allow serving without any authentication (development only)")
-	verifyKey         = flag.String("verify-key", "", "ed25519 public key PEM (PKIX); refuse policy uploads without a detached signature (<wasm>.sig or the request's \"signature\") that verifies against it")
-	driftThreshold    = flag.Float64("drift-threshold", 3.0, "Z-score threshold for fleet drift anomalies computed from fingerprints in agent heartbeats")
-	serverMetricsPort = flag.Int("metrics-port", 0, "Prometheus metrics port for the server itself, e.g. fleet drift gauges (0 = off)")
-	stateFile         = flag.String("state-file", "", "Durable single-writer state snapshot path (required unless --insecure); parent directory must exist and be private")
-	stateMaxBytes     = flag.Int64("state-max-bytes", 256<<20, "Maximum retained state snapshot bytes (mutations exceeding this limit are rejected)")
-	stateMaxWASMBytes = flag.Int64("state-max-wasm-bytes", 128<<20, "Maximum total retained policy WASM bytes")
-	stateMaxAgents    = flag.Int("state-max-agents", 10000, "Maximum retained agent registrations")
+	addr                = flag.String("addr", ":8443", "Server listen address")
+	caCert              = flag.String("ca-cert", "", "CA certificate PEM path used to verify agent client certificates (enables mTLS; requires --tls-cert and --tls-key)")
+	tlsCert             = flag.String("tls-cert", "", "Server TLS certificate PEM path")
+	tlsKey              = flag.String("tls-key", "", "Server TLS private key PEM path")
+	jwtSecret           = flag.String("jwt-secret", "", "JWT secret for bearer-token auth (env WARMOR_JWT_SECRET); required for the admin API")
+	policyDir           = flag.String("policy-dir", "", "Directory admin requests may load policy WASM files from")
+	insecure            = flag.Bool("insecure", false, "Allow serving without any authentication (development only)")
+	verifyKey           = flag.String("verify-key", "", "ed25519 public key PEM (PKIX); refuse policy uploads without a detached signature (<wasm>.sig or the request's \"signature\") that verifies against it")
+	driftThreshold      = flag.Float64("drift-threshold", 3.0, "Z-score threshold for fleet drift anomalies computed from fingerprints in agent heartbeats")
+	serverMetricsPort   = flag.Int("metrics-port", 0, "Prometheus metrics port for the server itself, e.g. fleet drift gauges (0 = off)")
+	stateFile           = flag.String("state-file", "", "Durable single-writer state snapshot path (required unless --insecure); parent directory must exist and be private")
+	stateMaxBytes       = flag.Int64("state-max-bytes", 256<<20, "Maximum retained state snapshot bytes (mutations exceeding this limit are rejected)")
+	stateMaxWASMBytes   = flag.Int64("state-max-wasm-bytes", 128<<20, "Maximum total retained policy WASM bytes")
+	stateMaxAgents      = flag.Int("state-max-agents", 10000, "Maximum retained agent registrations")
+	assignmentTrustFile = flag.String("assignment-trust-file", "", "Enable externally signed deployment relay with public assignment trust JSON (requires --verify-key and durable --state-file; no private signing keys)")
 )
 
 func main() {
@@ -125,6 +127,24 @@ func main() {
 		log.Printf("durable policy state: %s", *stateFile)
 	} else {
 		log.Println("WARNING: ephemeral development state; policies, registrations, and rollouts will be lost on restart")
+	}
+	if *assignmentTrustFile != "" {
+		if cfg.VerifyKey == nil || cfg.Store == nil {
+			log.Fatal("assignment relay requires --verify-key and --state-file")
+		}
+		data, err := crypto.ReadFileLimited(*assignmentTrustFile, 256<<10)
+		if err != nil {
+			log.Fatal(err)
+		}
+		cfg.AssignmentTrust, err = assignment.ParseTrustFile(data)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, k := range cfg.AssignmentTrust {
+			if string(k.Public) == string(cfg.VerifyKey) {
+				log.Fatal("assignment and artifact trust keys must be distinct")
+			}
+		}
 	}
 
 	srv := policyserver.NewServer(cfg)
