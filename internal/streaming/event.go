@@ -40,13 +40,15 @@ type SecurityEvent struct {
 	KernelEnforced bool `json:"kernel_enforced,omitempty"`
 
 	// Policy decision
-	Decision   string `json:"decision"` // allow, deny, log
-	Reason     string `json:"reason,omitempty"`
-	PolicyRule string `json:"policy_rule,omitempty"`
-	Cached     bool   `json:"cached"`
-	Enforced   bool   `json:"enforced"`
-	AuditOnly  bool   `json:"audit_only,omitempty"`
-	LatencyUS  int64  `json:"latency_us"`
+	Decision             string `json:"decision"` // allow, deny, log
+	Reason               string `json:"reason,omitempty"`
+	PolicyRule           string `json:"policy_rule,omitempty"`
+	Cached               bool   `json:"cached"`
+	Enforced             bool   `json:"enforced"`
+	EnforcementAttempted bool   `json:"enforcement_attempted,omitempty"`
+	EnforcementError     string `json:"enforcement_error,omitempty"`
+	AuditOnly            bool   `json:"audit_only,omitempty"`
+	LatencyUS            int64  `json:"latency_us"`
 
 	// Lineage (populated when process tracker is active)
 	Lineage []LineageEntry `json:"lineage,omitempty"`

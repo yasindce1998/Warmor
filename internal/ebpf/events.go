@@ -49,16 +49,17 @@ type ExecveEvent struct {
 
 func (e *ExecveEvent) ToEvent() Event {
 	ev := Event{
-		Kind:       EventKindProcess,
-		PID:        e.PID,
-		UID:        e.UID,
-		GID:        e.GID,
-		Comm:       nullTerminatedString(e.Comm[:]),
-		Filename:   nullTerminatedString(e.Filename[:]),
-		Timestamp:  bootTimeToWallClock(e.Timestamp),
-		CgroupID:   e.CgroupID,
-		PPID:       e.PPID,
-		ParentComm: nullTerminatedString(e.ParentComm[:]),
+		Kind:              EventKindProcess,
+		PID:               e.PID,
+		UID:               e.UID,
+		GID:               e.GID,
+		Comm:              nullTerminatedString(e.Comm[:]),
+		Filename:          nullTerminatedString(e.Filename[:]),
+		Timestamp:         bootTimeToWallClock(e.Timestamp),
+		KernelTimestampNS: e.Timestamp,
+		CgroupID:          e.CgroupID,
+		PPID:              e.PPID,
+		ParentComm:        nullTerminatedString(e.ParentComm[:]),
 	}
 	ev.Args = execveArgs(e.Args)
 	return ev
@@ -92,16 +93,17 @@ type OpenatEvent struct {
 
 func (e *OpenatEvent) ToEvent() Event {
 	return Event{
-		Kind:      EventKindFile,
-		PID:       e.PID,
-		UID:       e.UID,
-		GID:       e.GID,
-		Comm:      nullTerminatedString(e.Comm[:]),
-		Filename:  nullTerminatedString(e.Path[:]),
-		Flags:     e.Flags,
-		Mode:      e.Mode,
-		Timestamp: bootTimeToWallClock(e.Timestamp),
-		CgroupID:  e.CgroupID,
+		Kind:              EventKindFile,
+		PID:               e.PID,
+		UID:               e.UID,
+		GID:               e.GID,
+		Comm:              nullTerminatedString(e.Comm[:]),
+		Filename:          nullTerminatedString(e.Path[:]),
+		Flags:             e.Flags,
+		Mode:              e.Mode,
+		Timestamp:         bootTimeToWallClock(e.Timestamp),
+		KernelTimestampNS: e.Timestamp,
+		CgroupID:          e.CgroupID,
 	}
 }
 
@@ -122,16 +124,17 @@ type ConnectEvent struct {
 func (e *ConnectEvent) ToEvent() Event {
 	addr := e.remoteAddrString()
 	return Event{
-		Kind:       EventKindNetwork,
-		PID:        e.PID,
-		UID:        e.UID,
-		GID:        e.GID,
-		Comm:       nullTerminatedString(e.Comm[:]),
-		RemoteAddr: addr,
-		RemotePort: ntohs(e.RemotePort),
-		Family:     e.Family,
-		Timestamp:  bootTimeToWallClock(e.Timestamp),
-		CgroupID:   e.CgroupID,
+		Kind:              EventKindNetwork,
+		PID:               e.PID,
+		UID:               e.UID,
+		GID:               e.GID,
+		Comm:              nullTerminatedString(e.Comm[:]),
+		RemoteAddr:        addr,
+		RemotePort:        ntohs(e.RemotePort),
+		Family:            e.Family,
+		Timestamp:         bootTimeToWallClock(e.Timestamp),
+		KernelTimestampNS: e.Timestamp,
+		CgroupID:          e.CgroupID,
 	}
 }
 
@@ -161,7 +164,9 @@ type Event struct {
 	RemotePort uint16
 	Family     uint16
 	Timestamp  time.Time
-	CgroupID   uint64
+	// KernelTimestampNS preserves bpf_ktime_get_ns in the initial clock domain.
+	KernelTimestampNS uint64
+	CgroupID          uint64
 
 	// Process events (exec tracepoint): the parent's PID and comm and the
 	// executed command's argv (bounded; see ExecveArgsMax). Zero values
