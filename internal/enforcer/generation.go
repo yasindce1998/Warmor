@@ -66,6 +66,7 @@ type generationDispatch struct {
 	pending *generationActivation // activationMu only
 	kernel  platform.PolicyGenerations
 	timeout time.Duration
+	abortID uint64 // failed candidate cleanup; activationMu only
 }
 
 func (e *Enforcer) enableGenerations(gp platform.GenerationPlatform) error {
@@ -89,6 +90,9 @@ func (e *Enforcer) enableGenerations(gp platform.GenerationPlatform) error {
 	}
 	e.generations.states[1] = &evaluationGeneration{id: 1, evaluator: e.evaluator,
 		pool: e.pool, runtime: e.wasmRuntime, cache: e.cache, policyID: e.policyID}
+	// Generation states now own caches. Do not retain the initial cache's
+	// dependency closures (and its retired evaluator) through the legacy field.
+	e.cache = nil
 	if err := kernel.Activate(1); err != nil {
 		delete(e.generations.states, 1)
 		return errors.Join(err, kernel.Abort(1))
@@ -248,6 +252,12 @@ func closeEvaluationGeneration(s *evaluationGeneration) {
 // irreversible live commit. A failed disk barrier after it is NOT rollback.
 func (e *Enforcer) activateGeneration(path string, commit func() error) error {
 	g := e.generations
+	if g.abortID != 0 {
+		if err := g.kernel.Abort(g.abortID); err != nil && !errors.Is(err, kernelmap.ErrStaleGeneration) {
+			return err
+		}
+		g.abortID = 0
+	}
 	if g.pending != nil {
 		pendingPath := g.pending.path
 		if pendingPath != "" && path != pendingPath {
@@ -305,7 +315,7 @@ func (e *Enforcer) activateGeneration(path string, commit func() error) error {
 	g.next++
 	state.id = g.next
 	if err := g.kernel.Prepare(state.id, spec); err != nil {
-		return err
+		return errors.Join(err, e.abortGenerationCandidate(state.id))
 	}
 	// Fence legacy/cache writers too, with the existing documented ordering.
 	e.decisionMu.Lock()
@@ -315,7 +325,7 @@ func (e *Enforcer) activateGeneration(path string, commit func() error) error {
 		delete(g.states, state.id)
 		g.mu.Unlock()
 		e.decisionMu.Unlock()
-		return errors.Join(err, g.kernel.Abort(state.id))
+		return errors.Join(err, e.abortGenerationCandidate(state.id))
 	}
 	old := g.states[g.current]
 	g.current = state.id
@@ -331,6 +341,17 @@ func (e *Enforcer) activateGeneration(path string, commit func() error) error {
 	return e.finishGeneration()
 }
 
+func (e *Enforcer) abortGenerationCandidate(id uint64) error {
+	err := e.generations.kernel.Abort(id)
+	if errors.Is(err, kernelmap.ErrStaleGeneration) {
+		return nil
+	} // no FD was admitted
+	if err != nil {
+		e.generations.abortID = id
+	}
+	return err
+}
+
 // Generation candidates must already be compiled. Read/verify once, then load
 // exactly those bytes; a mutable standalone path cannot change pending identity.
 func (e *Enforcer) generationPolicyBytes(path string) ([]byte, error) {
@@ -343,15 +364,30 @@ func (e *Enforcer) generationPolicyBytes(path string) ([]byte, error) {
 	return crypto.ReadFileLimited(path, wasm.MaxPolicySize)
 }
 
+func (e *Enforcer) currentDecisionCache() *cache.DecisionCache {
+	if e.generations == nil {
+		return e.cache
+	}
+	g := e.generations
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.states[g.current].cache
+}
+
 // Called only after producer and consumer goroutines have stopped.
 func (e *Enforcer) releaseQueuedGenerationEvents() {
-	if e.generations == nil || e.eventChan == nil { return }
+	if e.generations == nil || e.eventChan == nil {
+		return
+	}
 	for {
 		select {
 		case event, ok := <-e.eventChan:
-			if !ok { return }
+			if !ok {
+				return
+			}
 			event.GenerationContext.Complete()
-		default: return
+		default:
+			return
 		}
 	}
 }

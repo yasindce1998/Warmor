@@ -1036,7 +1036,7 @@ func (l *logLimiter) allow(now time.Time) (bool, int) {
 // GetStats returns current statistics
 func (e *Enforcer) GetStats() api.EnforcementStats {
 	actionStats := e.actionHandler.GetStats()
-	cacheStats := e.cache.Stats()
+	cacheStats := e.currentDecisionCache().Stats()
 
 	return api.EnforcementStats{
 		Allowed:              actionStats.Allowed,
@@ -1055,7 +1055,7 @@ func (e *Enforcer) GetStats() api.EnforcementStats {
 // PrintStats prints current statistics
 func (e *Enforcer) PrintStats() {
 	stats := e.GetStats()
-	cacheStats := e.cache.Stats()
+	cacheStats := e.currentDecisionCache().Stats()
 
 	// Log structured stats
 	e.logger.LogStats(&stats)
@@ -1100,11 +1100,22 @@ func (e *Enforcer) ReloadPolicy() error {
 	return e.ActivatePolicy(e.policyPath, nil)
 }
 
-// ActivatePolicy prepares a candidate, drains old events and prepares kernel
-// state before durable publication and evaluator swap. The legacy single map
-// is NOT generation-atomic: default-deny misses may allow during rebuild and
-// rollback errors indicate degraded kernel enforcement.
-func (e *Enforcer) ActivatePolicy(path string, commit func() error) error {
+// ActivatePolicy serializes candidate activation with close/reload. In the
+// experimental generation path the kernel+userspace live commit PRECEDES the
+// error-returning durableCommit hook. An error after live commit wraps
+// ErrActivationPending, retains both evaluators, and must not be acknowledged
+// or compensated by changing a disk pointer alone. Retry the same immutable
+// path; the ORIGINAL hook is retained and must be idempotent. Supply exactly
+// one durable publication authority (agentstore in signed mode), not a chain
+// of independent pointer/store transactions. Nil means no durable publication
+// is requested, as for a standalone reload. No reader/worker-needed lock is held
+// during the hook, but activationMu remains held: it must not reenter activation.
+//
+// The default legacy path instead drains events, prepares its single map, calls
+// durableCommit and swaps userspace. It is NOT generation-atomic: default-deny
+// misses may allow during rebuild and rollback errors mean degraded enforcement.
+// See docs/design/generation-activation.md before implementing a backend adapter.
+func (e *Enforcer) ActivatePolicy(path string, durableCommit func() error) error {
 	e.activationMu.Lock()
 	defer e.activationMu.Unlock()
 	e.eventMu.RLock()
@@ -1114,7 +1125,7 @@ func (e *Enforcer) ActivatePolicy(path string, commit func() error) error {
 		return errors.New("enforcer closed")
 	}
 	if e.generations != nil {
-		return e.activateGeneration(path, commit)
+		return e.activateGeneration(path, durableCommit)
 	}
 	e.logger.LogInfo(fmt.Sprintf("Reloading policy from: %s", path))
 
@@ -1142,8 +1153,8 @@ func (e *Enforcer) ActivatePolicy(path string, commit func() error) error {
 	defer e.eventMu.Unlock()
 	e.decisionMu.Lock()
 	err = e.prepareKernel(newEvaluator)
-	if err == nil && commit != nil {
-		err = commit()
+	if err == nil && durableCommit != nil {
+		err = durableCommit()
 	}
 	if err != nil {
 		// Dynamic cached kernel entries cannot be restored transactionally.
