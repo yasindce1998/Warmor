@@ -471,17 +471,34 @@ default_action: allow
 		t.Fatal(err)
 	}
 	p := g.Policy()
+	if len(p.Rules) != 4 {
+		t.Fatalf("expected four composed rules, got %d", len(p.Rules))
+	}
 	for i, name := range []string{"deny-last", "audit-first", "log-first", "allow-first"} {
 		if p.Rules[i].Name != "system/baseline/"+name {
 			t.Fatal("incorrect deny-first ordering")
 		}
 	}
-	values := p.Rules[3].Conditions.All[0].Value.([]any)
+	if len(p.Rules[3].Conditions.All) == 0 {
+		t.Fatal("copied allow rule has no all-condition operand")
+	}
+	values, ok := p.Rules[3].Conditions.All[0].Value.([]any)
+	if !ok || len(values) == 0 {
+		t.Fatalf("expected nonempty copied numeric operand list, got %T (%v)", p.Rules[3].Conditions.All[0].Value, p.Rules[3].Conditions.All[0].Value)
+	}
 	values[0] = float64(999)
 	if _, err := g.Build(compiler.BuildOptions{RustOnly: true}); err != nil {
 		t.Fatal("copied numeric list invalid", err)
 	}
-	if g.Policy().Rules[3].Conditions.All[0].Value.([]any)[0] != float64(0) {
+	cloned := g.Policy()
+	if len(cloned.Rules) != 4 || len(cloned.Rules[3].Conditions.All) == 0 {
+		t.Fatal("cloned policy is missing the allow rule or its all-condition operand")
+	}
+	clonedValues, ok := cloned.Rules[3].Conditions.All[0].Value.([]any)
+	if !ok || len(clonedValues) == 0 {
+		t.Fatalf("expected nonempty cloned numeric operand list, got %T (%v)", cloned.Rules[3].Conditions.All[0].Value, cloned.Rules[3].Conditions.All[0].Value)
+	}
+	if clonedValues[0] != float64(0) {
 		t.Fatal("list operand alias")
 	}
 }
