@@ -55,7 +55,7 @@ jobs:
 
   bpf-compile:
     name: BPF Compilation Check (Clang ${{ matrix.clang }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -72,9 +72,28 @@ jobs:
 
       - name: Install BPF build dependencies
         run: |
+          set -euo pipefail
           sudo apt-get update
+          sudo apt-get install -y ca-certificates curl gnupg
+          # Noble ships LLVM 18, but not 21. Add only the versioned LLVM 21
+          # archive, scoped to its fingerprint-verified key (no remote script).
+          if [ '${{ matrix.clang }}' = 21 ]; then
+            key_dir="$(mktemp -d)"
+            trap 'rm -rf "$key_dir"' EXIT
+            curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+              https://apt.llvm.org/llvm-snapshot.gpg.key -o "$key_dir/llvm.asc"
+            fingerprint="$(gpg --batch --with-colons --show-keys "$key_dir/llvm.asc" | awk -F: '$1 == "pub" { primary = 1; next } primary && $1 == "fpr" { print $10; primary = 0 }')"
+            test "$fingerprint" = 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+            gpg --batch --dearmor -o "$key_dir/llvm.gpg" "$key_dir/llvm.asc"
+            sudo install -m 0644 "$key_dir/llvm.gpg" /usr/share/keyrings/warmor-llvm.gpg
+            echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/warmor-llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' \
+              | sudo tee /etc/apt/sources.list.d/warmor-llvm21.list
+            sudo apt-get update --error-on=any
+          fi
+          apt-cache policy clang-${{ matrix.clang }} llvm-${{ matrix.clang }}
           sudo apt-get install -y clang-${{ matrix.clang }} llvm-${{ matrix.clang }} libbpf-dev linux-headers-$(uname -r) gcc-multilib
           clang-${{ matrix.clang }} --version
+          llvm-strip-${{ matrix.clang }} --version
 
       - name: Compile LSM exec program
         run: |

@@ -274,3 +274,19 @@ BPF. This repairs common supported compiler compatibility rather than selecting
 a newer compiler to conceal the failure. The non-skippable Linux 6.1/6.18 VM
 verifier/outcome gates remain required: successful compilation and BTF parsing
 are not verifier acceptance, enforcement or combined-daemon proof.
+
+The compile matrix uses Ubuntu 24.04 explicitly. LLVM 18 comes from Noble;
+LLVM 21 comes from the versioned HTTPS `apt.llvm.org/noble/`
+`llvm-toolchain-noble-21` archive. Before enabling that source, CI verifies its
+signing key's primary fingerprint
+`6084F3CF814B57C1CF12EFD515CF4D18AF4F7421` (published by apt.llvm.org), scopes
+APT trust with `signed-by`, and requires a successful signed index refresh.
+No downloaded installer script or unauthenticated APT option is used. Both
+compiler entries remain mandatory; package policy and tool versions are logged.
+
+The committed objects were regenerated with Clang 18.1.3, whereas the previous
+objects used Clang 23. Their instruction bytes therefore differ with compiler
+code generation. The separate **same-compiler Clang 23** old/new source
+comparison found identical instructions and map/program contracts across all 16
+hook/endian objects; it does not claim old/new committed instruction identity.
+Neither that comparison nor ABI checks replace native kernel VM verification.

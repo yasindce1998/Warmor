@@ -211,7 +211,8 @@ func TestGenerationGateClangBTFCompatibility(t *testing.T) {
 	}
 	var workflow struct {
 		Jobs map[string]struct {
-			Continue any `yaml:"continue-on-error"`
+			Continue any    `yaml:"continue-on-error"`
+			RunsOn   string `yaml:"runs-on"`
 			Strategy struct {
 				Matrix struct{ Clang []int } `yaml:"matrix"`
 			} `yaml:"strategy"`
@@ -223,6 +224,9 @@ func TestGenerationGateClangBTFCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := workflow.Jobs["bpf-compile"]
+	if job.RunsOn != "ubuntu-24.04" {
+		t.Fatal("compiler provisioning must use the explicitly supported Noble runner")
+	}
 	seen := map[int]bool{}
 	for _, version := range job.Strategy.Matrix.Clang {
 		seen[version] = true
@@ -238,6 +242,22 @@ func TestGenerationGateClangBTFCompatibility(t *testing.T) {
 		runs = append(runs, step.Run)
 	}
 	joined := strings.Join(runs, "\n")
+	for _, required := range []string{
+		"https://apt.llvm.org/llvm-snapshot.gpg.key", "gpg --batch --with-colons --show-keys",
+		`test "$fingerprint" = 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421`,
+		"signed-by=/usr/share/keyrings/warmor-llvm.gpg", "https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main",
+		"sudo apt-get update --error-on=any", "apt-cache policy clang-${{ matrix.clang }} llvm-${{ matrix.clang }}",
+	} {
+		if !strings.Contains(joined, required) {
+			t.Errorf("missing authenticated LLVM 21 provisioning: %s", required)
+		}
+	}
+	verified := strings.Index(joined, `test "$fingerprint" =`)
+	source := strings.Index(joined, "| sudo tee /etc/apt/sources.list.d/warmor-llvm21.list")
+	install := strings.Index(joined, "sudo apt-get install -y clang-${{ matrix.clang }}")
+	if verified < 0 || source < verified || install < source || strings.Contains(joined, "llvm.sh") || strings.Contains(joined, "trusted=yes") || strings.Contains(joined, "--allow-unauthenticated") {
+		t.Fatal("must verify key before enabling signed archive and installing; no unverified installer or apt trust bypass")
+	}
 	regenerate := strings.Index(joined, "go generate ./internal/ebpf")
 	check := strings.Index(joined, "go test -count=1 -run '^TestGenerationObject' ./internal/ebpf")
 	if regenerate < 0 || check < regenerate || !strings.Contains(string(data), "BPF2GO_CFLAGS: -D__TARGET_ARCH_x86 -mcpu=v1") {
