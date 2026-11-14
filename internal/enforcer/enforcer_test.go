@@ -29,6 +29,15 @@ import (
 // everything else.
 var testPolicyPath = filepath.Join("..", "wasm", "testdata", "allow_policy.wasm")
 
+func inProcessEvaluator(t *testing.T, e *Enforcer) *wasm.PolicyEvaluator {
+	t.Helper()
+	evaluator, ok := e.evaluator.(*wasm.PolicyEvaluator)
+	if !ok {
+		t.Fatal("test requires the legacy in-process evaluator")
+	}
+	return evaluator
+}
+
 // ---- fakes ----
 
 // fakePlatform is an in-memory platform.Platform that never touches the kernel.

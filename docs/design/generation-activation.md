@@ -170,10 +170,11 @@ these two method signatures remain compatible. Its `policymeta.Source` also
 exposes `Metadata() Module`, field/temporal/age queries, and
 `DecisionCacheEligible`/`LinuxKernelCacheEligible`. Future supervised evaluator
 wiring should use that source's **effective trusted methods**, not raw observed
-flags or a signed build declaration as cache authorization. This checkpoint
-still stores concrete in-process `*wasm.PolicyEvaluator`, `*wasm.Pool` and
-`*wasm.Runtime`; it does **not** claim Host is wired. A reviewed evaluator
-evaluation/close/source interface plus backend lifecycle owner is still needed.
+flags or a signed build declaration as cache authorization. The later adapter in
+`supervised-evaluator-integration.md` extracts the Evaluate/Close/Source interface
+and complete backend lifetime owner. The default retains in-process pool/runtime;
+explicit supervised mode creates neither in the parent. This is not a production
+or whole-daemon VM readiness claim.
 
 PR41's shared `kernelmap.MaxPolicyPathBytes = 127` is retained here in compiler,
 runtime static-export and dynamic key validation. The metadata branch's more

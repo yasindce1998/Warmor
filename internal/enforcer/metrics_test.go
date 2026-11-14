@@ -11,7 +11,6 @@ import (
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/yasindce1998/warmor/internal/metrics"
-	"github.com/yasindce1998/warmor/internal/wasm"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -32,7 +31,7 @@ func histCount(t *testing.T, h *prometheus.HistogramVec, labels ...string) uint6
 func TestHandleEvent_RecordsEventAndWASMMetrics(t *testing.T) {
 	e, _ := newTestEnforcer(t, testEnforcerOpts{poolSize: 1, policyWasm: wasmtest.LoopOnUIDPolicy()})
 	e.policyID = "metrics-test.wasm"
-	e.evaluator.(*wasm.PolicyEvaluator).SetTimeout(20 * time.Millisecond)
+	inProcessEvaluator(t, e).SetTimeout(20 * time.Millisecond)
 
 	processed := testutil.ToFloat64(metrics.EventsProcessed.WithLabelValues("PROCESS"))
 	execs := histCount(t, metrics.WASMExecDuration, "metrics-test.wasm")

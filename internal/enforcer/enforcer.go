@@ -686,8 +686,21 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 		return
 	}
 
-	// Check cache first
-	if result, hit := decisionCache.Get(event); hit {
+	// Capture evaluator and generation together before consulting their cache.
+	// A terminal supervised child must not keep serving earlier cached allows.
+	e.evaluatorMu.RLock()
+	evaluator := e.evaluator
+	gen := e.policyGen.Load()
+	pid := e.policyID
+	e.evaluatorMu.RUnlock()
+	if captured != nil {
+		evaluator, gen, pid = captured.evaluator, captured.id, captured.policyID
+	}
+	cacheUsable := true
+	if host, ok := evaluator.(*hostEvaluator); ok {
+		cacheUsable = host.Alive()
+	}
+	if result, hit := decisionCache.Get(event); hit && cacheUsable {
 		metrics.RecordCacheHit()
 		_ = e.actionHandler.Enforce(e.ctx, event, result)
 		e.logger.LogEvent(event, result)
@@ -700,16 +713,6 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	}
 
 	metrics.RecordCacheMiss()
-
-	// Evaluate with policy
-	e.evaluatorMu.RLock()
-	evaluator := e.evaluator
-	gen := e.policyGen.Load()
-	pid := e.policyID
-	e.evaluatorMu.RUnlock()
-	if captured != nil {
-		evaluator, gen, pid = captured.evaluator, captured.id, captured.policyID
-	}
 
 	if evaluator.ReadsContainerAge(event.GetType()) {
 		e.annotateContainerStart(event)
@@ -862,6 +865,9 @@ func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, g
 	defer e.decisionMu.RUnlock()
 	if e.policyGen.Load() != gen {
 		return
+	}
+	if host, ok := evaluator.(*hostEvaluator); ok && !host.Alive() {
+		return // the final request/CPU budget must not yield a renewable cache
 	}
 	decisionCache := e.cache
 	if e.generations != nil {

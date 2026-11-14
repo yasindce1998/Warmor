@@ -33,7 +33,11 @@ var supervisedBuildErr error
 func supervisedConfig(t *testing.T) policyhost.Config {
 	t.Helper()
 	supervisedBuild.Do(func() {
-		dir, err := os.MkdirTemp("/tmp/opencode", "supervised-integration-")
+		base := ""
+		if st, err := os.Stat("/tmp/opencode"); err == nil && st.IsDir() {
+			base = "/tmp/opencode"
+		}
+		dir, err := os.MkdirTemp(base, "supervised-integration-")
 		if err != nil {
 			supervisedBuildErr = err
 			return
@@ -58,6 +62,24 @@ func supervisedConfig(t *testing.T) policyhost.Config {
 	c := DefaultSupervisedConfig(supervisedExecutable, supervisedDigest, 200*time.Millisecond)
 	c.LoadTimeout = time.Second
 	return c
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if supervisedExecutable != "" {
+		_ = os.Remove(supervisedExecutable)
+		_ = os.Remove(filepath.Dir(supervisedExecutable))
+	}
+	os.Exit(code)
+}
+
+func supervisedHost(t *testing.T, e Evaluator) *hostEvaluator {
+	t.Helper()
+	h, ok := e.(*hostEvaluator)
+	if !ok {
+		t.Fatal("test requires supervised evaluator")
+	}
+	return h
 }
 
 func signedCandidate(t *testing.T, key ed25519.PrivateKey, data []byte) string {
@@ -102,7 +124,7 @@ func supervisedEnforcer(t *testing.T, module []byte, c policyhost.Config, atomic
 func TestSupervisedGenerationRetainsHostUntilCapturedLeaseDrains(t *testing.T) {
 	c := supervisedConfig(t)
 	e, k, key := supervisedEnforcer(t, wasmtest.ConstPolicy(0, nil), c, true)
-	oldHost := e.evaluator.(*hostEvaluator)
+	oldHost := supervisedHost(t, e.evaluator)
 	oldEvent := &api.Event{UID: 1000, Filename: "/same"}
 	if !e.captureGeneration(oldEvent) {
 		t.Fatal("capture refused")
@@ -142,6 +164,8 @@ func TestSupervisedCompileDeadlinePreservesConcurrentActiveGeneration(t *testing
 	// activationMu. No event/decision/dispatch fence may be held during load.
 	tick := time.NewTicker(2 * time.Millisecond)
 	defer tick.Stop()
+	deadline := time.NewTimer(c.InitializationTimeout + time.Second)
+	defer deadline.Stop()
 	processed := uint64(0)
 	var err error
 wait:
@@ -152,7 +176,7 @@ wait:
 		case <-tick.C:
 			e.handleEvent(&api.Event{UID: 1000, Filename: "/good"})
 			processed++
-		case <-time.After(c.InitializationTimeout + time.Second):
+		case <-deadline.C:
 			t.Fatal("candidate load blocked the daemon")
 		}
 	}
@@ -170,6 +194,25 @@ wait:
 	// proves the killed compiler was reaped/released before failure returned.
 	if err := e.ActivatePolicy(signedCandidate(t, key, wasmtest.ConstPolicy(0, nil)), nil); err != nil {
 		t.Fatal("compiler child leaked host capacity", err)
+	}
+}
+
+func TestSupervisedTerminalHostCannotServeEarlierCachedAllow(t *testing.T) {
+	module := wasmtest.DeclaredPolicy(0)
+	c := supervisedConfig(t)
+	c.TrustedDeclarationDigests = []string{assignment.Digest(module)}
+	e, _, _ := supervisedEnforcer(t, module, c, true)
+	event := func() *api.Event { return &api.Event{UID: 1000, Filename: "/cached"} }
+	e.handleEvent(event())
+	if e.currentDecisionCache().Stats().Size != 1 {
+		t.Fatal("fixture failed to cache genuine allow")
+	}
+	if err := supervisedHost(t, e.evaluator).Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e.handleEvent(event())
+	if s := e.GetStats(); s.Allowed != 1 || s.AuditDenied != 1 {
+		t.Fatalf("dead host authorized cached allow %+v", s)
 	}
 }
 

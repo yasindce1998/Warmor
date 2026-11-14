@@ -1,10 +1,10 @@
 # Policy-host declarations: authenticated observations, explicit trust
 
-Status: optional backend/API checkpoint on `feat/policyhost-declarations`, based
-on PR45's frozen `f394546`, with only descriptor-sanitizer fix `84a8176`
-cherry-picked subsequently. **No enforcer routing, generation activation, kernel
-map writes or default backend changes.** PR45's process-boundary limitations
-continue to apply.
+Status: optional backend/API checkpoint originally on `feat/policyhost-declarations`,
+based on PR45's frozen `f394546` plus descriptor fix `84a8176`. The experimental
+adapter is now described in `supervised-evaluator-integration.md`; it adds opt-in
+enforcer routing, not a default backend change. PR45's process-boundary
+limitations continue to apply.
 
 ## Contract
 
@@ -15,8 +15,8 @@ domains, decision-cache eligibility and Linux kernel-key dependency eligibility.
 The existing `wasm.StaticDomain` name is an alias, so existing in-process method
 signatures remain source-compatible. Legacy in-process fields/static methods
 retain their trust semantics; new metadata/eligibility methods sanitize invalid
-declarations. Combined evaluator lifecycle/interface wiring belongs to the
-generation-activation integration, not this branch.
+declarations. Combined evaluator lifecycle/interface wiring is documented in
+`supervised-evaluator-integration.md`.
 
 ### Shared signed-activation contract
 
@@ -104,15 +104,12 @@ per-event kernel entries must obey the same exact-key requirements.
   guest table is bounded before allocation (1,064,961 bytes), and publication
   independently checks the combined count. This is below the legacy 65,536-entry
   map capacity, but not a promise of free capacity in any particular map.
-- Paths/patterns are nonempty, valid UTF-8, NUL-free and at most 254 bytes.
-  Process entries have port zero. Event labels must match their enclosing domain.
-  For the current binary event ABI, process static rules must additionally be
-  **shorter than 128 bytes**: the guest path field has a 128-byte capacity with
-  no truncation marker. A 128-byte eq rule also matches longer truncation aliases;
-  a longer rule cannot match its own input. The existing compiler's static export
-  currently admits up to 254 bytes, so metadata declines the entire process
-  domain when such a rule is observed. JSON ABI metadata retains the 254-byte
-  kernel bound. This branch does not change compiler evaluation semantics.
+- Paths/patterns are nonempty, valid UTF-8 and NUL-free. Process paths retain
+  PR41's shared **127-byte** exact identity limit across compiler, runtime static
+  tables and metadata, for both JSON and binary encoding. A binary 128-byte eq
+  rule can match longer truncation aliases, so is not a complete identity.
+  Process entries have port zero; event labels match their enclosing domain.
+  The general transport pattern cap remains 254 bytes, not kernel authorization.
 - Network entries require canonical unzoned IPv4/IPv6 text, not IPv4-mapped aliases
   or alternate textual spellings. Rewriting an alias would change guest string-eq
   semantics, so an unusable declaration declines the whole domain instead.

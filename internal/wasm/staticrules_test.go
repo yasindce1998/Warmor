@@ -127,7 +127,7 @@ rules:
 	}
 }
 
-func TestParseStaticTableIdentityContractAndFirstMatch(t *testing.T) {
+func TestParseStaticTableIdentityContractAndDuplicateDecline(t *testing.T) {
 	for _, p := range []string{"", strings.Repeat("x", 128), strings.Repeat("x", 254), "a\x00b", "a\xff"} {
 		if _, eligible, err := parseStaticTable(append([]byte{1}, staticTestTable(p, 0, 0)...), 0); eligible || err == nil {
 			t.Fatalf("accepted incomplete process identity %q", p)
@@ -144,10 +144,15 @@ func TestParseStaticTableIdentityContractAndFirstMatch(t *testing.T) {
 	a, b := "/opt/warmor/collision-000079bb", "/opt/warmor/collision-00044848"
 	table := append([]byte{1}, staticTestTable(a, 0, 0)...)
 	table = append(table, staticTestTable(b, 1, 0)...)
-	table = append(table, staticTestTable(a, 1, 0)...)
 	rules, eligible, err := parseStaticTable(table, 0)
 	if err != nil || !eligible || len(rules) != 2 || rules[0].Action != 0 || rules[1].Action != 1 {
-		t.Fatalf("first-match: %+v %v %v", rules, eligible, err)
+		t.Fatalf("distinct exact keys: %+v %v %v", rules, eligible, err)
+	}
+	// Compiler exports already deduplicate first-match keys. Custom duplicate
+	// declarations decline optimization rather than hiding invalid metadata.
+	table = append(table, staticTestTable(a, 1, 0)...)
+	if _, eligible, err := parseStaticTable(table, 0); eligible || err == nil {
+		t.Fatal("duplicate custom declaration promoted")
 	}
 }
 

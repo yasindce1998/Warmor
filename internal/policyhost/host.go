@@ -243,6 +243,18 @@ func (h *Host) terminate() { h.stop.Do(func() { kill(h.cmd); h.in.Close(); h.out
 func (h *Host) Close() error   { h.terminate(); <-h.done; return nil }
 func (h *Host) Digest() string { return h.digest }
 
+// Alive reports whether the owned child has been reaped. A terminal host must
+// never authorize a cached decision in an enclosing evaluator. Like any health
+// snapshot it is not a promise that a child cannot exit immediately afterward.
+func (h *Host) Alive() bool {
+	select {
+	case <-h.done:
+		return false
+	default:
+		return true
+	}
+}
+
 func (h *Host) Evaluate(ctx context.Context, event *api.Event) (*api.ActionResult, error) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, h.config.EvaluationTimeout)
