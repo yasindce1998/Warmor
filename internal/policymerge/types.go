@@ -1,5 +1,7 @@
 package policymerge
 
+// PolicyYAML retains source variables and temporal blocks for editing. Validate
+// uses compiler.Parse for the semantic model, variable resolution and operands.
 type PolicyYAML struct {
 	Name          string         `yaml:"name"`
 	Version       int            `yaml:"version"`

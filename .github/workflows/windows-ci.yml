@@ -20,7 +20,14 @@ jobs:
         run: go build ./...
 
       - name: Vet Windows packages
-        run: go vet ./internal/platform/... ./internal/enforcer/... ./internal/logging/... ./cmd/warmor-daemon/...
+        run: go vet ./internal/platform/... ./internal/enforcer/... ./internal/logging/... ./internal/privatefile/... ./internal/streaming/... ./internal/simulator/... ./cmd/warmor-daemon/...
+
+      # These tests must execute on Windows: cross-compilation does not check
+      # NTFS DACL inheritance, handle sharing, reparse points, or rename rights.
+      # Fixtures change only owned temporary files; no token privileges or
+      # machine-wide ACL/security policy are enabled or modified.
+      - name: Native private recording contracts
+        run: go test -race -count=1 -v ./internal/privatefile ./internal/streaming ./internal/simulator
 
       - name: Run unit tests
         shell: bash

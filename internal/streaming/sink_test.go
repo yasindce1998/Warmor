@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/yasindce1998/warmor/internal/testutil"
 )
 
 func sampleEvent(pid uint32) *SecurityEvent {
@@ -80,7 +82,7 @@ func readLines(t *testing.T, path string) []string {
 }
 
 func TestFileSinkWriteAndFlush(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "events.jsonl")
+	path := filepath.Join(testutil.PhysicalTempDir(t), "events.jsonl")
 	sink, err := NewFileSink(path, 0) // default max size
 	if err != nil {
 		t.Fatal(err)
@@ -125,11 +127,12 @@ func TestFileSinkWriteAndFlush(t *testing.T) {
 }
 
 func TestFileSinkAppendsAndCountsExistingSize(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "events.jsonl")
+	path := filepath.Join(testutil.PhysicalTempDir(t), "events.jsonl")
 	existing := []byte("{\"pre\":\"existing\"}\n")
 	if err := os.WriteFile(path, existing, 0644); err != nil {
 		t.Fatal(err)
 	}
+	ownRecordingFixture(t, path)
 
 	sink, err := NewFileSink(path, 1<<20)
 	if err != nil {
@@ -148,7 +151,7 @@ func TestFileSinkAppendsAndCountsExistingSize(t *testing.T) {
 }
 
 func TestFileSinkRotation(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.PhysicalTempDir(t)
 	path := filepath.Join(dir, "events.jsonl")
 	// Tiny max size: every write after the first triggers rotation.
 	sink, err := NewFileSink(path, 1)
@@ -188,7 +191,7 @@ func TestFileSinkRotationFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("removing the directory of an open file is not possible on Windows")
 	}
-	dir := filepath.Join(t.TempDir(), "logs")
+	dir := filepath.Join(testutil.PhysicalTempDir(t), "logs")
 	if err := os.Mkdir(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +239,7 @@ func TestFileSinkRotationFailure(t *testing.T) {
 }
 
 func TestFileSinkCloseAfterFailedRotation(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "logs")
+	dir := filepath.Join(testutil.PhysicalTempDir(t), "logs")
 	if err := os.Mkdir(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +259,7 @@ func TestFileSinkCloseAfterFailedRotation(t *testing.T) {
 // (typically within one millisecond). Rotated files used to be named only by
 // millisecond timestamp, so os.Rename silently overwrote earlier ones.
 func TestFileSinkRotationNamesUnique(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.PhysicalTempDir(t)
 	path := filepath.Join(dir, "events.jsonl")
 	sink, err := NewFileSink(path, 1)
 	if err != nil {
@@ -291,7 +294,7 @@ func TestFileSinkRotationNamesUnique(t *testing.T) {
 }
 
 func TestFileSinkRotatedNameSkipsExisting(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.PhysicalTempDir(t)
 	path := filepath.Join(dir, "events.jsonl")
 	s := &FileSink{path: path}
 	first := s.rotatedName()
@@ -312,7 +315,7 @@ func TestFileSinkRotatedNameSkipsExisting(t *testing.T) {
 }
 
 func TestFileSinkOpenError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "missing-dir", "events.jsonl")
+	path := filepath.Join(testutil.PhysicalTempDir(t), "missing-dir", "events.jsonl")
 	if _, err := NewFileSink(path, 0); err == nil {
 		t.Fatal("expected error opening file in non-existent directory")
 	}
