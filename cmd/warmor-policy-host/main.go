@@ -1,5 +1,6 @@
 // warmor-policy-host is the dedicated, opt-in supervised WASM worker. It is
-// not a daemon self-exec mode and has no command-line configuration.
+// not a daemon self-exec mode. Its only internal argument selects the serving
+// stage after Linux descriptor sanitization and re-exec of this same binary.
 package main
 
 import (
@@ -9,12 +10,14 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 1 {
-		os.Exit(2)
+	if len(os.Args) == 1 {
+		bootstrap()
+		// bootstrap must replace the process or terminate it. Never proceed to
+		// IPC if descriptor sanitization or the second exec failed.
+		os.Exit(1)
 	}
-	// fd 3 pins the trusted executable during exec; it is not an IPC channel.
-	if f := os.NewFile(3, "executable"); f != nil {
-		_ = f.Close()
+	if len(os.Args) != 2 || os.Args[1] != "--serve" {
+		os.Exit(2)
 	}
 	if err := worker.Run(os.Stdin, os.Stdout); err != nil {
 		os.Exit(1)

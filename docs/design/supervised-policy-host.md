@@ -30,8 +30,8 @@ go build -o /trusted/install/warmor-policy-host ./cmd/warmor-policy-host
 ```
 
 An administrator supplies a clean absolute `Config.Executable` path and a
-required lowercase `ExecutableSHA256`. There is no PATH discovery, self-exec,
-`init` interception, test-binary execution mode, policy-selected path/flags or
+required lowercase `ExecutableSHA256`. There is no PATH discovery, daemon
+self-exec, `init` interception, test-binary execution mode, policy-selected path/flags or
 automatic fallback. On Linux, descriptor-relative `O_NOFOLLOW` opens bind
 validation to the inode executed via `/proc/self/fd/3`. Directories and executable
 must be owned by root or the supervisor's effective UID; group/other writable
@@ -41,11 +41,29 @@ regular, executable, not setuid/setgid, non-group/other-writable and at most
 executable contents in place; install updates by atomic rename. `/proc` is required.
 The executable digest is a trust pin, not remote build provenance verification.
 
-The child receives only two anonymous IPC pipes and its pinned executable fd
-(closed before receiving configuration). Stderr is `/dev/null`, not a public
-pipe, bounded logging goroutine or daemon log. It inherits no daemon environment,
-tokens, extra descriptors, working directory or writable cache. The sole explicit
-environment entry is `GOMAXPROCS=1`. Host callbacks execute **inside the child**
+The parent explicitly provides two anonymous IPC pipes, `/dev/null` stderr and
+its pinned executable fd. **`exec.Cmd.ExtraFiles` is not an FD allowlist:** any
+unrelated non-CLOEXEC parent descriptors can also reach the initial trusted
+bootstrap. Before reading configuration or WASM, that bootstrap locks its OS
+thread and uses Linux `close_range(3, UINT_MAX, UNSHARE | CLOEXEC)` to create a
+private descriptor table and mark all descriptors except 0/1/2 close-on-exec.
+It immediately execs the same validated running inode via `/proc/self/exe` with
+the fixed internal `--serve` argument and a minimal environment. This is an
+explicit two-stage launch of the separate executable, never daemon self-exec.
+The second exec closes inherited descriptors (including fd 3 and descriptors
+above the later `RLIMIT_NOFILE`) and creates a fresh Go runtime. No live runtime
+poll descriptors are closed under an existing Go runtime; unsharing prevents
+other threads from introducing descriptors between marking and exec.
+
+Sanitization/exec failure exits before any IPC is accepted; there is no fallback
+requiring callers to set CLOEXEC correctly. Linux 5.11+ `CLOSE_RANGE_CLOEXEC` and
+`CLOSE_RANGE_UNSHARE` support is required. No forked grandchild is introduced:
+both exec stages use the same supervised PID, pipes, deadline and reaping path.
+The serving worker starts with only the explicit IPC/stderr allowlist and its
+own newly created runtime descriptors. Stderr is not a public pipe, logging
+goroutine or daemon log. It receives no daemon environment, tokens, working
+directory or writable cache. The sole explicit environment entry is
+`GOMAXPROCS=1`. Host callbacks execute **inside the child**
 against its event snapshot. WASI receives no mounted files, argv, environment,
 network listeners or external command execution capabilities.
 
@@ -151,7 +169,9 @@ under a trusted wazero/Go host**, not a sandbox for a compromised native worker:
   native runtime exploit could escape that assumption. Current rlimits do not
   satisfy the stronger cgroup/native-compromise threat model in
   `wasm-compilation-isolation.md`.
-- This backend supports Linux with `/proc` only. Windows and macOS reject startup;
+- This backend supports Linux 5.11+ with `/proc` and the required `close_range`
+  flags only. Unsupported/blocked descriptor sanitization rejects startup.
+  Windows and macOS reject startup;
   there is no Job Object or tested equivalent. Cross-compilation is not platform
   execution validation. Tests do not install host security hooks or alter parent
   process rlimits.
@@ -171,6 +191,8 @@ under a trusted wazero/Go host**, not a sandbox for a compromised native worker:
 the actual dedicated command. Tests cover signed immutable staging, path/digest
 trust, no runtime dependency in the parent, binary decisions/audit/unknown time,
 guest memory cap, actual Linux rlimits, cumulative CPU kill, loop kill/reap,
+non-CLOEXEC descriptors above the worker's NOFILE limit (pipe EOF must occur
+while the worker is still alive),
 cancellation, crash, bounded capacity/request count and malformed frames. A real
 ~7 MiB module with 384 functions and 393,216 conditional add/multiply blocks exercises loading
 under a 100 ms child-load deadline (within a 5 second total initialization cap)
