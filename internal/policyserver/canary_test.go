@@ -383,14 +383,14 @@ func assertFiniteCanaryMetrics(t *testing.T, m CanaryMetrics) {
 	t.Helper()
 	for _, rate := range []float64{m.BaselineDenyRate, m.CanaryDenyRate} {
 		if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 || rate > 1 {
-			t.Fatalf("invalid deny rate: %+v", m)
+			t.Errorf("invalid deny rate: %+v", m)
 		}
 	}
 	if m.ObservedFor < 0 || m.BaselineSamples < 0 || m.CanarySamples < 0 {
-		t.Fatalf("negative metrics: %+v", m)
+		t.Errorf("negative metrics: %+v", m)
 	}
 	if _, err := json.Marshal(m); err != nil {
-		t.Fatalf("metrics are not JSON safe: %v", err)
+		t.Errorf("metrics are not JSON safe: %v", err)
 	}
 }
 
@@ -740,7 +740,9 @@ func TestCanaryConcurrentResetAndConfiguration(t *testing.T) {
 			for range 200 {
 				switch worker % 4 {
 				case 0:
-					mustConfigureCanary(t, ca, "r", cfg)
+					if err := ca.Configure("r", cfg); err != nil {
+						t.Errorf("valid concurrent configuration failed: %v", err)
+					}
 				case 1:
 					ca.Reset("r")
 				case 2:
@@ -758,6 +760,53 @@ func TestCanaryConcurrentResetAndConfiguration(t *testing.T) {
 	ca.Reset("r")
 	if m := ca.Metrics("r"); m.Verdict != "pending" || m.CanarySamples != 0 {
 		t.Fatalf("final reset failed: %+v", m)
+	}
+}
+
+func TestCanaryRequiresFreshSamplesInBothCohorts(t *testing.T) {
+	ca := NewCanaryAnalyzer(nil)
+	now := time.Unix(1000, 0)
+	ca.clock = func() time.Time { return now }
+	cfg := CanaryConfig{MinSampleSize: 2, SampleWindow: 128 * time.Second}
+	mustConfigureCanary(t, ca, "r", cfg)
+	ca.RecordDecision("r", false, false)
+	ca.RecordDecision("r", false, false)
+	ca.RecordDecision("r", true, true)
+	if m, _ := ca.Evaluate("r"); m.Verdict != "pending" {
+		t.Fatalf("insufficient canary samples produced a verdict: %+v", m)
+	}
+	now = now.Add(time.Minute)
+	ca.RecordDecision("r", true, true)
+	if m, _ := ca.Evaluate("r"); m.Verdict != "degraded" {
+		t.Fatalf("both cohorts at minimum did not evaluate: %+v", m)
+	}
+	now = now.Add(68 * time.Second)
+	ca.RecordDecision("r", true, true)
+	if m, _ := ca.Evaluate("r"); m.Verdict != "pending" || m.BaselineSamples != 0 || m.CanarySamples != 2 {
+		t.Fatalf("expired baseline still allowed comparison: %+v", m)
+	}
+}
+
+func TestCanaryThresholdAndMetricsAreSideEffectFree(t *testing.T) {
+	ca := NewCanaryAnalyzer(nil)
+	aborter := &canaryTestAborter{}
+	ca.rollouts = aborter
+	cfg := CanaryConfig{MinSampleSize: 1, MaxDenyRateDelta: 0.5, AutoRollback: true}
+	mustConfigureCanary(t, ca, "r", cfg)
+	ca.RecordDecision("r", false, false)
+	ca.RecordDecision("r", true, true)
+	ca.RecordDecision("r", true, false)
+	if m, rolled := ca.Evaluate("r"); rolled || m.Verdict != "healthy" || aborter.calls != 0 {
+		t.Fatalf("delta equal to threshold triggered an abort: %+v", m)
+	}
+	ca.RecordDecision("r", true, true)
+	for range 3 {
+		if m := ca.Metrics("r"); m.Verdict != "pending" || aborter.calls != 0 {
+			t.Fatalf("Metrics evaluated or aborted the rollout: %+v", m)
+		}
+	}
+	if m, rolled := ca.Evaluate("r"); !rolled || m.Verdict != "rolled-back" || aborter.calls != 1 {
+		t.Fatalf("delta above threshold did not trigger explicit evaluation: %+v", m)
 	}
 }
 
