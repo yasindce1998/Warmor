@@ -11,13 +11,27 @@ import (
 )
 
 type DiffResult struct {
-	OnlyA []policymerge.RuleYAML
-	OnlyB []policymerge.RuleYAML
+	DefaultA     string
+	DefaultB     string
+	Variables    []VariableChange
+	OrderChanged bool
+	OrderA       []string
+	OrderB       []string
+	OnlyA        []policymerge.RuleYAML
+	OnlyB        []policymerge.RuleYAML
 	// Changed holds rules that match on (event, conditions) but whose
 	// decision (action, mode, reason or temporal window) differs between
 	// the policies.
 	Changed []RuleChange
 	Both    []policymerge.RuleYAML
+}
+
+type VariableChange struct {
+	Name     string
+	A        any
+	B        any
+	PresentA bool
+	PresentB bool
 }
 
 // RuleChange pairs a rule in policy A with the rule in policy B that has the
@@ -38,7 +52,25 @@ func Diff(a, b *policymerge.PolicyYAML) *DiffResult {
 	usedA := make([]bool, len(ea))
 	usedB := make([]bool, len(eb))
 
-	result := &DiffResult{}
+	result := &DiffResult{DefaultA: effectiveDefault(a.DefaultAction), DefaultB: effectiveDefault(b.DefaultAction)}
+	keys := make(map[string]bool)
+	for k := range a.Variables {
+		keys[k] = true
+	}
+	for k := range b.Variables {
+		keys[k] = true
+	}
+	for k := range keys {
+		av, oka := a.Variables[k]
+		bv, okb := b.Variables[k]
+		if oka != okb || string(canonical(av)) != string(canonical(bv)) {
+			result.Variables = append(result.Variables, VariableChange{k, av, bv, oka, okb})
+		}
+	}
+	sort.Slice(result.Variables, func(i, j int) bool { return result.Variables[i].Name < result.Variables[j].Name })
+	// Track matched pairs in source order: inserting an unrelated rule should
+	// not look like reordering, but a relative first-match change must be shown.
+	pairs := make(map[int]int)
 
 	// Pass 1: identical rules (same conditions and decision).
 	byFull := make(map[string][]int, len(eb))
@@ -49,6 +81,7 @@ func Diff(a, b *policymerge.PolicyYAML) *DiffResult {
 		if q := byFull[e.full]; len(q) > 0 {
 			byFull[e.full] = q[1:]
 			usedA[i], usedB[q[0]] = true, true
+			pairs[i] = q[0]
 			result.Both = append(result.Both, e.rule)
 		}
 	}
@@ -67,6 +100,7 @@ func Diff(a, b *policymerge.PolicyYAML) *DiffResult {
 		if q := byMatch[e.match]; len(q) > 0 {
 			byMatch[e.match] = q[1:]
 			usedA[i], usedB[q[0]] = true, true
+			pairs[i] = q[0]
 			result.Changed = append(result.Changed, RuleChange{A: e.rule, B: eb[q[0]].rule})
 		}
 	}
@@ -82,6 +116,21 @@ func Diff(a, b *policymerge.PolicyYAML) *DiffResult {
 		}
 	}
 
+	last := -1
+	for i := range ea {
+		if j, ok := pairs[i]; ok {
+			if j < last {
+				result.OrderChanged = true
+			}
+			last = j
+			result.OrderA = append(result.OrderA, ea[i].rule.Name)
+		}
+	}
+	for j := range eb {
+		if usedB[j] {
+			result.OrderB = append(result.OrderB, eb[j].rule.Name)
+		}
+	}
 	sortRules(result.OnlyA)
 	sortRules(result.OnlyB)
 	sortRules(result.Both)
@@ -99,6 +148,13 @@ type entry struct {
 	rule  policymerge.RuleYAML
 	match string // fingerprint of (event, conditions)
 	full  string // match plus decision fields
+}
+
+func effectiveDefault(action string) string {
+	if action == "" {
+		return "allow"
+	}
+	return action
 }
 
 func entries(rules []policymerge.RuleYAML) []entry {
@@ -180,12 +236,27 @@ func canonical(v any) []byte {
 }
 
 func FormatSummary(r *DiffResult, nameA, nameB string) string {
-	return fmt.Sprintf("Only in %s: %d rules\nOnly in %s: %d rules\nChanged:    %d rules\nIn both:    %d rules\n",
-		nameA, len(r.OnlyA), nameB, len(r.OnlyB), len(r.Changed), len(r.Both))
+	return fmt.Sprintf("Only in %s: %d rules\nOnly in %s: %d rules\nChanged:    %d rules\nIn both:    %d rules\nEffective defaults: %s -> %s\nVariable changes: %d\nRule order changed: %t\nStructural comparison only; not a proof of decision equivalence.\n",
+		nameA, len(r.OnlyA), nameB, len(r.OnlyB), len(r.Changed), len(r.Both), r.DefaultA, r.DefaultB, len(r.Variables), r.OrderChanged)
 }
 
 func FormatDetailed(r *DiffResult, nameA, nameB string) string {
 	var b strings.Builder
+	fmt.Fprintf(&b, "Effective default action: %s -> %s\n", r.DefaultA, r.DefaultB)
+	for _, v := range r.Variables {
+		av, bv := "<absent>", "<absent>"
+		if v.PresentA {
+			av = string(canonical(v.A))
+		}
+		if v.PresentB {
+			bv = string(canonical(v.B))
+		}
+		fmt.Fprintf(&b, "Variable %s: %s -> %s\n", v.Name, av, bv)
+	}
+	if r.OrderChanged {
+		fmt.Fprintf(&b, "Rule order changed (first match wins):\n  %s: %s\n  %s: %s\n", nameA, strings.Join(r.OrderA, ", "), nameB, strings.Join(r.OrderB, ", "))
+	}
+	b.WriteString("Structural comparison only; not a proof of decision equivalence.\n\n")
 
 	if len(r.OnlyA) > 0 {
 		fmt.Fprintf(&b, "=== Only in %s (%d rules) ===\n", nameA, len(r.OnlyA))

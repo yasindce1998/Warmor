@@ -65,7 +65,25 @@ func (s *Session) Synthesize() *policymerge.PolicyYAML {
 
 // MarshalPolicy returns the synthesized policy as YAML bytes.
 func (s *Session) MarshalPolicy() ([]byte, error) {
+	for _, p := range s.recorder.Profiles() {
+		for _, paths := range []map[string]int{p.Execs, p.Files} {
+			for path := range paths {
+				if len(path) > 128 {
+					return nil, fmt.Errorf("cannot learn path longer than compiler binary input limit (128 bytes): refusing an allow rule that cannot match its observation")
+				}
+			}
+		}
+		if len(p.Mounts) > 0 || len(p.Ptrace) > 0 {
+			return nil, fmt.Errorf("cannot learn mount/ptrace hooks: compiler has no hook-specific conditions; refusing broader file/process allows")
+		}
+		if len(p.Unsupported) > 0 {
+			return nil, fmt.Errorf("cannot learn unsupported event hooks: %v", p.Unsupported)
+		}
+	}
 	policy := s.Synthesize()
+	if err := policymerge.Validate(policy); err != nil {
+		return nil, fmt.Errorf("validate learned policy: %w", err)
+	}
 	data, err := yaml.Marshal(policy)
 	if err != nil {
 		return nil, fmt.Errorf("marshal policy: %w", err)

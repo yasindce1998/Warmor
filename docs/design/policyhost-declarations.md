@@ -1,8 +1,9 @@
 # Policy-host declarations: authenticated observations, explicit trust
 
 Status: optional backend/API integration on `feat/policyhost-metadata-integration`,
-based on freshly fetched `origin/main` at `9297209` (PR45 backend/sanitizer and
-PR42 release tests already present). Only metadata commits `d68d0af`, `48d5c41`,
+initially based on `origin/main` at `9297209` (PR45 backend/sanitizer and
+PR42 release tests already present), refreshed through `98d2b90` (PR49 signed
+compiler/pool identity and PR46 manifests). Only metadata commits `d68d0af`, `48d5c41`,
 and `c7ff006` were cherry-picked; backend commits were not duplicated.
 The reviewed source branch remains unchanged. **No enforcer routing, generation activation, kernel
 map writes or default backend changes.** PR45's process-boundary limitations
@@ -46,11 +47,22 @@ not a divergent parser. No signed or generation-activation branch is edited here
   must separately verify assignment/artifact trust and effective mode/kernel
   posture; enabling optimizations still requires exact module-digest attestation.
 
-The local compiler's build-output pipeline is not changed to append sections by
-this branch: the signed agent owns that integration. A real worker test consumes
-the same codec and demonstrates that any guest may carry a matching compiler
-label without gaining cache/default-deny permission. Combined integration must
-retain one `policybuild` codec, not resurrect a second `policymeta.Read` parser.
+PR49/main's context-aware compiler now appends one build section with identity
+`warmor-yaml/7` before signing; this branch consumes that section unchanged and
+does not append a duplicate or invent a different compiler identity. The pool
+captures `moduleDigest`, `buildMetadata` and actual `abiVersion` alongside its
+compiled module. Observed `Module` data derives from that **pool snapshot**, not
+mutable runtime state after a later load. Main's `Pool.CheckAssignment` and the
+shared `Module.MatchArtifact` are checked for identity/ABI/build-claim parity
+before and after runtime reload/replacement; inconsistent ABI replacements remain
+refused. These checks do not substitute for effective runtime/kernel posture.
+
+A real worker test uses the same current compiler label on an intentionally
+dishonest guest (finite fields/eligible empty allowlist/deny-default claim while
+evaluating allow). Artifact claim matching succeeds but **does not grant cache or
+default-deny trust**. Unknown observation flags still reject matching. The common
+`policymeta.Source/Module` API and canonical `policybuild` parser are retained;
+no second raw-WASM parser or daemon Host route is introduced.
 
 Wire protocol **2** requires `Ready{Control, Metadata}` instead of protocol 1's
 bare ready control frame. Metadata has its own version (1), exact module SHA-256,

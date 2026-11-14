@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/tetratelabs/wazero"
+	"github.com/yasindce1998/warmor/internal/policybuild"
 	"github.com/yasindce1998/warmor/internal/policymeta"
 )
 
@@ -16,16 +17,20 @@ var ErrPoolClosed = errors.New("policy pool is closed")
 // Pool manages a set of pre-instantiated WASM policy instances for
 // lock-free parallel evaluation.
 type Pool struct {
-	instances chan *Policy
-	runtime   *Runtime
-	module    wazero.CompiledModule
-	size      int
+	instances     chan *Policy
+	runtime       *Runtime
+	module        wazero.CompiledModule
+	buildMetadata *policybuild.Metadata
+	moduleDigest  string
+	size          int
 
 	// fields is the module's fields-read declaration per event type,
 	// read once from the first instance.
 	fields [numEventTypes]uint32
 	// temporal: the module is sent temporal context (ABI >= 3).
-	temporal bool
+	temporal   bool
+	abiVersion uint32
+	abiSet     bool
 	// staticProcess/staticNetwork are the kernel default-deny declarations
 	// (compiler.StaticRulesExport), read once from the first instance.
 	staticProcess StaticDomain
@@ -52,11 +57,16 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 	defer cancel()
 
 	p := &Pool{
-		instances: make(chan *Policy, size),
-		runtime:   runtime,
-		module:    runtime.module,
-		size:      size,
-		done:      make(chan struct{}),
+		instances:    make(chan *Policy, size),
+		runtime:      runtime,
+		module:       runtime.module,
+		moduleDigest: runtime.digest,
+		size:         size,
+		done:         make(chan struct{}),
+	}
+	if runtime.metadata != nil {
+		metadata := *runtime.metadata
+		p.buildMetadata = &metadata
 	}
 
 	for i := 0; i < size; i++ {
@@ -66,6 +76,8 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 			return nil, fmt.Errorf("instantiate pool member %d: %w", i, err)
 		}
 		if i == 0 {
+			p.abiVersion = policy.abiVersion
+			p.abiSet = true
 			p.fields = readFieldsDeclaration(ctx, policy)
 			p.temporal = policy.temporal()
 			p.staticProcess = readStaticDomain(ctx, policy, 0)
@@ -74,9 +86,9 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 			if policy.useBinaryABI {
 				encoding = policymeta.EncodingBinary
 			}
-			p.metadata = policymeta.Observe(runtime.moduleDigest, policy.abiVersion, encoding, p.fields, p.staticProcess, p.staticNetwork)
-			if runtime.buildMetadata != nil {
-				build := *runtime.buildMetadata
+			p.metadata = policymeta.Observe(p.moduleDigest, p.abiVersion, encoding, p.fields, p.staticProcess, p.staticNetwork)
+			if p.buildMetadata != nil {
+				build := *p.buildMetadata
 				p.metadata.Build = &build
 			}
 		}
@@ -84,6 +96,11 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 			policy.Close(ctx)
 			p.Close(ctx)
 			return nil, fmt.Errorf("initialize pool member %d: guest closed or initialization deadline exceeded", i)
+		}
+		if policy.abiVersion != p.abiVersion {
+			policy.Close(ctx)
+			p.Close(ctx)
+			return nil, fmt.Errorf("inconsistent policy ABI declarations")
 		}
 		p.instances <- policy
 	}
@@ -93,7 +110,17 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 
 func (p *Pool) instantiate(ctx context.Context) (*Policy, error) {
 	// Anonymous instances allow multiple pools to coexist in one runtime.
-	return p.runtime.instantiatePolicy(ctx, p.module, p.runtime.config.WithName(""))
+	// Keep the captured module and bounded initialization path from main;
+	// declaration checks must never reinstate raw/unbounded instantiation.
+	policy, err := p.runtime.instantiatePolicy(ctx, p.module, p.runtime.config.WithName(""))
+	if err != nil {
+		return nil, err
+	}
+	if p.abiSet && policy.abiVersion != p.abiVersion {
+		policy.Close(ctx)
+		return nil, fmt.Errorf("replacement policy ABI declaration changed")
+	}
+	return policy, nil
 }
 
 // Get retrieves a policy instance from the pool. Blocks if all instances are
