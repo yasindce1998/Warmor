@@ -70,7 +70,11 @@ func TestPipelineSharedShutdownBudgetAndConcurrentClose(t *testing.T) {
 	p := NewPipeline(PipelineConfig{Sinks: sinks, SinkBufferSize: 8, WriteTimeout: time.Hour, ShutdownTimeout: 40 * time.Millisecond})
 	p.Emit(&api.Event{PID: 1}, nil)
 	for _, s := range sinks {
-		<-s.(*blockingSink).started
+		blocked, ok := s.(*blockingSink)
+		if !ok {
+			t.Fatalf("expected blocking sink, got %T", s)
+		}
+		<-blocked.started
 	}
 	for i := 2; i <= 6; i++ {
 		p.Emit(&api.Event{PID: uint32(i)}, nil)

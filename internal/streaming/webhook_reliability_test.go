@@ -235,8 +235,13 @@ func TestWebhookResponseBodyReadIsBounded(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_, _ = io.Copy(io.Discard, r.Body)
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					t.Error("response writer does not support flushing")
+					return
+				}
 				w.WriteHeader(http.StatusOK)
-				w.(http.Flusher).Flush()
+				flusher.Flush()
 				if mode == "stall" {
 					<-r.Context().Done()
 					return
@@ -246,7 +251,7 @@ func TestWebhookResponseBodyReadIsBounded(t *testing.T) {
 					if _, err := w.Write(data); err != nil {
 						return
 					}
-					w.(http.Flusher).Flush()
+					flusher.Flush()
 				}
 			}))
 			defer ts.Close()
