@@ -174,7 +174,7 @@ func (c *Condition) Validate(eventType string) error {
 func validateConditionValue(field string, value interface{}) error {
 	if !isNumericField(field) {
 		if _, ok := value.(string); !ok {
-			return fmt.Errorf("field %q requires a string, got %v", field, value)
+			return fmt.Errorf("field %q requires a string, got %T", field, value)
 		}
 		return nil
 	}
@@ -194,7 +194,7 @@ func validateConditionValue(field string, value interface{}) error {
 		valid = n >= 0 && n <= float64(maxValue) && math.Trunc(n) == n
 	}
 	if !valid {
-		return fmt.Errorf("field %q requires an unsigned integer in [0, %d], got %v", field, maxValue, value)
+		return fmt.Errorf("field %q requires an unsigned integer in [0, %d], got %T", field, maxValue, value)
 	}
 	return nil
 }
