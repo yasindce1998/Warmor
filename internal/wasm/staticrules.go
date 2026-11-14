@@ -44,7 +44,11 @@ func readStaticDomain(ctx context.Context, p *Policy, eventType uint32) StaticDo
 
 	// Size query first: cap=0 never writes to the null pointer.
 	res, err := fn.Call(ctx, uint64(eventType), 0, 0)
-	if err != nil || len(res) != 1 {
+	if err != nil {
+		_ = p.instance.Close(ctx)
+		return out
+	}
+	if len(res) != 1 {
 		return out
 	}
 	size := uint32(res[0])
@@ -54,6 +58,7 @@ func readStaticDomain(ctx context.Context, p *Policy, eventType uint32) StaticDo
 
 	ptr, err := p.malloc(ctx, size)
 	if err != nil {
+		_ = p.instance.Close(ctx)
 		return out
 	}
 
@@ -68,7 +73,11 @@ func readStaticDomain(ctx context.Context, p *Policy, eventType uint32) StaticDo
 	}()
 
 	res, err = fn.Call(ctx, uint64(eventType), uint64(ptr), uint64(size))
-	if err != nil || len(res) != 1 || uint32(res[0]) != size {
+	if err != nil {
+		_ = p.instance.Close(ctx)
+		return out
+	}
+	if len(res) != 1 || uint32(res[0]) != size {
 		return out
 	}
 	data, ok := p.instance.Memory().Read(ptr, size)

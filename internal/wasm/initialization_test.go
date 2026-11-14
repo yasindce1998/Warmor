@@ -77,7 +77,11 @@ func TestInitializationGuestCallsBounded(t *testing.T) {
 }
 
 func TestPoolDeclarationCallsBounded(t *testing.T) {
-	for _, guest := range []testFunc{loopingFunction("warmor_fields_read", 1, 1), loopingFunction("warmor_static_rules", 3, 1)} {
+	for _, guest := range []testFunc{
+		loopingFunction("warmor_fields_read", 1, 1), loopingFunction("warmor_static_rules", 3, 1),
+		{name: "warmor_fields_read", params: 1, results: 1, body: []byte{0x00}},
+		{name: "warmor_static_rules", params: 3, results: 1, body: []byte{0x00}},
+	} {
 		t.Run(guest.name, func(t *testing.T) {
 			rt := boundedTestRuntime(t)
 			if err := rt.LoadPolicyBytes(context.Background(), buildTestModule([]testFunc{fnMalloc, fnBinaryDeny, guest})); err != nil {
