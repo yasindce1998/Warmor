@@ -46,9 +46,8 @@ kubectl --context "kind-$CLUSTER" wait --for=condition=Ready pod \
   -l app.kubernetes.io/name=warmor --timeout=300s
 
 echo "--- checking metrics endpoint (the daemon's health signal)"
-# The kind node shares the host kernel, so the daemon evaluates hundreds of
-# host execs per second and the startup banner is not reliably positioned in
-# the log stream. The metrics are the authoritative check instead:
+# Auto scope evaluates discovered pod cgroups, not arbitrary host execs.
+# Metrics verify local startup, not kernel blocking:
 #   warmor_ebpf_loader_status 1          -> eBPF programs loaded
 #   warmor_policy_info{path=...wasm} 1   -> the policy actually loaded
 METRICS=$(kubectl --context "kind-$CLUSTER" run metrics-check --rm -i --restart=Never \
@@ -164,25 +163,20 @@ else
   echo "ℹ no reload event logged (policy likely mounted at daemon start)"
 fi
 
-# Enforcement proof: the CR denies exec of /var/tmp/warmor-cr-* — a path
+# Audit-evaluation proof: the CR denies exec of /var/tmp/warmor-cr-* — a path
 # the baked default policy does not cover (it only blocks /tmp/**), so a
 # deny of the marker can only come from the CR's own rule, attributing
-# the enforcement to the CR specifically. This asserts the whole chain:
+# the policy decision to the CR specifically. This asserts the chain:
 # CR → compile → ConfigMap → kubelet mount → daemon reload → policy
-# evaluation → deny.
+# evaluation → would-deny. Audit mode remains enabled throughout this test.
 # The deny is asserted through the warmor_events_total{action="DENY"}
-# counter rather than the daemon's log: on kind the node shares the host
-# kernel, so the daemon evaluates every exec on it (hundreds of events
-# per second) and the container log rotates within seconds — log lines
-# are not a reliably greppable signal. The counter is monotonic and
+# counter rather than log grepping: a busy pod can rotate logs rapidly.
+# The counter is monotonic and
 # survives rotation. The daemon is hostNetwork, so its metrics endpoint
 # is reachable on the node IP.
-# The denied process is not SIGKILLed here: kind shares the kernel but
-# not the host PID namespace, so the daemon's kill cannot reach the
-# probe. On a real cluster (daemon on the node, same PID namespace as
-# the workload) the deny ends in SIGKILL; on kind the counter is the
-# verifiable part of the chain.
-echo "--- verifying the CR policy is enforced (deny exec of the CR's marker path)"
+# Host execution is deliberately NOT the probe: auto scope excludes it. Create
+# a non-root pod AFTER startup and retry beyond the reconciliation lag.
+echo "--- verifying the CR policy is audit-evaluated on a new pod"
 NODE_IP=$(kubectl "${KCTX[@]}" get nodes \
   -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
 deny_count() {
@@ -190,6 +184,11 @@ deny_count() {
     | awk '/^warmor_events_total\{action="DENY"\}/ {print $2}'
 }
 MARKER="/var/tmp/warmor-cr-marker-$$"
+PROBE="warmor-audit-probe"
+kubectl "${KCTX[@]}" run "$PROBE" --image=busybox:1.37 --restart=Never \
+  --overrides='{"spec":{"securityContext":{"runAsUser":10001,"runAsGroup":10001,"runAsNonRoot":true}}}' \
+  --command -- sleep 600
+kubectl "${KCTX[@]}" wait --for=condition=Ready "pod/$PROBE" --timeout=120s
 # The counter family only exists after the daemon's first deny ever, so a
 # fresh daemon scraping 0 denies returns nothing — treat that as 0.
 BEFORE_DENIES=$(deny_count)
@@ -198,18 +197,17 @@ policy_enforced() {
   # Re-exec per retry: the daemon's reload lags the ConfigMap update by
   # kubelet propagation plus its 2s mtime poll, and until it lands the
   # marker exec is allowed (the default policy does not cover /var/tmp).
-  cp /bin/true "$MARKER" 2>/dev/null || true
-  "$MARKER" 2>/dev/null || true
+  kubectl "${KCTX[@]}" exec "$PROBE" -- sh -c 'printf "#!/bin/sh\nexit 0\n" > "$1" && chmod 755 "$1" && "$1"' sh "$MARKER" >/dev/null 2>&1 || return 1
   local now
   now=$(deny_count)
   [ -n "$now" ] && [ "$now" -gt "$BEFORE_DENIES" ]
 }
-if ! wait_for "the daemon to enforce the e2e policy (deny the CR's marker exec)" 240 policy_enforced; then
+if ! wait_for "the daemon to audit-evaluate the policy on the new pod" 240 policy_enforced; then
   echo "error: deny counter did not move (before=$BEFORE_DENIES now=$(deny_count))" >&2
   exit 1
 fi
-rm -f "$MARKER"
-echo "✓ daemon enforces the WarmorPolicy (denied the CR's marker exec)"
+kubectl "${KCTX[@]}" delete pod "$PROBE" --wait=true
+echo "✓ daemon evaluated the policy on a new non-root pod without terminating it"
 
 echo
 echo "PASS: WarmorPolicy CRs compile, publish and hot-reload"

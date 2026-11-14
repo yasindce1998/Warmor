@@ -3,6 +3,12 @@
 Deploys the warmor daemon as a DaemonSet with an optional monitoring stack
 (ServiceMonitor, Prometheus alerts, Grafana dashboard).
 
+**Deployment safety:** read [Runtime safety and validation limits](RUNTIME-SAFETY.md)
+before enabling enforcement. Default scope is continuous exact-ID pod discovery;
+it covers all pods, not labels. The chart rejects unsupported webhooks and
+contradictory posture options. `make deploy-audit DRY_RUN=true` compiles, validates
+and renders the selected policy without accessing a cluster.
+
 > **Status: working on `main`.** The chart installs and the daemon runs —
 > verified end-to-end by a kind test in CI (`scripts/kind-e2e.sh`): install →
 > pods Ready → policy loaded → metrics serving. The image bakes in a
@@ -24,8 +30,9 @@ Or from a checkout:
 helm install warmor deploy/helm/warmor/
 ```
 
-`image.tag` defaults to the chart's `appVersion`, which tracks the latest
-release tag.
+`image.tag` currently defaults to `latest`; use `image.digest=sha256:<64 lowercase
+hex characters>` for immutable deployment (also `controller.image.digest` when
+enabled). Digest overrides tag for daemon, validator and controller images.
 
 ## Custom policies
 
@@ -53,14 +60,18 @@ no `cargo`.
 | `daemon.logLevel` | `info` | `--log-level` |
 | `daemon.statsInterval` | `30s` | `--stats-interval` |
 | `daemon.metricsPort` | `9090` | `--metrics-port`; also the scrape port |
-| `daemon.auditMode` | `true` | Pass `--audit`: no process termination or kernel blocking, even if enforcement flags are also enabled |
+| `daemon.auditMode` | `true` | Pass `--audit`: no termination or blocking; contradictory enforcement flags are rejected |
 | `daemon.lsmEnforce` | `false` | Pass `--lsm-enforce`: kernel-level blocking (EPERM) for cached exec/connect denies. Requires `CONFIG_BPF_LSM=y` and `bpf` in `/sys/kernel/security/lsm` on the nodes |
 | `daemon.requireLSM` | `false` | Pass `--require-lsm`: fail to start unless BPF-LSM enforcement can be loaded |
 | `daemon.defaultDeny` | `false` | Pass `--default-deny`: preload the policy's static allow rules and refuse (EPERM) exec/connect the policy does not allow. Requires `daemon.lsmEnforce` and an allowlist policy (`default_action: deny` + exact `eq` rules); misses stay allowed when the policy is not eligible. See [the design](https://github.com/yasindce1998/warmor/blob/main/docs/design/kernel-default-deny.md) |
-| `daemon.cgroupFilter` | `""` | Pass `--cgroup-filter` (cgroup paths or `auto` for K8s pod discovery); also mounts the host cgroup fs |
+| `daemon.cgroupFilter` | `auto` | Continuously discover exact pod/descendant container IDs; empty sets cover nobody. Explicit paths are exact IDs, not recursive selectors |
+| `daemon.cgroupReconcileInterval` | `1s` | Polling lag before new cgroups are covered |
+| `daemon.confirmNodeWidePolicy` | `false` | Required to disable audit or watch all namespaces; auto scope includes Warmor/system pods |
+| `daemon.metricsBindAddress` | `""` | All interfaces by default; loopback breaks kubelet HTTP probes |
+| `hostPaths.cgroup` / `.cgroupMount` / `.kernel` | `/sys/fs/cgroup` / `/host/sys/fs/cgroup` / `/sys/kernel` | Host cgroup/kernel sources and container cgroup mount passed to the daemon |
 | `policy.existingConfigMap` | `""` | ConfigMap (with a `policy.wasm` key) mounted over `/etc/warmor`; empty = use the policy baked into the image |
 | `resources` | requests 100m/128Mi, limits 500m/256Mi | Daemon container resources |
-| `tolerations` / `nodeSelector` / `affinity` | schedule everywhere | Standard DaemonSet scheduling |
+| `tolerations` / `nodeSelector` / `affinity` | Linux amd64 nodes | Keep mandatory OS/architecture selectors for current images |
 | `serviceAccount.create` / `.name` / `.annotations` | `true` / auto / `{}` | Service account for the daemon |
 | `podAnnotations` / `podSecurityContext` | — | Pod-level annotations / security context |
 | `priorityClass.*` | enabled, value 1000000000 | PriorityClass for the daemon pods (1000000000 is the K8s maximum for user-defined classes) |
@@ -70,7 +81,7 @@ no `cargo`.
 | `serviceMonitor.*` | disabled | Prometheus Operator ServiceMonitor |
 | `grafana.dashboardEnabled` | `false` | ConfigMap with the Grafana dashboard |
 | `alerting.*` | disabled | PrometheusRule with deny-rate, daemon-down, error-rate, loader-failure, dropped-events, WASM-error and map-sync alerts |
-| `webhook.*` | disabled | `ValidatingWebhookConfiguration` for the `WarmorPolicy` CRD |
+| `webhook.enabled` | `false` | Enabling is rejected: no functional admission handler exists |
 
 ## What works today
 
@@ -89,8 +100,8 @@ no `cargo`.
 ## Known issues
 
 To opt into enforcement after validating policy and scope, explicitly set
-`daemon.auditMode=false`. Kernel blocking additionally needs
-`daemon.lsmEnforce=true` and suitable nodes; `daemon.requireLSM=true` refuses an
+`daemon.auditMode=false,daemon.confirmNodeWidePolicy=true`. Kernel blocking needs
+`daemon.lsmEnforce=true,daemon.requireLSM=true` and suitable nodes; it refuses an
 unsupported node. Policies remain node-wide unless cgroup filtering restricts
 them; disabling audit can affect host processes as well as pods.
 
@@ -103,15 +114,14 @@ for the tracked items.
    tracepoint-only monitoring (or detect-then-`SIGKILL` if audit is explicitly disabled). Set
    `daemon.lsmEnforce: true` on BPF-LSM nodes for kernel blocking;
    `daemon.requireLSM: true` makes the daemon refuse to start without it.
-2. **The `WarmorPolicy` CRD has no controller.** Resources are stored but
-   never applied to any node; `status` is never populated. The
-   ValidatingWebhookConfiguration has no handler behind it — leave
-   `webhook.enabled` off, since with `failurePolicy: Fail` enabling it
-   would reject `WarmorPolicy` writes.
+2. **Pod selectors are not executed.** The optional controller publishes one
+   node policy; selector-bearing resources remain Pending. Unsupported webhook
+   enablement is rejected instead of deploying a handler-less admission hook.
 3. **No policy-server integration.** The chart runs a standalone daemon
    with a ConfigMap policy; there is no `warmor-server` deployment,
    mTLS or agent registration in the chart.
 
-The static manifests in `deploy/kubernetes/` are in worse shape (they
-configure the daemon through environment variables it does not read) —
-prefer the chart.
+Static manifests in `deploy/kubernetes/` are an audit-first policy-server example
+requiring certificates and a deployed server. Prefer the validated chart for
+standalone/ConfigMap deployments. No live enforcement test was run for this
+runtime-safety unit/render test suite; see the isolated capability matrix.

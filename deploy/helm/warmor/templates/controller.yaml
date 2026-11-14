@@ -107,8 +107,13 @@ spec:
         fsGroup: 1000
       containers:
         - name: controller
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "warmor.image" (dict "image" .Values.controller.image "version" .Chart.AppVersion) | quote }}
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           env:
             # cargo wants a writable package-cache lock even for a
             # dependency-free build, and /usr/local/cargo in the image is
@@ -137,7 +142,15 @@ spec:
           volumeMounts:
             - name: cache
               mountPath: /var/lib/warmor-controller/cache
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: cache
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ .Values.controller.cacheSizeLimit }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
 {{- end }}
