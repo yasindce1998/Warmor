@@ -19,7 +19,7 @@ func TestCodegenUntrustedNamesAndStrings(t *testing.T) {
 	p := safetyPolicy()
 	p.Name = "policy\ncompile_error!(\"policy injection\");\r\n\"\n[dependencies.attacker]\npath = \"/tmp/evil\""
 	p.Rules[0].Name = "rule\r\ncompile_error!(\"rule injection\");\u2028line"
-	p.Rules[0].Reason = "reason\a\b\f\v\x00\x1b\x7f\u0085\u2028\u2029\U0001f512\"\\"
+	p.Rules[0].Reason = "reason\a\b\f\v\x00\x1b\x7f\u0085\u2028\u2029\u202e\u2066\U0001f512\"\\"
 	for _, op := range []string{"eq", "not", "any_of", "none_of", "glob", "starts_with", "contains"} {
 		c := Condition{Field: "comm", Operator: op, Value: p.Rules[0].Reason}
 		if op == "any_of" || op == "none_of" {

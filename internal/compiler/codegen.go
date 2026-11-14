@@ -749,7 +749,9 @@ func rustString(s string) string {
 			b.WriteByte('\\')
 			b.WriteRune(r)
 		default:
-			if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			// Escape format/bidi controls too: Rust rejects some raw direction
+			// controls in source literals even though they are valid UTF-8.
+			if !unicode.IsPrint(r) {
 				fmt.Fprintf(&b, "\\u{%x}", r)
 			} else {
 				b.WriteRune(r)
