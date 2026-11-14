@@ -61,6 +61,7 @@ int BPF_PROG(lsm_connect_check, struct socket *sock, struct sockaddr *address, i
 		return 0;
 	}
 
+	struct policy_snapshot snapshot = snapshot_policy(cgid, EVENT_TYPE_NETWORK);
 	// Lookup policy: cgroup-specific first
 	struct policy_key key = {
 		.cgroup_id = cgid,
@@ -68,18 +69,14 @@ int BPF_PROG(lsm_connect_check, struct socket *sock, struct sockaddr *address, i
 	};
 	endpoint_key(&key, family, port, addr_v4, addr_v6);
 
-	struct policy_value *val = bpf_map_lookup_elem(&policy_map, &key);
-	if (!val) {
-		key.cgroup_id = 0;
-		val = bpf_map_lookup_elem(&policy_map, &key);
-	}
+	struct policy_value *val = lookup_policy(&snapshot, &key);
 
 	if (val) {
 		__sync_fetch_and_add(&val->hit_count, 1);
 
 		if (val->action == ACTION_DENY) {
 			__u8 blocked = is_enforce_enabled() && !val->audit;
-			emit_lsm_event(EVENT_TYPE_NETWORK, blocked, 0, 0,
+			emit_lsm_event_generation(snapshot.generation, EVENT_TYPE_NETWORK, blocked, 0, 0,
 				cgid, family, port, addr_v4, addr_v6);
 
 			// An audit-flagged deny is a would-be denial: log it, never block.
@@ -89,7 +86,7 @@ int BPF_PROG(lsm_connect_check, struct socket *sock, struct sockaddr *address, i
 		}
 
 		if (val->audit) {
-			emit_lsm_event(EVENT_TYPE_NETWORK, 0, 0, 0,
+			emit_lsm_event_generation(snapshot.generation, EVENT_TYPE_NETWORK, 0, 0, 0,
 				cgid, family, port, addr_v4, addr_v6);
 		}
 		return 0;
@@ -99,11 +96,11 @@ int BPF_PROG(lsm_connect_check, struct socket *sock, struct sockaddr *address, i
 	// endpoint is not on the allowlist: refuse it (enforce) or record the
 	// would-deny (audit). Only AF_INET/AF_INET6 reach here; other families
 	// returned before the lookup and stay allowed.
-	__u8 dd = lookup_default_deny(cgid, EVENT_TYPE_NETWORK);
+	__u8 dd = lookup_default_deny(&snapshot, cgid, EVENT_TYPE_NETWORK);
 	if (dd == DEFAULT_DENY_MODE_DENY) {
 		// The verdict is known, so a full ring cannot soften it.
 		if (is_enforce_enabled()) {
-			emit_lsm_event(EVENT_TYPE_NETWORK, 1, 0, 0,
+			emit_lsm_event_generation(snapshot.generation, EVENT_TYPE_NETWORK, 1, 0, 0,
 				cgid, family, port, addr_v4, addr_v6);
 			return -1; // -EPERM
 		}
@@ -114,7 +111,7 @@ int BPF_PROG(lsm_connect_check, struct socket *sock, struct sockaddr *address, i
 
 	// No match — emit for userspace evaluation. If the ring is full nobody
 	// will evaluate it; --on-event-loss decides.
-	if (!emit_lsm_event(EVENT_TYPE_NETWORK, 0, 0, 0, cgid, family, port, addr_v4, addr_v6))
+	if (!emit_lsm_event_generation(snapshot.generation, EVENT_TYPE_NETWORK, 0, 0, 0, cgid, family, port, addr_v4, addr_v6))
 		return lost_verdict();
 	return 0;
 }

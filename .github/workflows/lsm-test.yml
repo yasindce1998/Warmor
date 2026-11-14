@@ -51,6 +51,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       - name: Install BPF build dependencies
         run: |
           sudo apt-get update
@@ -107,6 +111,14 @@ jobs:
 
       - name: Compile monitor programs
         run: make -C bpf all
+
+      - name: Check regenerated generation ABI and compile VM fixtures offline
+        env:
+          BPF2GO_CFLAGS: -D__TARGET_ARCH_x86 -mcpu=v1
+        run: |
+          go generate ./internal/ebpf
+          go test -race -count=1 ./internal/ebpf
+          go test -tags integration -run '^$' ./internal/ebpf
 
       - name: Verify BPF object files
         run: |

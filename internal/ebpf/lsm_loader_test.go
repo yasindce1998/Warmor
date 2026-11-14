@@ -14,7 +14,7 @@ import (
 // rawLSMEvent builds a struct warmor_event exactly as laid out by the C
 // compiler in bpf/warmor_lsm.h (little-endian, natural alignment).
 func rawLSMEvent(eventType, decision uint8, filename string, portLE uint16, v4 [4]byte, v6 [16]byte, family uint16) []byte {
-	buf := make([]byte, 408)
+	buf := make([]byte, 416)
 	binary.LittleEndian.PutUint32(buf[0:], 1234)
 	binary.LittleEndian.PutUint32(buf[4:], 1000)
 	binary.LittleEndian.PutUint32(buf[8:], 1000)
@@ -32,12 +32,13 @@ func rawLSMEvent(eventType, decision uint8, filename string, portLE uint16, v4 [
 	// 6 bytes of padding at 330..336
 	putCString(buf, 336, 64, "/dev/sda1")
 	binary.LittleEndian.PutUint64(buf[400:], 31337)
+	binary.LittleEndian.PutUint64(buf[408:], 987654321)
 	return buf
 }
 
 func TestLSMEvent_Size(t *testing.T) {
-	if got := binary.Size(LSMEvent{}); got != 408 {
-		t.Errorf("binary.Size(LSMEvent) = %d, want 408 (sizeof(struct warmor_event))", got)
+	if got := binary.Size(LSMEvent{}); got != 416 {
+		t.Errorf("binary.Size(LSMEvent) = %d, want 416 (sizeof(struct warmor_event))", got)
 	}
 	// The bpf2go type is generated from the C struct, so this catches any
 	// drift between bpf/warmor_lsm.h and the hand-written LSMEvent.
@@ -101,6 +102,9 @@ func TestLSMEvent_DecodeFieldOffsets(t *testing.T) {
 		t.Errorf("Family = %d, want 2", ev.Family)
 	}
 	got := ev.ToEvent()
+	if ev.PolicyGeneration != 987654321 || got.PolicyGeneration != ev.PolicyGeneration {
+		t.Fatalf("policy generation was not preserved: raw=%d decoded=%d", ev.PolicyGeneration, got.PolicyGeneration)
+	}
 	if got.RemoteAddr != "192.168.1.10" {
 		t.Errorf("RemoteAddr = %q, want 192.168.1.10 (network-order bytes decoded via intToIPv4)", got.RemoteAddr)
 	}
@@ -111,7 +115,7 @@ func TestLSMEvent_DecodeFieldOffsets(t *testing.T) {
 
 func TestLSMEvent_DecodeShortInput(t *testing.T) {
 	var ev LSMEvent
-	if err := binary.Read(bytes.NewReader(make([]byte, 407)), binary.LittleEndian, &ev); !errors.Is(err, io.ErrUnexpectedEOF) {
+	if err := binary.Read(bytes.NewReader(make([]byte, 415)), binary.LittleEndian, &ev); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Errorf("err = %v, want io.ErrUnexpectedEOF", err)
 	}
 }
