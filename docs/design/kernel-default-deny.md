@@ -9,7 +9,7 @@ synced** into the kernel policy map, and a policy-map **miss means allow**.
 Enforcement on a BPF-LSM node works like this:
 
 1. An exec happens. The `lsm/bprm_check_security` hook looks the
-   `{cgroup, fnv1a(path), exec}` key up in the policy map.
+   `{cgroup, full literal path bytes, exec}` key up in the policy map.
 2. **Hit + DENY** → `-EPERM`. The operation never runs.
 3. **Miss** → the event is emitted to userspace, the operation is
    **allowed through**, and the WASM evaluation result is synced into the
@@ -72,7 +72,7 @@ domain:
 In the exec hook, a filename that fills the read buffer (possibly
 truncated) never consults the policy map today; under a marked domain it
 falls into the miss path and is denied. That is deliberate: an
-allowlisted path is never truncated (exact rules are capped at 254
+allowlisted path is never truncated (policy-derived exact rules are capped at 127
 bytes), so a truncated name is not provably allowed.
 
 Connects to unsupported families (AF_UNIX and others) return before the
@@ -95,8 +95,13 @@ policy defaults to deny:
   are globs would be *safe* — miss is already deny — but allowing them
   invites subtle rule-ordering mistakes, so v1 requires exactness of
   every rule in the domain.)
-- The rule's pattern is kernel-hashed as a whole (≤ 254 bytes for exec,
-  a parseable IP for connect, no NUL bytes).
+- The rule's pattern fits the complete-input contract (≤ 127 UTF-8 bytes
+  for exec, no NUL bytes; canonical sensor-rendered IP for connect). This
+  also respects the binary WASM ABI's 128-byte primary string: kernel
+  preloads must not recognize a path the evaluator only sees as a prefix.
+  Expanded, uppercase or IPv4-mapped IPv6 spellings that differ from
+  `net.IP.String()` make the network domain ineligible rather than silently
+  becoming a different string-equality rule.
 
 For an eligible domain the compiler emits every rule (allow **and**
 deny, preserving first-match order — duplicate keys keep the first rule,
@@ -158,3 +163,62 @@ map accordingly (`POLICY_MAP_MAX_ENTRIES`, 65536 by default).
 - Deny-rule globs inside an eligible domain (see strictness note above).
 - Failing daemon startup when the policy is ineligible (it logs and
   runs without kernel default-deny; userspace enforcement is unchanged).
+
+## Exact identity contract and limitations
+
+The Linux `policy_map` key is a 288-byte structured identity, not a 32-bit
+FNV digest: cgroup ID, hook/event type, family, network-order port bytes,
+16 address bytes, 256 literal path bytes, and zero padding. BPF compares
+the entire key, so hash-table implementation collisions do not share
+decisions. Cgroup-specific entries still precede global entries;
+default-deny is a separate cgroup/event-type lookup on a miss.
+Old 16-byte map layouts cannot be reused. Deploy BPF objects and userspace
+together; external raw-map tooling must migrate its key ABI. The key alone
+occupies 18 MiB at 65536 entries, before values and hash/LRU overhead;
+recheck node memory budgets and performance before rollout.
+
+The event decision byte records an **actual refusal**, not merely a cached
+deny action. Audit-flagged entries and a disabled enforcement toggle emit a
+pass/audit event for userspace re-evaluation; they must not be marked
+`KernelDenied` or streamed as successfully enforced. This remains distinct
+from PR #31's verified pidfd signal attempt and process wait status.
+
+- **Exec is literal pathname policy, not file identity policy.** The key
+  is `bprm->filename`, without path cleaning, symlink/inode resolution or
+  mount-namespace canonicalization. Relative paths, symlink spellings,
+  rename/replacement, interpreter execution and the same pathname in
+  different mount namespaces are not proven to name the same file.
+  Decisions apply to the literal string within a cgroup (or globally for
+  static rules); they do not attest file content. Integrity verification
+  is separate. No new mount-namespace/workload isolation is implied.
+- **Dynamic decisions require complete shared inputs.** Paths longer
+  than 127 bytes, empty/NUL/invalid-UTF-8 paths, unknown cgroups, basename
+  file events and non-connect network events are not synced. Low-level
+  `SetRule` can explicitly key complete exec strings up to 254 bytes,
+  but policy-derived static/dynamic entries use the shared stricter bound.
+  Failed or full-buffer kernel path reads never hit allow entries;
+  marked enforce domains deny them as misses. Sensors and legacy binary
+  WASM still have bounded fields and **do not expose complete/truncated/
+  unknown markers to policy code**. Skipping persistence does not make
+  userspace's long-input evaluation complete; end-to-end input-schema
+  migration remains necessary. Ineligible domains retain allow-on-miss.
+- **Endpoints are address+port policy identities**, not socket or
+  transport identities. Family and all address bytes are keyed; mapped
+  IPv6 normalizes to IPv4 to match sensor `net.IP.String()` output.
+  IPv6 zone/flow labels, protocol, image and other metadata are not key
+  fields. Dynamic decisions depending on other fields cannot persist.
+  Default-deny connect covers IPv4/IPv6 only, not Unix sockets.
+- Mount and ptrace low-level keys hold the whole filesystem-type/task-comm
+  field, not a target file/process lifetime. File-open never consults the
+  map because it only sees a basename. `unix_watch` retains FNV solely to
+  select **observation** events; it cannot install security decisions.
+- `SetNetworkRule(hash, ...)` remains source-compatible but always returns
+  `ErrNotKernelMatchable`; supply the canonical endpoint to
+  `SetEndpointRule`. Legacy hash helpers are not identity constructors.
+
+Unprivileged tests cover deliberate FNV32 path/endpoint collisions, scope,
+embedded-object ABI layout, lengths and first-match exports. VM integration
+tests assert successful allowed operations and **kernel EPERM** for
+colliding denies, unknown default-deny keys and truncated paths. Run them
+only in an isolated BPF-LSM VM. Compilation/unit success does not establish
+kernel verifier acceptance or runtime enforcement on supported kernels.

@@ -130,6 +130,9 @@ WARMOR_REQUIRE_IMA=1 vimto -kernel /tmp/kernel-6.1/vmlinuz -- \
 - **5.10 and 5.15 are not tested yet.** The matrix covers 6.1, 6.18 and the
   ci-kernels channels (~6.18–7.3). Adding an older version to the IMA kernel
   matrix is the remaining coverage gap.
-- **Policy matching is exact-hash (FNV-1a).** No prefix/glob matching, and hash
-  collisions are theoretically possible. This is an architectural property of
-  the current policy map, not a kernel-compat issue — noted here for awareness.
+- **Linux policy matching uses full structured keys**, not FNV-only identities.
+  Exec uses literal pathname bytes and endpoints use family/address/port.
+  Policy-derived exact paths cap at 127 bytes to respect the WASM input ABI;
+  longer/unknown inputs cannot populate the dynamic fast path. This is not
+  inode/content or mount-namespace identity. See the [identity contract and
+  limitations](design/kernel-default-deny.md#exact-identity-contract-and-limitations).

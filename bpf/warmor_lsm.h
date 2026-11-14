@@ -37,13 +37,41 @@
 #define ON_LOSS_LOG  0 // allow it, count the drop (default)
 #define ON_LOSS_DENY 1 // refuse it in enforce mode
 
-// Policy map key: cgroup + rule hash + event type
+// Exact operation identity, not a digest. All unused bytes MUST be zero.
+// Strings are literal hook bytes, not resolved inode identities. IPv4-mapped
+// IPv6 normalizes to IPv4, matching net.IP.String in the event decoders.
+#define WARMOR_POLICY_PATH_MAX 256
 struct policy_key {
 	__u64 cgroup_id;
-	__u32 rule_hash;
 	__u8  event_type;
-	__u8  pad[3];
+	__u8  family;
+	__u8  port[2]; // network byte order, including listen
+	__u8  address[16]; // IPv4 in first four bytes, zero tail
+	char  path[WARMOR_POLICY_PATH_MAX];
+	__u8  pad[4];
 };
+
+_Static_assert(sizeof(struct policy_key) == 288, "policy_key ABI");
+
+static __always_inline void endpoint_key(struct policy_key *key, __u16 family,
+		__u16 port, __u32 addr_v4, const __u8 *addr_v6)
+{
+	key->family = family;
+	__builtin_memcpy(key->port, &port, 2);
+	if (family == 2) {
+		__builtin_memcpy(key->address, &addr_v4, 4);
+	} else if (family == 10) {
+		if (addr_v6[0] == 0 && addr_v6[1] == 0 && addr_v6[2] == 0 &&
+		    addr_v6[3] == 0 && addr_v6[4] == 0 && addr_v6[5] == 0 &&
+		    addr_v6[6] == 0 && addr_v6[7] == 0 && addr_v6[8] == 0 &&
+		    addr_v6[9] == 0 && addr_v6[10] == 255 && addr_v6[11] == 255) {
+			key->family = 2;
+			__builtin_memcpy(key->address, addr_v6 + 12, 4);
+		} else {
+			__builtin_memcpy(key->address, addr_v6, 16);
+		}
+	}
+}
 
 // Policy map value: action + metadata
 struct policy_value {
@@ -63,7 +91,7 @@ struct warmor_event {
 	__u64 timestamp;
 	__u64 cgroup_id;
 	__u8  event_type;
-	__u8  decision;     // 0=miss (needs userspace), 1=denied by map
+	__u8  decision;     // 0=pass/audit (needs userspace), 1=actually refused
 	__u16 remote_port;
 	__u32 remote_addr_v4;
 	__u8  remote_addr_v6[16];
@@ -189,7 +217,7 @@ static __always_inline int is_enforce_enabled(void)
 // Default-deny domains: when userspace has proven a (cgroup, event_type)
 // domain's policy-map entries are a complete allowlist, it marks the domain
 // here and a policy-map miss denies instead of allowing. The key mirrors
-// policy_key's cgroup+event_type (rule_hash does not apply). A plain HASH,
+// policy_key's cgroup+event_type (operation identity does not apply). A plain HASH,
 // not LRU: the marking must never be evicted — an evicted marking silently
 // reopens the allow-on-miss hole it closed.
 struct default_deny_key {
