@@ -215,7 +215,10 @@ NO_WAKEUP flush, sustained default-deny, bounded memory and shutdown. Filesystem
 fault injection is not physical power-loss validation. Startup attachment before
 initial generation preparation and downtime/restart protection are not made
 transactional. Configuration outside the generation map (enforce/audit switch,
-cgroup filters, integrity, unix watch, loss behavior) is fixed during activation.
+integrity, unix watch, loss behavior) is fixed during activation. Automatic
+cgroup discovery/filter reconciliation can proceed concurrently and remains
+outside the generation transaction. Activation success does not prove atomic
+scope convergence or healthy discovery; readiness reports scope health separately.
 
 Integration branch `feat/generation-atomic-activation` began at PR38 `e4203dc` and
 merged main `34a95ea`, PR41 `3bfa8a1`, generation `6060ed2`, dependency main

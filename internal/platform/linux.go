@@ -38,12 +38,22 @@ type LinuxConfig struct {
 	CgroupReconcileInterval time.Duration
 }
 
+type tracepointMonitor interface {
+	ReadProcessEvent() (*ebpf.Event, error)
+	ReadFileEvent() (*ebpf.Event, error)
+	ReadNetworkEvent() (*ebpf.Event, error)
+	ReplaceCgroupFilter([]uint64) error
+	StopReaders() error
+	Close() error
+}
+
 type LinuxPlatform struct {
-	ebpfLoader    *ebpf.Loader
+	ebpfLoader    tracepointMonitor
 	lsmLoader     *ebpf.LSMLoader
 	eventChan     chan<- *api.Event
 	stopChan      chan struct{}
 	stopOnce      sync.Once
+	stopErr       error
 	wg            sync.WaitGroup
 	config        LinuxConfig
 	lsmEnabled    bool
@@ -695,21 +705,30 @@ func (p *LinuxPlatform) lossVerb() string {
 func (p *LinuxPlatform) Stop() error {
 	p.stopOnce.Do(func() {
 		close(p.stopChan)
-		// Idle readers must wake without detaching protection. Drain waiters
-		// observe stopChan rather than treating shutdown as a completed fence.
+		// Readers can be idle forever (including ReadLSMEvent's deadline
+		// retry loop). Interrupt them before waiting, but keep enforcement
+		// hooks/maps alive until Close finishes the resource lifecycle.
+		// Do not hold drainMu or a generation dispatch/worker lock here:
+		// reader completion may need them. stopChan aborts pending drains,
+		// never acknowledging an interrupted flush as a completed fence.
+		var errs []error
 		if p.ebpfLoader != nil {
-			p.ebpfLoader.InterruptReaders()
+			errs = append(errs, p.ebpfLoader.StopReaders())
 		}
 		if p.lsmLoader != nil {
-			p.lsmLoader.InterruptReader()
+			errs = append(errs, p.lsmLoader.StopReaders())
 		}
+		p.stopErr = errors.Join(errs...)
 	})
 	p.wg.Wait()
-	return nil
+	return p.stopErr
 }
 
 func (p *LinuxPlatform) Close() error {
 	var errs []error
+	if err := p.Stop(); err != nil {
+		errs = append(errs, err)
+	}
 	if p.lsmLoader != nil {
 		if err := p.lsmLoader.Close(); err != nil {
 			errs = append(errs, err)

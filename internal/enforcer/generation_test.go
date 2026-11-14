@@ -385,6 +385,59 @@ func TestGenerationCancellationRetainsOldUntilTeardown(t *testing.T) {
 	}
 }
 
+func TestGenerationStopCancelsInflightActivationWithoutDispatchLock(t *testing.T) {
+	e, k := generationEnforcer(t)
+	entered := make(chan struct{})
+	k.drain = func(ctx context.Context) error {
+		close(entered)
+		<-ctx.Done()
+		// Reader/worker cleanup must still be able to capture and release a
+		// lease while Stop cancels the activation's outstanding drain.
+		event := &api.Event{}
+		if !e.captureGeneration(event) {
+			return errors.New("current generation unavailable during cleanup")
+		}
+		event.GenerationContext.Complete()
+		return ctx.Err()
+	}
+	path := generationCandidate(t, 1)
+	activated := make(chan error, 1)
+	go func() { activated <- e.ActivatePolicy(path, nil) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("activation never entered drain")
+	}
+	stopped := make(chan struct{})
+	go func() { e.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop deadlocked with activation")
+	}
+	select {
+	case err := <-activated:
+		if !errors.Is(err, ErrActivationPending) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("interrupted live activation must remain pending: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("activation cleanup deadlocked on generation dispatch")
+	}
+	if len(k.acked) != 1 || e.generations.pending == nil || len(e.generations.states) != 2 {
+		t.Fatal("Stop retired an undrained generation")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- e.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close deadlocked after interrupted activation")
+	}
+}
+
 func TestGenerationOptionFailsBeforePlatformSideEffects(t *testing.T) {
 	for _, opts := range []*Options{
 		{AtomicGenerations: true},

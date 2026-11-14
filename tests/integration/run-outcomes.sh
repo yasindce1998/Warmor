@@ -66,8 +66,8 @@ fi
 WARMOR_OUTCOME_VM=1 WARMOR_REQUIRE_BPF_LSM=1 bash tests/integration/run-vm.sh verifier "$ARTIFACTS" \
   "$VIMTO" -kernel "$KERNEL" exec -- \
   "$ARTIFACTS/kernel.test" -test.v -test.count=1 -test.timeout=120s \
-  -test.run '^TestLSM_(LoadAndAttach|ExactExecCollisionFirstMatchDefaultDenyAndScope|ExactAuditDeniesAreNotKernelRefusals|ExactEndpointCollisionDefaultDeny|TruncatedExecCannotHitExactAllow|ExactIPv6AndMappedEndpointIdentities)$'
-for test in LoadAndAttach ExactExecCollisionFirstMatchDefaultDenyAndScope ExactAuditDeniesAreNotKernelRefusals ExactEndpointCollisionDefaultDeny TruncatedExecCannotHitExactAllow ExactIPv6AndMappedEndpointIdentities; do
+  -test.run '^TestLSM_(LoadAndAttach|StopReadersInterruptsIdleMonitors|ExactExecCollisionFirstMatchDefaultDenyAndScope|ExactAuditDeniesAreNotKernelRefusals|ExactEndpointCollisionDefaultDeny|TruncatedExecCannotHitExactAllow|ExactIPv6AndMappedEndpointIdentities)$'
+for test in LoadAndAttach StopReadersInterruptsIdleMonitors ExactExecCollisionFirstMatchDefaultDenyAndScope ExactAuditDeniesAreNotKernelRefusals ExactEndpointCollisionDefaultDeny TruncatedExecCannotHitExactAllow ExactIPv6AndMappedEndpointIdentities; do
   grep -q -- "^--- PASS: TestLSM_${test} " "$ARTIFACTS/verifier.log"
 done
 WARMOR_OUTCOME_VM=1 bash tests/integration/run-vm.sh outcomes "$ARTIFACTS" \

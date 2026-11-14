@@ -218,3 +218,128 @@ func TestGenerationReaderFailureAndCanceledDelivery(t *testing.T) {
 		t.Fatal("canceled delivery leaked captured zero generation")
 	}
 }
+
+type generationStopMonitor struct {
+	idleTracepointMonitor
+	interrupt func()
+}
+
+func (m *generationStopMonitor) StopReaders() error {
+	m.interrupt()
+	return m.idleTracepointMonitor.StopReaders()
+}
+
+func TestGenerationStopInterruptsPendingDrainWithoutAcknowledgingFence(t *testing.T) {
+	for _, fenceQueued := range []bool{false, true} {
+		t.Run(fmt.Sprint("fence-queued=", fenceQueued), func(t *testing.T) {
+			p, stream, events := generationPlatform(t)
+			monitor := &generationStopMonitor{
+				idleTracepointMonitor: idleTracepointMonitor{unblock: make(chan struct{})},
+				interrupt: func() {
+					// A closing reader can need the drain lock to report failure.
+					// Stop must not retain it while interrupting or joining readers.
+					p.drainMu.Lock()
+					pending := p.drainPending
+					p.drainMu.Unlock()
+					if pending == nil {
+						t.Error("reader interruption lost pending drain ownership")
+					}
+					stream.reads <- generationRead{err: ringbuf.ErrClosed}
+				},
+			}
+			p.ebpfLoader = monitor
+			g := &linuxPolicyGenerations{p: p}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			drained := make(chan error, 1)
+			go func() { drained <- g.Drain(ctx) }()
+			for stream.flushes.Load() == 0 {
+				select {
+				case <-ctx.Done():
+					t.Fatal("no pending flush")
+				default:
+					time.Sleep(time.Millisecond)
+				}
+			}
+			var fence *api.Event
+			if fenceQueued {
+				stream.reads <- generationRead{err: ringbuf.ErrFlushed}
+				select {
+				case fence = <-events:
+					if fence.DispatchBarrier == nil {
+						t.Fatal("missing worker fence")
+					}
+				case <-ctx.Done():
+					t.Fatal("no queued fence")
+				}
+			}
+			stopped := make(chan error, 1)
+			go func() { stopped <- p.Stop() }()
+			select {
+			case err := <-stopped:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal("Stop deadlocked with pending generation drain")
+			}
+			select {
+			case err := <-drained:
+				if err == nil || errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("interrupted drain must fail immediately, not acknowledge: %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatal("interrupted drain did not return")
+			}
+			if fence != nil {
+				select {
+				case <-fence.DispatchBarrier:
+					t.Fatal("Stop acknowledged an unprocessed worker fence")
+				default:
+				}
+			}
+			if monitor.closed.Load() || monitor.stops.Load() != 1 || p.Ready() == nil {
+				t.Fatal("Stop must interrupt once, withdraw readiness and retain resources")
+			}
+			if err := p.Close(); err != nil || !monitor.closed.Load() {
+				t.Fatalf("Close must finish resource cleanup: %v", err)
+			}
+		})
+	}
+}
+
+func TestGenerationStopReleasesBlockedDeliveryOutsideDrainLock(t *testing.T) {
+	p, stream, _ := generationPlatform(t)
+	p.eventChan = make(chan *api.Event) // no worker can accept the captured event
+	captured := make(chan struct{})
+	var released atomic.Int32
+	p.SetEventCapture(func(event *api.Event) bool {
+		event.GenerationContext = api.NewGenerationContext(event.PolicyGeneration, func() {
+			p.drainMu.Lock()
+			defer p.drainMu.Unlock()
+			released.Add(1)
+		})
+		close(captured)
+		return true
+	})
+	p.ebpfLoader = &generationStopMonitor{
+		idleTracepointMonitor: idleTracepointMonitor{unblock: make(chan struct{})},
+		interrupt:             func() { stream.reads <- generationRead{err: ringbuf.ErrClosed} },
+	}
+	stream.reads <- generationRead{event: &ebpf.Event{Kind: ebpf.EventKindProcess, Hook: "exec", PolicyGeneration: 77}}
+	select {
+	case <-captured:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no captured event")
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.Stop() }()
+	select {
+	case err := <-done:
+		if err != nil || released.Load() != 1 {
+			t.Fatalf("Stop lost captured generation lease: released=%d err=%v", released.Load(), err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop deadlocked while completing a blocked generation delivery")
+	}
+}
