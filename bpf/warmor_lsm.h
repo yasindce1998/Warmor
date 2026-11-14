@@ -249,17 +249,25 @@ struct {
 #define GENERATION_MARKER_FAMILY 255
 #define GENERATION_ID_EVENT 255
 #define GENERATION_MAP_MAX_ENTRIES 65536
-struct generation_value {
+// An anonymous struct behind a typedef keeps the complete value in Clang 21's
+// BTF even in observation-only hooks (notably integrity) that never read it.
+// A named struct here can become an unsized BTF FWD through __array(values).
+// This is the same single canonical 16-byte layout, not a second map ABI.
+typedef struct {
 	struct policy_value policy;
 	__u64 generation;
-};
+} generation_value;
+
+_Static_assert(sizeof(generation_value) == 16, "generation_value ABI");
+_Static_assert(__builtin_offsetof(generation_value, policy) == 0, "generation policy offset");
+_Static_assert(__builtin_offsetof(generation_value, generation) == 8, "generation ID offset");
 
 struct generation_policy_map {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__uint(max_entries, GENERATION_MAP_MAX_ENTRIES);
 	__type(key, struct policy_key);
-	__type(value, struct generation_value);
+	__type(value, generation_value);
 };
 
 struct {
@@ -290,7 +298,7 @@ static __always_inline struct policy_snapshot snapshot_policy(__u64 cgid, __u8 e
 		.event_type = GENERATION_ID_EVENT,
 		.family = GENERATION_MARKER_FAMILY,
 	};
-	struct generation_value *value = bpf_map_lookup_elem(snapshot.map, &marker);
+	generation_value *value = bpf_map_lookup_elem(snapshot.map, &marker);
 	// A published map must have metadata. Corruption fails closed on misses;
 	// userspace never publishes such a map and never deletes marker entries.
 	if (!value || !value->generation) {
@@ -314,7 +322,7 @@ static __always_inline struct policy_value *lookup_policy(
 		struct policy_snapshot *snapshot, struct policy_key *key)
 {
 	if (snapshot->map) {
-		struct generation_value *value = bpf_map_lookup_elem(snapshot->map, key);
+		generation_value *value = bpf_map_lookup_elem(snapshot->map, key);
 		if (!value) {
 			key->cgroup_id = 0;
 			value = bpf_map_lookup_elem(snapshot->map, key);

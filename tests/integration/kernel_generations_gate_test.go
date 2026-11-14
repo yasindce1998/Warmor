@@ -203,3 +203,44 @@ func TestGenerationGateRunnerSafetyAndEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerationGateClangBTFCompatibility(t *testing.T) {
+	data, err := os.ReadFile("../../.github/workflows/lsm-test.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Continue any `yaml:"continue-on-error"`
+			Strategy struct {
+				Matrix struct{ Clang []int } `yaml:"matrix"`
+			} `yaml:"strategy"`
+			Env   map[string]string
+			Steps []struct{ Run string }
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	job := workflow.Jobs["bpf-compile"]
+	seen := map[int]bool{}
+	for _, version := range job.Strategy.Matrix.Clang {
+		seen[version] = true
+	}
+	if !seen[18] || !seen[21] || (job.Continue != nil && job.Continue != false) {
+		t.Fatal("offline BTF regression must require Clang 18 and 21, not hide behind a newer compiler")
+	}
+	if job.Env["BPF2GO_CC"] != "clang-${{ matrix.clang }}" || job.Env["BPF2GO_STRIP"] != "llvm-strip-${{ matrix.clang }}" {
+		t.Fatal("bpf2go must use the selected compatible compiler/strip tools")
+	}
+	var runs []string
+	for _, step := range job.Steps {
+		runs = append(runs, step.Run)
+	}
+	joined := strings.Join(runs, "\n")
+	regenerate := strings.Index(joined, "go generate ./internal/ebpf")
+	check := strings.Index(joined, "go test -count=1 -run '^TestGenerationObject' ./internal/ebpf")
+	if regenerate < 0 || check < regenerate || !strings.Contains(string(data), "BPF2GO_CFLAGS: -D__TARGET_ARCH_x86 -mcpu=v1") {
+		t.Fatal("must parse both-endian ABI objects after selected-toolchain regeneration with v1 ISA")
+	}
+}
