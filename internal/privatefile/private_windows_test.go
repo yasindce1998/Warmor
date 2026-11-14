@@ -57,6 +57,114 @@ func securityString(t *testing.T, path string) string {
 	return sd.String()
 }
 
+// Keep a read-control-only handle to distinguish a stored descriptor change
+// from inheritance metadata derived by a named SE_FILE_OBJECT query. This is
+// diagnostic evidence, not a replacement for the strict named-ACL assertions.
+func monitorSecurity(t *testing.T, path string) windows.Handle {
+	t.Helper()
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := windows.CreateFile(p, windows.READ_CONTROL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = windows.CloseHandle(h) })
+	return h
+}
+
+func traceSecurityPhase(t *testing.T, phase, path string, h windows.Handle) {
+	t.Helper()
+	// NtQuerySecurityObject is the raw handle query, without the Win32
+	// SE_FILE_OBJECT provider's parent/child inheritance interpretation.
+	proc := windows.NewLazySystemDLL("ntdll.dll").NewProc("NtQuerySecurityObject")
+	if err := proc.Find(); err != nil {
+		t.Fatal(err)
+	}
+	// Pointer-aligned storage, ample for these small, test-owned descriptors.
+	buf := make([]uintptr, 8192)
+	var needed uint32
+	status, _, _ := proc.Call(uintptr(h),
+		uintptr(windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION),
+		uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf))*unsafe.Sizeof(buf[0]), uintptr(unsafe.Pointer(&needed)))
+	if status := windows.NTStatus(status); status != windows.STATUS_SUCCESS {
+		t.Fatalf("ACL phase=%s NtQuerySecurityObject: %v (needed %d)", phase, status, needed)
+	}
+	raw := (*windows.SECURITY_DESCRIPTOR)(unsafe.Pointer(&buf[0]))
+	control, _, err := raw.Control()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("ACL phase=%s path=%q native-control=%#x native-descriptor=%s", phase, path, control, raw.String())
+	runtime.KeepAlive(buf)
+	for _, kind := range []windows.SE_OBJECT_TYPE{windows.SE_FILE_OBJECT, windows.SE_KERNEL_OBJECT} {
+		sd, err := windows.GetSecurityInfo(h, kind, windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatalf("ACL phase=%s handle query kind=%d: %v", phase, kind, err)
+		}
+		control, _, err := sd.Control()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("ACL phase=%s path=%q handle-kind=%d control=%#x descriptor=%s", phase, path, kind, control, sd.String())
+	}
+	t.Logf("ACL phase=%s path=%q named=%s", phase, path, securityString(t, path))
+}
+
+func TestWindowsParentTighteningSecurityQueryPhases(t *testing.T) {
+	dir := t.TempDir()
+	ownedFixture(t, dir)
+	path := filepath.Join(dir, "child")
+	if err := os.WriteFile(path, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	h := monitorSecurity(t, path)
+	traceSecurityPhase(t, "phase-probe-created", path, h)
+	before := securityString(t, path)
+	s, err := currentSecurity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, parts, err := recordingPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []bool{false, true} {
+		phase := "directory-private=" + strconv.FormatBool(private)
+		traceSecurityPhase(t, phase+"-before", path, h)
+		dirs, err := s.directory(root, parts[:len(parts)-1], private, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		traceSecurityPhase(t, phase+"-handles-open", path, h)
+		// Open without a security descriptor/disposition that could mutate the
+		// child, so the log separates parent hardening from target opening.
+		child, err := openRelative(dirs[len(dirs)-1], parts[len(parts)-1], windows.READ_CONTROL,
+			windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil)
+		if err != nil {
+			closeDirectories(dirs)
+			t.Fatal(err)
+		}
+		traceSecurityPhase(t, phase+"-child-open", path, h)
+		if _, _, err := ownerDescriptor(child); err != nil {
+			_ = windows.CloseHandle(child)
+			closeDirectories(dirs)
+			t.Fatal(err)
+		}
+		traceSecurityPhase(t, phase+"-owner-query", path, h)
+		_ = windows.CloseHandle(child)
+		closeDirectories(dirs)
+		traceSecurityPhase(t, phase+"-handles-closed", path, h)
+	}
+	if after := securityString(t, path); after != before {
+		t.Fatalf("phase probe child ACL changed:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
 // Explicitly assign fixture ownership rather than relying on an elevated
 // runner's configurable default owner (which can be Administrators).
 func ownedFixture(t *testing.T, path string) {
@@ -276,25 +384,33 @@ func TestWindowsOpenAppendRejectsReparsePoints(t *testing.T) {
 	if err := os.WriteFile(target, []byte("keep"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	monitor := monitorSecurity(t, target)
+	traceSecurityPhase(t, "target-created-before-inherited-query", target, monitor)
 	requireInheritedDACL(t, target)
 	before := securityString(t, target)
+	traceSecurityPhase(t, "target-baseline", target, monitor)
 	link := filepath.Join(dir, "link")
 	// Windows CI is elevated. Do not skip this security check on a runner
 	// lacking symlink support; that runner has not validated the contract.
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
+	traceSecurityPhase(t, "file-symlink-created", target, monitor)
 	alias := filepath.Join(dir, "alias")
 	if err := os.Symlink(dir, alias); err != nil {
 		t.Fatal(err)
 	}
+	traceSecurityPhase(t, "directory-symlink-created", target, monitor)
 	junction := filepath.Join(dir, "junction")
 	createJunction(t, junction, dir)
+	traceSecurityPhase(t, "junction-created-before-production", target, monitor)
 	for _, path := range []string{link, filepath.Join(alias, "new"), filepath.Join(alias, "nested", "new"), filepath.Join(junction, "new")} {
+		traceSecurityPhase(t, "before-OpenAppend-"+path, target, monitor)
 		if f, err := OpenAppend(path, true, true); err == nil {
 			_ = f.Close()
 			t.Fatalf("accepted reparse point %s", path)
 		}
+		traceSecurityPhase(t, "after-OpenAppend-"+path, target, monitor)
 		if after := securityString(t, target); after != before {
 			t.Fatalf("rejected %q changed target ACL:\nbefore: %s\nafter:  %s", path, before, after)
 		}
@@ -375,21 +491,27 @@ func TestWindowsOpenAppendRejectsForeignOwnership(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			monitor := monitorSecurity(t, path)
+			traceSecurityPhase(t, "foreign-fixture-created", path, monitor)
 			ownedFixture(t, path)
+			traceSecurityPhase(t, "foreign-fixture-current-user-assigned", path, monitor)
 			t.Cleanup(func() { ownedFixture(t, path) })
 			if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, admin, nil, nil, nil); err != nil {
 				t.Fatal(err)
 			}
+			traceSecurityPhase(t, "foreign-fixture-admin-assigned", path, monitor)
 			requireInheritedDACL(t, path)
 			before := securityString(t, path)
 			filePath := path
 			if directory {
 				filePath = filepath.Join(path, "events")
 			}
+			traceSecurityPhase(t, "foreign-before-production", path, monitor)
 			if f, err := OpenAppend(filePath, true, false); err == nil {
 				_ = f.Close()
 				t.Fatal("accepted foreign owner")
 			}
+			traceSecurityPhase(t, "foreign-after-production", path, monitor)
 			if after := securityString(t, path); after != before {
 				t.Fatalf("changed foreign-owned ACL:\nbefore: %s\nafter:  %s", before, after)
 			}
