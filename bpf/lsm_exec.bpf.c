@@ -17,26 +17,18 @@ int BPF_PROG(lsm_exec_check, struct linux_binprm *bprm, int ret)
 
 	// Read the filename being executed (same bound as warmor_event.filename)
 	const char *filename = BPF_CORE_READ(bprm, filename);
-	char fname_buf[WARMOR_HASH_STR_MAX];
-	int len = bpf_probe_read_kernel_str(fname_buf, sizeof(fname_buf), filename);
-	if (len <= 0)
-		return 0;
-
-	// Hash the filename for policy map lookup
-	__u32 hash = fnv1a_hash(fname_buf, len);
-
 	// Lookup policy: cgroup-specific rule first
 	struct policy_key key = {
 		.cgroup_id = cgid,
-		.rule_hash = hash,
 		.event_type = EVENT_TYPE_EXEC,
 	};
+	// Read into the zeroed key so the string tail is deterministic, without
+	// a second path buffer consuming the verifier's 512-byte stack.
+	int len = bpf_probe_read_kernel_str(key.path, sizeof(key.path), filename);
 
-	// A full buffer means the string may have been truncated, and the hash
-	// would then cover only a prefix shared with other strings. Never consult
-	// the policy map for it; let userspace evaluate the event instead.
+	// Failed and possibly truncated reads are misses, never prefix matches.
 	struct policy_value *val = 0;
-	if (len < (int)sizeof(fname_buf)) {
+	if (len > 0 && len < (int)sizeof(key.path)) {
 		val = bpf_map_lookup_elem(&policy_map, &key);
 		if (!val) {
 			// Try global rule (cgroup_id = 0)
@@ -50,19 +42,20 @@ int BPF_PROG(lsm_exec_check, struct linux_binprm *bprm, int ret)
 		__sync_fetch_and_add(&val->hit_count, 1);
 
 		if (val->action == ACTION_DENY) {
+			__u8 blocked = is_enforce_enabled() && !val->audit;
 			// Emit audit event for the denial
-			emit_lsm_event(EVENT_TYPE_EXEC, 1, fname_buf, len,
+			emit_lsm_event(EVENT_TYPE_EXEC, blocked, key.path, len,
 				cgid, 0, 0, 0, 0);
 
 			// An audit-flagged deny is a would-be denial: log it, never block.
-			if (is_enforce_enabled() && !val->audit)
+			if (blocked)
 				return -1; // -EPERM
 			return 0; // audit-only mode
 		}
 
 		// ACTION_ALLOW — if audit flag set, emit event
 		if (val->audit) {
-			emit_lsm_event(EVENT_TYPE_EXEC, 0, fname_buf, len,
+			emit_lsm_event(EVENT_TYPE_EXEC, 0, key.path, len,
 				cgid, 0, 0, 0, 0);
 		}
 		return 0;
@@ -78,7 +71,7 @@ int BPF_PROG(lsm_exec_check, struct linux_binprm *bprm, int ret)
 		// The verdict is known, so a full ring cannot soften it: emit is
 		// best effort, the deny stands.
 		if (is_enforce_enabled()) {
-			emit_lsm_event(EVENT_TYPE_EXEC, 1, fname_buf, len,
+			emit_lsm_event(EVENT_TYPE_EXEC, 1, key.path, len,
 				cgid, 0, 0, 0, 0);
 			return -1; // -EPERM
 		}
@@ -89,7 +82,7 @@ int BPF_PROG(lsm_exec_check, struct linux_binprm *bprm, int ret)
 
 	// No policy map entry — emit to userspace for WASM evaluation. If the
 	// ring is full nobody will evaluate it; --on-event-loss decides.
-	if (!emit_lsm_event(EVENT_TYPE_EXEC, 0, fname_buf, len, cgid, 0, 0, 0, 0))
+	if (!emit_lsm_event(EVENT_TYPE_EXEC, 0, key.path, len, cgid, 0, 0, 0, 0))
 		return lost_verdict();
 	return 0;
 }

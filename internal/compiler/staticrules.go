@@ -2,9 +2,12 @@ package compiler
 
 import (
 	"fmt"
-	"github.com/yasindce1998/warmor/internal/policymeta"
 	"net"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/yasindce1998/warmor/internal/kernelmap"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 )
 
 // StaticRulesExport is the name of the exported static-rules table.
@@ -34,7 +37,7 @@ type StaticRule = policymeta.StaticRule
 // is exactly enumerable — only eq conditions on the kernel key fields (path
 // for process; remote_addr and remote_port, both required, for network), no
 // glob/starts_with/contains/not/any_of/none_of, no other fields, no temporal
-// block — and its pattern is one the kernel hashes as a whole. For an
+// block — and its pattern fits the shared exact-input contract. For an
 // eligible domain it returns the rules in declaration order; duplicate keys
 // keep the first rule, matching the WASM's first-match semantics. An
 // ineligible domain contributes no rules (and its table is emitted with
@@ -131,10 +134,8 @@ func staticRule(r Rule, event string) (StaticRule, error) {
 		if !ok {
 			return StaticRule{}, fmt.Errorf("path condition is not a string")
 		}
-		// Bounds matching the BPF side: the exec hook hashes at most
-		// fname_buf[WARMOR_HASH_STR_MAX] bytes and skips the map for a
-		// possibly-truncated string, so a longer rule could never match.
-		if path == "" || len(path) > 254 || strings.IndexByte(path, 0) >= 0 {
+		// The sensor and binary WASM ABI must both see the entire path.
+		if path == "" || len(path) > kernelmap.MaxPolicyPathBytes || strings.IndexByte(path, 0) >= 0 || !utf8.ValidString(path) {
 			return StaticRule{}, fmt.Errorf("path %q is not kernel-matchable", path)
 		}
 		sr.Pattern = path
@@ -146,8 +147,9 @@ func staticRule(r Rule, event string) (StaticRule, error) {
 		if !ok {
 			return StaticRule{}, fmt.Errorf("remote_addr condition is not a string")
 		}
-		if net.ParseIP(addr) == nil {
-			return StaticRule{}, fmt.Errorf("remote_addr %q is not an IP", addr)
+		ip := net.ParseIP(addr)
+		if ip == nil || ip.String() != addr {
+			return StaticRule{}, fmt.Errorf("remote_addr %q is not a canonical sensor IP", addr)
 		}
 		port, ok := toPort(eq["remote_port"])
 		if !ok {

@@ -2,8 +2,9 @@
 
 Status: optional backend/API integration on `feat/policyhost-metadata-integration`,
 initially based on `origin/main` at `9297209` (PR45 backend/sanitizer and
-PR42 release tests already present), refreshed through `98d2b90` (PR49 signed
-compiler/pool identity and PR46 manifests). Only metadata commits `d68d0af`, `48d5c41`,
+PR42 release tests already present), refreshed through `ce1d5ab` (PR49 signed
+compiler/pool identity, PR46 manifests, compiler-7 compatibility, and PR41 exact
+kernel identities). Only metadata commits `d68d0af`, `48d5c41`,
 and `c7ff006` were cherry-picked; backend commits were not duplicated.
 The reviewed source branch remains unchanged. **No enforcer routing, generation activation, kernel
 map writes or default backend changes.** PR45's process-boundary limitations
@@ -124,28 +125,28 @@ per-event kernel entries must obey the same exact-key requirements.
   Process entries have port zero; event labels match their enclosing domain.
   This is the same constant as PR41/generation activation, not a new 254-byte
   exception for JSON. A binary 128-byte eq rule may match longer truncation
-  aliases, so such tables are declined. The fetched `9297209` base does not yet
-  contain PR41's exact-key/127-byte changes: this branch supplies the identical
-  shared constant solely for metadata admission, without importing unrelated
-  kernel commits or modifying the base compiler/dynamic key paths. Combining
-  with PR41 must retain its compiler/runtime/dynamic 127-byte checks and remove
-  no allocator, preflight or endpoint validation. Historical old-base mismatch
-  fixtures are regression evidence, not a new vulnerability report on PR41.
+   aliases, so such tables are declined. The `ce1d5ab` main refresh imports PR41's
+   exact-key implementation and uses its single shared constant unchanged across
+   compiler/runtime/dynamic/metadata paths. No allocator, preflight or canonical
+   endpoint check is removed. Historical old-base mismatch fixtures are
+   regression evidence, not a new vulnerability report on PR41.
 - Network entries require canonical unzoned IPv4/IPv6 text, not IPv4-mapped aliases
   or alternate textual spellings. Rewriting an alias would change guest string-eq
   semantics, so an unusable declaration declines the whole domain instead.
   Ports are uint16 including 0 and 65535, never interpreted as wildcards.
-- Exact tuple keys `(event type, full pattern, port)` are retained. Duplicate full
-  keys (even identical values) decline the whole guest domain or reject incoming
-  metadata; action/audit differences never turn into last-writer-wins behavior.
-  Distinct keys are not deduplicated by a lossy hash.
+- Exact tuple keys `(event type, full pattern, port)` are retained. PR41's raw
+  guest table parser retains the first full-key entry (including action/audit),
+  matching compiler first-match semantics; the 4096 count cap charges **encoded
+  entries**, including duplicates, before deduplication. Published metadata must
+  contain unique full keys: duplicates on the wire are rejected, never silently
+  collapsed by the parent. Distinct keys are not deduplicated by a lossy hash.
 - Action is precisely allow=0 or deny=1; audit is a strict boolean. Log rules
   retain allow+audit; audit-mode denials retain deny+audit. Runtime global mode is
   not guessed or folded into the module metadata. Empty **eligible** domains mean
   deny-all misses, while ineligible domains must contain no rules.
 - Static eligibility additionally requires finite fields fully covered by that
   domain's key. Unknown dependencies, invalid eligibility bytes, trailing data,
-  overlong entries, duplicates and noncanonical endpoints never become incomplete
+  overlong entries, inconsistent wire duplicates and noncanonical endpoints never become incomplete
   allowlists. Worker observations decline unusable domains; malformed transport
   fails candidate readiness. Existing evaluation remains available when a guest
   optional declaration is unusable.
@@ -175,8 +176,8 @@ path lengths 127/128/254/255, 0/65535 ports, maximal IPv6 text, and noncanonical
 mapped addresses. Maximum escaped metadata and real FNV-colliding full paths
 exercise frame capacity and lossless key identities, not only happy-path values.
 
-This is not semantic verification of arbitrary WASM. The existing kernel branch's
-collision-free exact identities and generation-atomic installation are still
-required before enabling default-deny or kernel cache integration. Activation,
+This is not semantic verification of arbitrary WASM. Main now supplies PR41's
+collision-free exact identities; generation-atomic installation and activation
+are still required before enabling new default-deny/kernel-cache integration. Activation,
 attestation provenance/configuration, global audit mode, retirement/drain,
 packaging and fail-closed enforcement tests remain separate gates.

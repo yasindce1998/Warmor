@@ -154,7 +154,6 @@ func TestRealWorkerMalformedDeclarationsStayIneligible(t *testing.T) {
 		"bad action":          append([]byte{1}, staticEntry("/bin/tool", 0, 2, 0)...),
 		"bad audit":           append([]byte{1}, staticEntry("/bin/tool", 0, 0, 2)...),
 		"process port":        append([]byte{1}, staticEntry("/bin/tool", 443, 0, 0)...),
-		"duplicate":           append(append([]byte{1}, entry...), entry...),
 		"excess count":        tooMany,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -188,6 +187,23 @@ func TestRealWorkerMalformedDeclarationsStayIneligible(t *testing.T) {
 	s := supervisor(t, config(t))
 	if h, err := s.Start(context.Background(), staged(t, declarationGuest(nil, 0, 6))); err == nil || h != nil || len(s.slots) != 0 {
 		t.Fatal("unsupported actual ABI produced a host or leaked capacity")
+	}
+}
+
+func TestRealWorkerGuestStaticDuplicatesPreserveFirstMatch(t *testing.T) {
+	table := append([]byte{1}, staticEntry("/bin/tool", 0, 1, 1)...)
+	table = append(table, staticEntry("/bin/tool", 0, 0, 0)...)
+	p := staged(t, declarationGuest(table, compiler.FieldBitPath, 5))
+	c := config(t)
+	c.TrustedDeclarationDigests = []string{p.Digest()}
+	h, err := supervisor(t, c).Start(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	d := h.StaticRulesProcess()
+	if !d.Eligible || len(d.Rules) != 1 || d.Rules[0].Action != 1 || !d.Rules[0].Audit {
+		t.Fatalf("guest first-match action/audit lost %+v", d)
 	}
 }
 
@@ -276,8 +292,8 @@ rules:
 				}
 			}
 			if len(tc.path) == 128 {
-				// The current binary guest also allows this longer truncation
-				// alias, proving why its static table is not exact/complete.
+				// Metadata must decline the full-field rule even while the
+				// binary guest preserves its existing truncation semantics.
 				r, err := h.Evaluate(context.Background(), &api.Event{Filename: tc.path + "suffix"})
 				if err != nil || r.Action != api.ActionAllow || h.StaticRulesProcess().Eligible {
 					t.Fatalf("binary alias was promoted %+v %v", r, err)
