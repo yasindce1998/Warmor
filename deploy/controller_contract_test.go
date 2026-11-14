@@ -99,7 +99,25 @@ func TestKindWaitsForPublicationNotLegacyOrFabricatedApplication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := string(raw)
+	lf := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	for _, fixture := range []struct {
+		name, script string
+	}{
+		{"LF", lf},
+		{"CRLF", strings.ReplaceAll(lf, "\n", "\r\n")},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			checkKindPublicationWaitContract(t, fixture.script)
+		})
+	}
+}
+
+func checkKindPublicationWaitContract(t *testing.T, script string) {
+	t.Helper()
+	// Git's Windows checkout may use CRLF. Normalize before locating the
+	// function boundary and executing its snippet with bash; otherwise the
+	// closing brace is not found and carriage returns become shell tokens.
+	script = strings.ReplaceAll(script, "\r\n", "\n")
 	start := strings.Index(script, "cr_is_published() {")
 	if start < 0 {
 		t.Fatal("missing publication predicate")
