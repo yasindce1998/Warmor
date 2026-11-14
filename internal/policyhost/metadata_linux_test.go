@@ -323,12 +323,8 @@ rules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Model the signed build writer's pre-signing step with the shared codec.
-	// Production compiler integration remains owned by the signed agent.
-	data, err = policybuild.Append(data, policybuild.Metadata{Compiler: "test-compiler@sha256:reviewed-build", DefaultAction: "deny"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The merged compiler appends canonical build claims before signing.
+	// Do not append a second independently maintained metadata declaration.
 	p := staged(t, data)
 	c := config(t)
 	s := supervisor(t, c)
@@ -351,7 +347,7 @@ rules:
 	if m.ABIVersion != 3 || m.Encoding != policymeta.EncodingBinary || m.ModuleSHA256 != p.Digest() {
 		t.Fatalf("actual compiled identity %+v", m)
 	}
-	if err := m.MatchArtifact(p.Digest(), 3, "test-compiler@sha256:reviewed-build", "deny"); err != nil {
+	if err := m.MatchArtifact(p.Digest(), 3, compiler.Identity, "deny"); err != nil {
 		t.Fatal("compiled signed build comparison failed", err)
 	}
 	if !h.DecisionCacheEligible(0) || !h.LinuxKernelCacheEligible(0) || !h.StaticRulesProcess().Eligible || !h.StaticRulesNetwork().Eligible {

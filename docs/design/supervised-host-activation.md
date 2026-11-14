@@ -72,9 +72,10 @@ and kernel policy keys remain **288 bytes**. No arbitrary module decode, custom
 section parse, validation or compilation runs in the parent host-mode path.
 
 `Options.ExpectedAssignment`/`ActivateAssignment` consume actual child-observed
-ABI/build metadata. The separate signed-mode daemon/client is not imported here;
-**signed-assignment + atomic-generation combinations remain explicitly rejected**,
-including supervised mode. Detached artifact signatures with unsigned fleet
+ABI/build metadata. Main's standalone signed-mode daemon/client is now imported
+by the later `98d2b90` merge; agentstore remains its sole publication owner.
+**Signed-daemon + Host and signed-assignment + atomic-generation combinations
+remain explicitly rejected before side effects**. Detached artifact signatures with unsigned fleet
 intent are not that gated combination. `--validate-policy` is still explicitly
 the legacy in-process validator and refuses every supervised backend flag rather
 than silently loading the candidate in the parent.

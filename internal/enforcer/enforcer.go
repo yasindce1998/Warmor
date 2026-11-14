@@ -36,6 +36,9 @@ import (
 
 // Options configures the enforcer at startup
 type Options struct {
+	// Platform injects an embedded monitor implementation. Nil uses the native
+	// platform. Capability/posture checks still apply; no daemon flag exposes it.
+	Platform                platform.Platform
 	AuditMode               bool
 	LearningMode            bool
 	CgroupFilter            []string
@@ -56,6 +59,10 @@ type Options struct {
 	// <policy>.sig. The policy file is read once, verified, and loaded from
 	// memory; YAML policies are refused.
 	PolicyVerifyKey ed25519.PublicKey
+	// SignedAssignment is the standalone signed-daemon mode. It enables strict
+	// artifact/ABI/posture checks and refuses Host/generation combinations before
+	// side effects until their sole-store commit model is validated.
+	SignedAssignment *assignment.Policy
 	// EvalTimeout bounds each WASM policy evaluation; an evaluation that
 	// exceeds it is denied (fail closed) and its instance replaced. Zero
 	// means wasm.DefaultEvalTimeout.
@@ -87,8 +94,9 @@ type Options struct {
 	// SupervisedBackend explicitly opts into the experimental pinned child
 	// backend. Requires PolicyVerifyKey; nil preserves the in-process default.
 	SupervisedBackend *policyhost.Config
-	// ExpectedAssignment enables strict signed-assignment activation. The
-	// caller owns assignment verification and the sole durable agentstore commit.
+	// ExpectedAssignment is the existing embedded metadata-validation seam.
+	// The caller owns verification/commit; it cannot combine with generations
+	// or SignedAssignment. It does not opt into signed-daemon Host support.
 	ExpectedAssignment *assignment.Policy
 
 	// AttackGraph enables the node-side intelligence chain: MITRE
@@ -137,6 +145,7 @@ type Enforcer struct {
 	supervisor       *policyhost.Supervisor
 	signedAssignment bool
 	kernelEnforce    bool
+	requireLSM       bool
 	pool             *wasm.Pool
 	cache            *cache.DecisionCache
 	actionHandler    *ActionHandler
@@ -196,6 +205,15 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	// dry runs, including independent integrity enforcement. Copy options
 	// so the caller's requested posture remains unchanged.
 	effective := *opts
+	if effective.SignedAssignment != nil && effective.ExpectedAssignment != nil {
+		return nil, errors.New("specify only SignedAssignment or ExpectedAssignment, not both")
+	}
+	if effective.SignedAssignment != nil {
+		if effective.SupervisedBackend != nil {
+			return nil, errors.New("signed daemon mode with supervised backend is unsupported until its sole-store commit model is tested")
+		}
+		effective.ExpectedAssignment = effective.SignedAssignment
+	}
 	if effective.AuditMode || effective.LearningMode {
 		effective.LSMEnforce = false
 		if effective.IntegrityMode == "enforce" {
@@ -307,22 +325,25 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 
 	// Initialize the platform-specific monitor (eBPF on Linux, ETW on
 	// Windows, ESF on macOS).
-	plat, err := newPlatform(platform.Config{
-		CgroupFilter:            opts.CgroupFilter,
-		CgroupRoot:              cgroupRoot,
-		CgroupReconcileInterval: opts.CgroupReconcileInterval,
-		LSMEnforce:              opts.LSMEnforce,
-		RequireLSM:              opts.RequireLSM,
-		SkipLSM:                 opts.SkipLSM,
-		AuditMode:               opts.AuditMode || opts.LearningMode,
+	plat := opts.Platform
+	if plat == nil {
+		plat, err = newPlatform(platform.Config{
+			CgroupFilter:            opts.CgroupFilter,
+			CgroupRoot:              cgroupRoot,
+			CgroupReconcileInterval: opts.CgroupReconcileInterval,
+			LSMEnforce:              opts.LSMEnforce,
+			RequireLSM:              opts.RequireLSM,
+			SkipLSM:                 opts.SkipLSM,
+			AuditMode:               opts.AuditMode || opts.LearningMode,
 
-		IntegrityMode:    opts.IntegrityMode,
-		IntegrityDigests: opts.IntegrityDigests,
-		UnixWatch:        unixWatch,
+			IntegrityMode:    opts.IntegrityMode,
+			IntegrityDigests: opts.IntegrityDigests,
+			UnixWatch:        unixWatch,
 
-		LSMRingBufferSize: opts.LSMRingBufferSize,
-		OnEventLoss:       opts.OnEventLoss,
-	})
+			LSMRingBufferSize: opts.LSMRingBufferSize,
+			OnEventLoss:       opts.OnEventLoss,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("initialize platform: %w", err)
 	}
@@ -478,6 +499,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		supervisor:       supervisor,
 		signedAssignment: opts.ExpectedAssignment != nil,
 		kernelEnforce:    kernelBlocking,
+		requireLSM:       opts.RequireLSM,
 		cache:            decisionCache,
 		actionHandler:    actionHandler,
 		logger:           logger,
@@ -503,6 +525,14 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	}
 	backend = nil // e now owns the complete backend lifetime
 	if opts.ExpectedAssignment != nil {
+		if opts.SignedAssignment != nil && opts.SignedAssignment.Posture.Mode == "enforce" && !caps.Enforcement {
+			_ = e.Close()
+			return nil, fmt.Errorf("%w: platform enforcement unavailable", assignment.ErrCompatibility)
+		}
+		if opts.SignedAssignment != nil && opts.SignedAssignment.Posture.RequireDefaultDeny && !opts.RequireLSM {
+			_ = e.Close()
+			return nil, fmt.Errorf("%w: signed required default-deny needs --require-lsm", assignment.ErrCompatibility)
+		}
 		if err := e.checkAssignment(e.evaluator, *opts.ExpectedAssignment); err != nil {
 			_ = e.Close()
 			return nil, err

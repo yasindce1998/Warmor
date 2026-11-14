@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/yasindce1998/warmor/internal/policybuild"
 )
 
 type BuildOptions struct {
@@ -76,6 +78,23 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 	wasmPath, err := cargoBuild(crateDir, policy.Name, opts)
 	if err != nil {
 		return nil, fmt.Errorf("cargo build: %w", err)
+	}
+	if err := opts.Context.Err(); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(wasmPath)
+	if err != nil {
+		return nil, err
+	}
+	data, err = policybuild.Append(data, policybuild.Metadata{Compiler: Identity, DefaultAction: policy.DefaultAction})
+	if err != nil {
+		return nil, err
+	}
+	if err := opts.Context.Err(); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(wasmPath, data, 0o644); err != nil {
+		return nil, err
 	}
 
 	succeeded = true

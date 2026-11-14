@@ -23,7 +23,7 @@ func (e *Enforcer) checkAssignment(src policymeta.Source, want assignment.Policy
 		return fmt.Errorf("%w: effective audit/enforce mode differs", assignment.ErrCompatibility)
 	}
 	if want.Posture.RequireDefaultDeny {
-		if _, ok := e.policyMap.(defaultDenySyncer); !ok || !e.defaultDeny || !e.kernelEnforce || e.auditMode || e.learningMode || !src.StaticRulesProcess().Eligible || !src.StaticRulesNetwork().Eligible {
+		if _, ok := e.policyMap.(defaultDenySyncer); !ok || !e.defaultDeny || !e.kernelEnforce || !e.requireLSM || e.auditMode || e.learningMode || !src.StaticRulesProcess().Eligible || !src.StaticRulesNetwork().Eligible {
 			return fmt.Errorf("%w: required kernel default-deny unavailable/ineligible", assignment.ErrCompatibility)
 		}
 	}

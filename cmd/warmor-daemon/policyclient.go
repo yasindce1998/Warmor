@@ -24,13 +24,15 @@ const serverTokenEnv = "WARMOR_SERVER_TOKEN"
 
 // policyClientConfig holds the daemon's policy server settings.
 type policyClientConfig struct {
-	ServerURL string
-	Token     string
-	CAFile    string
-	CertFile  string
-	KeyFile   string
-	AgentID   string
-	Labels    map[string]string
+	SignedAssignments bool
+	InitialAssignment *policyserver.PolicyAssignment
+	ServerURL         string
+	Token             string
+	CAFile            string
+	CertFile          string
+	KeyFile           string
+	AgentID           string
+	Labels            map[string]string
 	// Verify, if set, vets each download before onUpdate (see
 	// policyserver.ClientConfig.Verify).
 	Verify func(*policyserver.PolicyAssignment, []byte) error
@@ -97,15 +99,17 @@ func newPolicyClient(cfg policyClientConfig, onUpdate func(*policyserver.PolicyA
 	hostname, _ := os.Hostname()
 
 	return policyserver.NewClient(policyserver.ClientConfig{
-		ServerURL:   strings.TrimRight(cfg.ServerURL, "/"),
-		AgentID:     cfg.AgentID,
-		Hostname:    hostname,
-		Labels:      cfg.Labels,
-		TLSConfig:   tlsCfg,
-		Token:       cfg.Token,
-		OnUpdate:    onUpdate,
-		Verify:      cfg.Verify,
-		Fingerprint: cfg.Fingerprint,
+		SignedAssignments: cfg.SignedAssignments,
+		InitialAssignment: cfg.InitialAssignment,
+		ServerURL:         strings.TrimRight(cfg.ServerURL, "/"),
+		AgentID:           cfg.AgentID,
+		Hostname:          hostname,
+		Labels:            cfg.Labels,
+		TLSConfig:         tlsCfg,
+		Token:             cfg.Token,
+		OnUpdate:          onUpdate,
+		Verify:            cfg.Verify,
+		Fingerprint:       cfg.Fingerprint,
 	}), nil
 }
 

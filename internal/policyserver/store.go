@@ -24,14 +24,15 @@ type Store struct {
 	versions map[string]map[int64]*policyVersion
 	// verifyKey, if set, makes every upload require a detached signature
 	// that verifies against it.
-	verifyKey ed25519.PublicKey
-	rollouts  map[string]*RolloutState
-	bindings  map[string]*ContainerBinding
-	audit     []AuditEntry
-	sequence  uint64
-	backend   *snapshotBackend
-	limits    StoreLimits
-	closed    bool
+	verifyKey   ed25519.PublicKey
+	rollouts    map[string]*RolloutState
+	bindings    map[string]*ContainerBinding
+	audit       []AuditEntry
+	sequence    uint64
+	backend     *snapshotBackend
+	limits      StoreLimits
+	closed      bool
+	deployments map[string][]byte // audience -> canonical externally signed bundle
 }
 
 // policyVersion is one immutable uploaded revision of a policy's WASM.
@@ -45,12 +46,13 @@ type policyVersion struct {
 
 func NewStore() *Store {
 	return &Store{
-		policies: make(map[string]*Policy),
-		agents:   make(map[string]*Agent),
-		versions: make(map[string]map[int64]*policyVersion),
-		rollouts: make(map[string]*RolloutState),
-		bindings: make(map[string]*ContainerBinding),
-		limits:   DefaultStoreLimits(),
+		policies:    make(map[string]*Policy),
+		agents:      make(map[string]*Agent),
+		versions:    make(map[string]map[int64]*policyVersion),
+		rollouts:    make(map[string]*RolloutState),
+		bindings:    make(map[string]*ContainerBinding),
+		limits:      DefaultStoreLimits(),
+		deployments: make(map[string][]byte),
 	}
 }
 

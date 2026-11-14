@@ -26,3 +26,29 @@ func TestSupervisedBackendRequiresExplicitOptIn(t *testing.T) {
 		}
 	}
 }
+
+func TestSignedBackendCombinationsRejectBeforeConfiguration(t *testing.T) {
+	for _, tc := range []struct{ signed, atomic, host bool }{
+		{true, false, false}, {false, false, true}, {false, true, true},
+		{true, true, false}, {true, false, true}, {true, true, true},
+	} {
+		err := checkSignedBackendCombination(tc.signed, tc.atomic, tc.host)
+		if (err != nil) != (tc.signed && (tc.atomic || tc.host)) {
+			t.Fatalf("wrong combination decision %+v: %v", tc, err)
+		}
+	}
+}
+
+func TestMainSignedExperimentalCombinationsRejectBeforeSideEffects(t *testing.T) {
+	for _, flags := range [][]string{
+		{"--experimental-atomic-generations"},
+		{"--experimental-supervised-policy-host"},
+		{"--experimental-atomic-generations", "--experimental-supervised-policy-host"},
+	} {
+		args := append([]string{"--signed-assignments", "--assignment-state-dir", "/not-opened/state", "--event-sink", "file:/not-opened/events"}, flags...)
+		r := runChild(t, nil, args...)
+		if r.code != 1 || !strings.Contains(r.stderr, "unsupported until one commit/recovery model is tested") || strings.Contains(r.stderr, "elevated privileges") || strings.Contains(r.stderr, "signed assignment configuration/state") {
+			t.Fatalf("signed combination reached side effects: %+v", r)
+		}
+	}
+}
