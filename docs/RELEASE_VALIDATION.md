@@ -259,3 +259,50 @@ Still unverified: native ARM64 image build/runtime/scan and GitHub's pinned
 BuildKit execution of this patch. Native image gates remain mandatory, as do
 fresh scans after dependency integration. No push, PR, remote CI rerun, image
 publication, tag, release or deployment was performed.
+
+## Darwin declaration-test setup timing (head `0ea2e84`)
+
+Read the completed job's logs directly from
+`GET /repos/yasindce1998/Warmor/actions/jobs/132495498458/logs` while the rest of
+Release run **43610881379** was still active. No polling or job rerun was used.
+The job checked out PR merge commit
+`5587985f390339b7f67e03ba081864332b9d4ee5`.
+
+The only failing test was
+`TestPoolDeclarationCallsBounded/warmor_fields_read`:
+
+```text
+initialization_test.go:88: invalid policy module: instantiate module:
+malloc for event buffer: module closed with context deadline exceeded
+```
+
+This is **not the 50 ms production evaluation deadline**. The test configured
+a 30 ms initialization budget for compilation, benign load-time probing and
+pool declaration testing alike. The preliminary `LoadPolicyBytes` failed before
+`NewPool` or the looping declaration was reached. Downloads, native-architecture
+verification and module verification succeeded; archive build/upload were
+skipped after the test failure.
+
+The test-only fix loads/probes declaration fixtures under the normal five-second
+initialization budget, then applies a bounded 250 ms budget to pool creation,
+still below both declaration-specific production limits and the two-second
+watchdog. Both declaration tests now require the error to identify
+`initialize pool member 0`, so a failed preliminary instantiation cannot falsely
+satisfy the expected declaration failure. The declaration malloc/free regression
+uses the same helper to avoid the identical setup race. Dedicated tests for
+looping start/ABI/malloc initialization retain their existing 30 ms budget.
+
+Local Go 1.26.11 / `GOMAXPROCS=2` validation passed:
+
+- 30 race-enabled repetitions of both declaration regressions.
+- Full `./internal/wasm` short suite with `-race -count=1 -p=1`.
+- Full `./internal/wasm` portable short suite with `CGO_ENABLED=0`,
+  `-count=1 -p=1`.
+- CI-configured errcheck and `git diff --check`.
+
+Only `internal/wasm/initialization_test.go` and this evidence record change.
+Production initialization/evaluation deadlines and required gates are unchanged.
+Native Darwin confirmation remains outstanding. The coordinator reports prior
+AMD64/ARM64 controller security scans passed with the Debian pins; no new image
+or release scan is claimed by this test patch. No push, remote rerun, tag or
+release was performed.
