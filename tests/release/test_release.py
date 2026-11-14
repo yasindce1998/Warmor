@@ -13,6 +13,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -50,7 +51,7 @@ class ArchiveTests(unittest.TestCase):
                               'out.write_text("#!/usr/bin/env bash\\necho 1.2.3\\n")\n'
                               'out.chmod(0o755)\n')
                 go.chmod(0o755)
-                env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+                env = dict(isolated_git_environment(), PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
                            VERSION="1.2.3", GOOS=goos, GOARCH="amd64", SOURCE_DATE_EPOCH="1700000000")
                 result = subprocess.run(["bash", str(ROOT / "scripts/release-build.sh")], cwd=root, env=env, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr.decode())
@@ -92,7 +93,7 @@ class ArchiveTests(unittest.TestCase):
                           'out.write_text("#!/usr/bin/env bash\\necho 1.2.3\\n")\n'
                           'out.chmod(0o755)\n')
             go.chmod(0o755)
-            env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+            env = dict(isolated_git_environment(), PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
                        VERSION="1.2.3", GOOS="windows", GOARCH="amd64", SOURCE_DATE_EPOCH="1700000000")
             result = subprocess.run(["bash", str(ROOT / "scripts/release-build.sh")], cwd=root, env=env, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr.decode())
@@ -222,7 +223,7 @@ class WorkflowTests(unittest.TestCase):
             output = root / "dist/warmor-1.2.3-darwin-arm64"
             output.mkdir(parents=True)
             (output / "warmor-daemon").write_text("old nonfunctional daemon")
-            env = dict(os.environ, VERSION="1.2.3", GOOS="darwin", GOARCH="arm64")
+            env = dict(isolated_git_environment(), VERSION="1.2.3", GOOS="darwin", GOARCH="arm64")
             result = subprocess.run(["bash", str(ROOT / "scripts/release-build.sh")], cwd=root, env=env, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b"release output already exists", result.stderr)
@@ -329,7 +330,7 @@ class ArtifactTransferTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "output"
             for result in ("failure", "skipped", "success"):
-                env = dict(os.environ, GITHUB_OUTPUT=str(output), PRODUCERS=json.dumps({"chart": {"result": result, "outputs": good}}))
+                env = dict(isolated_git_environment(), GITHUB_OUTPUT=str(output), PRODUCERS=json.dumps({"chart": {"result": result, "outputs": good}}))
                 run = subprocess.run([sys.executable, str(ROOT / "scripts/release-receipts.py")], env=env, capture_output=True)
                 if result != "success":
                     self.assertNotEqual(run.returncode, 0)
@@ -339,23 +340,111 @@ class ArtifactTransferTests(unittest.TestCase):
                     self.assertEqual(json.loads(output.read_text().removeprefix("receipts=")), [good])
 
 
+def isolated_git_environment(source=None):
+    """Never let a caller redirect fixture Git commands into its checkout."""
+    env = {key: value for key, value in (os.environ if source is None else source).items()
+           if not key.upper().startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_SYSTEM=os.devnull,
+               GIT_CONFIG_GLOBAL=os.devnull, GIT_ATTR_NOSYSTEM="1",
+               GIT_TERMINAL_PROMPT="0", GIT_ALLOW_PROTOCOL="file")
+    return env
+
+
+class RefRepository:
+    """Own all repository/config/ref/remote writes inside a fresh private temp."""
+
+    def __init__(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="warmor-release-ref-")
+        self.base = Path(self.tmp.name).resolve()
+        self.root = self.base / "repo"
+        self.root.mkdir(mode=0o700)
+        self.env = isolated_git_environment()
+        self.template = self.base / "empty-template"
+        self.template.mkdir(mode=0o700)
+        if (self.base.is_symlink() or not self.base.is_dir()
+                or self.root.resolve() != self.base / "repo"
+                or (self.root / ".git").exists()):
+            raise RuntimeError("release fixture init requires a fresh owned directory")
+        self._run("init", "-q", "--template=" + str(self.template), str(self.root))
+        self.assert_owned()
+
+    def close(self):
+        self.tmp.cleanup()
+
+    def _run(self, *args):
+        return subprocess.check_output(["git", *args], cwd=self.root,
+                                       env=self.env, text=True, stderr=subprocess.PIPE)
+
+    def assert_owned(self):
+        # cwd alone is not a boundary: .git files/symlinks, common-dir links,
+        # config worktree redirection and ambient GIT_* can override it.
+        gitdir = self.root / ".git"
+        if not self.base.is_dir() or self.base.is_symlink():
+            raise RuntimeError("release fixture root is not test-owned")
+        if (self.root.resolve() != self.base / "repo" or self.root.is_symlink()
+                or gitdir.is_symlink() or not gitdir.is_dir()
+                or (gitdir / "commondir").exists()):
+            raise RuntimeError("release fixture repository is not test-owned")
+        actual = Path(self._run("rev-parse", "--absolute-git-dir").strip()).resolve()
+        common = Path(self._run("rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
+        worktree = Path(self._run("rev-parse", "--show-toplevel").strip()).resolve()
+        if actual != gitdir or common != gitdir or worktree != self.root:
+            raise RuntimeError("release fixture Git escaped its private temporary repository")
+
+    def init_remote(self):
+        self.assert_owned()
+        remote = self.base / "remote.git"
+        if remote.exists() or remote.is_symlink():
+            raise RuntimeError("release fixture remote must be new and test-owned")
+        self._run("init", "--bare", "-q", "--template=" + str(self.template), str(remote))
+        if remote.is_symlink() or (remote / "commondir").exists():
+            raise RuntimeError("release fixture remote is not test-owned")
+        if (Path(self._run("--git-dir=" + str(remote), "rev-parse", "--absolute-git-dir").strip()).resolve() != remote
+                or Path(self._run("--git-dir=" + str(remote), "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve() != remote):
+            raise RuntimeError("release fixture remote escaped its temporary directory")
+        self.git("remote", "add", "origin", str(remote))
+
+    def git(self, *args):
+        self.assert_owned()
+        if not args or args[0].startswith("-") or args[0] == "init":
+            raise RuntimeError("fixture Git options/init must not override repository ownership")
+        if args[0] in ("push", "ls-remote"):
+            # Even a poisoned fixture config may not send writes to a real remote.
+            expected = str(self.base / "remote.git")
+            remote = Path(expected)
+            if remote.is_symlink() or not remote.is_dir() or (remote / "commondir").exists():
+                raise RuntimeError("release fixture remote is not test-owned")
+            for mode in ([], ["--push"]):
+                urls = self._run("remote", "get-url", *mode, "--all", "origin").splitlines()
+                if urls != [expected]:
+                    raise RuntimeError("release fixture remote is not test-owned")
+        return self._run(*args)
+
+    def check(self, mode, sha):
+        self.assert_owned()
+        if mode == "tag":
+            # Verify the script's read-only remote lookup uses the owned remote too.
+            self.git("ls-remote", "origin", "refs/tags/v1.2.3")
+        env = dict(self.env, GITHUB_SHA=sha, GITHUB_REF="refs/tags/v1.2.3")
+        return subprocess.run(["bash", str(ROOT / "scripts/release-check-ref.sh"), mode],
+                              cwd=self.root, env=env, capture_output=True)
+
+
 class RefTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        self.git("init", "-q")
+        self.repository = RefRepository()
+        self.addCleanup(self.repository.close)
+        self.root = self.repository.root
         self.git("config", "user.email", "release-test@example.invalid")
         self.git("config", "user.name", "Release test")
         self.git("commit", "--allow-empty", "-qm", "tested")
         self.sha = self.git("rev-parse", "HEAD").strip()
 
     def git(self, *args):
-        return subprocess.check_output(["git", *args], cwd=self.root, text=True, stderr=subprocess.DEVNULL)
+        return self.repository.git(*args)
 
     def check(self, mode):
-        env = dict(os.environ, GITHUB_SHA=self.sha, GITHUB_REF="refs/tags/v1.2.3")
-        return subprocess.run(["bash", str(ROOT / "scripts/release-check-ref.sh"), mode], cwd=self.root, env=env, capture_output=True)
+        return self.repository.check(mode, self.sha)
 
     def test_branch_full_ref_match_rejects_embedded_origin_main(self):
         for ref in ("refs/remotes/origin/feature/origin/main", "refs/remotes/origin/feature/origin/release-1", "refs/remotes/other/main"):
@@ -368,9 +457,7 @@ class RefTests(unittest.TestCase):
         self.assertEqual(self.check("branch").returncode, 0)
 
     def test_lightweight_and_annotated_remote_tag_move_or_delete_rejected(self):
-        remote = self.root / "remote.git"
-        self.git("init", "--bare", "-q", str(remote))
-        self.git("remote", "add", "origin", str(remote))
+        self.repository.init_remote()
         for annotated in (False, True):
             with self.subTest(annotated=annotated):
                 self.git("tag", "-f", *( ["-a", "-m", "release"] if annotated else []), "v1.2.3", self.sha)
@@ -382,6 +469,55 @@ class RefTests(unittest.TestCase):
                 self.assertNotEqual(self.check("tag").returncode, 0)
                 self.git("push", "-q", "origin", ":refs/tags/v1.2.3")
                 self.assertNotEqual(self.check("tag").returncode, 0)
+
+
+class GitIsolationTests(unittest.TestCase):
+    def test_ref_fixtures_ignore_hostile_ambient_git_without_touching_sentinel(self):
+        sentinel = RefRepository()
+        self.addCleanup(sentinel.close)
+        sentinel.git("config", "user.name", "Sentinel owner")
+        sentinel.git("config", "user.email", "sentinel@example.invalid")
+        sentinel.git("commit", "--allow-empty", "-qm", "sentinel")
+        sha = sentinel.git("rev-parse", "HEAD").strip()
+        sentinel.git("update-ref", "refs/remotes/origin/main", sha)
+
+        def snapshot():
+            return {str(path.relative_to(sentinel.root)): path.read_bytes()
+                    for path in sentinel.root.rglob("*") if path.is_file()}
+
+        before = snapshot()
+        hostile = {
+            "GIT_DIR": str(sentinel.root / ".git"),
+            "GIT_COMMON_DIR": str(sentinel.root / ".git"),
+            "GIT_WORK_TREE": str(sentinel.root),
+            "GIT_INDEX_FILE": str(sentinel.root / ".git" / "index"),
+            "GIT_CONFIG": str(sentinel.root / ".git" / "config"),
+            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree",
+            "GIT_CONFIG_VALUE_0": str(sentinel.root),
+            "GIT_CONFIG_PARAMETERS": "'core.worktree=" + str(sentinel.root) + "'",
+            "GIT_AUTHOR_NAME": "Hostile ambient author",
+            "GIT_AUTHOR_EMAIL": "hostile@example.invalid",
+            "GIT_CONFIG_GLOBAL": str(sentinel.root / ".git" / "config"),
+            "GIT_CONFIG_SYSTEM": str(sentinel.root / ".git" / "config"),
+        }
+        with mock.patch.dict(os.environ, hostile):
+            result = unittest.TestResult()
+            unittest.defaultTestLoader.loadTestsFromTestCase(RefTests).run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+        self.assertEqual(snapshot(), before, "fixture touched the external sentinel Git repository")
+
+    def test_ref_fixture_refuses_repository_redirection_before_mutation(self):
+        owned = RefRepository()
+        sentinel = RefRepository()
+        self.addCleanup(owned.close)
+        self.addCleanup(sentinel.close)
+        before = (sentinel.root / ".git" / "config").read_bytes()
+        original = owned.root / ".git"
+        original.rename(owned.root / "retained.git")
+        original.write_text("gitdir: " + str(sentinel.root / ".git") + "\n")
+        with self.assertRaisesRegex(RuntimeError, "not test-owned"):
+            owned.git("config", "user.name", "must not write")
+        self.assertEqual((sentinel.root / ".git" / "config").read_bytes(), before)
 
 
 @unittest.skipUnless(shutil.which("helm"), "helm required for packaged chart regression")
@@ -402,7 +538,7 @@ class ChartTests(unittest.TestCase):
                 return {path.relative_to(chart_root): path.read_bytes() for path in chart_root.rglob("*") if path.is_file()}
 
             source = snapshot()
-            env = dict(os.environ, VERSION=version, IMAGE_REPOSITORY="ghcr.io/example/warmor")
+            env = dict(isolated_git_environment(), VERSION=version, IMAGE_REPOSITORY="ghcr.io/example/warmor")
             subprocess.run(["bash", str(ROOT / "scripts/release-chart.sh")], cwd=root, env=env, check=True, capture_output=True)
             archive = root / f"dist/warmor-{version}.tgz"
             with tarfile.open(archive) as stream:

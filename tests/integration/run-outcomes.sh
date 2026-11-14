@@ -6,8 +6,12 @@ cd "$ROOT"
 # Go 1.26's VCS discovery recognizes .git directories but not worktree .git
 # files and otherwise stamps the enclosing checkout's HEAD. Bind Git queries
 # to this exact worktree; never bless mismatched embedded revision metadata.
-export GIT_DIR="$(git rev-parse --absolute-git-dir)"
-export GIT_WORK_TREE="$ROOT"
+WORKTREE_GIT_DIR="$(git rev-parse --absolute-git-dir)"
+go_with_worktree_vcs() {
+  # Scope provenance overrides to Go itself. Exporting them for the complete
+  # runner can redirect unrelated fixture Git commands despite their own cwd.
+  GIT_DIR="$WORKTREE_GIT_DIR" GIT_WORK_TREE="$ROOT" go "$@"
+}
 
 usage() {
   echo 'Usage: tests/integration/run-outcomes.sh [--build-only] [--policy-host [--atomic-generations]]'
@@ -59,14 +63,14 @@ export WARMOR_OUTCOME_ARTIFACTS="$ARTIFACTS"
 git rev-parse HEAD > "$ARTIFACTS/source-sha.txt"
 if "$POLICY_HOST"; then
   # Explicit test-only paired protocol: production/release builds omit it.
-  go build -tags policyhost_phaseproof -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon
-  go build -tags policyhost_phaseproof -o "$ARTIFACTS/warmor-policy-host" ./cmd/warmor-policy-host
+  go_with_worktree_vcs build -tags policyhost_phaseproof -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon
+  go_with_worktree_vcs build -tags policyhost_phaseproof -o "$ARTIFACTS/warmor-policy-host" ./cmd/warmor-policy-host
   sha256sum "$ARTIFACTS/warmor-policy-host" | cut -d ' ' -f1 > "$ARTIFACTS/POLICY_HOST_SHA256"
 else
-  go build -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon
+  go_with_worktree_vcs build -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon
 fi
-go test -c -tags integration -o "$ARTIFACTS/outcomes.test" ./tests/integration
-go test -c -tags integration -o "$ARTIFACTS/kernel.test" ./internal/ebpf
+go_with_worktree_vcs test -c -tags integration -o "$ARTIFACTS/outcomes.test" ./tests/integration
+go_with_worktree_vcs test -c -tags integration -o "$ARTIFACTS/kernel.test" ./internal/ebpf
 test "$(git rev-parse HEAD)" = "$(cat "$ARTIFACTS/source-sha.txt")"
 WARMOR_OUTCOME_PREPARE=1 "$ARTIFACTS/outcomes.test" \
   -test.v -test.run '^TestPrepareOutcomeArtifacts$' | tee "$ARTIFACTS/build.log"

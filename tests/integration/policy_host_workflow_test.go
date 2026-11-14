@@ -88,11 +88,12 @@ func TestSupervisedHostRunnerControlsAndTrustEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		`export GIT_DIR="$(git rev-parse --absolute-git-dir)"`, `export GIT_WORK_TREE="$ROOT"`,
+		`WORKTREE_GIT_DIR="$(git rev-parse --absolute-git-dir)"`,
+		`GIT_DIR="$WORKTREE_GIT_DIR" GIT_WORK_TREE="$ROOT" go "$@"`,
 		`unset WARMOR_OUTCOME_POLICY_HOST WARMOR_OUTCOME_ATOMIC_GENERATIONS`,
 		`unset WARMOR_TEST_HOST_PHASE_SOCKET WARMOR_TEST_HOST_PHASE_DIGESTS`,
-		`go build -tags policyhost_phaseproof -o "$ARTIFACTS/warmor-policy-host" ./cmd/warmor-policy-host`,
-		`go build -tags policyhost_phaseproof -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon`,
+		`go_with_worktree_vcs build -tags policyhost_phaseproof -o "$ARTIFACTS/warmor-policy-host" ./cmd/warmor-policy-host`,
+		`go_with_worktree_vcs build -tags policyhost_phaseproof -o "$ARTIFACTS/warmor-daemon" ./cmd/warmor-daemon`,
 		`"$ARTIFACTS/POLICY_HOST_SHA256"`, `"$ARTIFACTS/fixture-public.pem"`,
 		`"$ARTIFACTS/"*.sig`, `"$ARTIFACTS/reviewed-declaration-digests.txt"`,
 		`bash tests/integration/check-host-outcomes.sh "$ARTIFACTS/outcomes.log"`,
@@ -101,6 +102,9 @@ func TestSupervisedHostRunnerControlsAndTrustEvidence(t *testing.T) {
 		if !strings.Contains(string(data), required) {
 			t.Error("missing exact host evidence:", required)
 		}
+	}
+	if strings.Contains(string(data), "export GIT_DIR=") || strings.Contains(string(data), "export GIT_WORK_TREE=") {
+		t.Fatal("Git provenance overrides must not leak outside Go invocations")
 	}
 }
 
