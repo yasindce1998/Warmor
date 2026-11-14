@@ -29,7 +29,7 @@ func TestPolicyUpdateFailureKeepsDurableRevision(t *testing.T) {
 				writeFile(t, path+".revisions", "not a directory")
 			}
 			calls := 0
-			hook := policyUpdateHandler(path, func(candidate string, commit func() error) error {
+			hook := policyUpdateHandler(path, sk.Public, func(candidate string, commit func() error) error {
 				calls++
 				if failure == "load" {
 					_, err := enforcer.ValidatePolicy(context.Background(), candidate, sk.Public)
@@ -168,7 +168,7 @@ func TestPolicyRevisionBootRecoveryAndPublicationRetry(t *testing.T) {
 	blocker := filepath.Join(previous, "block-rename")
 	writeFile(t, blocker, "injected publication failure")
 	validations := 0
-	hook := policyUpdateHandler(path, func(candidate string, commit func() error) error {
+	hook := policyUpdateHandler(path, sk.Public, func(candidate string, commit func() error) error {
 		if _, err := enforcer.ValidatePolicy(ctx, candidate, sk.Public); err != nil {
 			return err
 		}

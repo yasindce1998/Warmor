@@ -317,7 +317,7 @@ func runDaemon(stop <-chan struct{}) {
 			}
 		}
 		var err error
-		policyClient, err = newPolicyClient(clientCfg, policyUpdateHandler(*policyPath, enf.ActivatePolicy))
+		policyClient, err = newPolicyClient(clientCfg, policyUpdateHandler(*policyPath, pub, enf.ActivatePolicy))
 		if err != nil {
 			log.Fatalf("❌ Policy server: %v", err)
 		}

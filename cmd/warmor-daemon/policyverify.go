@@ -91,9 +91,13 @@ func writeDownloadedPolicy(path string, a *policyserver.PolicyAssignment, data [
 }
 
 // policyUpdateHandler waits for actual activation and durable publication.
-func policyUpdateHandler(policyPath string, activate func(string, func() error) error) func(*policyserver.PolicyAssignment, []byte) error {
+func policyUpdateHandler(policyPath string, pub ed25519.PublicKey, activate func(string, func() error) error) func(*policyserver.PolicyAssignment, []byte) error {
+	return (policyRevisionStager{verifyKey: pub}).updateHandler(policyPath, activate)
+}
+
+func (s policyRevisionStager) updateHandler(policyPath string, activate func(string, func() error) error) func(*policyserver.PolicyAssignment, []byte) error {
 	return func(a *policyserver.PolicyAssignment, data []byte) error {
-		r, err := stagePolicyRevision(policyPath, a, data)
+		r, err := s.stage(policyPath, a, data)
 		if err == nil {
 			defer r.discard()
 			err = activate(r.modulePath, r.commit)

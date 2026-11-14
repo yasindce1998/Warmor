@@ -39,7 +39,14 @@ For any symlinked policy path, the signature must live next to the resolved
 module; an unrelated `<alias>.sig` alongside a module-only symlink is not used.
 
 An existing legacy pair is first copied without changing its bytes, then
-migrated to this layout. A fresh runtime/pool loads the staged candidate before
+migrated to this layout. Migration resolves the legacy module once and copies
+that resolved module's sibling signature, matching the startup reader even for
+a module-only symlink. With `--verify-key`, the copied recovery pair is verified
+before either public alias changes. The public aliases' parent directory is
+synced on **every** staging attempt: already-correct symlink targets are not
+evidence that a previous rename passed its durability barrier. A failed parent
+sync blocks candidate activation and acknowledgement, including on retry.
+A fresh runtime/pool loads the staged candidate before
 the restart pointer changes. Download, signature, staging-write, runtime-load,
 kernel-preparation, and durable-publication failures are not acknowledged. The
 previous userspace generation remains and subsequent polls retry. Unpublished

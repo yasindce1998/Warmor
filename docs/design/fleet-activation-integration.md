@@ -139,3 +139,36 @@ optional build artifacts.
 See [policy-activation.md](policy-activation.md) and
 [POLICY_SERVER_STATE.md](../POLICY_SERVER_STATE.md) for recovery procedures and
 operational boundaries.
+
+## Independent review publication blockers (follow-up)
+
+Review pinned at `b80dfef` identified two disk-publication blockers despite the
+runtime-generation review being clear. The follow-up preserves subsequent main
+merges through `78471f6` and changes only daemon publication/wiring/tests/docs:
+
+- Legacy migration now resolves the module once, reads its actual sibling
+  signature, and verifies the copied immutable recovery pair with the daemon's
+  configured verification key before changing public aliases. It does not use
+  an unrelated signature alongside a module-only symlink. Recovery from an
+  interrupted migration validates its existing recovery pair before finishing
+  alias replacement.
+- Every staging attempt repeats the public-alias parent-directory fsync, even
+  when both aliases already have the expected targets. Failed barriers cannot
+  be bypassed by retrying or recreating the in-memory stager.
+
+Deterministic tests cover a signed legacy module symlink with its real sibling
+signature (including an absent or unrelated alias-side signature), interrupted
+staging, candidate load/publication failure, verification failure before alias
+changes, and two successive injected parent-fsync failures followed by recovery.
+The fsync test checks the parent call count on each attempt and that no failed
+attempt reaches activation or returns an acknowledgement; all previous signed
+startup pairs are validated in the actual WASM runtime. Fault injection is local
+to a stager, not a process-global hook. These are filesystem call-boundary tests,
+not physical power-loss or privileged infrastructure validation.
+
+Follow-up validation (`GOMAXPROCS=2`, `-p 2`): full `go test ./...`, full
+`go test -race ./...`, repeated focused security tests under race, and daemon
+`go vet` all pass. Daemon staticcheck v0.8.2 passes. Daemon errcheck v1.30.0 with
+`-asserts` reports only the existing cleanup/print exclusions, with no unchecked
+assertions or new persistence-error findings. Changed files pass gofmt and diff
+whitespace checks. Follow-up logs are `/tmp/opencode/fleet-blockers-*.log`.

@@ -179,7 +179,7 @@ func TestSignedPolicyDistributionEndToEnd(t *testing.T) {
 			}
 			return err
 		},
-	}, policyUpdateHandler(policyPath, func(path string, commit func() error) error {
+	}, policyUpdateHandler(policyPath, sk.Public, func(path string, commit func() error) error {
 		if _, err := enforcer.ValidatePolicy(context.Background(), path, pub); err != nil {
 			return err
 		}
