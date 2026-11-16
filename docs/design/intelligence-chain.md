@@ -67,6 +67,42 @@ while `--attack-graph` is on, every 15 s:
 - `warmor_blast_radius_reachable{cgroup}` — containers reachable from
   that cgroup in the relationship graph (BFS, unlimited hops)
 
+## Correlation and graph model
+
+The attack graph correlates events to MITRE ATT&CK techniques and builds a
+per-container kill-chain graph: nodes are observed techniques, edges point from
+earlier to later tactics and weights reinforce on repetition. `Graph.Summary()`
+reports container count, technique coverage and `HighestProgression` — how deep
+into the kill chain any container has reached.
+
+The embedded technique database covers 28 container-relevant techniques across
+all 11 kill-chain tactics:
+
+| Tactic | Techniques |
+|--------|-----------|
+| Initial Access | Exploit Public App (T1190), Valid Accounts (T1078) |
+| Execution | Unix Shell (T1059.004), Deploy Container (T1610), Ingress Tool Transfer (T1105), Service Execution (T1569.002) |
+| Persistence | Cron (T1053.003), Systemd Service (T1543.002), Account Manipulation (T1098) |
+| Privilege Escalation | Escape to Host (T1611), Exploitation (T1068), Setuid/Setgid (T1548.001), Process Injection (T1055) |
+| Defense Evasion | Build Image on Host (T1612), File Deletion (T1070.004), Rootkit (T1014), Obfuscated Files (T1027) |
+| Discovery | Container Discovery (T1613), Network Service Scan (T1046), System Info (T1082), File Discovery (T1083), Process Discovery (T1057), Network Connections (T1049) |
+| Lateral Movement | SSH (T1021.004) |
+| Collection | Credentials in Files (T1552.001), Data Staged (T1074) |
+| Exfiltration | Alternative Protocol (T1048), Web Protocols (T1071.001), Non-App Layer Protocol (T1095) |
+| Impact | Data Destruction (T1485), Service Stop (T1489), Resource Hijacking (T1496) |
+
+Correlation rules map events to techniques via event type, exact `comm` match and
+substring path match (for example `exec` + `nsenter` → T1611, `exec` + `xmrig` →
+T1496); custom rules use `NewCorrelatorWithRules`.
+
+The blast-radius collector builds a live relationship graph and answers "if
+container X is breached, what else is reachable?" via BFS. Edge types: network
+connections (directed), shared volumes (directed) and shared PID/IPC namespaces
+(bidirectional). Queries: `Reach` (undirected BFS, worst case), `ReachDirected`
+(outgoing only, realistic lateral movement), `ImpactScore` (0–1, fraction of the
+fleet reachable from one container) and `MostConnected` (highest-risk node).
+They are intended for incident response, segmentation planning and risk scoring.
+
 ## Known limits
 
 - The attack graph keeps entries for containers that have exited; there
