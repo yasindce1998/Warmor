@@ -191,8 +191,8 @@ func TestRealWorkerMalformedDeclarationsStayIneligible(t *testing.T) {
 }
 
 func TestRealWorkerGuestStaticDuplicatesPreserveFirstMatch(t *testing.T) {
+	// A unique first-match table must keep the guest's exact action/audit.
 	table := append([]byte{1}, staticEntry("/bin/tool", 0, 1, 1)...)
-	table = append(table, staticEntry("/bin/tool", 0, 0, 0)...)
 	p := staged(t, declarationGuest(table, compiler.FieldBitPath, 5))
 	c := config(t)
 	c.TrustedDeclarationDigests = []string{p.Digest()}
@@ -204,6 +204,25 @@ func TestRealWorkerGuestStaticDuplicatesPreserveFirstMatch(t *testing.T) {
 	d := h.StaticRulesProcess()
 	if !d.Eligible || len(d.Rules) != 1 || d.Rules[0].Action != 1 || !d.Rules[0].Audit {
 		t.Fatalf("guest first-match action/audit lost %+v", d)
+	}
+}
+
+func TestRealWorkerGuestDuplicateStaticIdentityDeclinesOptimization(t *testing.T) {
+	// PR53's fail-closed declaration guard is retained: a custom raw export
+	// carrying duplicate exact identities declines optimization rather than
+	// letting a later conflicting declaration hide behind an earlier match.
+	table := append([]byte{1}, staticEntry("/bin/tool", 0, 1, 1)...)
+	table = append(table, staticEntry("/bin/tool", 0, 0, 0)...)
+	p := staged(t, declarationGuest(table, compiler.FieldBitPath, 5))
+	c := config(t)
+	c.TrustedDeclarationDigests = []string{p.Digest()}
+	h, err := supervisor(t, c).Start(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if d := h.StaticRulesProcess(); d.Eligible || len(d.Rules) != 0 {
+		t.Fatalf("duplicate raw static identity was promoted %+v", d)
 	}
 }
 
