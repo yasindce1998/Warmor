@@ -237,7 +237,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		return nil, errGenerationTelemetryUnsupported
 	}
 	if opts.ExpectedAssignment != nil && opts.AtomicGenerations {
-		return nil, errors.New("signed assignments with atomic generations are unsupported until one commit/recovery model is validated")
+		return nil, errors.New("signed assignments with atomic generations are unsupported until one separately reviewed commit/recovery model is validated")
 	}
 	if opts.AtomicGenerations && (runtime.GOOS != "linux" || opts.SkipLSM || !opts.RequireLSM) {
 		return nil, errors.New("atomic generations require Linux --require-lsm without --no-lsm")
@@ -1291,7 +1291,7 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, dura
 	}
 	if e.generations != nil {
 		if expected != nil || e.signedAssignment {
-			return errors.New("signed assignments with atomic generations require a separately reviewed activation integration")
+			return errors.New("signed assignments with atomic generations are unsupported until one separately reviewed activation/commit-recovery integration is validated")
 		}
 		if snapshot != nil || e.telemetry != nil {
 			if e.telemetry != nil {
@@ -1334,8 +1334,8 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, dura
 		// Dynamic cached kernel entries cannot be restored transactionally.
 		restoreErr := e.prepareKernel(e.evaluator)
 		e.decisionMu.Unlock()
-		e.activation = nodereceipt.Activation{} // kernel state is no longer acknowledged
 		if restoreErr != nil {
+			e.activation = nodereceipt.Activation{} // kernel state is no longer acknowledged
 			return fmt.Errorf("activation failed: %w; kernel rollback failed (enforcement degraded): %v", err, restoreErr)
 		}
 		return fmt.Errorf("activation failed (previous userspace policy retained): %w", err)

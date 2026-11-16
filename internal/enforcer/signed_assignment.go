@@ -35,6 +35,9 @@ func (e *Enforcer) checkAssignment(src policymeta.Source, want assignment.Policy
 // until that combined recovery model is tested. Generic reloads stay disabled
 // when ExpectedAssignment was supplied at startup.
 func (e *Enforcer) ActivateAssignment(path string, policy assignment.Policy, commit func() error) error {
+	if e.generations != nil {
+		return errors.New("signed assignments with atomic generations are unsupported until one separately reviewed activation/commit-recovery integration is validated")
+	}
 	if len(e.verifyKey) != ed25519.PublicKeySize {
 		return errors.New("signed assignment requires an artifact verification key")
 	}

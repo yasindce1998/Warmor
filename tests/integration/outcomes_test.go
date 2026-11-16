@@ -454,7 +454,7 @@ func (d *daemonProcess) stop(t *testing.T) {
 
 func (f *outcomeFixture) startDaemon(t *testing.T, name, policy string, flags ...string) *daemonProcess {
 	t.Helper()
-	return f.startDaemonEnv(t, name, policy, nil, flags...)
+	return f.startDaemonBinary(t, "warmor-daemon", name, policy, flags...)
 }
 
 func (f *outcomeFixture) startDaemonEnv(t *testing.T, name, policy string, env []string, flags ...string) *daemonProcess {
