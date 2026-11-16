@@ -90,7 +90,7 @@ func (m *policiesModel) View() string {
 
 func (m *policiesModel) fetch() tea.Msg {
 	var policies []policyInfo
-	if err := m.api.get("/api/v1/admin/policies", &policies); err != nil {
+	if err := m.api.get(routeAdminPolicies, &policies); err != nil {
 		return errMsg{err}
 	}
 	return policiesMsg(policies)

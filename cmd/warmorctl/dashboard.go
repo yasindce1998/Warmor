@@ -8,12 +8,12 @@ import (
 )
 
 type dashboardModel struct {
-	api        *apiClient
-	agents     []agentInfo
-	policies   []policyInfo
-	rollouts   []rolloutInfo
-	loading    bool
-	err        error
+	api      *apiClient
+	agents   []agentInfo
+	policies []policyInfo
+	rollouts []rolloutInfo
+	loading  bool
+	err      error
 }
 
 type dashboardDataMsg struct {
@@ -121,13 +121,13 @@ func (m *dashboardModel) fetchAll() tea.Msg {
 	var policies []policyInfo
 	var rollouts []rolloutInfo
 
-	if err := m.api.get("/api/v1/admin/agents", &agents); err != nil {
+	if err := m.api.get(routeAdminAgents, &agents); err != nil {
 		return errMsg{err}
 	}
-	if err := m.api.get("/api/v1/admin/policies", &policies); err != nil {
+	if err := m.api.get(routeAdminPolicies, &policies); err != nil {
 		return errMsg{err}
 	}
-	if err := m.api.get("/api/v1/admin/rollouts", &rollouts); err != nil {
+	if err := m.api.get(routeAdminRollouts, &rollouts); err != nil {
 		return errMsg{err}
 	}
 

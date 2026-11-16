@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/yasindce1998/warmor/internal/telemetry"
+	"github.com/yasindce1998/warmor/pkg/controlplane"
 )
 
 // AuthorizeTelemetry explicitly starts a new collector incarnation. It never
@@ -23,7 +24,7 @@ func (c *Client) AuthorizeTelemetry(ctx context.Context) error {
 	if c.telemetry == nil {
 		return fmt.Errorf("no telemetry collector configured")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/telemetry/session", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+controlplane.RouteTelemetrySession, nil)
 	if err != nil {
 		return err
 	}

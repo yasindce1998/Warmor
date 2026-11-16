@@ -9,10 +9,13 @@ import (
 	"net/http"
 
 	"github.com/yasindce1998/warmor/internal/telemetry"
+	"github.com/yasindce1998/warmor/pkg/controlplane"
 )
 
-const telemetryEpochHeader = "X-Warmor-Telemetry-Epoch"
-const telemetrySessionHeader = "X-Warmor-Telemetry-Session"
+const (
+	telemetryEpochHeader   = controlplane.HeaderTelemetryEpoch
+	telemetrySessionHeader = controlplane.HeaderTelemetrySession
+)
 
 const signedTelemetryUnsupported = "signed-deployment-telemetry-unsupported"
 
@@ -67,7 +70,7 @@ func (s *Server) handleTelemetryReport(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	id := r.URL.Query().Get("rollout_id")
+	id := r.URL.Query().Get(controlplane.QueryRolloutID)
 	s.store.mu.RLock()
 	defer s.store.mu.RUnlock()
 	if s.signedTelemetryDisabledLocked() {

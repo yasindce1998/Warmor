@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+
+	"github.com/yasindce1998/warmor/pkg/controlplane"
 )
 
 type ContainerBinding struct {
@@ -66,7 +68,7 @@ func (s *Server) handleContainerDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := strings.TrimPrefix(r.URL.Path, "/api/v1/containers/")
+	id := strings.TrimPrefix(r.URL.Path, controlplane.RouteContainersPrefix)
 	if !validStateID(id) {
 		http.Error(w, "container_id required", http.StatusBadRequest)
 		return

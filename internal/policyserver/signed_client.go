@@ -12,14 +12,19 @@ import (
 	"strconv"
 
 	"github.com/yasindce1998/warmor/internal/crypto/assignment"
+	"github.com/yasindce1998/warmor/pkg/controlplane"
 )
 
 func (c *Client) pollSigned(ctx context.Context) error {
 	c.mu.Lock()
 	sequence, hash := c.deploymentSequence, c.envelopeHash
 	c.mu.Unlock()
-	q := url.Values{"agent_id": {c.agentID}, "if_sequence": {strconv.FormatUint(sequence, 10)}, "if_envelope_hash": {hash}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/deployment?"+q.Encode(), nil)
+	q := url.Values{
+		controlplane.QueryAgentID:        {c.agentID},
+		controlplane.QueryIfSequence:     {strconv.FormatUint(sequence, 10)},
+		controlplane.QueryIfEnvelopeHash: {hash},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+controlplane.RouteDeployment+"?"+q.Encode(), nil)
 	if err != nil {
 		return err
 	}

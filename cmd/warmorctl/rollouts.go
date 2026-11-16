@@ -106,7 +106,7 @@ func (m *rolloutsModel) View() string {
 
 func (m *rolloutsModel) fetch() tea.Msg {
 	var rollouts []rolloutInfo
-	if err := m.api.get("/api/v1/admin/rollouts", &rollouts); err != nil {
+	if err := m.api.get(routeAdminRollouts, &rollouts); err != nil {
 		return errMsg{err}
 	}
 	return rolloutsMsg(rollouts)

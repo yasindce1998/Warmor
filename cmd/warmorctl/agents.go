@@ -118,7 +118,7 @@ func (m *agentsModel) View() string {
 
 func (m *agentsModel) fetch() tea.Msg {
 	var agents []agentInfo
-	if err := m.api.get("/api/v1/admin/agents", &agents); err != nil {
+	if err := m.api.get(routeAdminAgents, &agents); err != nil {
 		return errMsg{err}
 	}
 	return agentsMsg(agents)
