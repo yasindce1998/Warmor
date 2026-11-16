@@ -532,8 +532,12 @@ func (f *outcomeFixture) startDaemonBinaryEnv(t *testing.T, binary, name, policy
 		}
 	})
 	waitFor(t, "daemon event loop and HTTP endpoint", func() bool {
-		data, _ := os.ReadFile(d.log)
-		return strings.Contains(string(data), "warmor is running") && strings.Contains(d.scrape(), "warmor_ebpf_loader_status 1")
+		// The /ready endpoint is backed by the enforcer's own liveness source:
+		// it returns 200 only after Start() installed its readiness check and
+		// the event loop is running with an active policy (and, in supervised
+		// mode, a live host). Unlike a log string it cannot be obscured by a
+		// partial/interleaved log write, so it is a strictly stronger oracle.
+		return d.ready() && strings.Contains(d.scrape(), "warmor_ebpf_loader_status 1")
 	})
 	// Preserve effective/permitted capability masks for nonroot-signal failure
 	// diagnosis. Root identity alone is not proof of CAP_KILL; neither a missing
@@ -564,6 +568,20 @@ func (d *daemonProcess) scrape() string {
 		return ""
 	}
 	return string(data)
+}
+
+// ready queries the enforcer's authoritative readiness endpoint. A 200/READY
+// proves the event loop is processing (e.processing), a policy is active, and
+// the supervised host (if any) is still alive.
+func (d *daemonProcess) ready() bool {
+	client := &http.Client{Timeout: time.Second}
+	resp, err := client.Get(strings.TrimSuffix(d.metrics, "/metrics") + "/ready")
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode == http.StatusOK && strings.Contains(string(data), "READY")
 }
 
 func waitFor(t *testing.T, description string, condition func() bool) {
