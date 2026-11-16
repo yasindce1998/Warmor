@@ -129,72 +129,32 @@ func flushGenerationTraffic(t *testing.T, l *LSMLoader, c *generationTrafficEven
 	return 0
 }
 
-// holdSyscallAcrossPublication arms a helper that blocks in a syscall and
-// stays blocked until the returned release function is called. The caller
-// must record its publication window between the "armed" signal and release;
-// the returned attempt then strictly contains that window by construction.
+// runGenerationWorkload executes one full concurrent workload using strictly
+// real, BPF-intercepted UDP connects. Generation IDs genBase+1..genBase+numPubs
+// are used so repeated attempts never replay an ID (Prepare requires strictly
+// increasing IDs). eventStart is the collector's event index at attempt start;
+// only events recorded from there on belong to this attempt.
 //
-// This is deterministic concurrency evidence: UDP connects are instantaneous,
-// so on a fast run every one of them can land between two activations and the
-// overlap count would be zero even though the verdict-pairing checks all pass.
-// The four writers keep exercising real policy decisions continuously; this
-// barrier guarantees that at least one measured operation is in flight across
-// each pointer switch, so the pairing/generation/drain checks below are proven
-// to have run concurrently with publication rather than sequentially.
-func holdSyscallAcrossPublication(t *testing.T) (release func(), armed <-chan struct{}, attempt <-chan generationTrafficAttempt) {
+// Every verdict/generation/drain/retire assertion in the original test runs
+// here unchanged on every attempt. The only thing the caller decides based on
+// the return value is whether this attempt produced real overlap evidence.
+func runGenerationWorkload(
+	t *testing.T,
+	l *LSMLoader,
+	cgid uint64,
+	m *GenerationManager,
+	c *generationTrafficEvents,
+	spec func(uint64) GenerationSpec,
+	genBase, numPubs uint64,
+	eventStart int,
+) int {
 	t.Helper()
-	pr, pw, err := os.Pipe()
-	if err != nil {
+	if err := m.Prepare(genBase+1, spec(genBase+1)); err != nil {
 		t.Fatal(err)
 	}
-	armedCh := make(chan struct{})
-	done := make(chan generationTrafficAttempt, 1)
-	go func() {
-		defer pr.Close()
-		buf := make([]byte, 1)
-		start := time.Now()
-		close(armedCh)      // start is recorded before the caller proceeds to Activate
-		_, _ = pr.Read(buf) // blocks until release writes (or the writer is closed)
-		done <- generationTrafficAttempt{false, start, time.Now()}
-	}()
-	var once sync.Once
-	release = func() {
-		once.Do(func() {
-			if _, werr := pw.Write([]byte{0}); werr != nil {
-				t.Errorf("release spanning syscall: %v", werr)
-			}
-			if cerr := pw.Close(); cerr != nil {
-				t.Errorf("close spanning syscall writer: %v", cerr)
-			}
-		})
-	}
-	// Also release on early t.Fatal so the helper cannot be leaked.
-	t.Cleanup(release)
-	return release, armedCh, done
-}
-
-func TestLSM_GenerationConcurrentVerdictsFlushAndRetire(t *testing.T) {
-	l, cgid := identityTestLoader(t)
-	m := l.PolicyGenerations()
-	spec := func(id uint64) GenerationSpec {
-		s := GenerationSpec{DefaultDeny: []GenerationDomain{{EventType: EventTypeNetwork, Mode: DefaultDenyModeDeny}}}
-		for worker := 0; worker < 4; worker++ {
-			// Alternate which endpoints are exact audited allows and which
-			// are denied on a miss. Both generations must remain complete.
-			if (uint64(worker)+id)%2 == 0 {
-				s.Rules = append(s.Rules, GenerationRule{CgroupID: cgid, EventType: EventTypeNetwork,
-					Address: "127.0.0.1", Port: uint16(42100 + worker), Action: ActionAllow, Audit: true})
-			}
-		}
-		return s
-	}
-	if err := m.Prepare(1, spec(1)); err != nil {
+	if err := m.Activate(genBase + 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Activate(1); err != nil {
-		t.Fatal(err)
-	}
-	c := collectGenerationTraffic(l)
 	var stopOnce sync.Once
 	stop := make(chan struct{})
 	var workers sync.WaitGroup
@@ -202,22 +162,16 @@ func TestLSM_GenerationConcurrentVerdictsFlushAndRetire(t *testing.T) {
 	var results [4][]generationTrafficAttempt
 	workerErrors := make(chan error, 4)
 	stopWorkers := func() { stopOnce.Do(func() { close(stop); workers.Wait() }) }
-	t.Cleanup(func() {
-		stopWorkers()
-		if err := l.lsmReader.Close(); err != nil {
-			t.Error(err)
-		}
-		<-c.done
-	})
+	t.Cleanup(stopWorkers)
 	flushGenerationTraffic(t, l, c)
-	if err := m.AcknowledgeDrain(0); err != nil {
+	if err := m.AcknowledgeDrain(genBase); err != nil {
 		t.Fatal(err)
 	}
 	for worker := range results {
 		workers.Add(1)
 		go func(worker int) {
 			defer workers.Done()
-			tick := time.NewTicker(2 * time.Millisecond)
+			tick := time.NewTicker(500 * time.Microsecond)
 			defer tick.Stop()
 			for {
 				select {
@@ -269,7 +223,7 @@ func TestLSM_GenerationConcurrentVerdictsFlushAndRetire(t *testing.T) {
 			return true
 		}
 	}
-	waitGenerationTraffic(t, c, seenAll(1))
+	waitGenerationTraffic(t, c, seenAll(genBase+1))
 	type retiredBarrier struct {
 		id    uint64
 		index int
@@ -277,25 +231,17 @@ func TestLSM_GenerationConcurrentVerdictsFlushAndRetire(t *testing.T) {
 	var retired []retiredBarrier
 	type publicationWindow struct{ start, end time.Time }
 	var publications []publicationWindow
-	// Barrier-coordinated spanning syscalls: each one is released only after
-	// its publication window is recorded, so its [start,end] interval strictly
-	// contains that window regardless of how fast the connects run.
-	var spanning []generationTrafficAttempt
-	for id := uint64(2); id <= 6; id++ {
+	for id := genBase + 2; id <= genBase+numPubs; id++ {
 		beforeBuild := completed.Load()
 		if err := m.Prepare(id, spec(id)); err != nil {
 			t.Fatal(err)
 		}
 		oldFD := m.active.mapFD
-		releaseSpan, armedSpan, spanDone := holdSyscallAcrossPublication(t)
-		<-armedSpan
 		start := time.Now()
 		if err := m.Activate(id); err != nil {
 			t.Fatal(err)
 		}
 		publications = append(publications, publicationWindow{start, time.Now()})
-		releaseSpan()
-		spanning = append(spanning, <-spanDone)
 		waitGenerationTraffic(t, c, seenAll(id))
 		if m.retiring == nil || m.retiring.mapFD != oldFD {
 			t.Fatal("old FD released before acknowledgement")
@@ -314,7 +260,7 @@ func TestLSM_GenerationConcurrentVerdictsFlushAndRetire(t *testing.T) {
 		if m.retiring != nil || oldFD.(interface{ FD() int }).FD() != -1 {
 			t.Fatal("retired generation FD was not actually closed")
 		}
-		retired = append(retired, retiredBarrier{id - 1, barrier})
+		retired = append(retired, retiredBarrier{id - 1, barrier - eventStart})
 		waitGenerationTraffic(t, c, func([]Event) bool { return completed.Load() >= beforeRetire+16 })
 		t.Logf("generation=%d flush-index=%d completions build=%d retire=%d after=%d", id, barrier, beforeBuild, beforeRetire, completed.Load())
 	}
@@ -326,12 +272,13 @@ func TestLSM_GenerationConcurrentVerdictsFlushAndRetire(t *testing.T) {
 	default:
 	}
 	c.mu.Lock()
-	events := append([]Event(nil), c.events...)
+	allEvents := append([]Event(nil), c.events...)
 	c.mu.Unlock()
+	events := allEvents[eventStart:]
 	var actual [4][]Event
 	for _, e := range events {
 		worker := int(e.RemotePort - 42100)
-		if e.CgroupID != cgid || e.PolicyGeneration < 1 || e.PolicyGeneration > 6 {
+		if e.CgroupID != cgid || e.PolicyGeneration < genBase+1 || e.PolicyGeneration > genBase+numPubs {
 			t.Fatalf("invalid traffic scope/generation: %+v", e)
 		}
 		wantBlocked := (uint64(worker)+e.PolicyGeneration)%2 != 0
@@ -359,29 +306,6 @@ func TestLSM_GenerationConcurrentVerdictsFlushAndRetire(t *testing.T) {
 			}
 		}
 	}
-	// Each spanning syscall was released only after its publication window was
-	// recorded, so it must overlap that window by construction. Assert this
-	// explicitly: it proves the verdict pairing above ran concurrently with a
-	// generation switch even when no short connect happened to be in flight.
-	if len(spanning) == 0 {
-		t.Fatal("no barrier-coordinated spanning syscall was recorded")
-	}
-	spanningOverlapped := 0
-	for _, attempt := range spanning {
-		for _, publication := range publications {
-			if attempt.start.Before(publication.end) && attempt.end.After(publication.start) {
-				spanningOverlapped++
-			}
-		}
-	}
-	if spanningOverlapped == 0 {
-		t.Fatal("spanning syscall did not overlap any activation; concurrent evidence is not deterministic")
-	}
-	overlapped += spanningOverlapped
-	if overlapped == 0 {
-		t.Fatal("no syscall invocation overlapped an activation; insufficient concurrent evidence")
-	}
-	t.Logf("paired %d syscall/event verdicts; %d invocations overlapped pointer publication (%d barrier-coordinated)", len(events), overlapped, spanningOverlapped)
 	for _, barrier := range retired {
 		for _, e := range events[barrier.index:] {
 			if e.PolicyGeneration <= barrier.id {
@@ -396,6 +320,55 @@ func TestLSM_GenerationConcurrentVerdictsFlushAndRetire(t *testing.T) {
 	if drops["connect"] != 0 {
 		t.Fatalf("stress verdict evidence lost: %+v", drops)
 	}
+	return overlapped
+}
+
+func TestLSM_GenerationConcurrentVerdictsFlushAndRetire(t *testing.T) {
+	l, cgid := identityTestLoader(t)
+	m := l.PolicyGenerations()
+	spec := func(id uint64) GenerationSpec {
+		s := GenerationSpec{DefaultDeny: []GenerationDomain{{EventType: EventTypeNetwork, Mode: DefaultDenyModeDeny}}}
+		for worker := 0; worker < 4; worker++ {
+			// Alternate which endpoints are exact audited allows and which
+			// are denied on a miss. Both generations must remain complete.
+			if (uint64(worker)+id)%2 == 0 {
+				s.Rules = append(s.Rules, GenerationRule{CgroupID: cgid, EventType: EventTypeNetwork,
+					Address: "127.0.0.1", Port: uint16(42100 + worker), Action: ActionAllow, Audit: true})
+			}
+		}
+		return s
+	}
+	c := collectGenerationTraffic(l)
+	t.Cleanup(func() {
+		if err := l.lsmReader.Close(); err != nil {
+			t.Error(err)
+		}
+		<-c.done
+	})
+
+	// Real UDP connects are short, so on a fast run every one of them can land
+	// between activations and a single run can observe zero overlap even though
+	// every verdict/generation/drain check passes. Retry the whole real workload
+	// with fresh (strictly increasing) generations until at least one REAL
+	// intercepted connect is observed overlapping a publication. The bound
+	// keeps the test finite; every attempt still runs every assertion.
+	const (
+		maxAttempts = 5
+		numPubs     = 12 // generations genBase+1..genBase+12 per attempt
+	)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		genBase := uint64((attempt - 1) * numPubs)
+		c.mu.Lock()
+		eventStart := len(c.events)
+		c.mu.Unlock()
+		overlapped := runGenerationWorkload(t, l, cgid, m, c, spec, genBase, numPubs, eventStart)
+		if overlapped > 0 {
+			t.Logf("attempt %d: paired real syscall/event verdicts; %d real connect invocations overlapped pointer publication", attempt, overlapped)
+			return
+		}
+		t.Logf("attempt %d: no real intercepted syscall overlapped a publication; retrying with fresh generations", attempt)
+	}
+	t.Fatalf("no real intercepted syscall overlapped a publication after %d attempts", maxAttempts)
 }
 
 func TestLSM_GenerationFlushQueuedOldNoWakeup(t *testing.T) {
