@@ -7,14 +7,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/yasindce1998/warmor/internal/policybuild"
 )
 
 type BuildOptions struct {
-	// Context bounds toolchain lifetime. Nil leaves the overall CLI build
-	// without a deadline; tool discovery always has its own short timeout.
-	Context    context.Context
+	// Context bounds toolchain checks and compilation. Nil leaves the overall
+	// CLI build without a deadline (the historical unbounded behavior for
+	// existing callers); tool discovery always has its own short timeout.
+	Context context.Context
+
+	// OutputPath defaults to policy.wasm. Build replaces a regular file only
+	// after metadata validation; symlinks, hard links, and special files are
+	// rejected. New outputs retain private staging permissions (0600 on Unix,
+	// further restricted by umask); existing permission bits are preserved.
 	OutputPath string
 	RustOnly   bool
 	// Verbose prints bounded tool output after the command completes.
@@ -27,6 +34,10 @@ type BuildResult struct {
 	CratePath  string
 }
 
+// Build compiles privately, appends build metadata, then publishes one complete
+// artifact. Errors before replacement preserve an existing output. An error
+// matching ErrArtifactPublicationIndeterminate means the destination may already
+// contain the new artifact; callers must not assume the old output survived.
 func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 	if opts.Context == nil {
 		opts.Context = context.Background()
@@ -74,25 +85,26 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 		return nil, fmt.Errorf("write lib.rs: %w", err)
 	}
 
-	wasmPath, err := cargoBuild(crateDir, policy.Name, opts)
+	builtPath, err := cargoBuild(crateDir, policy.Name, opts)
 	if err != nil {
 		return nil, fmt.Errorf("cargo build: %w", err)
 	}
 	if err := opts.Context.Err(); err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(wasmPath)
+	data, err := readBuiltArtifact(builtPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read built wasm: %w", err)
 	}
 	data, err = policybuild.Append(data, policybuild.Metadata{Compiler: Identity, DefaultAction: policy.DefaultAction})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("append build metadata: %w", err)
 	}
-	if err := opts.Context.Err(); err != nil {
-		return nil, err
+	if len(data) > maxCompiledArtifactBytes {
+		return nil, fmt.Errorf("final wasm exceeds %d bytes", maxCompiledArtifactBytes)
 	}
-	if err := os.WriteFile(wasmPath, data, 0o644); err != nil {
+	wasmPath, err := newArtifactPublisher().publish(opts.Context, opts.OutputPath, data)
+	if err != nil {
 		return nil, err
 	}
 
@@ -132,8 +144,21 @@ func checkCargoContext(ctx context.Context) error {
 }
 
 func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) {
-	args := []string{"build", "--target", "wasm32-unknown-unknown", "--release"}
-	cmd := exec.Command("cargo", args...)
+	safeName := crateIdentifier(policyName)
+	wasmFile := fmt.Sprintf("warmor_policy_%s.wasm", safeName)
+	builtPath := filepath.Join(crateDir, wasmFile)
+	// Cargo normally hard-links release artifacts to its deps directory. Have
+	// rustc emit the final link output directly into our private crate instead,
+	// so strict rejection of hard-linked tool output also works with real Cargo.
+	// rustc parses commas inside --emit even in a single argv entry. Use only
+	// the sanitized basename, relative to cmd.Dir, not a caller's temp parent.
+	args := []string{"rustc", "--target", "wasm32-unknown-unknown", "--release", "--lib", "--", "--emit=link=" + wasmFile}
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, "cargo", args...)
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = crateDir
 	cmd.Env = append(os.Environ(), "CARGO_TARGET_DIR="+filepath.Join(crateDir, "target"))
 
@@ -147,39 +172,9 @@ func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) 
 		return "", fmt.Errorf("cargo build failed: %w\n%s", err, output.stderr)
 	}
 
-	safeName := crateIdentifier(policyName)
-	wasmFile := fmt.Sprintf("warmor_policy_%s.wasm", safeName)
-	builtPath := filepath.Join(crateDir, "target", "wasm32-unknown-unknown", "release", wasmFile)
-
-	if _, err := os.Stat(builtPath); err != nil {
-		return "", fmt.Errorf("expected wasm output not found at %s", builtPath)
-	}
-
-	outputPath := opts.OutputPath
-	if outputPath == "" {
-		outputPath = "policy.wasm"
-	}
-
-	if !filepath.IsAbs(outputPath) {
-		wd, err := os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("get working directory: %w", err)
-		}
-		outputPath = filepath.Join(wd, outputPath)
-	}
-
-	data, err := os.ReadFile(builtPath)
-	if err != nil {
-		return "", fmt.Errorf("read built wasm: %w", err)
-	}
-	if opts.Context != nil && opts.Context.Err() != nil {
-		return "", opts.Context.Err()
-	}
-	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
-		return "", fmt.Errorf("write output wasm: %w", err)
-	}
-
-	return outputPath, nil
+	// Cargo never receives or writes the caller's destination. Build reads this
+	// private artifact with a size bound and validates metadata before publishing.
+	return builtPath, nil
 }
 
 func Cleanup(result *BuildResult) {

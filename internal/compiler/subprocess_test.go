@@ -130,7 +130,16 @@ func waitToolTestPIDs(n int) {
 }
 
 func writeToolTestArtifact() {
-	dir := filepath.Join(os.Getenv("CARGO_TARGET_DIR"), "wasm32-unknown-unknown", "release")
+	// Real cargo invoked with `rustc -- --emit=link=<name>` writes the linked
+	// artifact relative to its working directory (the private crate), never
+	// into the target directory. Parse the same argument the implementation
+	// passes so the fake matches the linked-artifact contract.
+	dir := "."
+	for _, arg := range os.Args {
+		if emit, ok := strings.CutPrefix(arg, "--emit=link="); ok {
+			dir = filepath.Dir(emit)
+		}
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		panic(err)
 	}
