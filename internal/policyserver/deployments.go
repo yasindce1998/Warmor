@@ -13,6 +13,7 @@ import (
 
 	"github.com/yasindce1998/warmor/internal/crypto"
 	"github.com/yasindce1998/warmor/internal/crypto/assignment"
+	"github.com/yasindce1998/warmor/pkg/controlplane"
 )
 
 func cloneAssignmentTrust(trust assignment.Trust) assignment.Trust {
@@ -169,7 +170,7 @@ func (s *Server) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set(assignment.ProtocolHeader, "1")
-	id := r.URL.Query().Get("agent_id")
+	id := r.URL.Query().Get(controlplane.QueryAgentID)
 	if id == "" || !authorizeAgent(w, r, id) {
 		if id == "" {
 			http.Error(w, "agent_id required", http.StatusBadRequest)
@@ -195,7 +196,8 @@ func (s *Server) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "corrupt envelope", http.StatusServiceUnavailable)
 		return
 	}
-	if r.URL.Query().Get("if_sequence") == fmt.Sprint(e.Deployment.Sequence) && r.URL.Query().Get("if_envelope_hash") == assignment.Digest(b.Envelope) {
+	if r.URL.Query().Get(controlplane.QueryIfSequence) == fmt.Sprint(e.Deployment.Sequence) &&
+		r.URL.Query().Get(controlplane.QueryIfEnvelopeHash) == assignment.Digest(b.Envelope) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}

@@ -22,6 +22,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/metrics"
+	"github.com/yasindce1998/warmor/pkg/controlplane"
 )
 
 // Server is the central policy management HTTP server.
@@ -123,27 +124,29 @@ func NewServer(cfg ServerConfig) *Server {
 
 	mux := http.NewServeMux()
 
-	// Agent-facing endpoints (mTLS client cert or agent token)
-	mux.HandleFunc("/api/v1/register", s.requireAgent(s.handleRegister))
-	mux.HandleFunc("/api/v1/heartbeat", s.requireAgent(s.handleHeartbeat))
-	mux.HandleFunc("/api/v1/policy", s.requireAgent(s.handleGetPolicy))
-	mux.HandleFunc("/api/v1/policy/wasm", s.requireAgent(s.handleGetWASM))
-	mux.HandleFunc("/api/v1/telemetry/session", s.requireAgent(s.handleTelemetrySession))
-	mux.HandleFunc("/api/v1/admin/telemetry", s.requireJWT(s.handleTelemetryReport))
-	mux.HandleFunc("/api/v1/deployment", s.requireAgent(s.handleGetDeployment))
+	// Agent-facing endpoints (mTLS client cert or agent token). Every response
+	// advertises the protocol version so an agent can detect a control plane
+	// that speaks an incompatible contract.
+	mux.HandleFunc(controlplane.RouteRegister, advertiseProtocol(s.requireAgent(s.handleRegister)))
+	mux.HandleFunc(controlplane.RouteHeartbeat, advertiseProtocol(s.requireAgent(s.handleHeartbeat)))
+	mux.HandleFunc(controlplane.RoutePolicy, advertiseProtocol(s.requireAgent(s.handleGetPolicy)))
+	mux.HandleFunc(controlplane.RoutePolicyWASM, advertiseProtocol(s.requireAgent(s.handleGetWASM)))
+	mux.HandleFunc(controlplane.RouteTelemetrySession, advertiseProtocol(s.requireAgent(s.handleTelemetrySession)))
+	mux.HandleFunc(controlplane.RouteAdminTelemetry, s.requireJWT(s.handleTelemetryReport))
+	mux.HandleFunc(controlplane.RouteDeployment, advertiseProtocol(s.requireAgent(s.handleGetDeployment)))
 
 	// Container runtime endpoints (mTLS client cert or runtime token)
-	mux.HandleFunc("/api/v1/containers/bind", s.requireRuntime(s.handleContainerBind))
-	mux.HandleFunc("/api/v1/containers/", s.requireRuntime(s.handleContainerDelete))
+	mux.HandleFunc(controlplane.RouteContainersBind, advertiseProtocol(s.requireRuntime(s.handleContainerBind)))
+	mux.HandleFunc(controlplane.RouteContainersPrefix, advertiseProtocol(s.requireRuntime(s.handleContainerDelete)))
 
 	// Admin endpoints (admin token)
-	mux.HandleFunc("/api/v1/admin/policies", s.requireJWT(s.handleAdminPolicies))
-	mux.HandleFunc("/api/v1/admin/deployments", s.requireJWT(s.handleAdminDeployment))
-	mux.HandleFunc("/api/v1/admin/policies/", s.requireJWT(s.handleAdminPolicy))
-	mux.HandleFunc("/api/v1/admin/agents", s.requireJWT(s.handleAdminAgents))
-	mux.HandleFunc("/api/v1/admin/rollouts", s.requireJWT(s.handleAdminRollouts))
-	mux.HandleFunc("/api/v1/admin/rollouts/", s.requireJWT(s.handleAdminRollout))
-	mux.HandleFunc("/api/v1/admin/drift", s.requireJWT(s.handleAdminDrift))
+	mux.HandleFunc(controlplane.RouteAdminPolicies, s.requireJWT(s.handleAdminPolicies))
+	mux.HandleFunc(controlplane.RouteAdminDeployments, s.requireJWT(s.handleAdminDeployment))
+	mux.HandleFunc(controlplane.RouteAdminPolicyPrefix, s.requireJWT(s.handleAdminPolicy))
+	mux.HandleFunc(controlplane.RouteAdminAgents, s.requireJWT(s.handleAdminAgents))
+	mux.HandleFunc(controlplane.RouteAdminRollouts, s.requireJWT(s.handleAdminRollouts))
+	mux.HandleFunc(controlplane.RouteAdminRolloutPrefix, s.requireJWT(s.handleAdminRollout))
+	mux.HandleFunc(controlplane.RouteAdminDrift, s.requireJWT(s.handleAdminDrift))
 
 	s.httpServer = &http.Server{
 		Addr:         cfg.Addr,
@@ -164,6 +167,17 @@ func (s *Server) Store() *Store {
 // Handler returns the server's HTTP handler, including authentication.
 func (s *Server) Handler() http.Handler {
 	return s.httpServer.Handler
+}
+
+// advertiseProtocol marks agent-facing responses with the version of the
+// wire contract they implement. The value is informational: agents must keep
+// working when they do not recognise it, and servers must not gate requests
+// on the agent's declared version.
+func advertiseProtocol(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(controlplane.HeaderProtocolVersion, controlplane.ProtocolVersionString)
+		next(w, r)
+	}
 }
 
 // Rollouts returns the rollout manager.
@@ -267,7 +281,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req RegisterRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, controlplane.MaxAgentRequestBodyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -294,7 +308,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req HeartbeatRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, controlplane.MaxAgentRequestBodyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -360,7 +374,7 @@ func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentID := r.URL.Query().Get("agent_id")
+	agentID := r.URL.Query().Get(controlplane.QueryAgentID)
 	if agentID == "" {
 		http.Error(w, "agent_id required", http.StatusBadRequest)
 		return
@@ -388,12 +402,12 @@ func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(RevisionIdentityHeader, "1")
 	// A version alone is ambiguous across policies. Legacy clients receive
 	// 200 rather than a potentially incorrect not-modified response.
-	ifVersion := r.URL.Query().Get("if_version")
+	ifVersion := r.URL.Query().Get(controlplane.QueryIfVersion)
 	if ifVersion != "" {
 		v, err := strconv.ParseInt(ifVersion, 10, 64)
 		if err == nil && assignment.Telemetry == nil && v == assignment.Version &&
-			r.URL.Query().Get("if_policy_id") == assignment.PolicyID &&
-			r.URL.Query().Get("if_hash") == assignment.WASMHash {
+			r.URL.Query().Get(controlplane.QueryIfPolicyID) == assignment.PolicyID &&
+			r.URL.Query().Get(controlplane.QueryIfHash) == assignment.WASMHash {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
@@ -408,7 +422,7 @@ func (s *Server) handleGetWASM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	policyID := r.URL.Query().Get("policy_id")
+	policyID := r.URL.Query().Get(controlplane.QueryPolicyID)
 	if policyID == "" {
 		http.Error(w, "policy_id required", http.StatusBadRequest)
 		return
@@ -417,7 +431,7 @@ func (s *Server) handleGetWASM(w http.ResponseWriter, r *http.Request) {
 	// Without a version the active one is served; agents pass the version
 	// from their assignment so rollout cohorts get the right binary.
 	var version int64
-	if vs := r.URL.Query().Get("version"); vs != "" {
+	if vs := r.URL.Query().Get(controlplane.QueryVersion); vs != "" {
 		v, err := strconv.ParseInt(vs, 10, 64)
 		if err != nil || v <= 0 {
 			http.Error(w, "invalid version", http.StatusBadRequest)
@@ -506,7 +520,7 @@ func (s *Server) handleAdminPolicies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminPolicy(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/policies/")
+	id := strings.TrimPrefix(r.URL.Path, controlplane.RouteAdminPolicyPrefix)
 	if id == "" {
 		http.Error(w, "policy id required", http.StatusBadRequest)
 		return
@@ -606,7 +620,7 @@ func (s *Server) handleAdminRollouts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminRollout(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/rollouts/")
+	id := strings.TrimPrefix(r.URL.Path, controlplane.RouteAdminRolloutPrefix)
 	if id == "" {
 		http.Error(w, "rollout id required", http.StatusBadRequest)
 		return

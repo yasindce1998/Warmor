@@ -54,6 +54,12 @@ jobs:
       - name: Run tests
         run: go test -race -coverprofile=coverage.out ./...
 
+      - name: Agent protocol conformance (reference server)
+        run: go test -count=1 -run '^TestReferenceServerConformance$' ./internal/policyserver -v
+
+      - name: Contract usable from an external Go module
+        run: cd tests/controlplane-consumer && go test -count=1 ./...
+
       - name: Check coverage threshold
         run: |
           COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')

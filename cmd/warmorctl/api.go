@@ -10,6 +10,16 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/yasindce1998/warmor/pkg/controlplane"
+)
+
+// Admin API routes come from the public control-plane contract so the TUI
+// follows protocol changes instead of drifting from them.
+const (
+	routeAdminAgents   = controlplane.RouteAdminAgents
+	routeAdminPolicies = controlplane.RouteAdminPolicies
+	routeAdminRollouts = controlplane.RouteAdminRollouts
 )
 
 // apiTLSConfig, when non-nil, is used for every admin API connection. main

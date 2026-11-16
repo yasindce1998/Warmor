@@ -9,14 +9,16 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/yasindce1998/warmor/pkg/controlplane"
 )
 
 type ociState struct {
-	OciVersion string            `json:"ociVersion"`
-	ID         string            `json:"id"`
-	Status     string            `json:"status"`
-	PID        int               `json:"pid"`
-	Bundle     string            `json:"bundle"`
+	OciVersion  string            `json:"ociVersion"`
+	ID          string            `json:"id"`
+	Status      string            `json:"status"`
+	PID         int               `json:"pid"`
+	Bundle      string            `json:"bundle"`
 	Annotations map[string]string `json:"annotations"`
 }
 
@@ -64,7 +66,7 @@ func handleStart(state ociState, serverURL string, logger *slog.Logger) {
 	body, _ := json.Marshal(payload)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Post(
-		serverURL+"/api/v1/containers/bind",
+		serverURL+controlplane.RouteContainersBind,
 		"application/json",
 		strings.NewReader(string(body)),
 	)

@@ -21,6 +21,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/internal/telemetry"
+	"github.com/yasindce1998/warmor/pkg/controlplane"
 )
 
 // Client connects to the policy management server for policy distribution.
@@ -48,7 +49,7 @@ type Client struct {
 }
 
 // MaxWASMDownloadSize bounds a policy module download.
-const MaxWASMDownloadSize = 64 * 1024 * 1024
+const MaxWASMDownloadSize = controlplane.MaxWASMDownloadSize
 
 // ClientConfig configures the policy server client.
 type ClientConfig struct {
@@ -121,8 +122,10 @@ func NewClient(cfg ClientConfig) *Client {
 	return c
 }
 
-// do sends req with the agent's credentials attached.
+// do sends req with the agent's credentials and declared protocol version
+// attached. The version is advisory: servers must ignore unknown values.
 func (c *Client) do(req *http.Request) (*http.Response, error) {
+	req.Header.Set(controlplane.HeaderAgentProtocol, controlplane.ProtocolVersionString)
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
@@ -139,7 +142,7 @@ func (c *Client) Register(ctx context.Context) (err error) {
 	}
 
 	body, _ := json.Marshal(req)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/register", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+controlplane.RouteRegister, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -202,11 +205,11 @@ func (c *Client) pollOnce(ctx context.Context) error {
 	c.mu.Unlock()
 
 	q := url.Values{}
-	q.Set("agent_id", c.agentID)
-	q.Set("if_version", strconv.FormatInt(version, 10))
-	q.Set("if_policy_id", id)
-	q.Set("if_hash", digest)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/policy?"+q.Encode(), nil)
+	q.Set(controlplane.QueryAgentID, c.agentID)
+	q.Set(controlplane.QueryIfVersion, strconv.FormatInt(version, 10))
+	q.Set(controlplane.QueryIfPolicyID, id)
+	q.Set(controlplane.QueryIfHash, digest)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+controlplane.RoutePolicy+"?"+q.Encode(), nil)
 	if err != nil {
 		return err
 	}
@@ -231,7 +234,7 @@ func (c *Client) pollOnce(ctx context.Context) error {
 			return nil
 		}
 		q.Del("if_version")
-		retry, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/policy?"+q.Encode(), nil)
+		retry, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+controlplane.RoutePolicy+"?"+q.Encode(), nil)
 		if err != nil {
 			return err
 		}
@@ -249,7 +252,7 @@ func (c *Client) pollOnce(ctx context.Context) error {
 	}
 
 	var assignment PolicyAssignment
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&assignment); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, controlplane.MaxAgentRequestBodyBytes)).Decode(&assignment); err != nil {
 		return err
 	}
 	if len(assignment.Envelope) != 0 || assignment.DeploymentSequence != 0 {
@@ -339,9 +342,9 @@ func (c *Client) InvalidateActiveRevision() {
 // server sent none).
 func (c *Client) fetchWASM(ctx context.Context, policyID string, version int64) ([]byte, []byte, error) {
 	q := url.Values{}
-	q.Set("policy_id", policyID)
-	q.Set("version", strconv.FormatInt(version, 10))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/policy/wasm?"+q.Encode(), nil)
+	q.Set(controlplane.QueryPolicyID, policyID)
+	q.Set(controlplane.QueryVersion, strconv.FormatInt(version, 10))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+controlplane.RoutePolicyWASM+"?"+q.Encode(), nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -410,7 +413,7 @@ func (c *Client) SendHeartbeat(ctx context.Context) (err error) {
 	}
 
 	body, _ := json.Marshal(req)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/heartbeat", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+controlplane.RouteHeartbeat, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

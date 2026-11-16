@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/yasindce1998/warmor/internal/drift"
+	"github.com/yasindce1998/warmor/pkg/controlplane"
 )
 
 // Bounds on agent-supplied fingerprints: they are untrusted input that
@@ -37,7 +38,7 @@ func (s *Server) handleAdminDrift(w http.ResponseWriter, r *http.Request) {
 		Images:    s.drift.Status(),
 		Anomalies: []drift.DriftAnomaly{},
 	}
-	agentID := r.URL.Query().Get("agent_id")
+	agentID := r.URL.Query().Get(controlplane.QueryAgentID)
 	for _, image := range s.drift.Images() {
 		for _, a := range s.drift.Anomalies(image) {
 			if agentID == "" || a.AgentID == agentID {
