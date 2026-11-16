@@ -76,14 +76,25 @@ Windows local signed-policy validation/reload and the server's independent
 write-through snapshot backend remain available; see
 [PLATFORM_WINDOWS.md](../PLATFORM_WINDOWS.md#policy-distribution-and-durable-activation).
 
-Fleet mode does not run a competing file watcher. A successful explicit SIGHUP
-reload invalidates the client's remembered identity so the next poll reconciles
-the fleet revision. Standalone watching hashes module/signature content instead
+Fleet mode does not run a competing file watcher and **rejects SIGHUP local
+reload before calling the enforcer**. The fleet client exclusively owns activation,
+identity withdrawal and pending-revision recovery; publish changes through the
+server. Invalidating identity only after a successful local reload is unsafe:
+generation publication can succeed live before drain/durability returns an error.
+A rejected signal does not change live policy, fleet acknowledgement or activation
+error; the explicit rejection is logged. Standalone SIGHUP remains supported,
+and standalone watching hashes module/signature content instead
 of increasing mtime and retries unchanged files after reload failure. External
 standalone writers should still publish immutable pairs or use atomic directory
 switching: this cannot make arbitrary concurrent two-file writes transactional.
 
 ## Evaluator lifetime and kernel limits
+
+The following describes the default **legacy** activation path. Experimental
+Linux generation activation is separately opt-in; its per-event lifetime,
+irreversible live commit and pending durability/drain semantics are documented
+in [generation-activation.md](generation-activation.md). It is not a production
+atomicity guarantee and does not enable workload selectors.
 
 Reload and close are serialized. An event holds a shared drain barrier through
 cache lookup, WASM evaluation, persistence, action and reporting. Activation

@@ -42,24 +42,21 @@ int BPF_PROG(lsm_ptrace_check, struct task_struct *child, unsigned int mode)
 	// inside one container from one that reaches across a boundary.
 	__u64 target_cgid = BPF_CORE_READ((struct task_struct___warmor *)child, cgroups, dfl_cgrp, kn, id);
 
+	struct policy_snapshot snapshot = snapshot_policy(cgid, EVENT_TYPE_PTRACE);
 	struct policy_key key = {
 		.cgroup_id = cgid,
 		.event_type = EVENT_TYPE_PTRACE,
 	};
 	__builtin_memcpy(key.path, comm_buf, sizeof(comm_buf));
 
-	struct policy_value *val = bpf_map_lookup_elem(&policy_map, &key);
-	if (!val) {
-		key.cgroup_id = 0;
-		val = bpf_map_lookup_elem(&policy_map, &key);
-	}
+	struct policy_value *val = lookup_policy(&snapshot, &key);
 
 	if (val) {
 		__sync_fetch_and_add(&val->hit_count, 1);
 
 		if (val->action == ACTION_DENY) {
 			__u8 blocked = is_enforce_enabled() && !val->audit;
-			emit_lsm_event_aux(EVENT_TYPE_PTRACE, blocked, comm_buf, 16,
+			emit_lsm_event_aux_generation(snapshot.generation, EVENT_TYPE_PTRACE, blocked, comm_buf, 16,
 				cgid, 0, 0, 0, 0, 0, target_cgid);
 
 			// An audit-flagged deny is a would-be denial: log it, never block.
@@ -69,13 +66,13 @@ int BPF_PROG(lsm_ptrace_check, struct task_struct *child, unsigned int mode)
 		}
 
 		if (val->audit) {
-			emit_lsm_event_aux(EVENT_TYPE_PTRACE, 0, comm_buf, 16,
+			emit_lsm_event_aux_generation(snapshot.generation, EVENT_TYPE_PTRACE, 0, comm_buf, 16,
 				cgid, 0, 0, 0, 0, 0, target_cgid);
 		}
 		return 0;
 	}
 
-	emit_lsm_event_aux(EVENT_TYPE_PTRACE, 0, comm_buf, 16, cgid, 0, 0, 0, 0, 0, target_cgid);
+	emit_lsm_event_aux_generation(snapshot.generation, EVENT_TYPE_PTRACE, 0, comm_buf, 16, cgid, 0, 0, 0, 0, 0, target_cgid);
 	return 0;
 }
 

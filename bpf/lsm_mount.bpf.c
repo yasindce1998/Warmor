@@ -19,6 +19,7 @@ int BPF_PROG(lsm_mount_check, const char *dev_name, const struct path *path,
 	if (len <= 0)
 		return 0;
 
+	struct policy_snapshot snapshot = snapshot_policy(cgid, EVENT_TYPE_MOUNT);
 	struct policy_key key = {
 		.cgroup_id = cgid,
 		.event_type = EVENT_TYPE_MOUNT,
@@ -29,11 +30,7 @@ int BPF_PROG(lsm_mount_check, const char *dev_name, const struct path *path,
 	// the policy map for it; let userspace evaluate the event instead.
 	struct policy_value *val = 0;
 	if (len < (int)sizeof(type_buf)) {
-		val = bpf_map_lookup_elem(&policy_map, &key);
-		if (!val) {
-			key.cgroup_id = 0;
-			val = bpf_map_lookup_elem(&policy_map, &key);
-		}
+		val = lookup_policy(&snapshot, &key);
 	}
 
 	if (val) {
@@ -41,7 +38,7 @@ int BPF_PROG(lsm_mount_check, const char *dev_name, const struct path *path,
 
 		if (val->action == ACTION_DENY) {
 			__u8 blocked = is_enforce_enabled() && !val->audit;
-			emit_lsm_event_aux(EVENT_TYPE_MOUNT, blocked, type_buf, len,
+			emit_lsm_event_aux_generation(snapshot.generation, EVENT_TYPE_MOUNT, blocked, type_buf, len,
 				cgid, 0, 0, 0, 0, dev_name, 0);
 
 			// An audit-flagged deny is a would-be denial: log it, never block.
@@ -51,13 +48,13 @@ int BPF_PROG(lsm_mount_check, const char *dev_name, const struct path *path,
 		}
 
 		if (val->audit) {
-			emit_lsm_event_aux(EVENT_TYPE_MOUNT, 0, type_buf, len,
+			emit_lsm_event_aux_generation(snapshot.generation, EVENT_TYPE_MOUNT, 0, type_buf, len,
 				cgid, 0, 0, 0, 0, dev_name, 0);
 		}
 		return 0;
 	}
 
-	emit_lsm_event_aux(EVENT_TYPE_MOUNT, 0, type_buf, len, cgid, 0, 0, 0, 0, dev_name, 0);
+	emit_lsm_event_aux_generation(snapshot.generation, EVENT_TYPE_MOUNT, 0, type_buf, len, cgid, 0, 0, 0, 0, dev_name, 0);
 	return 0;
 }
 

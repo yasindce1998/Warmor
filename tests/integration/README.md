@@ -70,3 +70,61 @@ The suite does **not** yet prove atomic successful policy activation, map-write-
 `scripts/kind-e2e.sh` is a deployment/controller/**evaluation smoke test** on a shared host kernel. Ready pods, a loaded policy, Active CRs, events and deny counters demonstrate plumbing and policy evaluation, **not synchronous prevention or successful process termination**. Do not substitute its result for this VM outcome gate, or turn enforcement on in kind to obtain such proof. Lower-level `internal/ebpf` integration tests cover BPF loader/map behavior but likewise do not replace this whole-daemon test.
 
 Local build/oracle success without a live VM run must be reported as **infrastructure-blocked for prevention/termination evidence**, not as an enforcement pass.
+
+## Kernel-generation verifier and stress gate
+
+`run-kernel-generations.sh` is the separate strict, non-skippable gate for the
+opt-in kernel generation API. It requires real PASS results for every
+`TestLSM_Generation*` fixture plus named legacy/integrity regressions. It runs a
+prebuilt hashed binary only in a disposable vimto VM, requires BPF LSM and IMA,
+and checks the requested actual kernel minor. Broad suite skips do not count.
+
+Local compilation and oracle checks, **without host attachment or a VM**:
+
+```sh
+bash -n tests/integration/run-kernel-generations.sh tests/integration/run-vm.sh
+go test -race -run '^(TestGenerationGate|TestVM)' ./tests/integration
+bash tests/integration/run-kernel-generations.sh --build-only
+```
+
+The dedicated CI matrix runs on the built 6.1 and 6.18 IMA kernels and retains
+logs, manifest and input hashes under `artifacts/generations.*`. Its shared
+`run-vm.sh generations` phase replaces closed CI stdin with `/dev/null` and bounds
+host cache/boot/transport/guest waits to 420 seconds, plus a 15-second hard-kill
+grace for the whole launcher/QEMU process group. The guest's 180-second test
+timeout is separate. `generations.log` captures both output streams and
+`generations-status.txt` retains phase/deadline/exit and failure diagnostics,
+including failures before guest startup; both are uploaded on failure too.
+Offline fake-launcher tests cover closed stdin, failure propagation and stalled
+startup with QUIT/KILL escalation. These do not execute a VM or enforcement.
+The required-PASS/no-SKIP/duplicate-PASS oracle is unchanged. See
+[`docs/design/kernel-generations.md`](../../docs/design/kernel-generations.md)
+for concurrency and flush/retirement assertions. A build-only success is not
+verifier/runtime evidence.
+
+## Whole-daemon generation activation gate
+
+`run-generation-daemon.sh` separately executes the actual daemon with
+`--experimental-atomic-generations --require-lsm --lsm-enforce --default-deny`.
+It is required after the kernel phase on both built 6.1.188 and 6.18.53 kernels.
+Its compiled VM-only profile holds old work and injects named post-live durable/
+pre-drain failures; normal builds have no fault-control flag. The guard checks
+actual vimto PID 1/private ports before enabling the profile. The strict oracle
+requires the parent and every child PASS, no skips, plus successful cleanup.
+
+Safe local checks (no daemon or hooks):
+
+```sh
+bash -n tests/integration/run-generation-daemon.sh
+go test -race -run '^TestGenerationDaemonGate' ./tests/integration
+go test -race -tags 'integration generation_daemon_vm' -run '^TestProfile' ./internal/generationvm
+bash tests/integration/run-generation-daemon.sh --build-only
+```
+
+Full VM invocation requires `KERNEL=/absolute/built/vmlinuz` and
+`EXPECT_KERNEL_MINOR=6.1` (or `6.18`). It retains exact binaries/hashes, real Cargo
+WASM, generation/scope/verdict evidence, markers, heartbeats/fault stages and
+SIGTERM outcomes under `artifacts/generation-daemon.*`. It is not signed-mode or
+supervised-Host combination proof. See
+[`generation-daemon-vm.md`](../../docs/design/generation-daemon-vm.md) for exact
+assertions, compile-profile boundaries and locally unexecuted VM evidence.

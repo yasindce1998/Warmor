@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/yasindce1998/warmor/internal/crypto"
 	"github.com/yasindce1998/warmor/internal/enforcer"
+	"github.com/yasindce1998/warmor/internal/generationvm"
 	"github.com/yasindce1998/warmor/internal/policyserver"
 	"github.com/yasindce1998/warmor/internal/wasm"
 )
@@ -188,6 +190,11 @@ func (r *stagedPolicyRevision) commit() error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// A prior uncertain commit can already point here. Retry its durability
+	// barrier without destroying the actual previous recovery revision.
+	if old == filepath.Base(r.dir) {
+		return r.syncDir(r.root)
+	}
 	if old != "" {
 		if err := replacePolicyLink(filepath.Join(r.root, "previous"), old); err != nil {
 			return err
@@ -199,7 +206,7 @@ func (r *stagedPolicyRevision) commit() error {
 	if err := replacePolicyLink(current, filepath.Base(r.dir)); err != nil {
 		return err
 	}
-	if err := r.syncDir(r.root); err != nil {
+	if err := errors.Join(generationvm.Checkpoint(context.Background(), "durable-sync", 0, nil), r.syncDir(r.root)); err != nil {
 		// Never acknowledge a failed durability barrier. Attempt pointer
 		// rollback and surface both errors if storage remains unavailable.
 		var rollback error

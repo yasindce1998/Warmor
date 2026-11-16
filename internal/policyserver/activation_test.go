@@ -5,12 +5,60 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 )
+
+type uncertainTestActivation struct{}
+
+func (uncertainTestActivation) Error() string             { return "live commit complete, fsync pending" }
+func (uncertainTestActivation) ActivationUncertain() bool { return true }
+
+func TestClientUncertainActivationWithdrawsOldAcknowledgement(t *testing.T) {
+	srv, ts, _ := setupClientEnv(t)
+	ctx := context.Background()
+	fail := false
+	c := NewClient(ClientConfig{ServerURL: ts.URL, AgentID: "a", Labels: map[string]string{"env": "prod"},
+		OnUpdate: func(*PolicyAssignment, []byte) error {
+			if fail {
+				return fmt.Errorf("pending: %w", uncertainTestActivation{})
+			}
+			return nil
+		},
+	})
+	if err := c.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	c.poll(ctx)
+	if c.policyID == "" {
+		t.Fatal("initial activation failed")
+	}
+	if err := srv.Store().CreatePolicy(&Policy{ID: "new", Priority: 100}, writeWASM(t, t.TempDir(), "new.wasm", "new")); err != nil {
+		t.Fatal(err)
+	}
+	fail = true
+	c.poll(ctx)
+	if err := c.SendHeartbeat(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := srv.Store().GetAgent("a")
+	if a.PolicyID != "" || a.PolicyVersion != 0 || a.PolicyHash != "" || a.ActivationError == "" {
+		t.Fatalf("inactive old revision acknowledged: %+v", a)
+	}
+	fail = false
+	c.poll(ctx)
+	if err := c.SendHeartbeat(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = srv.Store().GetAgent("a")
+	if a.PolicyID != "new" || a.ActivationError != "" {
+		t.Fatalf("recovery not acknowledged: %+v", a)
+	}
+}
 
 func TestClientSameVersionReassignmentAndActivationRetry(t *testing.T) {
 	srv, ts, _ := setupClientEnv(t)

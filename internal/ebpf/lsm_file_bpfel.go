@@ -45,30 +45,32 @@ type lsm_filePolicyValue struct {
 }
 
 type lsm_fileWarmorEvent struct {
-	_            structs.HostLayout
-	Pid          uint32
-	Uid          uint32
-	Gid          uint32
-	Comm         [16]int8
-	Filename     [256]int8
-	_            [4]byte
-	Timestamp    uint64
-	CgroupId     uint64
-	EventType    uint8
-	Decision     uint8
-	RemotePort   uint16
-	RemoteAddrV4 uint32
-	RemoteAddrV6 [16]uint8
-	Family       uint16
-	Pad          [3]uint16
-	Aux          [64]int8
-	AuxId        uint64
+	_                structs.HostLayout
+	Pid              uint32
+	Uid              uint32
+	Gid              uint32
+	Comm             [16]int8
+	Filename         [256]int8
+	_                [4]byte
+	Timestamp        uint64
+	CgroupId         uint64
+	EventType        uint8
+	Decision         uint8
+	RemotePort       uint16
+	RemoteAddrV4     uint32
+	RemoteAddrV6     [16]uint8
+	Family           uint16
+	Pad              [3]uint16
+	Aux              [64]int8
+	AuxId            uint64
+	PolicyGeneration uint64
 }
 
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	lsm_fileMapActiveGeneration     = "active_generation"
 	lsm_fileMapDefaultDeny          = "default_deny"
 	lsm_fileMapLsmCfg               = "lsm_cfg"
 	lsm_fileMapLsmCgroupFilter      = "lsm_cgroup_filter"
@@ -134,14 +136,15 @@ type lsm_fileProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type lsm_fileMapSpecs struct {
-	DefaultDeny     *ebpf.MapSpec `ebpf:"default_deny"`
-	LsmCfg          *ebpf.MapSpec `ebpf:"lsm_cfg"`
-	LsmCgroupFilter *ebpf.MapSpec `ebpf:"lsm_cgroup_filter"`
-	LsmDrops        *ebpf.MapSpec `ebpf:"lsm_drops"`
-	LsmEnforce      *ebpf.MapSpec `ebpf:"lsm_enforce"`
-	LsmEvents       *ebpf.MapSpec `ebpf:"lsm_events"`
-	PolicyMap       *ebpf.MapSpec `ebpf:"policy_map"`
-	UnixWatch       *ebpf.MapSpec `ebpf:"unix_watch"`
+	ActiveGeneration *ebpf.MapSpec `ebpf:"active_generation"`
+	DefaultDeny      *ebpf.MapSpec `ebpf:"default_deny"`
+	LsmCfg           *ebpf.MapSpec `ebpf:"lsm_cfg"`
+	LsmCgroupFilter  *ebpf.MapSpec `ebpf:"lsm_cgroup_filter"`
+	LsmDrops         *ebpf.MapSpec `ebpf:"lsm_drops"`
+	LsmEnforce       *ebpf.MapSpec `ebpf:"lsm_enforce"`
+	LsmEvents        *ebpf.MapSpec `ebpf:"lsm_events"`
+	PolicyMap        *ebpf.MapSpec `ebpf:"policy_map"`
+	UnixWatch        *ebpf.MapSpec `ebpf:"unix_watch"`
 }
 
 // lsm_fileVariableSpecs contains global variables before they are loaded into the kernel.
@@ -175,18 +178,20 @@ func (o *lsm_fileObjects) Close() error {
 //
 // It can be passed to loadLsm_fileObjects or ebpf.CollectionSpec.LoadAndAssign.
 type lsm_fileMaps struct {
-	DefaultDeny     *ebpf.Map `ebpf:"default_deny"`
-	LsmCfg          *ebpf.Map `ebpf:"lsm_cfg"`
-	LsmCgroupFilter *ebpf.Map `ebpf:"lsm_cgroup_filter"`
-	LsmDrops        *ebpf.Map `ebpf:"lsm_drops"`
-	LsmEnforce      *ebpf.Map `ebpf:"lsm_enforce"`
-	LsmEvents       *ebpf.Map `ebpf:"lsm_events"`
-	PolicyMap       *ebpf.Map `ebpf:"policy_map"`
-	UnixWatch       *ebpf.Map `ebpf:"unix_watch"`
+	ActiveGeneration *ebpf.Map `ebpf:"active_generation"`
+	DefaultDeny      *ebpf.Map `ebpf:"default_deny"`
+	LsmCfg           *ebpf.Map `ebpf:"lsm_cfg"`
+	LsmCgroupFilter  *ebpf.Map `ebpf:"lsm_cgroup_filter"`
+	LsmDrops         *ebpf.Map `ebpf:"lsm_drops"`
+	LsmEnforce       *ebpf.Map `ebpf:"lsm_enforce"`
+	LsmEvents        *ebpf.Map `ebpf:"lsm_events"`
+	PolicyMap        *ebpf.Map `ebpf:"policy_map"`
+	UnixWatch        *ebpf.Map `ebpf:"unix_watch"`
 }
 
 func (m *lsm_fileMaps) Close() error {
 	return _Lsm_fileClose(
+		m.ActiveGeneration,
 		m.DefaultDeny,
 		m.LsmCfg,
 		m.LsmCgroupFilter,

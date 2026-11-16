@@ -167,6 +167,9 @@ type Event struct {
 	// KernelTimestampNS preserves bpf_ktime_get_ns in the initial clock domain.
 	KernelTimestampNS uint64
 	CgroupID          uint64
+	// PolicyGeneration is the kernel policy snapshot ID, or 0 for legacy and
+	// observation-only hooks. Preserve it when dispatching versioned work.
+	PolicyGeneration uint64
 
 	// Process events (exec tracepoint): the parent's PID and comm and the
 	// executed command's argv (bounded; see ExecveArgsMax). Zero values

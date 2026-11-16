@@ -44,24 +44,21 @@ int BPF_PROG(lsm_bind_check, struct socket *sock, struct sockaddr *address, int 
 		return 0;
 	}
 
+	struct policy_snapshot snapshot = snapshot_policy(cgid, EVENT_TYPE_BIND);
 	struct policy_key key = {
 		.cgroup_id = cgid,
 		.event_type = EVENT_TYPE_BIND,
 	};
 	endpoint_key(&key, family, port, addr_v4, addr_v6);
 
-	struct policy_value *val = bpf_map_lookup_elem(&policy_map, &key);
-	if (!val) {
-		key.cgroup_id = 0;
-		val = bpf_map_lookup_elem(&policy_map, &key);
-	}
+	struct policy_value *val = lookup_policy(&snapshot, &key);
 
 	if (val) {
 		__sync_fetch_and_add(&val->hit_count, 1);
 
 		if (val->action == ACTION_DENY) {
 			__u8 blocked = is_enforce_enabled() && !val->audit;
-			emit_lsm_event(EVENT_TYPE_BIND, blocked, 0, 0,
+			emit_lsm_event_generation(snapshot.generation, EVENT_TYPE_BIND, blocked, 0, 0,
 				cgid, family, port, addr_v4, addr_v6);
 
 			// An audit-flagged deny is a would-be denial: log it, never block.
@@ -71,13 +68,13 @@ int BPF_PROG(lsm_bind_check, struct socket *sock, struct sockaddr *address, int 
 		}
 
 		if (val->audit) {
-			emit_lsm_event(EVENT_TYPE_BIND, 0, 0, 0,
+			emit_lsm_event_generation(snapshot.generation, EVENT_TYPE_BIND, 0, 0, 0,
 				cgid, family, port, addr_v4, addr_v6);
 		}
 		return 0;
 	}
 
-	emit_lsm_event(EVENT_TYPE_BIND, 0, 0, 0, cgid, family, port, addr_v4, addr_v6);
+	emit_lsm_event_generation(snapshot.generation, EVENT_TYPE_BIND, 0, 0, 0, cgid, family, port, addr_v4, addr_v6);
 	return 0;
 }
 
