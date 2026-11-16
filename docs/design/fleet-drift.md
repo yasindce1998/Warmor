@@ -81,6 +81,10 @@ image drift. Those implicit comparisons are no longer produced.
 - Only mature fingerprints with matching window durations and overlapping
   timestamps are compared. Legacy window-zero fingerprints compare only with
   other legacy window-zero fingerprints, not new rolling observations.
+- Comparison is per image hash with z-score outlier detection
+  (`|z| > threshold`, default 3.0) and requires at least two agents for that
+  image. Anomalies are `excess`, `deficit` or `unique` — a pattern no peer
+  exhibits is always flagged.
 - `GET /api/v1/admin/drift` (admin JWT) returns status and anomalies;
   `?agent_id=` filters by agent. `--drift-threshold` defaults to a z-score of 3.
 - Server metrics (`--metrics-port`, 0 disables) expose unlabelled totals
