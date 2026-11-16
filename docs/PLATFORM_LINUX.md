@@ -223,8 +223,9 @@ Monitors process execution via `execve()` syscall.
 - Executable path
 - Cgroup ID
 
-(Exec arguments and the parent PID are not captured; the WASM policy never
-sees them.)
+(The exec tracepoint also captures up to 16 arguments of at most 63 bytes each
+and the parent's comm and PID; ABI v4 policies see them as `args`,
+`parent_comm` and `ppid`.)
 
 **Hook Point:** `tracepoint/syscalls/sys_enter_execve`
 
@@ -371,7 +372,7 @@ Posture guidance for combining these flags is in
 
 ## Limitations
 
-1. **Kernel Version Dependency** - Requires modern kernel (5.8+)
+1. **Kernel Version Dependency** - Requires kernel 5.7+ (5.8+ recommended for ring buffers)
 2. **BTF Requirement** - Needs BTF information for CO-RE
 3. **Verifier Limits** - Complex programs may hit verifier limits
 4. **No Userspace Tracing** - Only kernel-level syscalls

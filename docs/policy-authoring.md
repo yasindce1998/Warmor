@@ -22,6 +22,9 @@ rules:
         - field: { operator: value }
       any:         # OR — at least one must match
         - field: { operator: value }
+      not:         # NOR — none of the listed conditions may match
+        - field: { operator: value }
+    mode: enforce | audit   # optional; audit turns a deny into an audit-deny
     action: allow | deny | log
     reason: "Human-readable explanation"
     temporal:      # optional, deny/log rules only: act only OUTSIDE this window
@@ -170,6 +173,9 @@ warmor-compile --validate policy.yaml
 
 # Emit Rust source for inspection
 warmor-compile --rust-only policy.yaml > policy.rs
+
+# Show cargo build output while compiling
+warmor-compile -o policy.wasm --verbose policy.yaml
 ```
 
 The daemon accepts both `.yaml` and `.wasm` files via `--policy`. A `.yaml` file is always compiled from its own content (requires the Rust toolchain); the result is cached under the WASM cache directory keyed by the SHA-256 of the YAML and the compiler version, so an unchanged YAML is not rebuilt and an edited one always is. Nothing is written next to the YAML, so it may live on a read-only volume such as a ConfigMap. A `.wasm` file next to the YAML is never substituted for it — to run a precompiled policy, pass the `.wasm` to `--policy` directly.

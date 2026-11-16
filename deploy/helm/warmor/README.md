@@ -96,7 +96,7 @@ Apply `crds/warmorpolicy-crd.yaml` explicitly before controller upgrades: Helm
 does not upgrade schemas under `crds/`. The additive status schema retains old
 fields for compatibility but does not fabricate node counts or `lastApplied`.
 See [runtime safety](RUNTIME-SAFETY.md) and the
-[controller contract](../../../../docs/design/warmorpolicy-controller.md) for
+[controller contract](../../../docs/design/warmorpolicy-controller.md) for
 recovery, signing and selector limits.
 
 ## What works today

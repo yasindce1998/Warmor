@@ -64,7 +64,7 @@ Traditional security enforcers are platform-specific:
 │  │  - Prometheus metrics                              │     │
 │  │  - Structured logging (zerolog)                    │     │
 │  │  - Decision cache (10k entries, TTL)               │     │
-│  │  - Event sinks: stdout / file / webhook            │     │
+│  │  - Event sinks: stdout / file / webhook / syslog   │     │
 │  └────────────────────────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -155,7 +155,7 @@ pub extern "C" fn evaluate_syscall(event_ptr: *const u8, event_len: usize) -> i3
 - Sandboxed execution in Wazero. A trap cannot crash the daemon. Each instance is capped at 16 MiB of linear memory and each evaluation at `--eval-timeout` (default 50 ms); exceeding either fails closed (DENY).
 - Hot reload via SIGHUP
 - Evaluation latency (target <100μs P95): measured P95 32μs for a compiled YAML policy and 55μs for the Rust `advanced` crate on a cache miss ([PERFORMANCE.md](PERFORMANCE.md))
-- Two ABIs: JSON `evaluate_syscall(ptr,len)` and binary `evaluate_event`. If a module exports `evaluate_event`, the host uses the binary ABI.
+- Two ABIs: JSON `evaluate_syscall(ptr,len)` and binary `evaluate_event`. The binary ABI is selected only when `evaluate_event` has signature `(i32) -> (i32)`; a wrong-signature export falls back to `evaluate_syscall` if present, and a module with neither is rejected.
 
 ### 4. Decision Cache
 
@@ -216,7 +216,8 @@ default_action: allow
 
 **Temporal rules:** a rule's `temporal:` block is compiled into the same evaluator (the action applies outside the permitted window) and reads the ABI v3 wall clock and container age; see [Temporal Policies](temporal-policies.md).
 
-**Known gap:** other keys the schema does not know are silently ignored.
+**Validation:** unknown keys (including misspelled `default_action` or
+`temporal`) are rejected; see the authoring guide.
 
 ### 6. Observability
 
@@ -633,7 +634,7 @@ YAML policy); "undeclared" ones do not.
 └─────────────────┘ └──────────────┘ └──────────────────────┘
 ```
 
-**Use Case:** Fleet management and centralized policy distribution. Per-container policy, containerd integration and consuming the OCI hook's bindings are **not implemented** on `main`. Downloaded policies are not signature-verified by the daemon.
+**Use Case:** Fleet management and centralized policy distribution. Per-container policy, containerd integration and consuming the OCI hook's bindings are **not implemented** on `main`. Downloaded policies are signature-verified by the daemon when `--verify-key` is set.
 
 ### Monitoring Stack
 
@@ -698,13 +699,12 @@ See [STATUS.md](STATUS.md) for the per-feature, per-phase reference. In short:
   - LSM hooks attach, but only exec/connect get kernel entries.
   - The policy server, mTLS/JWT, signed bundles and `warmorctl` ship.
   - The Helm chart, CRD, webhook, containerd and per-container policy do not work or are missing.
-- **Phase 9:** `warmor-learn` and `warmor-simulate` ship, and so do YAML temporal policies. Integrity is offline only. Escape, drift, attack graph, blast radius and canary auto-rollback are library-only.
+- **Phase 9:** `warmor-learn`, `warmor-simulate`, YAML temporal policies, in-kernel integrity, escape detection, drift collection, attack graph and blast radius metrics ship. Canary auto-rollback and fleet drift comparison remain library-only.
 
 ## Future Enhancements
 
-- Kernel-side default-deny and preloading static rules from the compiled policy
-- Wiring the library-only Phase 9 features into the daemon and server
-- Policy signature verification in the daemon
+- Wiring the remaining library-only features (canary auto-rollback, fleet drift comparison, workload routing) into the daemon and server
+- Signed-assignment telemetry attribution (sealed pending a signed attribution contract)
 - Verified eBPF-for-Windows enforcement and macOS ESF blocking
 - Network policy (L3/L4 filtering via XDP)
 - Distributed tracing (OpenTelemetry spans per event)

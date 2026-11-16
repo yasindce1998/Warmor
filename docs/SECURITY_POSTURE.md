@@ -33,8 +33,10 @@ Each LSM hook consults the kernel `policy_map`:
 > **Coverage on `main`:** userspace writes rules only for **exec** (exact path)
 > and **connect** (endpoint) decisions. `file_open`, `socket_bind`,
 > `socket_listen`, `ptrace_access_check` and `sb_mount` never get rules, so
-> they never block in the kernel. Pre-seeding deny rules from the compiled
-> policy is not implemented yet. See [STATUS.md](STATUS.md).
+> they never block in the kernel. The opt-in `--default-deny` mode preloads
+> allowlist rules (exec/connect) into the kernel map at startup and reload so a
+> map miss is refused too. See [kernel default-deny](design/kernel-default-deny.md)
+> and [STATUS.md](STATUS.md).
 
 ### 2. Userspace policy (WASM)
 

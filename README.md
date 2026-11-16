@@ -46,7 +46,7 @@ Requirements: Linux with BTF (`/sys/kernel/btf/vmlinux`), Go 1.26+, and Rust wit
 git clone https://github.com/yasindce1998/warmor.git && cd warmor
 go build -o bin/ ./cmd/...              # prebuilt BPF objects are checked in
 
-# Compile a YAML policy to WASM (-o must come before the input file)
+# Compile a YAML policy to WASM (-o may appear before or after the input file)
 ./bin/warmor-compile -o crypto.wasm examples/policies/block-crypto-miners.yaml
 
 # Start in audit mode first: denies are logged, nothing is killed
@@ -211,6 +211,7 @@ A rule's `temporal:` block (`max_container_age`, `min_container_age`, UTC `time_
 |------|---------|
 | `warmor-daemon` | Enforcement daemon: tracepoints, LSM-BPF hooks, WASM evaluation, event sinks, policy-server client |
 | `warmor-server` | Central policy server: agent registration and heartbeats, policy versions, percentage rollouts, mTLS/JWT |
+| `warmor-controller` | Kubernetes controller: validates and compiles `WarmorPolicy` CRs and publishes the node-wide effective-policy ConfigMap |
 | `warmor-compile` | YAML to WASM compiler (needs `cargo` and the `wasm32-unknown-unknown` target) |
 | `warmorctl` | Interactive TUI (dashboard, agents, policies, rollouts, certs). Interactive only; there are no subcommands. |
 | `warmor-learn` | Synthesize a policy from recorded daemon events |
@@ -221,7 +222,9 @@ A rule's `temporal:` block (`max_container_age`, `min_container_age`, UTC `time_
 | `warmor-policy-diff` | Compare two policies and show what changes |
 | `warmor-policy-merge` | Merge multiple policies with conflict resolution |
 | `warmor-policy-bundle` | Package policies into signed OCI bundles; sign/verify detached `<policy>.sig` |
+| `warmor-policy-assignment` | Build and verify signed deployment assignments and agentstore publication artifacts |
 | `warmor-oci-hook` | **Experimental.** OCI runtime hook that reports container start/stop to `warmor-server`. It has no auth or TLS, so it only works against `warmor-server --insecure`, and the server does not use the bindings yet. |
+| `warmor-policy-host` | **Experimental.** Supervised WASM worker child process for the daemon's opt-in `--experimental-supervised-policy-host` backend |
 
 There is no `warmor-dashboard` binary on `main`; the SSE dashboard is served by the daemon itself with `--dashboard-port`.
 
@@ -315,13 +318,14 @@ See [Architecture Deep Dive](docs/architecture.md) for data flow diagrams.
 | Category | Documents |
 |----------|-----------|
 | **Getting Started** | [Getting Started](GETTING_STARTED.md) &bull; [Build Guide](BUILD.md) |
-| **Architecture** | [System Design](docs/architecture.md) &bull; [Security Posture](docs/SECURITY_POSTURE.md) &bull; [BPF Compatibility](docs/BPF_COMPATIBILITY.md) &bull; [Control-plane Protocol](docs/control-plane-protocol.md) |
+| **Architecture** | [System Design](docs/architecture.md) &bull; [Security Posture](docs/SECURITY_POSTURE.md) &bull; [BPF Compatibility](docs/BPF_COMPATIBILITY.md) &bull; [Control-plane Protocol](docs/control-plane-protocol.md) &bull; [SaaS boundary ADR](docs/design/adr-0001-warmor-saas-boundary.md) &bull; [SaaS repo layout](docs/design/warmor-saas-repo-layout.md) |
 | **Platforms** | [Linux](docs/PLATFORM_LINUX.md) &bull; [Windows](docs/PLATFORM_WINDOWS.md) &bull; [Windows hardening plan](docs/windows-hardening-plan.md) &bull; [macOS](docs/PLATFORM_MACOS.md) |
 | **Policies** | [Authoring Guide](docs/policy-authoring.md) &bull; [Rust Examples](docs/rust-policy-examples.md) &bull; [YAML DSL](docs/policy-authoring.md) |
 | **Toolchain** | [Policy Toolchain](docs/policy-toolchain.md) — generate (SBOM/audit), merge, diff, simulate, sign & distribute |
 | **Intelligence** | [Learning Mode](docs/learning-mode.md) &bull; [Escape Detection](docs/escape-detection.md) &bull; [Supply Chain](docs/supply-chain-integrity.md) |
 | **Fleet** | [Canary Rollout](docs/canary-rollout.md) &bull; [Experimental Features](docs/experimental-features.md) &bull; [Temporal](docs/temporal-policies.md) |
 | **Kubernetes** | [CRD Usage](docs/crd-usage.md) &bull; [Helm Chart](deploy/helm/warmor/) |
+| **Releases** | [Releasing](docs/RELEASING.md) &bull; [Release Validation](docs/RELEASE_VALIDATION.md) &bull; [Dependency Validation](docs/DEPENDENCY_VALIDATION.md) &bull; [Release Support](docs/RELEASE_SUPPORT.md) |
 | **Project** | [Feature Status](docs/STATUS.md) &bull; [PRD, Phase Tracking & Roadmap](docs/PRD.md) |
 
 ---

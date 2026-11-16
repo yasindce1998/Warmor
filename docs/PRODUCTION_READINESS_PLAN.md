@@ -526,7 +526,7 @@ contracts that orders 3 and 6 require.
 
 This addendum records progress at merged main **`ce1d5ab`**; it does not change
 the plan's scope, erase the original findings, or clear a release. The
-[dated milestone table](STATUS.md#merged-readiness-milestones-all-dated-2026-11-14)
+[dated milestone table](STATUS.md)
 links the merged subset of PRs #28–50 and qualifies each delivery. In particular,
 the earlier “open” list is historical: #36–42, #44–46, #49 and #50 have
 merged. Controller last-known-good publication, durable fleet activation,

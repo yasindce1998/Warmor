@@ -37,7 +37,7 @@ All constraints in one block are AND-ed: the event is inside the window only if 
 - **Days** are full English names, case-insensitive (`Monday`, `tuesday`), at least one, no duplicates. The day is the UTC calendar day of the event, evaluated independently of `time_of_day`: for a `22:00`-`06:00` window on `[Friday]`, 23:00 Friday is inside but 01:00 Saturday is not.
 - **Actions:** temporal blocks are allowed on `deny` and `log` rules, including `mode: audit`. They are rejected on `allow` rules: acting outside the permitted window would allow exactly when the operation is *not* permitted.
 
-The compiler is strict about the block: unknown keys (`max_age`, `tz`, ...), wrong types (`max_container_age: 300`, `hour: "2"`), out-of-range values and an empty or null `temporal:` are compile errors, never ignored. Note that unknown keys elsewhere in a rule are still ignored by the compiler, so a misspelt `temporal:` key itself (`temporl:`) is not caught. Check the output of `warmor-compile --rust-only`: a temporal rule's check ends in `&& !(...)`.
+The compiler is strict about the block: unknown keys (`max_age`, `tz`, ...), wrong types (`max_container_age: 300`, `hour: "2"`), out-of-range values and an empty or null `temporal:` are compile errors, never ignored. Unknown rule-level keys are rejected too, so a misspelt `temporal:` key (`temporl:`) is a compile error. Check the output of `warmor-compile --rust-only`: a temporal rule's check ends in `&& !(...)`.
 
 ## Unknown age or time: fail closed
 
@@ -123,7 +123,8 @@ Note on the maintenance window: `days_of_week` is checked against the event's ow
 
 There is one rule engine: the compiled WASM policy. Nothing in Go evaluates temporal rules at runtime.
 
-1. **Compiler.** `warmor-compile` parses the block into `internal/temporal.Constraint` and generates Rust that checks it after the rule's conditions: `if (conditions) && !(window) { return action }`. Compiled policies export `abi_version() = 3`.
+1. **Compiler.** `warmor-compile` parses the block into `internal/temporal.Constraint` and generates Rust that checks it after the rule's conditions: `if (conditions) && !(window) { return action }`. Compiled policies export `abi_version() = 3`, or `5` when the policy also uses
+`args` or network `operation` rules (see [policy authoring](policy-authoring.md)).
 2. **Host inputs (policy ABI version 3).** For modules that declare ABI version 3 the host sends two values with every event, each `0` when unknown:
    - the wall clock, as UTC Unix seconds: the event's own timestamp (when the kernel saw the operation), not the evaluation time, so a recorded event replays with the same decision. Events without a timestamp are stamped at evaluation. The policy derives the minute of the day and weekday from it with integer arithmetic. Sending one raw value instead of precomputed calendar fields keeps a single source of truth and gives hand-written policies the full timestamp.
    - the container age in milliseconds: the event timestamp minus the container start time. A known age is at least 1 ms.

@@ -37,11 +37,12 @@ module's export *signatures* and rejects a module it cannot call at load time:
 | `evaluate_event` | `(ptr: i32) -> i32` | Binary ABI: `ptr` is a fixed 256-byte struct (used by YAML-compiled policies) |
 | `malloc` | `(size: i32) -> i32` | Required for both ABIs |
 | `free` | `(ptr: i32, size: i32)` | Optional |
-| `abi_version` | `() -> i32` | Optional; the host accepts 1, 2, 3 and 4 and refuses anything else. 3 opts in to temporal context, 4 additionally to process context (below) |
+| `abi_version` | `() -> u32` | Optional; the host accepts 1 through 5 and refuses anything else. 3 opts in to temporal context, 4 to process context, and 5 to the argv host callback used by compiled YAML `args`/network-operation rules (below) |
 
-A JSON policy must name its entry point `evaluate_syscall`. Exporting
-`evaluate_event(ptr, len)` is an error: `evaluate_event` is reserved for the
-binary ABI and such a module fails to load.
+A JSON policy must name its entry point `evaluate_syscall`. The binary entry
+point `evaluate_event` is selected only with signature `(ptr: i32) -> i32`;
+a wrong-signature `evaluate_event` falls back to `evaluate_syscall` if that is
+also exported, otherwise the module is rejected.
 
 The JSON document has these keys (all of them are always present for the
 listed type):
@@ -69,7 +70,9 @@ for those event types. A version 3 module without that export is treated as
 reading everything, so none of its decisions are cached or synced to the
 kernel. Modules without version 3 never see time and are cached as before.
 
-Anything else (`args`, `parent_comm`, `cgroup_id`, ...) is not sent today.
+The keys above are the complete JSON ABI surface. `args`, `parent_comm` and
+`cgroup_id` are sent for PROCESS events, and `direction` for NETWORK events,
+only to modules declaring `abi_version() >= 4` (see the table above).
 Mark every struct `#[serde(default)]`: a missing key is otherwise a parse
 error, and the crates deny on parse errors.
 
@@ -126,7 +129,7 @@ Internally the rules build a `Decision` (action + reason) that `evaluate_syscall
 
 ### ABI Version
 
-The host accepts `abi_version()` returning `1`, `2`, `3` or `4` and refuses anything else. All crates return `4`, opting in to the temporal context (`wall_clock_unix`, `container_age_ms`; version 3) and the process context (`cgroup_id`, `parent_comm`, `args`, `direction`; version 4 — see the host contract above and [the design](design/abi-v4-process-context.md)). YAML-compiled policies declare `3`.
+The host accepts `abi_version()` returning `1` through `5` and refuses anything else. All crates return `4`, opting in to the temporal context (`wall_clock_unix`, `container_age_ms`; version 3) and the process context (`cgroup_id`, `parent_comm`, `args`, `direction`; version 4 — see the host contract above and [the design](design/abi-v4-process-context.md)). YAML-compiled policies declare `3`, or `5` when they use `args` or network `operation` rules; version 5 adds the argv host callback (field 15).
 
 ## Policy Descriptions
 
@@ -270,6 +273,6 @@ All policies use the same action constants:
 2. Set `crate-type = ["cdylib"]` in `Cargo.toml`
 3. Add `serde`, `serde_json` dependencies
 4. Export `malloc`, `free`, and `evaluate_syscall(ptr, len) -> i32`; mark event structs `#[serde(default)]`
-5. Optionally export `abi_version() -> u32` — the host accepts 1 through 4; 3 additionally opts in to temporal context, 4 to process context (`args`, `parent_comm`, `cgroup_id`, `direction`)
+5. Optionally export `abi_version() -> u32` — the host accepts 1 through 5; 3 opts in to temporal context, 4 to process context (`args`, `parent_comm`, `cgroup_id`, `direction`), 5 to the argv host callback used by compiled YAML policies
 6. Build with `cargo build --release --target wasm32-unknown-unknown`
 7. Load with `warmor-daemon --policy path/to/policy.wasm`
