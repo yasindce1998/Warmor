@@ -447,7 +447,49 @@ func TestGenerationEmbeddedMapABIAndSharing(t *testing.T) {
 	if l.PolicyGenerations() != l.PolicyGenerations() {
 		t.Fatal("multiple generation writers")
 	}
-	if !reflect.DeepEqual(l.PolicyGenerations().backend, kernelGenerationBackend{marker}) {
+	if !reflect.DeepEqual(l.PolicyGenerations().backend, kernelGenerationBackend{active: marker}) {
 		t.Fatal("wrong active pointer backend")
+	}
+}
+
+// Linux <= 6.1's bpf_map_meta_equal() compares timer_off, which is -ENOENT
+// only for maps created with BTF. The userspace inner map must therefore
+// inherit the loaded object's BTF or ARRAY_OF_MAPS update returns EINVAL.
+func TestGenerationMapSpecInheritsTemplateBTF(t *testing.T) {
+	spec, err := loadLsm_exec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer := spec.Maps["active_generation"]
+	if outer == nil || outer.InnerMap == nil || outer.InnerMap.Key == nil || outer.InnerMap.Value == nil {
+		t.Fatal("loaded object has no BTF-bearing inner template")
+	}
+	plain := generationMapSpec()
+	if plain.Key != nil || plain.Value != nil {
+		t.Fatal("offline spec must stay BTF-free")
+	}
+	got := generationMapSpecWithTemplate(outer.InnerMap)
+	if got.Key != outer.InnerMap.Key || got.Value != outer.InnerMap.Value {
+		t.Fatal("inner map spec did not inherit template BTF")
+	}
+	if got.Type != plain.Type || got.KeySize != plain.KeySize || got.ValueSize != plain.ValueSize ||
+		got.MaxEntries != plain.MaxEntries || got.Flags != plain.Flags {
+		t.Fatalf("template inheritance changed the ABI: %+v", got)
+	}
+}
+
+func TestLoaderPassesInnerTemplateToGenerationBackend(t *testing.T) {
+	spec, err := loadLsm_exec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := spec.Maps["active_generation"].InnerMap.Copy()
+	l := &LSMLoader{
+		execObjs:        &lsm_execObjects{lsm_execMaps: lsm_execMaps{ActiveGeneration: &ebpf.Map{}}},
+		generationInner: template,
+	}
+	backend, ok := l.PolicyGenerations().backend.(kernelGenerationBackend)
+	if !ok || backend.template != template {
+		t.Fatal("loader did not pass the BTF template to the generation backend")
 	}
 }

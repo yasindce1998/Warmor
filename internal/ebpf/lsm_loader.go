@@ -181,6 +181,10 @@ type LSMLoader struct {
 	defaultDenyMap *ciliumebpf.Map
 	generationOnce sync.Once
 	generations    *GenerationManager
+	// generationInner is a copy of the BTF-bearing inner map template from
+	// the loaded exec object, used to create compatible generation maps on
+	// Linux 6.1 (see kernelGenerationBackend.create).
+	generationInner *ciliumebpf.MapSpec
 
 	// integrity is nil until EnableIntegrity loads lsm_integrity.
 	integrity *integrityProgram
@@ -305,6 +309,12 @@ func LoadLSMWithOptions(opts LSMOptions) (*LSMLoader, error) {
 	execSpec, err := loadLsm_exec()
 	if err != nil {
 		return nil, fmt.Errorf("load lsm_exec spec: %w", err)
+	}
+	// Capture the inner map template before LoadAndAssign consumes the spec.
+	// The kernel builds active_generation's inner_map_meta from this template,
+	// so published maps must carry the same BTF (Linux 6.1 compatibility).
+	if outer, ok := execSpec.Maps["active_generation"]; ok && outer.InnerMap != nil {
+		l.generationInner = outer.InnerMap.Copy()
 	}
 	if opts.RingBufferSize != 0 {
 		execSpec.Maps["lsm_events"].MaxEntries = opts.RingBufferSize
@@ -525,7 +535,10 @@ func (l *LSMLoader) PolicyMap() *PolicyMapManager {
 // legacy map writers and implement the documented evaluator/drain protocol.
 func (l *LSMLoader) PolicyGenerations() *GenerationManager {
 	l.generationOnce.Do(func() {
-		l.generations = &GenerationManager{backend: kernelGenerationBackend{l.execObjs.ActiveGeneration}}
+		l.generations = &GenerationManager{backend: kernelGenerationBackend{
+			active:   l.execObjs.ActiveGeneration,
+			template: l.generationInner,
+		}}
 	})
 	return l.generations
 }
