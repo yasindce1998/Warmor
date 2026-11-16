@@ -154,7 +154,7 @@ type Enforcer struct {
 	signedAssignment bool
 	kernelEnforce    bool
 	requireLSM       bool
-	lsmEnforce       bool // requested LSM enforcement mode, separate from loaded hook capability
+	lsmEnforce       bool                   // requested LSM enforcement mode, separate from loaded hook capability
 	activation       nodereceipt.Activation // guarded by activationMu; committed pool only
 	pool             *wasm.Pool
 	cache            *cache.DecisionCache

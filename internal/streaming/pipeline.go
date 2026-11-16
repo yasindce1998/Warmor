@@ -184,13 +184,19 @@ func (p *Pipeline) Close() error {
 	timer.Stop()
 
 	var errs []error
-	if p.ctx.Err() != nil {
-		errs = append(errs, fmt.Errorf("shutdown budget exhausted: %w", context.DeadlineExceeded))
-	}
 	for _, w := range p.workers {
 		if w.closeErr != nil {
 			errs = append(errs, w.closeErr)
 		}
+	}
+	// The timer is a bound on how long we wait for the drain, not a verdict on
+	// its outcome. A late timer (e.g. during a slow final fsync after every
+	// accepted event was already written and every sink closed) must not turn a
+	// clean drain into a failure. Only report an exhausted budget when it
+	// actually shed accepted work or a sink reported an error.
+	if p.ctx.Err() != nil &&
+		(p.stats.shutdownDropped.Load() != 0 || p.stats.sinkErrors.Load() != 0 || len(errs) != 0) {
+		errs = append(errs, fmt.Errorf("shutdown budget exhausted: %w", context.DeadlineExceeded))
 	}
 	p.cancel()
 	p.closeErr = errors.Join(errs...)
