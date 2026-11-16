@@ -129,6 +129,50 @@ func flushGenerationTraffic(t *testing.T, l *LSMLoader, c *generationTrafficEven
 	return 0
 }
 
+// holdSyscallAcrossPublication arms a helper that blocks in a syscall and
+// stays blocked until the returned release function is called. The caller
+// must record its publication window between the "armed" signal and release;
+// the returned attempt then strictly contains that window by construction.
+//
+// This is deterministic concurrency evidence: UDP connects are instantaneous,
+// so on a fast run every one of them can land between two activations and the
+// overlap count would be zero even though the verdict-pairing checks all pass.
+// The four writers keep exercising real policy decisions continuously; this
+// barrier guarantees that at least one measured operation is in flight across
+// each pointer switch, so the pairing/generation/drain checks below are proven
+// to have run concurrently with publication rather than sequentially.
+func holdSyscallAcrossPublication(t *testing.T) (release func(), armed <-chan struct{}, attempt <-chan generationTrafficAttempt) {
+	t.Helper()
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	armedCh := make(chan struct{})
+	done := make(chan generationTrafficAttempt, 1)
+	go func() {
+		defer pr.Close()
+		buf := make([]byte, 1)
+		start := time.Now()
+		close(armedCh)      // start is recorded before the caller proceeds to Activate
+		_, _ = pr.Read(buf) // blocks until release writes (or the writer is closed)
+		done <- generationTrafficAttempt{false, start, time.Now()}
+	}()
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			if _, werr := pw.Write([]byte{0}); werr != nil {
+				t.Errorf("release spanning syscall: %v", werr)
+			}
+			if cerr := pw.Close(); cerr != nil {
+				t.Errorf("close spanning syscall writer: %v", cerr)
+			}
+		})
+	}
+	// Also release on early t.Fatal so the helper cannot be leaked.
+	t.Cleanup(release)
+	return release, armedCh, done
+}
+
 func TestLSM_GenerationConcurrentVerdictsFlushAndRetire(t *testing.T) {
 	l, cgid := identityTestLoader(t)
 	m := l.PolicyGenerations()
@@ -233,17 +277,25 @@ func TestLSM_GenerationConcurrentVerdictsFlushAndRetire(t *testing.T) {
 	var retired []retiredBarrier
 	type publicationWindow struct{ start, end time.Time }
 	var publications []publicationWindow
+	// Barrier-coordinated spanning syscalls: each one is released only after
+	// its publication window is recorded, so its [start,end] interval strictly
+	// contains that window regardless of how fast the connects run.
+	var spanning []generationTrafficAttempt
 	for id := uint64(2); id <= 6; id++ {
 		beforeBuild := completed.Load()
 		if err := m.Prepare(id, spec(id)); err != nil {
 			t.Fatal(err)
 		}
 		oldFD := m.active.mapFD
+		releaseSpan, armedSpan, spanDone := holdSyscallAcrossPublication(t)
+		<-armedSpan
 		start := time.Now()
 		if err := m.Activate(id); err != nil {
 			t.Fatal(err)
 		}
 		publications = append(publications, publicationWindow{start, time.Now()})
+		releaseSpan()
+		spanning = append(spanning, <-spanDone)
 		waitGenerationTraffic(t, c, seenAll(id))
 		if m.retiring == nil || m.retiring.mapFD != oldFD {
 			t.Fatal("old FD released before acknowledgement")
@@ -307,10 +359,29 @@ func TestLSM_GenerationConcurrentVerdictsFlushAndRetire(t *testing.T) {
 			}
 		}
 	}
+	// Each spanning syscall was released only after its publication window was
+	// recorded, so it must overlap that window by construction. Assert this
+	// explicitly: it proves the verdict pairing above ran concurrently with a
+	// generation switch even when no short connect happened to be in flight.
+	if len(spanning) == 0 {
+		t.Fatal("no barrier-coordinated spanning syscall was recorded")
+	}
+	spanningOverlapped := 0
+	for _, attempt := range spanning {
+		for _, publication := range publications {
+			if attempt.start.Before(publication.end) && attempt.end.After(publication.start) {
+				spanningOverlapped++
+			}
+		}
+	}
+	if spanningOverlapped == 0 {
+		t.Fatal("spanning syscall did not overlap any activation; concurrent evidence is not deterministic")
+	}
+	overlapped += spanningOverlapped
 	if overlapped == 0 {
 		t.Fatal("no syscall invocation overlapped an activation; insufficient concurrent evidence")
 	}
-	t.Logf("paired %d syscall/event verdicts; %d connect invocations overlapped pointer publication", len(events), overlapped)
+	t.Logf("paired %d syscall/event verdicts; %d invocations overlapped pointer publication (%d barrier-coordinated)", len(events), overlapped, spanningOverlapped)
 	for _, barrier := range retired {
 		for _, e := range events[barrier.index:] {
 			if e.PolicyGeneration <= barrier.id {
