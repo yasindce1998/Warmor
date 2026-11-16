@@ -14,7 +14,7 @@ import (
 // model is not implied by the independent metadata/host APIs.
 func checkSignedBackendCombination(signed, atomic, host bool) error {
 	if signed && (atomic || host) {
-		return errors.New("--signed-assignments with experimental atomic generations or supervised policy host is unsupported until one commit/recovery model is tested")
+		return errors.New("--signed-assignments cannot be combined with --experimental-atomic-generations or the supervised policy host: unsupported until one commit/recovery model is tested")
 	}
 	return nil
 }

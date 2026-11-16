@@ -160,7 +160,13 @@ func TestRejectsMalformedMemoryAndAllocatorExports(t *testing.T) {
 			t.Errorf("bad %s signature accepted: %v", bad.name, err)
 		}
 	}
-	rt := boundedTestRuntime(t)
+	// Missing exports must fail validation, not race benign compilation against
+	// the looping-guest fixture's 30ms timeout on a contended native runner.
+	rt, err := NewRuntime(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rt.Close(context.Background()) })
 	mod := bytes.Replace(buildTestModule([]testFunc{fnMalloc, fnBinaryDeny}), []byte("memory"), []byte("hidden"), 1)
 	if err := rt.LoadPolicyBytes(context.Background(), mod); err == nil || !strings.Contains(err.Error(), "memory") {
 		t.Errorf("unexported memory accepted: %v", err)

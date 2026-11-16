@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/policybuild"
 	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/internal/wasm"
@@ -49,8 +50,11 @@ func TestRealChildMetadataRequiresExplicitDigestTrust(t *testing.T) {
 func TestChildBuildMetadataSharedSignedFormat(t *testing.T) {
 	// The same compiler label can be appended to any guest. Matching signed
 	// declarations is necessary, but must not authorize dependency trust.
-	build := policybuild.Metadata{Compiler: "warmor-yaml/6", DefaultAction: "deny"}
-	data, err := policybuild.Append(wasmtest.AgeKnownPolicy(nil), build)
+	build := policybuild.Metadata{Compiler: compiler.Identity, DefaultAction: "deny"}
+	// Intentionally dishonest guest: claims a deny default, exposes a finite
+	// zero dependency mask and empty allowlist, but evaluates ALLOW. A copied
+	// compiler label plus signed content is not proof of these declarations.
+	data, err := policybuild.Append(declarationGuest([]byte{1}, 0, 5), build)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,13 +65,19 @@ func TestChildBuildMetadataSharedSignedFormat(t *testing.T) {
 	}
 	defer h.Close()
 	m := h.Metadata()
-	if m.Build == nil || *m.Build != build || m.MatchArtifact(p.Digest(), 3, build.Compiler, "deny") != nil {
+	if m.Build == nil || *m.Build != build || m.MatchArtifact(p.Digest(), 5, build.Compiler, "deny") != nil {
 		t.Fatalf("shared build declaration not observed %+v", m)
 	}
-	if h.DecisionCacheEligible(0) || h.StaticRulesProcess().Eligible {
+	if !m.Domains[0].Eligible || m.Events[0].Flags&policymeta.FlagDecisionCache == 0 {
+		t.Fatal("dishonest fixture lost its usable-shaped declarations")
+	}
+	if h.DecisionCacheEligible(0) || h.LinuxKernelCacheEligible(0) || h.StaticRulesProcess().Eligible {
 		t.Fatal("compiler display label enabled optimization")
 	}
-	duplicate := append(append([]byte(nil), data...), data[len(wasmtest.AgeKnownPolicy(nil)):]...)
+	if result, err := h.Evaluate(context.Background(), &api.Event{}); err != nil || result.Action != api.ActionAllow {
+		t.Fatalf("fixture did not demonstrate dishonest claims: %+v %v", result, err)
+	}
+	duplicate := append(append([]byte(nil), data...), data[len(declarationGuest([]byte{1}, 0, 5)):]...)
 	s := supervisor(t, config(t))
 	if got, err := s.Start(context.Background(), staged(t, duplicate)); got != nil || err == nil || len(s.slots) != 0 {
 		t.Fatal("duplicate build section reached ready")
@@ -144,7 +154,6 @@ func TestRealWorkerMalformedDeclarationsStayIneligible(t *testing.T) {
 		"bad action":          append([]byte{1}, staticEntry("/bin/tool", 0, 2, 0)...),
 		"bad audit":           append([]byte{1}, staticEntry("/bin/tool", 0, 0, 2)...),
 		"process port":        append([]byte{1}, staticEntry("/bin/tool", 443, 0, 0)...),
-		"duplicate":           append(append([]byte{1}, entry...), entry...),
 		"excess count":        tooMany,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -178,6 +187,23 @@ func TestRealWorkerMalformedDeclarationsStayIneligible(t *testing.T) {
 	s := supervisor(t, config(t))
 	if h, err := s.Start(context.Background(), staged(t, declarationGuest(nil, 0, 6))); err == nil || h != nil || len(s.slots) != 0 {
 		t.Fatal("unsupported actual ABI produced a host or leaked capacity")
+	}
+}
+
+func TestRealWorkerGuestStaticDuplicatesPreserveFirstMatch(t *testing.T) {
+	table := append([]byte{1}, staticEntry("/bin/tool", 0, 1, 1)...)
+	table = append(table, staticEntry("/bin/tool", 0, 0, 0)...)
+	p := staged(t, declarationGuest(table, compiler.FieldBitPath, 5))
+	c := config(t)
+	c.TrustedDeclarationDigests = []string{p.Digest()}
+	h, err := supervisor(t, c).Start(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	d := h.StaticRulesProcess()
+	if !d.Eligible || len(d.Rules) != 1 || d.Rules[0].Action != 1 || !d.Rules[0].Audit {
+		t.Fatalf("guest first-match action/audit lost %+v", d)
 	}
 }
 
@@ -266,8 +292,8 @@ rules:
 				}
 			}
 			if len(tc.path) == 128 {
-				// The current binary guest also allows this longer truncation
-				// alias, proving why its static table is not exact/complete.
+				// Metadata must decline the full-field rule even while the
+				// binary guest preserves its existing truncation semantics.
 				r, err := h.Evaluate(context.Background(), &api.Event{Filename: tc.path + "suffix"})
 				if err != nil || r.Action != api.ActionAllow || h.StaticRulesProcess().Eligible {
 					t.Fatalf("binary alias was promoted %+v %v", r, err)
@@ -323,8 +349,8 @@ rules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The merged compiler appends canonical build claims before signing.
-	// Do not append a second independently maintained metadata declaration.
+	// Main's context-aware compiler now writes build claims before signing.
+	// Consume that single section instead of appending a second declaration.
 	p := staged(t, data)
 	c := config(t)
 	s := supervisor(t, c)
@@ -334,6 +360,9 @@ rules:
 	}
 	if untrusted.DecisionCacheEligible(0) || untrusted.StaticRulesProcess().Eligible {
 		t.Fatal("compiler output signature implicitly authorized cache")
+	}
+	if err := untrusted.Metadata().MatchArtifact(p.Digest(), 3, compiler.Identity, "deny"); err != nil {
+		t.Fatal("actual compiler claims not readable without cache trust", err)
 	}
 	untrusted.Close()
 	c.TrustedDeclarationDigests = []string{p.Digest()}
@@ -377,9 +406,23 @@ rules:
 	}
 	defer pool.Close(ctx)
 	legacy := wasm.NewPolicyEvaluator(pool, "")
+	claims := assignment.Policy{ID: "metadata-parity", Version: 1, SHA256: p.Digest(), ABI: 3, Compiler: compiler.Identity, Posture: assignment.Posture{Mode: "audit", DefaultAction: "deny"}}
+	if err := pool.CheckAssignment(claims); err != nil {
+		t.Fatal("signed pool rejected actual compiler claims", err)
+	}
 	var sources = []policymeta.Source{h, legacy}
 	if !reflect.DeepEqual(sources[0].Metadata(), sources[1].Metadata()) {
 		t.Fatal("in-process metadata differs from supervised observation")
+	}
+	for _, source := range sources {
+		if err := source.Metadata().MatchArtifact(claims.SHA256, claims.ABI, claims.Compiler, claims.Posture.DefaultAction); err != nil {
+			t.Fatal("source/signed claims diverged", err)
+		}
+		bad := source.Metadata()
+		bad.Events[0].Flags |= 1 << 31
+		if bad.MatchArtifact(claims.SHA256, claims.ABI, claims.Compiler, claims.Posture.DefaultAction) == nil {
+			t.Fatal("signed claims bypassed unknown metadata flags")
+		}
 	}
 	for _, event := range []*api.Event{{Filename: "/bin/tool"}, {Filename: "/bin/audit"}, {Filename: "/bin/log"}, {Filename: "/bin/unknown"}, {Type: api.EventTypeNetwork, Network: &api.NetworkEvent{RemoteAddr: "2001:db8::1", RemotePort: 443}}} {
 		a, err := h.Evaluate(ctx, event)

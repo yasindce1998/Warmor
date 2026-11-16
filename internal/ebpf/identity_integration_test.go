@@ -123,37 +123,27 @@ func TestLSM_StopReadersInterruptsIdleMonitors(t *testing.T) {
 	}
 }
 
-// Prepending arbitrary bytes to a known FNV collision need not preserve it;
-// search after the actual temp-dir prefix instead.
-func collidingExecPaths(t *testing.T, dir string) (string, string) {
-	t.Helper()
-	seen := make(map[uint32]string)
-	for i := 0; i < 1000000; i++ {
-		p := filepath.Join(dir, fmt.Sprintf("collision-%08x", i))
-		h := HashPattern(p)
-		if prior, ok := seen[h]; ok && prior != p {
-			return prior, p
-		}
-		seen[h] = p
-	}
-	t.Fatal("could not find test collision")
-	return "", ""
-}
-
 func TestLSM_ExactExecCollisionFirstMatchDefaultDenyAndScope(t *testing.T) {
 	l, cgid := identityTestLoader(t)
-	// t.TempDir includes the long test name, which can exceed the shared
-	// 127-byte policy-path bound before the fixture filename is added.
-	dir, err := os.MkdirTemp("/tmp", "warmor-id-")
-	if err != nil {
+	// FNV collisions depend on the entire prefix. A bounded birthday search
+	// over sequential filenames can be injective for a random temp directory,
+	// even across a million candidates. Reuse the proven full literal paths
+	// from the unprivileged identity tests instead: no search or seed assumption.
+	// The VM guard above MUST precede this fixed-path creation. Exclusive Mkdir
+	// refuses preexisting contents; never reuse, overwrite or clean an old dir.
+	a, b := collisionPathA, collisionPathB
+	if err := validateExecCollisionPaths(a, b); err != nil {
 		t.Fatal(err)
+	}
+	dir := filepath.Dir(a)
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatalf("create exclusive disposable-VM collision fixture: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := os.RemoveAll(dir); err != nil {
 			t.Errorf("remove identity fixture: %v", err)
 		}
 	})
-	a, b := collidingExecPaths(t, dir)
 	bin, err := os.ReadFile("/bin/true")
 	if err != nil {
 		t.Fatal(err)

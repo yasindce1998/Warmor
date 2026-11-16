@@ -6,9 +6,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
@@ -21,6 +24,60 @@ const (
 	collisionPathB = "/opt/warmor/collision-00044848"
 )
 
+// validateExecCollisionPaths is shared by the unprivileged fixture tests and
+// the real VM exec test. It validates full literal filenames, never a suffix,
+// cleaned substitute, hash-only key, or truncated policy/sensor input.
+func validateExecCollisionPaths(a, b string) error {
+	for _, path := range []string{a, b} {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path ||
+			len(path) > kernelmap.MaxPolicyPathBytes || strings.ContainsRune(path, 0) || !utf8.ValidString(path) {
+			return fmt.Errorf("incomplete or nonliteral collision fixture path %q", path)
+		}
+	}
+	if a == b || filepath.Dir(a) != filepath.Dir(b) {
+		return fmt.Errorf("collision fixture needs distinct filenames in one exclusive directory")
+	}
+	if HashPattern(a) != HashPattern(b) {
+		return fmt.Errorf("full collision fixture paths do not have equal FNV32 hashes")
+	}
+	return nil
+}
+
+func TestExecCollisionFixtureFullLiteralPaths(t *testing.T) {
+	if err := validateExecCollisionPaths(collisionPathA, collisionPathB); err != nil {
+		t.Fatal(err)
+	}
+	if hash := HashPattern(collisionPathA); hash != 0x7136a1ae {
+		t.Fatalf("proven full-path FNV32 vector changed: %#x", hash)
+	}
+	// Do not accidentally turn the full-path fixture into a suffix collision.
+	// Random/JSON-escaped/digit-heavy temp prefixes were the old search input;
+	// none may be silently substituted for the proven directory.
+	prefixes := []string{"/tmp/warmor-id-0", "/tmp/warmor-id-1234567890", `/tmp/{"run":123}`, "/var/tmp/warmor-outcome-fixtures", "/" + strings.Repeat("x", 127)}
+	for i := 0; i < 64; i++ {
+		prefixes = append(prefixes, fmt.Sprintf("/tmp/warmor-id-%010d", i))
+	}
+	for _, dir := range prefixes {
+		a, b := filepath.Join(dir, filepath.Base(collisionPathA)), filepath.Join(dir, filepath.Base(collisionPathB))
+		if err := validateExecCollisionPaths(a, b); err == nil {
+			t.Fatalf("accepted unproven or overlong prefix %q", dir)
+		}
+	}
+	for _, pair := range [][2]string{
+		{collisionPathA, collisionPathA},
+		{"relative/a", "relative/b"},
+		{"/opt/../opt/warmor/collision-000079bb", collisionPathB},
+		{collisionPathA + "\x00suffix", collisionPathB},
+		{collisionPathA + "\xff", collisionPathB},
+		{collisionPathA, collisionPathB + "different"},
+		{collisionPathA, "/other/" + filepath.Base(collisionPathB)},
+	} {
+		if err := validateExecCollisionPaths(pair[0], pair[1]); err == nil {
+			t.Fatalf("accepted invalid collision fixture: %q %q", pair[0], pair[1])
+		}
+	}
+}
+
 func mustStringKey(t *testing.T, scope uint64, typ uint8, path string) PolicyKey {
 	t.Helper()
 	k, err := stringPolicyKey(scope, typ, path)
@@ -31,8 +88,8 @@ func mustStringKey(t *testing.T, scope uint64, typ uint8, path string) PolicyKey
 }
 
 func TestExactKeysSeparateDeliberateFNV32Collisions(t *testing.T) {
-	if HashPattern(collisionPathA) != HashPattern(collisionPathB) {
-		t.Fatal("fixture must collide under old key")
+	if err := validateExecCollisionPaths(collisionPathA, collisionPathB); err != nil {
+		t.Fatal(err)
 	}
 	b := newFakeBackend()
 	m := &PolicyMapManager{policyMap: b}

@@ -82,6 +82,12 @@ spec:
             - name: XDG_CACHE_HOME
               value: /tmp/.cache
           args:
+            {{- if .Values.controller.nodeReceipts.enabled }}
+            - {{ printf "--receipt-controller=https://%s-controller-receipts.%s.svc:9443" (include "warmor.fullname" .) .Release.Namespace | quote }}
+            - "--receipt-token-file=/var/run/warmor-receipts/token"
+            - "--receipt-ca=/etc/warmor-receipt-ca/ca.crt"
+            - "--receipt-manifest=/etc/warmor/policy.d/activation-manifest.json"
+            {{- end }}
             - "-policy"
             {{- if .Values.controller.enabled }}
             # Controller mode: the effective policy the controller
@@ -161,6 +167,14 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
+            {{- if .Values.controller.nodeReceipts.enabled }}
+            - name: receipt-token
+              mountPath: /var/run/warmor-receipts
+              readOnly: true
+            - name: receipt-ca
+              mountPath: /etc/warmor-receipt-ca
+              readOnly: true
+            {{- end }}
             {{- if .Values.controller.enabled }}
             - name: effective-policy
               mountPath: /etc/warmor/policy.d
@@ -181,6 +195,18 @@ spec:
               mountPath: {{ .Values.hostPaths.cgroupMount | quote }}
               readOnly: true
       volumes:
+        {{- if .Values.controller.nodeReceipts.enabled }}
+        - name: receipt-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ .Values.controller.nodeReceipts.audience | quote }}
+                  expirationSeconds: 600
+        - name: receipt-ca
+          configMap:
+            name: {{ .Values.controller.nodeReceipts.caConfigMapName | quote }}
+        {{- end }}
         {{- if .Values.controller.enabled }}
         # optional: on a fresh install the controller may not have
         # published the first policy yet; the mount fills in within
@@ -192,6 +218,10 @@ spec:
             items:
               - key: policy.wasm
                 path: policy.wasm
+              {{- if .Values.controller.nodeReceipts.enabled }}
+              - key: activation-manifest.json
+                path: activation-manifest.json
+              {{- end }}
         {{- else if .Values.policy.existingConfigMap }}
         - name: policy
           configMap:

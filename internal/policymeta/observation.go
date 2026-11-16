@@ -171,25 +171,11 @@ func ValidateDomain(d Domain, fields uint32) error {
 	return nil
 }
 
-// Binary event paths occupy 128 bytes with no truncation marker. An eq rule
-// of length 128 can also match a longer truncated path; longer rules cannot
-// match their own full input at all. Neither is a complete exact allowlist.
-func validateEncodingDomain(encoding string, d Domain) error {
-	if encoding == EncodingBinary && d.Type == api.EventTypeProcess && d.Eligible {
-		for _, r := range d.Rules {
-			if len(r.Pattern) >= 128 {
-				return ErrMetadata
-			}
-		}
-	}
-	return nil
-}
-
 func (m Module) Validate(expectedDigest string) error {
 	if m.Version != Version || !ValidDigest(m.ModuleSHA256) || m.ModuleSHA256 != expectedDigest || m.ABIVersion > 5 || m.Encoding != EncodingBinary && m.Encoding != EncodingJSON || len(m.Events) != 3 || len(m.Domains) != 2 {
 		return ErrMetadata
 	}
-	if m.Build != nil && policybuild.Validate(*m.Build) != nil {
+	if m.Build != nil && ValidateBuild(*m.Build) != nil {
 		return ErrMetadata
 	}
 	for i, e := range m.Events {
@@ -205,9 +191,6 @@ func (m Module) Validate(expectedDigest string) error {
 			return ErrMetadata
 		}
 		if err := ValidateDomain(d, m.Events[d.Type].FieldsRead); err != nil {
-			return err
-		}
-		if err := validateEncodingDomain(m.Encoding, d); err != nil {
 			return err
 		}
 	}
@@ -244,7 +227,7 @@ func Observe(digest string, abi uint32, encoding string, fields [3]uint32, proce
 			t = api.EventTypeNetwork
 		}
 		domain := Domain{Type: t, StaticDomain: d}
-		if abi == 0 || ValidateDomain(domain, m.Events[t].FieldsRead) != nil || validateEncodingDomain(encoding, domain) != nil {
+		if abi == 0 || ValidateDomain(domain, m.Events[t].FieldsRead) != nil {
 			domain.StaticDomain = StaticDomain{}
 		}
 		m.Domains = append(m.Domains, domain)
@@ -263,6 +246,16 @@ func Observe(digest string, abi uint32, encoding string, fields [3]uint32, proce
 // kernel activation or declaration truthfulness. Those remain caller duties.
 func (m Module) MatchArtifact(digest string, abi uint32, compilerIdentity, defaultAction string) error {
 	if m.Validate(digest) != nil || abi == 0 || m.ABIVersion != abi || m.Build == nil || m.Build.Compiler != compilerIdentity || m.Build.DefaultAction != defaultAction {
+		return ErrMetadata
+	}
+	return nil
+}
+
+// ValidateBuild applies stricter observation/IPC text admission independently
+// of the shared signed-artifact section codec. Values remain claims, not proof
+// of provenance or effective posture.
+func ValidateBuild(m policybuild.Metadata) error {
+	if m.Compiler == "" || len(m.Compiler) > 256 || !utf8.ValidString(m.Compiler) || strings.IndexFunc(m.Compiler, func(r rune) bool { return r < 32 || r == 127 }) >= 0 || m.DefaultAction != "allow" && m.DefaultAction != "deny" && m.DefaultAction != "log" {
 		return ErrMetadata
 	}
 	return nil

@@ -121,8 +121,8 @@ func parseStaticTable(data []byte, eventType uint32) (rules []compiler.StaticRul
 
 	seen := map[string]bool{}
 	i := 1
-	for i < len(data) {
-		if len(rules) >= policymeta.MaxStaticRules {
+	for entries := 0; i < len(data); entries++ {
+		if entries >= policymeta.MaxStaticRules {
 			return nil, false, fmt.Errorf("too many static rules")
 		}
 		if i+6 > len(data) {
@@ -154,7 +154,7 @@ func parseStaticTable(data []byte, eventType uint32) (rules []compiler.StaticRul
 		}
 		key := fmt.Sprintf("%d/%s", port, pattern)
 		if seen[key] {
-			return nil, false, fmt.Errorf("duplicate static identity")
+			continue // first match wins, including custom exports
 		}
 		seen[key] = true
 		rules = append(rules, compiler.StaticRule{

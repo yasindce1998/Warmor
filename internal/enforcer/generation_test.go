@@ -5,17 +5,40 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/crypto"
+	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/platform"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/internal/wasm"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
+
+// The generation seam consumes the canonical source's effective static methods,
+// not raw Module flags or a second generation-specific metadata representation.
+var _ staticRulesSource = (policymeta.Source)(nil)
+
+func TestGenerationSpecAcceptsCanonicalStaticDomainAliases(t *testing.T) {
+	e := &Enforcer{defaultDeny: true}
+	process := policymeta.StaticDomain{Eligible: true, Rules: []policymeta.StaticRule{{Event: "process", Pattern: "/bin/canonical", Action: 0}}}
+	network := policymeta.StaticDomain{Eligible: true, Rules: []policymeta.StaticRule{{Event: "network", Pattern: "127.0.0.1", Port: 443, Action: 1, Audit: true}}}
+	spec, err := e.generationSpec(fakeStaticSource{proc: process, net: network})
+	if err != nil || len(spec.Rules) != 2 || len(spec.DefaultDeny) != 2 {
+		t.Fatalf("canonical source aliases incompatible: %+v %v", spec, err)
+	}
+	process.Rules[0].Pattern = "/bin/changed"
+	network.Rules[0].Port = 8443
+	if spec.Rules[0].Pattern != "/bin/canonical" || spec.Rules[1].Port != 443 || !spec.Rules[1].Audit {
+		t.Fatalf("generation installation input retained mutable canonical source data: %+v", spec)
+	}
+}
 
 // Only the publication/drain boundary is faked; evaluators and pools are real.
 // No test in this file loads/attaches BPF or signals a host process.
@@ -385,6 +408,59 @@ func TestGenerationCancellationRetainsOldUntilTeardown(t *testing.T) {
 	}
 }
 
+func TestGenerationStopCancelsInflightActivationWithoutDispatchLock(t *testing.T) {
+	e, k := generationEnforcer(t)
+	entered := make(chan struct{})
+	k.drain = func(ctx context.Context) error {
+		close(entered)
+		<-ctx.Done()
+		// Reader/worker cleanup must still be able to capture and release a
+		// lease while Stop cancels the activation's outstanding drain.
+		event := &api.Event{}
+		if !e.captureGeneration(event) {
+			return errors.New("current generation unavailable during cleanup")
+		}
+		event.GenerationContext.Complete()
+		return ctx.Err()
+	}
+	path := generationCandidate(t, 1)
+	activated := make(chan error, 1)
+	go func() { activated <- e.ActivatePolicy(path, nil) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("activation never entered drain")
+	}
+	stopped := make(chan struct{})
+	go func() { e.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop deadlocked with activation")
+	}
+	select {
+	case err := <-activated:
+		if !errors.Is(err, ErrActivationPending) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("interrupted live activation must remain pending: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("activation cleanup deadlocked on generation dispatch")
+	}
+	if len(k.acked) != 1 || e.generations.pending == nil || len(e.generations.states) != 2 {
+		t.Fatal("Stop retired an undrained generation")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- e.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close deadlocked after interrupted activation")
+	}
+}
+
 func TestGenerationOptionFailsBeforePlatformSideEffects(t *testing.T) {
 	for _, opts := range []*Options{
 		{AtomicGenerations: true},
@@ -396,6 +472,37 @@ func TestGenerationOptionFailsBeforePlatformSideEffects(t *testing.T) {
 	}
 	if e, err := New(context.Background(), "not-read.yaml", &Options{AtomicGenerations: true, RequireLSM: true}); err == nil || e != nil {
 		t.Fatal("mutable compile-on-reload path admitted")
+	}
+}
+
+func TestGenerationSignedAssignmentRejectedBeforeStartupSideEffects(t *testing.T) {
+	artifact, err := crypto.GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := newPlatform
+	t.Cleanup(func() { newPlatform = original })
+	called := false
+	newPlatform = func(platform.Config) (platform.Platform, error) {
+		called = true
+		return nil, errors.New("unexpected platform construction")
+	}
+	_, err = New(context.Background(), "not-read.wasm", &Options{
+		AtomicGenerations: true, RequireLSM: true, PolicyVerifyKey: artifact.Public,
+		SignedAssignment: &assignment.Policy{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "separately reviewed") || called {
+		t.Fatalf("signed/generation startup reached artifact/platform preparation: %v", err)
+	}
+}
+
+func TestGenerationSignedAssignmentCannotUseLiveFirstCommit(t *testing.T) {
+	e, k := generationEnforcer(t)
+	old := e.evaluator
+	committed := false
+	err := e.ActivateAssignment("not-read.wasm", assignment.Policy{}, func() error { committed = true; return nil })
+	if err == nil || !strings.Contains(err.Error(), "separately reviewed") || committed || e.evaluator != old || len(k.prepared) != 1 || e.generations.pending != nil {
+		t.Fatalf("signed update crossed experimental generation boundary: %v", err)
 	}
 }
 

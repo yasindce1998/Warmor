@@ -108,7 +108,11 @@ func New(cfg *Config) *Client {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
-	return &Client{cfg: cfg, http: &http.Client{Transport: transport}}
+	return &Client{cfg: cfg, http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
+		// Kubernetes REST resources never require redirects. In particular do
+		// not redirect authentication operations or bearer credentials.
+		return fmt.Errorf("Kubernetes API redirects refused")
+	}}}
 }
 
 // StatusError is a non-2xx API server response.

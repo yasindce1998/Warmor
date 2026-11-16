@@ -2,44 +2,6 @@
 
 This is a **disposable-VM-only** test of the real `cmd/warmor-daemon`, compiler-generated WASM policies, and BPF-LSM hooks. It does not run an enforcing daemon on the host, in kind, or in the current Kubernetes cluster. `tests/e2e_enforcement_test.sh` is a compatibility wrapper for this runner; the old unsafe standalone shell test has been removed.
 
-## Optional supervised host gate
-
-`bash tests/integration/run-outcomes.sh --policy-host` runs the same outcome
-oracle with a separately built host and artifact-signed modules. Add `--atomic-generations`
-to select generation maps; without it the legacy single-map mode is explicit.
-Add `--build-only` for preparation without starting a VM or daemon. The existing
-default run and kernel-generation gates remain independent and required.
-
-The helper and daemon come from the same revision; the guest checks all retained
-hashes, copies the helper to a physical root-owned `/run/warmor-outcomes` path,
-and supplies its exact SHA-256 pin explicitly. Ed25519 private keys exist only
-in host preparation memory. Public keys, signatures, signed malformed/init-loop
-and real compile-heavy modules are retained. Declaration trust is limited to the
-reviewed compiler-generated static/file fixtures, not all signed modules.
-
-Additional probes require compile/init deadline rejection with LKG still
-allowing/refusing real operations, reaped failed candidates, no cached allow or
-automatic respawn after an active host dies, and clean SIGTERM cancellation of a
-watcher-owned candidate. `check-host-outcomes.sh` rejects skips, duplicates,
-missing nested PASS evidence, and final success without all selected fixtures.
-`.github/workflows/supervised-host-outcomes.yml` requires separate legacy/atomic
-VM jobs using Go 1.26.11 and the existing `/dev/null` transport/deadline launcher.
-These are new CI gates, not locally claimed VM results. Deterministic real-host,
-fake-kernel tests retain the precise old-lease/maps-until-Close ordering oracle;
-the process-level VM test does not pretend to observe every teardown instant.
-See [deployment assumptions](../../docs/design/supervised-host-deployment.md).
-
-The host-mode pair now uses the explicit test-only `policyhost_phaseproof` build
-profile. Its owned IPC barrier requires helper completion and an attributed
-uncached ALLOW **before** releasing the still-loading candidate; the real load
-deadline and eventual LKG assertions follow. Release/Docker binaries never use
-this profile. See [phase-proof scope and negative probes](../../docs/design/supervised-host-phase-proof.md).
-Artifact signatures here do not imply signed-deployment validation.
-PR53's `--signed-assignments` + Host/atomic combinations remain explicitly
-unsupported. Live NDJSON uses guest-owned `/tmp/warmor-outcome-fixtures/recordings`
-(0700); private exports are copied to retained artifacts only after daemon exit.
-Both verifier and outcome logs require exact non-skipped PASS evidence in host mode.
-
 ## What a passing VM run proves
 
 | Gate | Required observable outcome |
@@ -76,7 +38,7 @@ For systems with a small/memory-backed `/tmp`, put the OCI cache on persistent d
 XDG_CACHE_HOME="$HOME/.cache/warmor-outcomes" bash tests/integration/run-outcomes.sh
 ```
 
-The guest runs controlled executables in its private `/tmp` overlay, so a checkout under a mode-0700 host home directory does not require weakening host permissions. No host secret paths or service-account tokens are created or touched.
+The guest runs controlled executables in its private `/var/tmp` overlay, so a checkout under a mode-0700 host home directory does not require weakening host permissions. No host secret paths or service-account tokens are created or touched.
 
 ### Safe local validation without a VM
 
@@ -120,13 +82,49 @@ and checks the requested actual kernel minor. Broad suite skips do not count.
 Local compilation and oracle checks, **without host attachment or a VM**:
 
 ```sh
-bash -n tests/integration/run-kernel-generations.sh
-go test -race -run '^TestGenerationGate' ./tests/integration
+bash -n tests/integration/run-kernel-generations.sh tests/integration/run-vm.sh
+go test -race -run '^(TestGenerationGate|TestVM)' ./tests/integration
 bash tests/integration/run-kernel-generations.sh --build-only
 ```
 
 The dedicated CI matrix runs on the built 6.1 and 6.18 IMA kernels and retains
-logs, manifest and input hashes under `artifacts/generations.*`. See
+logs, manifest and input hashes under `artifacts/generations.*`. Its shared
+`run-vm.sh generations` phase replaces closed CI stdin with `/dev/null` and bounds
+host cache/boot/transport/guest waits to 420 seconds, plus a 15-second hard-kill
+grace for the whole launcher/QEMU process group. The guest's 180-second test
+timeout is separate. `generations.log` captures both output streams and
+`generations-status.txt` retains phase/deadline/exit and failure diagnostics,
+including failures before guest startup; both are uploaded on failure too.
+Offline fake-launcher tests cover closed stdin, failure propagation and stalled
+startup with QUIT/KILL escalation. These do not execute a VM or enforcement.
+The required-PASS/no-SKIP/duplicate-PASS oracle is unchanged. See
 [`docs/design/kernel-generations.md`](../../docs/design/kernel-generations.md)
-for concurrency, flush/retirement assertions and the still-unimplemented daemon
-activation contract. A build-only success is not verifier/runtime evidence.
+for concurrency and flush/retirement assertions. A build-only success is not
+verifier/runtime evidence.
+
+## Whole-daemon generation activation gate
+
+`run-generation-daemon.sh` separately executes the actual daemon with
+`--experimental-atomic-generations --require-lsm --lsm-enforce --default-deny`.
+It is required after the kernel phase on both built 6.1.188 and 6.18.53 kernels.
+Its compiled VM-only profile holds old work and injects named post-live durable/
+pre-drain failures; normal builds have no fault-control flag. The guard checks
+actual vimto PID 1/private ports before enabling the profile. The strict oracle
+requires the parent and every child PASS, no skips, plus successful cleanup.
+
+Safe local checks (no daemon or hooks):
+
+```sh
+bash -n tests/integration/run-generation-daemon.sh
+go test -race -run '^TestGenerationDaemonGate' ./tests/integration
+go test -race -tags 'integration generation_daemon_vm' -run '^TestProfile' ./internal/generationvm
+bash tests/integration/run-generation-daemon.sh --build-only
+```
+
+Full VM invocation requires `KERNEL=/absolute/built/vmlinuz` and
+`EXPECT_KERNEL_MINOR=6.1` (or `6.18`). It retains exact binaries/hashes, real Cargo
+WASM, generation/scope/verdict evidence, markers, heartbeats/fault stages and
+SIGTERM outcomes under `artifacts/generation-daemon.*`. It is not signed-mode or
+supervised-Host combination proof. See
+[`generation-daemon-vm.md`](../../docs/design/generation-daemon-vm.md) for exact
+assertions, compile-profile boundaries and locally unexecuted VM evidence.

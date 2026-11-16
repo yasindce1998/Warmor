@@ -32,6 +32,16 @@ spec:
     {{- with .Values.networkPolicy.extraEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+    {{- if .Values.controller.nodeReceipts.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "warmor.selectorLabels" . | nindent 14 }}
+              component: controller
+      ports:
+        - port: 9443
+          protocol: TCP
+    {{- end }}
 ---
 {{- if .Values.controller.enabled }}
 apiVersion: networking.k8s.io/v1
@@ -52,6 +62,16 @@ spec:
     - ports:
         - port: 9091
           protocol: TCP
+    {{- if .Values.controller.nodeReceipts.enabled }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "warmor.selectorLabels" . | nindent 14 }}
+              component: daemon
+      ports:
+        - port: 9443
+          protocol: TCP
+    {{- end }}
   # The controller only ever talks to the API server (and DNS).
   # 443 covers real clusters, where policy engines evaluate the service
   # ClusterIP before DNAT; 6443 covers kindnet (kind), which evaluates

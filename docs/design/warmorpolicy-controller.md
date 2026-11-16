@@ -29,7 +29,8 @@ Deployment in the chart (`controller.enabled`, off by default). It:
    UTF-8) that the DaemonSet mounts at `/etc/warmor/policy.d`.
 6. **Reports** separate validation, compilation and publication outcomes.
    `Applied` remains `Unknown` until authenticated exact-digest node
-   acknowledgements exist; `lastApplied` and `nodesApplied` are not asserted.
+   acknowledgements exist; `lastApplied` and `nodesApplied` are not asserted by
+   default. See [explicit authenticated receipt mode](authenticated-node-receipts.md).
 
 Agents pick changes up through the mtime-polling policy watcher that
 already exists on every platform: a ConfigMap update lands as a file swap
@@ -138,9 +139,11 @@ writes cannot become the fallback for later edits.
 describe the effective composition, including retained snapshots, not a promise
 that an invalid desired spec compiled. `publishedDigest` and `lastPublished`
 describe publication, never node activation. There is no `activeDigest` assertion.
-`Applied=Unknown/NoNodeAcknowledgements` and `Ready=False` remain until a real
-acknowledgement path exists. `Active` is retained in the CRD enum for compatibility
-but is no longer emitted.
+`Applied=Unknown/NoNodeAcknowledgements` and `Ready=False` remain in default mode.
+The separately enabled [authenticated receipt path](authenticated-node-receipts.md)
+can emit `Active` only for fresh exact accepted-generation self-reports from
+every required authorized node. This is not attestation; consumers must enforce
+`receiptExpiresAt`, not treat a stored condition as a perpetual live health lease.
 
 **Upgrade:** apply the updated CRD separately (Helm does not upgrade `crds/`).
 Consumers waiting for `phase=Active` must instead inspect `Published=True` for
@@ -185,7 +188,7 @@ Metrics are `warmor_controller_ready`,
 `warmor_controller_last_success_timestamp_seconds` and
 `warmor_controller_last_reconcile_duration_seconds`. They contain no CR names,
 policy operands or raw API/compiler errors. These are **local reconciliation**
-signals only: none changes `Applied=Unknown`, asserts an active digest, or proves
+signals only: none changes Applied, asserts an active digest, or proves
 node loading, evaluation, kernel prevention or termination.
 
 ### Durable snapshots and recovery

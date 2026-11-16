@@ -2,6 +2,8 @@ package kube
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,6 +81,25 @@ func TestClient_StatusErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no such thing") {
 		t.Errorf("error message = %q, want the API server's message", err)
+	}
+}
+
+func TestClientRejectsCredentialBearingRedirects(t *testing.T) {
+	called := false
+	destination := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true; w.WriteHeader(http.StatusNoContent) }))
+	defer destination.Close()
+	originServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
+	}))
+	defer originServer.Close()
+	pool := x509.NewCertPool()
+	pool.AddCert(originServer.Certificate())
+	origin := New(&Config{BaseURL: originServer.URL, TLS: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}, Token: func() (string, error) { return "owned-controller-test", nil }})
+	if err := origin.Create(context.Background(), "/apis/authentication.k8s.io/v1/tokenreviews", map[string]string{"token": "owned-test-only"}, nil); err == nil {
+		t.Fatal("redirect accepted")
+	}
+	if called {
+		t.Fatal("redirect destination received token review")
 	}
 }
 

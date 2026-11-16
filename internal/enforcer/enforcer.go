@@ -21,10 +21,12 @@ import (
 	"github.com/yasindce1998/warmor/internal/crypto/assignment"
 	"github.com/yasindce1998/warmor/internal/drift"
 	"github.com/yasindce1998/warmor/internal/escape"
+	"github.com/yasindce1998/warmor/internal/generationvm"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/lineage"
 	"github.com/yasindce1998/warmor/internal/logging"
 	"github.com/yasindce1998/warmor/internal/metrics"
+	"github.com/yasindce1998/warmor/internal/nodereceipt"
 	"github.com/yasindce1998/warmor/internal/platform"
 	"github.com/yasindce1998/warmor/internal/policyhost"
 	"github.com/yasindce1998/warmor/internal/policymeta"
@@ -152,6 +154,8 @@ type Enforcer struct {
 	signedAssignment bool
 	kernelEnforce    bool
 	requireLSM       bool
+	lsmEnforce       bool // requested LSM enforcement mode, separate from loaded hook capability
+	activation       nodereceipt.Activation // guarded by activationMu; committed pool only
 	pool             *wasm.Pool
 	cache            *cache.DecisionCache
 	actionHandler    *ActionHandler
@@ -229,7 +233,8 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	}
 	opts = &effective
 	if opts.AtomicGenerations && opts.Telemetry != nil {
-		return nil, errors.New("legacy telemetry attribution with atomic generations is unsupported")
+		opts.Telemetry.Seal()
+		return nil, errGenerationTelemetryUnsupported
 	}
 	if opts.ExpectedAssignment != nil && opts.AtomicGenerations {
 		return nil, errors.New("signed assignments with atomic generations are unsupported until one commit/recovery model is validated")
@@ -517,6 +522,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		signedAssignment: opts.ExpectedAssignment != nil,
 		kernelEnforce:    kernelBlocking,
 		requireLSM:       opts.RequireLSM,
+		lsmEnforce:       opts.LSMEnforce,
 		cache:            decisionCache,
 		actionHandler:    actionHandler,
 		logger:           logger,
@@ -579,6 +585,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		e.Close()
 		return nil, fmt.Errorf("activate kernel default-deny: %w", activationErr)
 	}
+	e.activation = e.captureActivation()
 
 	return e, nil
 }
@@ -666,6 +673,9 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 		// the platform. Completion is idempotent for pre-captured events.
 		defer event.GenerationContext.Complete()
 		decisionCache = captured.cache
+		if err := generationvm.Checkpoint(e.ctx, "event", captured.id, event); err != nil {
+			return
+		}
 	}
 	metrics.RecordEventProcessed(event.GetType().String())
 	if e.checkEscape(event) {
@@ -1280,11 +1290,14 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, dura
 		return err
 	}
 	if e.generations != nil {
-		if expected != nil {
-			return errors.New("signed assignments with atomic generations are unsupported")
+		if expected != nil || e.signedAssignment {
+			return errors.New("signed assignments with atomic generations require a separately reviewed activation integration")
 		}
-		if snapshot != nil {
-			return errors.New("legacy telemetry attribution with atomic generations is unsupported")
+		if snapshot != nil || e.telemetry != nil {
+			if e.telemetry != nil {
+				e.telemetry.Seal()
+			}
+			return errGenerationTelemetryUnsupported
 		}
 		return e.activateGeneration(path, durableCommit)
 	}
@@ -1321,6 +1334,7 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, dura
 		// Dynamic cached kernel entries cannot be restored transactionally.
 		restoreErr := e.prepareKernel(e.evaluator)
 		e.decisionMu.Unlock()
+		e.activation = nodereceipt.Activation{} // kernel state is no longer acknowledged
 		if restoreErr != nil {
 			return fmt.Errorf("activation failed: %w; kernel rollback failed (enforcement degraded): %v", err, restoreErr)
 		}
@@ -1336,6 +1350,10 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, dura
 	e.backend = newBackend
 	e.policyID = pid
 	e.policyGen.Add(1)
+	// Receipt evidence is the committed pool's identity, never the optional
+	// fleet telemetry snapshot/revision supplied by the caller. Publish both
+	// under the same drain/activation locks before admitting new events.
+	e.activation = e.captureActivation()
 	if e.telemetry != nil {
 		if snapshot == nil {
 			e.telemetry.Seal()

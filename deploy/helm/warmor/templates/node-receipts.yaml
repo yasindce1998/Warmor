@@ -1,0 +1,72 @@
+{{- if and .Values.controller.enabled .Values.controller.nodeReceipts.enabled }}
+# Explicit opt-in only. Deliberately NOT system:auth-delegator (which also grants
+# subjectaccessreviews), and never cluster-admin. TokenReview is cluster-scoped.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "warmor.fullname" . }}-node-receipts
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    resourceNames: {{ toJson .Values.controller.nodeReceipts.requiredNodes }}
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "warmor.fullname" . }}-node-receipts
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "warmor.fullname" . }}-node-receipts
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "warmor.fullname" . }}-controller
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "warmor.fullname" . }}-node-receipts
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    resourceNames: [{{ include "warmor.serviceAccountName" . | quote }}]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames: [{{ include "warmor.fullname" . | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "warmor.fullname" . }}-node-receipts
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "warmor.fullname" . }}-node-receipts
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "warmor.fullname" . }}-controller
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "warmor.fullname" . }}-controller-receipts
+spec:
+  selector:
+    {{- include "warmor.selectorLabels" . | nindent 4 }}
+    component: controller
+  ports:
+    - name: receipts-https
+      port: 9443
+      targetPort: receipts-https
+{{- end }}

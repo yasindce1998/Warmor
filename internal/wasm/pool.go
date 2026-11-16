@@ -60,12 +60,12 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 		instances:    make(chan *Policy, size),
 		runtime:      runtime,
 		module:       runtime.module,
-		moduleDigest: runtime.moduleDigest,
+		moduleDigest: runtime.digest,
 		size:         size,
 		done:         make(chan struct{}),
 	}
-	if runtime.buildMetadata != nil {
-		metadata := *runtime.buildMetadata
+	if runtime.metadata != nil {
+		metadata := *runtime.metadata
 		p.buildMetadata = &metadata
 	}
 
@@ -86,7 +86,7 @@ func NewPool(ctx context.Context, runtime *Runtime, size int) (*Pool, error) {
 			if policy.useBinaryABI {
 				encoding = policymeta.EncodingBinary
 			}
-			p.metadata = policymeta.Observe(p.moduleDigest, policy.abiVersion, encoding, p.fields, p.staticProcess, p.staticNetwork)
+			p.metadata = policymeta.Observe(p.moduleDigest, p.abiVersion, encoding, p.fields, p.staticProcess, p.staticNetwork)
 			if p.buildMetadata != nil {
 				build := *p.buildMetadata
 				p.metadata.Build = &build

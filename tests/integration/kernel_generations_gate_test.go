@@ -119,6 +119,7 @@ func TestGenerationGateWorkflow(t *testing.T) {
 			Steps []struct {
 				Run, Uses, If string
 				Env           map[string]string
+				With          struct{ Path string }
 			} `yaml:"steps"`
 		} `yaml:"jobs"`
 	}
@@ -144,7 +145,7 @@ func TestGenerationGateWorkflow(t *testing.T) {
 		if strings.Contains(step.Run, "go generate ./internal/ebpf") {
 			regenerated = true
 		}
-		if strings.Contains(step.Run, "-run '^TestGenerationGate'") {
+		if strings.Contains(step.Run, "-run '^(TestGenerationGate|TestVM)'") {
 			checkedOracles = true
 		}
 		if strings.Contains(step.Run, "bash tests/integration/run-kernel-generations.sh") {
@@ -157,15 +158,18 @@ func TestGenerationGateWorkflow(t *testing.T) {
 			ranVM = true
 		}
 		if strings.HasPrefix(step.Uses, "actions/upload-artifact@") && step.If == "always()" {
-			retained = true
+			retained = strings.Contains(step.With.Path, "tests/integration/artifacts/generations.*/*.log") &&
+				strings.Contains(step.With.Path, "tests/integration/artifacts/generations.*/generations-status.txt")
 		}
 	}
 	if !ranVM || !retained || !checkedOracles {
 		t.Fatal("must run strict VM suite, check oracles offline and retain evidence on failure")
 	}
 	for _, event := range []string{"push", "pull_request"} {
-		if !strings.Contains(strings.Join(workflow.On[event].Paths, ","), "tests/integration/run-kernel-generations.sh") {
-			t.Fatalf("%s doesn't trigger gate changes", event)
+		for _, path := range []string{"tests/integration/run-kernel-generations.sh", "tests/integration/run-vm.sh", "tests/integration/workflow_test.go"} {
+			if !strings.Contains(strings.Join(workflow.On[event].Paths, ","), path) {
+				t.Fatalf("%s doesn't trigger gate changes to %s", event, path)
+			}
 		}
 	}
 }
@@ -179,6 +183,7 @@ func TestGenerationGateRunnerSafetyAndEvidence(t *testing.T) {
 	for _, required := range []string{
 		"set -euo pipefail", `go test -c -tags integration -o "$ARTIFACTS/kernel.test" ./internal/ebpf`,
 		"WARMOR_REQUIRE_BPF_LSM=1 WARMOR_REQUIRE_IMA=1 WARMOR_GENERATION_VM_GATE=1",
+		`bash tests/integration/run-vm.sh generations "$ARTIFACTS"`,
 		`WARMOR_EXPECT_KERNEL_MINOR="$EXPECT_KERNEL_MINOR"`, `"$VIMTO" -kernel "$KERNEL" exec -- "$ARTIFACTS/kernel.test"`,
 		`check_log "$ARTIFACTS/generations.log"`, `"$ROOT"/internal/ebpf/*_bpf*.o`, `"$ROOT"/internal/ebpf/*_bpf*.go`,
 		`sha256sum "$KERNEL"`, `-test.count=1`, `-test.timeout=180s`,

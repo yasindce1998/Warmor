@@ -123,6 +123,12 @@ func runDaemon(stop <-chan struct{}) {
 	if err := checkSignedBackendCombination(*signedAssignments, *atomicGenerations, *supervisedPolicyHost); err != nil {
 		log.Fatal(err)
 	}
+	if err := setupGenerationVM(); err != nil {
+		log.Fatal(err)
+	}
+	if err := validateNodeReceiptMode(); err != nil {
+		log.Fatal(err)
+	}
 	hostConfig, err := supervisedBackendConfig(*supervisedPolicyHost, *policyHostPath, *policyHostSHA256, *policyDeclarationDigests, *evalTimeout, *policyHostLoadTimeout)
 	if err != nil {
 		log.Fatal(err)
@@ -463,6 +469,15 @@ func runDaemon(stop <-chan struct{}) {
 	}
 	if err := start(); err != nil {
 		log.Fatalf("❌ Failed to start enforcer: %v", err)
+	}
+	receiptClient, err := newNodeReceiptClient(enf)
+	if err != nil {
+		log.Fatalf("Node receipts: %v", err)
+	}
+	if receiptClient != nil {
+		receiptCtx, stopReceipts := context.WithCancel(ctx)
+		defer stopReceipts()
+		go runNodeReceipts(receiptCtx, receiptClient)
 	}
 
 	// Set up signal handling

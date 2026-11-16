@@ -145,38 +145,61 @@ only implement pre-kernel publication or disk-only compensating rollback is
 until a shared reviewed commit/recovery model is implemented. Process restart
 adopts the sole backend's durable pair; no second PR38 pointer should compete.
 
+After integrating main's signed-assignment support, this branch explicitly
+rejects `--signed-assignments --experimental-atomic-generations` before opening
+state or capture. The enforcer also rejects the combined startup options and
+`ActivateAssignment` on a generation-enabled instance before candidate loading,
+kernel preparation or durable commit. Generic reload remains forbidden in signed
+mode, and fleet SIGHUP remains forbidden. The separate signed-generation adapter
+is not imported by this merge; its commit/recovery ownership still needs review.
+
+Main's optional schema-1 telemetry collector is also **unsupported with atomic
+generations**. Its single collector replacement assumes a full event drain before
+new evaluation, unlike this branch's overlapping captured-generation leases.
+Supplying both options rejects startup before artifact/platform work and seals
+the supplied collector. `ActivatePolicyTelemetry` and generic activation with a
+collector reject before generation preparation/live commit, and generation
+decisions never enter legacy telemetry. No assignment/cohort identity is invented
+from a kernel generation ID. Supporting this combination needs separately reviewed
+per-generation attribution and acknowledgement tests; plain generation operation
+without telemetry is unchanged. Legacy telemetry and signed-mode refusal rules
+remain as on main.
+
 ### Shared metadata API coordination
 
-The original generation checkpoint deliberately introduced **no**
-ABI/compiler/posture metadata struct. Its read-only inspection found
-the signed integration's `policymeta.Metadata{Compiler,DefaultAction}` custom
-section declaration (`warmor.build.v1`) and the metadata owner's
-`policymeta.Module` runtime observations plus `policymeta.Source`. They represent
-different trust statements and must be unified by their owners, not guessed from
-a third generation-specific metadata document. The supervised integration now
-uses the metadata owner's canonical observation/source types and separate
-`policybuild` build claims, rather than introducing a third metadata document.
+Main's canonical `internal/policybuild.Metadata{Compiler,DefaultAction}` custom
+section declaration (`warmor.build.v1`) is retained unchanged, including compiler
+identity `warmor-yaml/7`. Signed assignment checking uses the actual instantiated
+pool ABI, captured artifact digest and authenticated build declaration, not a
+generation-specific metadata model. This branch introduces no alternative
+ABI/compiler/posture struct or `ModuleClaims`. Main's canonical `policymeta.Module`
+runtime observations and `policymeta.Source` are retained unchanged, including
+actual digest/ABI observations and digest-pinned Host effective methods. Build
+declarations remain distinct from observed structure or optimization permission.
 
 Generation spec building consumes the pre-existing structural surface:
 
 ```go
 type staticRulesSource interface {
-    StaticRulesProcess() policymeta.StaticDomain
-    StaticRulesNetwork() policymeta.StaticDomain
+    StaticRulesProcess() wasm.StaticDomain
+    StaticRulesNetwork() wasm.StaticDomain
 }
 // wasm.StaticDomain: { Eligible bool; Rules []compiler.StaticRule }
 ```
 
-The metadata branch aliases `wasm.StaticDomain = policymeta.StaticDomain`, so
-these two method signatures remain compatible. Its `policymeta.Source` also
+Main aliases `compiler.StaticRule = policymeta.StaticRule` and
+`wasm.StaticDomain = policymeta.StaticDomain`, so the existing generation seam's
+two method signatures remain compatible without another metadata model.
+The canonical `policymeta.Source` also
 exposes `Metadata() Module`, field/temporal/age queries, and
-`DecisionCacheEligible`/`LinuxKernelCacheEligible`. Supervised evaluator
-wiring uses that source's **effective trusted methods**, not raw observed
-flags or a signed build declaration as cache authorization. The later adapter in
-`supervised-evaluator-integration.md` extracts the Evaluate/Close/Source interface
-and complete backend lifetime owner. The default retains in-process pool/runtime;
-explicit supervised mode creates neither in the parent. This is not a production
-or whole-daemon VM readiness claim.
+`DecisionCacheEligible`/`LinuxKernelCacheEligible`. Future supervised evaluator
+wiring should use that source's **effective trusted methods**, not raw observed
+flags or a signed build declaration as cache authorization. A component test
+checks canonical source/interface compatibility and copied installation inputs;
+it is not Host+generation execution proof. This checkpoint
+still stores concrete in-process `*wasm.PolicyEvaluator`, `*wasm.Pool` and
+`*wasm.Runtime`; it does **not** claim Host is wired. A reviewed evaluator
+evaluation/close/source interface plus backend lifecycle owner is still needed.
 
 PR41's shared `kernelmap.MaxPolicyPathBytes = 127` is retained here in compiler,
 runtime static-export and dynamic key validation. The metadata branch's more
@@ -218,7 +241,10 @@ NO_WAKEUP flush, sustained default-deny, bounded memory and shutdown. Filesystem
 fault injection is not physical power-loss validation. Startup attachment before
 initial generation preparation and downtime/restart protection are not made
 transactional. Configuration outside the generation map (enforce/audit switch,
-cgroup filters, integrity, unix watch, loss behavior) is fixed during activation.
+integrity, unix watch, loss behavior) is fixed during activation. Automatic
+cgroup discovery/filter reconciliation can proceed concurrently and remains
+outside the generation transaction. Activation success does not prove atomic
+scope convergence or healthy discovery; readiness reports scope health separately.
 
 Integration branch `feat/generation-atomic-activation` began at PR38 `e4203dc` and
 merged main `34a95ea`, PR41 `3bfa8a1`, generation `6060ed2`, dependency main
@@ -276,3 +302,16 @@ another session holding its global runner lock; rerunning with
 `--allow-serial-runners` passed. Logs: `/tmp/opencode/generation-activation-sighup-`
 `{tests,race,lint,vet}.log`. No full-suite rerun or VM execution is claimed for
 this focused follow-up. No other owner branch was changed.
+
+### Supervised-host integration (PR53)
+
+This tree also carries the opt-in supervised whole-WASM policy host (PR53). The
+enforcer's generation dispatch owns its evaluator lifetimes through the shared
+`Evaluator`/`policyBackend` abstraction, so an active generation can carry a
+supervised backend as well as the default in-process pool/runtime. Generation
+activation and reload remain opt-in; the supervised host is never enabled by
+default. See `supervised-policy-host.md`, `supervised-evaluator-integration.md`
+and `supervised-host-activation.md` for the supervised trust, lifecycle and
+daemon-gate contracts. The telemetry and signed-assignment refusal rules above
+apply unchanged to supervised generations: legacy telemetry and signed-mode
+activation are rejected before any generation preparation or durable commit.

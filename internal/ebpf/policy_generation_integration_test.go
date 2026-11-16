@@ -21,16 +21,22 @@ import (
 // CI runs them on both the regular kernels and the built Linux 6.1 LTS kernel.
 func TestLSM_GenerationPrepareSwitchRetireExec(t *testing.T) {
 	l, cgid := identityTestLoader(t)
-	dir, err := os.MkdirTemp("/tmp", "warmor-gen-")
-	if err != nil {
+	// FNV collisions depend on the entire prefix; reuse the proven full
+	// literal paths from the unprivileged identity tests. Exclusive Mkdir
+	// refuses preexisting contents; never reuse, overwrite or clean an old dir.
+	a, b := collisionPathA, collisionPathB
+	if err := validateExecCollisionPaths(a, b); err != nil {
 		t.Fatal(err)
+	}
+	dir := filepath.Dir(a)
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatalf("create exclusive disposable-VM collision fixture: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := os.RemoveAll(dir); err != nil {
-			t.Error(err)
+			t.Errorf("remove generation fixture: %v", err)
 		}
 	})
-	a, b := collidingExecPaths(t, dir)
 	unknown := filepath.Join(dir, "unknown")
 	bin, err := os.ReadFile("/bin/true")
 	if err != nil {

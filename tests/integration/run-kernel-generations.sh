@@ -91,10 +91,12 @@ fi
 selection="^($(required_tests | paste -sd '|' -))$"
 # No sudo, host test execution, daemon, Docker, cluster or fallback. env is
 # propagated by vimto into the VM; the requirements fixture proves it arrived.
+# The shared wrapper bounds pre-guest startup too and replaces Actions' closed
+# stdin with /dev/null, retaining generations.log and generations-status.txt.
 WARMOR_REQUIRE_BPF_LSM=1 WARMOR_REQUIRE_IMA=1 WARMOR_GENERATION_VM_GATE=1 \
 WARMOR_EXPECT_KERNEL_MINOR="$EXPECT_KERNEL_MINOR" \
+  bash tests/integration/run-vm.sh generations "$ARTIFACTS" \
   "$VIMTO" -kernel "$KERNEL" exec -- "$ARTIFACTS/kernel.test" \
-  -test.v -test.count=1 -test.timeout=180s -test.run "$selection" \
-  2>&1 | tee "$ARTIFACTS/generations.log"
+  -test.v -test.count=1 -test.timeout=180s -test.run "$selection"
 check_log "$ARTIFACTS/generations.log"
 echo 'Strict non-skipped kernel-generation VM gate passed.'

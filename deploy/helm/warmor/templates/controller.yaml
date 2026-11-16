@@ -138,10 +138,29 @@ spec:
             - {{ .Values.controller.resyncPeriod | quote }}
             - "--metrics-address"
             - ":9091"
+            {{- if .Values.controller.nodeReceipts.enabled }}
+            - "--node-receipts"
+            - "--receipts-tls-cert=/etc/warmor-receipts/tls.crt"
+            - "--receipts-tls-key=/etc/warmor-receipts/tls.key"
+            - {{ printf "--receipts-audience=%s" .Values.controller.nodeReceipts.audience | quote }}
+            - {{ printf "--receipts-namespace=%s" .Release.Namespace | quote }}
+            - {{ printf "--receipts-service-account=%s" (include "warmor.serviceAccountName" .) | quote }}
+            - {{ printf "--receipts-daemonset=%s" (include "warmor.fullname" .) | quote }}
+            - {{ printf "--receipts-required-nodes=%s" (join "," .Values.controller.nodeReceipts.requiredNodes) | quote }}
+            - {{ printf "--receipts-max-age=%s" .Values.controller.nodeReceipts.maxAge | quote }}
+            - {{ printf "--receipts-audit=%t" .Values.daemon.auditMode | quote }}
+            - {{ printf "--receipts-lsm-enforcement=%t" (and .Values.daemon.lsmEnforce (not .Values.daemon.auditMode)) | quote }}
+            - {{ printf "--receipts-default-deny-requested=%t" .Values.daemon.defaultDeny | quote }}
+            {{- end }}
           {{- if .Values.controller.extraArgs }}
           {{- toYaml .Values.controller.extraArgs | nindent 12 }}
           {{- end }}
           ports:
+            {{- if .Values.controller.nodeReceipts.enabled }}
+            - name: receipts-https
+              containerPort: 9443
+              protocol: TCP
+            {{- end }}
             - name: controller-http
               containerPort: 9091
               protocol: TCP
@@ -167,11 +186,21 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
+            {{- if .Values.controller.nodeReceipts.enabled }}
+            - name: receipt-tls
+              mountPath: /etc/warmor-receipts
+              readOnly: true
+            {{- end }}
             - name: cache
               mountPath: /var/lib/warmor-controller/cache
             - name: tmp
               mountPath: /tmp
       volumes:
+        {{- if .Values.controller.nodeReceipts.enabled }}
+        - name: receipt-tls
+          secret:
+            secretName: {{ .Values.controller.nodeReceipts.tlsSecretName | quote }}
+        {{- end }}
         - name: cache
           emptyDir:
             sizeLimit: {{ .Values.controller.cacheSizeLimit }}

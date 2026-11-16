@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -85,6 +86,9 @@ func TestGeneratedABIRequiresCallbackSupportOnlyWhenUsed(t *testing.T) {
 		}
 		if !strings.Contains(src, "fn abi_version() -> u32 {\n    "+tc.version) {
 			t.Fatalf("%s policy has wrong ABI declaration", tc.field)
+		}
+		if fmt.Sprint(PolicyABIVersion(p)) != tc.version || strings.Count(src, "fn abi_version()") != 1 {
+			t.Fatal("controller ABI prediction diverged or duplicated export")
 		}
 	}
 }

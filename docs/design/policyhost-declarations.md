@@ -1,10 +1,14 @@
 # Policy-host declarations: authenticated observations, explicit trust
 
-Status: optional backend/API checkpoint originally on `feat/policyhost-declarations`,
-based on PR45's frozen `f394546` plus descriptor fix `84a8176`. The experimental
-adapter is now described in `supervised-evaluator-integration.md`; it adds opt-in
-enforcer routing, not a default backend change. PR45's process-boundary
-limitations continue to apply.
+Status: optional backend/API integration on `feat/policyhost-metadata-integration`,
+initially based on `origin/main` at `9297209` (PR45 backend/sanitizer and
+PR42 release tests already present), refreshed through `ce1d5ab` (PR49 signed
+compiler/pool identity, PR46 manifests, compiler-7 compatibility, and PR41 exact
+kernel identities). Only metadata commits `d68d0af`, `48d5c41`,
+and `c7ff006` were cherry-picked; backend commits were not duplicated.
+The reviewed source branch remains unchanged. **No enforcer routing, generation activation, kernel
+map writes or default backend changes.** PR45's process-boundary limitations
+continue to apply.
 
 ## Contract
 
@@ -15,18 +19,18 @@ domains, decision-cache eligibility and Linux kernel-key dependency eligibility.
 The existing `wasm.StaticDomain` name is an alias, so existing in-process method
 signatures remain source-compatible. Legacy in-process fields/static methods
 retain their trust semantics; new metadata/eligibility methods sanitize invalid
-declarations. Combined evaluator lifecycle/interface wiring is documented in
-`supervised-evaluator-integration.md`.
+declarations. Combined evaluator lifecycle/interface wiring belongs to the
+generation-activation integration, not this branch.
 
 ### Shared signed-activation contract
 
-Read-only comparison with signed activation `f54480a` found an independent
-`policymeta.Metadata/Read/Append` custom-section codec, not a shared observation
-API. That agent's subsequent worktree moves the codec to `internal/policybuild`;
-this branch follows the same package split and preserves the exact
-`warmor.build.v1` canonical JSON format (`compiler`, `default_action`). It adds
-only stricter bounded text validation (`policybuild.Validate`). No signed agent
-or generation-activation branch is edited here.
+Read-only comparison with signed activation `f54480a` originally found an
+independent custom-section codec, not a shared observation API. The signed
+owner's new `.worktrees/signed-policy-integration` moves that codec to
+`internal/policybuild`. This integration retains the **identical parser source**
+and `warmor.build.v1` canonical JSON format (`compiler`, `default_action`).
+Stricter observation text checks live separately in `policymeta.ValidateBuild`,
+not a divergent parser. No signed or generation-activation branch is edited here.
 
 - `policybuild.Metadata` is an artifact-author-approved claim, parsed only in
   the child runtime for supervised loads; duplicate/malformed sections fail load.
@@ -44,11 +48,22 @@ or generation-activation branch is edited here.
   must separately verify assignment/artifact trust and effective mode/kernel
   posture; enabling optimizations still requires exact module-digest attestation.
 
-The local compiler's build-output pipeline is not changed to append sections by
-this branch: the signed agent owns that integration. A real worker test consumes
-the same codec and demonstrates that any guest may carry a matching compiler
-label without gaining cache/default-deny permission. Combined integration must
-retain one `policybuild` codec, not resurrect a second `policymeta.Read` parser.
+PR49/main's context-aware compiler now appends one build section with identity
+`warmor-yaml/7` before signing; this branch consumes that section unchanged and
+does not append a duplicate or invent a different compiler identity. The pool
+captures `moduleDigest`, `buildMetadata` and actual `abiVersion` alongside its
+compiled module. Observed `Module` data derives from that **pool snapshot**, not
+mutable runtime state after a later load. Main's `Pool.CheckAssignment` and the
+shared `Module.MatchArtifact` are checked for identity/ABI/build-claim parity
+before and after runtime reload/replacement; inconsistent ABI replacements remain
+refused. These checks do not substitute for effective runtime/kernel posture.
+
+A real worker test uses the same current compiler label on an intentionally
+dishonest guest (finite fields/eligible empty allowlist/deny-default claim while
+evaluating allow). Artifact claim matching succeeds but **does not grant cache or
+default-deny trust**. Unknown observation flags still reject matching. The common
+`policymeta.Source/Module` API and canonical `policybuild` parser are retained;
+no second raw-WASM parser or daemon Host route is introduced.
 
 Wire protocol **2** requires `Ready{Control, Metadata}` instead of protocol 1's
 bare ready control frame. Metadata has its own version (1), exact module SHA-256,
@@ -104,27 +119,34 @@ per-event kernel entries must obey the same exact-key requirements.
   guest table is bounded before allocation (1,064,961 bytes), and publication
   independently checks the combined count. This is below the legacy 65,536-entry
   map capacity, but not a promise of free capacity in any particular map.
-- Paths/patterns are nonempty, valid UTF-8 and NUL-free. Process paths retain
-  PR41's shared **127-byte** exact identity limit across compiler, runtime static
-  tables and metadata, for both JSON and binary encoding. A binary 128-byte eq
-  rule can match longer truncation aliases, so is not a complete identity.
+- Paths/patterns are nonempty, valid UTF-8 and NUL-free. The encoded pattern
+  framing cap is 254 bytes, but process rule admission uses the shared
+  **`kernelmap.MaxPolicyPathBytes = 127`** for both binary and JSON metadata.
   Process entries have port zero; event labels match their enclosing domain.
-  The general transport pattern cap remains 254 bytes, not kernel authorization.
+  This is the same constant as PR41/generation activation, not a new 254-byte
+  exception for JSON. A binary 128-byte eq rule may match longer truncation
+   aliases, so such tables are declined. The `ce1d5ab` main refresh imports PR41's
+   exact-key implementation and uses its single shared constant unchanged across
+   compiler/runtime/dynamic/metadata paths. No allocator, preflight or canonical
+   endpoint check is removed. Historical old-base mismatch fixtures are
+   regression evidence, not a new vulnerability report on PR41.
 - Network entries require canonical unzoned IPv4/IPv6 text, not IPv4-mapped aliases
   or alternate textual spellings. Rewriting an alias would change guest string-eq
   semantics, so an unusable declaration declines the whole domain instead.
   Ports are uint16 including 0 and 65535, never interpreted as wildcards.
-- Exact tuple keys `(event type, full pattern, port)` are retained. Duplicate full
-  keys (even identical values) decline the whole guest domain or reject incoming
-  metadata; action/audit differences never turn into last-writer-wins behavior.
-  Distinct keys are not deduplicated by a lossy hash.
+- Exact tuple keys `(event type, full pattern, port)` are retained. PR41's raw
+  guest table parser retains the first full-key entry (including action/audit),
+  matching compiler first-match semantics; the 4096 count cap charges **encoded
+  entries**, including duplicates, before deduplication. Published metadata must
+  contain unique full keys: duplicates on the wire are rejected, never silently
+  collapsed by the parent. Distinct keys are not deduplicated by a lossy hash.
 - Action is precisely allow=0 or deny=1; audit is a strict boolean. Log rules
   retain allow+audit; audit-mode denials retain deny+audit. Runtime global mode is
   not guessed or folded into the module metadata. Empty **eligible** domains mean
   deny-all misses, while ineligible domains must contain no rules.
 - Static eligibility additionally requires finite fields fully covered by that
   domain's key. Unknown dependencies, invalid eligibility bytes, trailing data,
-  overlong entries, duplicates and noncanonical endpoints never become incomplete
+  overlong entries, inconsistent wire duplicates and noncanonical endpoints never become incomplete
   allowlists. Worker observations decline unusable domains; malformed transport
   fails candidate readiness. Existing evaluation remains available when a guest
   optional declaration is unusable.
@@ -154,8 +176,8 @@ path lengths 127/128/254/255, 0/65535 ports, maximal IPv6 text, and noncanonical
 mapped addresses. Maximum escaped metadata and real FNV-colliding full paths
 exercise frame capacity and lossless key identities, not only happy-path values.
 
-This is not semantic verification of arbitrary WASM. The existing kernel branch's
-collision-free exact identities and generation-atomic installation are still
-required before enabling default-deny or kernel cache integration. Activation,
+This is not semantic verification of arbitrary WASM. Main now supplies PR41's
+collision-free exact identities; generation-atomic installation and activation
+are still required before enabling new default-deny/kernel-cache integration. Activation,
 attestation provenance/configuration, global audit mode, retirement/drain,
 packaging and fail-closed enforcement tests remain separate gates.

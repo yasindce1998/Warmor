@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,6 +52,9 @@ func main() {
 	defer stop()
 
 	cfg := loadConfig()
+	if *receiptsEnabled && (!strings.HasPrefix(cfg.BaseURL, "https://") || (cfg.TLS != nil && cfg.TLS.InsecureSkipVerify)) {
+		log.Fatal("node receipts require a verified HTTPS Kubernetes API connection")
+	}
 
 	// Resolve namespace defaults before overriding with the all flag.
 	podNamespace := kube.PodNamespace()
@@ -79,7 +83,15 @@ func main() {
 		ResyncPeriod:       *resyncPeriod,
 		CompileTimeout:     *compileTimeout,
 	}
-	ctl := controller.New(kube.New(cfg), opts)
+	api := kube.New(cfg)
+	ctl := controller.New(api, opts)
+	receiptServer, err := startReceipts(ctl, api, stop)
+	if err != nil {
+		log.Fatalf("node receipts: %v", err)
+	}
+	if receiptServer != nil {
+		defer receiptServer.Close()
+	}
 	listener, err := net.Listen("tcp", *metricsAddress)
 	if err != nil {
 		log.Fatalf("controller probes: %v", err)

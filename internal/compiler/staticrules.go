@@ -2,12 +2,12 @@ package compiler
 
 import (
 	"fmt"
-	"github.com/yasindce1998/warmor/internal/policymeta"
 	"net"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/yasindce1998/warmor/internal/kernelmap"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 )
 
 // StaticRulesExport is the name of the exported static-rules table.

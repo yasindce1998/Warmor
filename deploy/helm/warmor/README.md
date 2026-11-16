@@ -142,3 +142,12 @@ Static manifests in `deploy/kubernetes/` are an audit-first policy-server exampl
 requiring certificates and a deployed server. Prefer the validated chart for
 standalone/ConfigMap deployments. No live enforcement test was run for this
 runtime-safety unit/render test suite; see the isolated capability matrix.
+## Authenticated activation receipts
+
+Receipts are disabled by default. Explicit mode requires operator-provisioned
+controller TLS and daemon CA trust, a dedicated projected bound-pod token audience
+and a complete `controller.nodeReceipts.requiredNodes` roster. It adds only the
+opt-in TokenReview/named-Node and namespaced daemon-identity read permissions.
+See [the receipt contract and trust limitations](../../../docs/design/authenticated-node-receipts.md).
+Receipts are authenticated **self-reports, not attestation**. Consumers must
+honor `status.receiptExpiresAt`; publication alone never means Applied.
