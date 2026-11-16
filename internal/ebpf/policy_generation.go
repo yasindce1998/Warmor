@@ -56,7 +56,14 @@ type generationBackend interface {
 	publish(generationMap) error
 }
 
-type kernelGenerationBackend struct{ active *ebpf.Map }
+type kernelGenerationBackend struct {
+	active *ebpf.Map
+	// template is the BTF-bearing inner map template of active_generation's
+	// ARRAY_OF_MAPS declaration in the loaded BPF object. The kernel derives
+	// the outer map's inner_map_meta from this template, so every published
+	// inner map must be created with the same BTF metadata.
+	template *ebpf.MapSpec
+}
 
 func generationMapSpec() *ebpf.MapSpec {
 	return &ebpf.MapSpec{
@@ -65,8 +72,29 @@ func generationMapSpec() *ebpf.MapSpec {
 	}
 }
 
+// generationMapSpecWithTemplate copies the BTF key/value types from the outer
+// map's inner template. Layout and flags stay pinned by generationMapSpec()
+// (and the object ABI tests); only BTF is inherited.
+func generationMapSpecWithTemplate(template *ebpf.MapSpec) *ebpf.MapSpec {
+	spec := generationMapSpec()
+	if template != nil {
+		spec.Key = template.Key
+		spec.Value = template.Value
+	}
+	return spec
+}
+
 func (b kernelGenerationBackend) create() (generationMap, error) {
-	return ebpf.NewMap(generationMapSpec())
+	// Linux <= 6.1's bpf_map_meta_equal() compares inner_map_meta->timer_off
+	// against the submitted inner map's timer_off. map_create() sets
+	// timer_off = -ENOENT when the map is created with BTF (the ELF template
+	// has BTF but no bpf_timer field) and leaves it at -EINVAL for BTF-less
+	// maps. Publishing a BTF-less inner map therefore fails with EINVAL on
+	// 6.1 even though the ABI is identical. Newer kernels (>= 6.2, commit
+	// db559117828d "bpf: Consolidate spin_lock, timer management into
+	// btf_record") compare btf_record instead, which is empty on both sides.
+	// Carrying the template's BTF makes both maps agree on every kernel.
+	return ebpf.NewMap(generationMapSpecWithTemplate(b.template))
 }
 
 func (b kernelGenerationBackend) publish(m generationMap) error {
