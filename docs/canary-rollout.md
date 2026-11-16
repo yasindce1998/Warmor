@@ -6,7 +6,7 @@ The policy server supports A/B canary rollouts for Wasm policies. You can gradua
 
 ## How It Works
 
-1. A rollout is created with a target percentage. Agents are assigned to the canary (new policy) or baseline (current policy) cohort via consistent hashing on `sha256(rolloutID + ":" + agentID) % 100`.
+1. A rollout is created with a target percentage. Agents are assigned to the canary (new policy) or baseline (current policy) cohort via a consistent hash: the first four bytes of `sha256(rolloutID + ":" + agentID)` are read as a big-endian `uint32`, then taken modulo 100.
 2. *(Library only, not wired.)* The `CanaryAnalyzer` is designed to record every policy decision (allow/deny) for both cohorts.
 3. *(Library only, not wired.)* Once the observation window elapses and both cohorts have enough samples, it compares deny rates. If the canary deny rate exceeds baseline by more than `MaxDenyRateDelta`, the rollout is flagged as degraded or automatically rolled back.
 

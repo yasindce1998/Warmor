@@ -76,7 +76,7 @@ scrape annotations; the daemon Service does not select it). Reconcile failure or
 staleness withdraws controller readiness; retaining a valid last-good publication
 after an invalid desired edit can remain locally ready. This never proves node
 application: CR `Applied` remains Unknown, with no asserted node count or
-`lastApplied`. See the [controller contract](../../../../docs/design/warmorpolicy-controller.md#controller-probes-and-metrics).
+`lastApplied`. See the [controller contract](../../../docs/design/warmorpolicy-controller.md#controller-probes-and-metrics).
 
 ## Empirical capability and real-node test matrix (not run here)
 

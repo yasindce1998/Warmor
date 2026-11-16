@@ -82,7 +82,7 @@ alone. The check and `TerminateProcess` use the same handle.
 |---|---|
 | `comm` | Lowercased image file name, e.g. `powershell.exe` (Windows names are case-insensitive) |
 | `path` (process) | Drive-letter image path, e.g. `C:\Windows\System32\cmd.exe` (translated from the NT device path) |
-| `args` (process) | Command line split with `CommandLineToArgvW` rules. The eBPF hook copies it in the kernel. ETW has no command line, so the consumer reads it from the live process; processes that exit within ETW's ~1 s delivery delay have no `args` in ETW mode. **Note:** the WASM policy ABI does not pass `args` yet on any platform, so `args` conditions in YAML currently compile to a path check. |
+| `args` (process) | Command line split with `CommandLineToArgvW` rules. The eBPF hook copies it in the kernel. ETW has no command line, so the consumer reads it from the live process; processes that exit within ETW's ~1 s delivery delay have no `args` in ETW mode. The WASM ABI carries `args` as a space-joined string (field 15 for modules declaring ABI 5); compiled YAML `args` conditions read that field. |
 | file `operation` | `open`, `create`, `write` (first write per handle only), `delete`, `rename`. There is no `read`: ETW has no read-intent event, and read I/O events are too noisy to subscribe to. |
 | network `operation` | `connect`, `accept`, `sendto` (UDP, deduplicated per peer for 10 s). Bind/listen reuse `connect` and carry `hook: bind|listen`, matching the Linux LSM sensor. |
 | network `protocol` | `tcp`, `udp`, `tcp6`, `udp6` (IPv4-mapped addresses are unmapped) |
@@ -91,7 +91,8 @@ alone. The check and `TerminateProcess` use the same handle.
 
 The daemon ignores its own file and network I/O. Bind/listen blocking requires
 the optional `cgroup/bind4`, `bind6`, `listen4`, `listen6` programs; without
-them those operations fall back to userspace evaluation.
+them those operations are not monitored — the ETW provider supplies no
+bind/listen events.
 
 ## Requirements
 

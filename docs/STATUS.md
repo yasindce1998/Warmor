@@ -1,6 +1,6 @@
 # Warmor Feature Status
 
-**Source snapshot:** main at [`971471e`](https://github.com/yasindce1998/Warmor/commit/971471e2ff0b257fd58a695651aa7d67b451a3f0), plus the PR #57 receipt integration being reconciled here, checked 2026-11-14. PR #57's previously reviewed head is `40de5eb`; its green checks do not validate this new merge head. This source description is not a claim of fresh remote CI or release clearance.
+**Source snapshot:** main at [`d62a460`](https://github.com/yasindce1998/Warmor/commit/d62a460), checked 2026-11-16 (the merge `b4a0634` plus the shared control-plane contract). This page describes merged source only. This is not a claim of fresh remote CI or release clearance.
 
 This page distinguishes merged implementation from pending work and deployment
 evidence. **Warmor is not production-ready; no release is cleared by this status
@@ -9,7 +9,7 @@ published artifact, deployed fleet, or completed production release gate. The
 [readiness plan](PRODUCTION_READINESS_PLAN.md) preserves the original assessment
 and acceptance gates; its dated findings must not be read as current status.
 
-## Readiness snapshot — 2026-11-14
+## Readiness snapshot — 2026-11-16
 
 - [PR #41](https://github.com/yasindce1998/Warmor/pull/41) is now merged: kernel
   policy matching uses **exact structured path/endpoint keys**, not hash-only
@@ -25,14 +25,21 @@ and acceptance gates; its dated findings must not be read as current status.
   later generation/Host integrations or production readiness. The earlier
   [`5aa4556` VM success](https://github.com/yasindce1998/Warmor/actions/runs/43615301413/job/132508919164)
   is historical branch evidence, not a substitute for the reviewed-head run.
-- Reload drains userspace event handling and guards stale cache/map writes, but
-  the legacy kernel map rebuild is **not generation-atomic**. Default-deny misses
-  may allow during rebuilding; rollback can leave degraded kernel state.
+- The default reload path drains userspace event handling and guards stale
+  cache/map writes, but its kernel map rebuild is **not generation-atomic**:
+  default-deny misses may be allowed during rebuilding and rollback errors can
+  leave degraded state. The merged opt-in `--experimental-atomic-generations
+  --require-lsm` path prepares a complete unreachable map and publishes one
+  generation pointer, but is off by default and still requires whole-daemon VM
+  evidence. See [generation activation](design/generation-activation.md).
 - CRs report **Published, not Applied by default**; `Applied=Unknown`, `Ready=False`
-  awaits acknowledgement. Explicit receipt mode can report Applied only for a
-  fresh exact-publication set from every required authorized daemon pod; consumers
-  must honor `receiptExpiresAt`. These are self-reports, not attestation or
-  prevention proof. All non-nil selectors, including `{}`, stay
+  awaits acknowledgement. The merged explicit receipt mode
+  (`warmor-controller --node-receipts` and the daemon's `--receipt-controller`,
+  `--receipt-token-file`, `--receipt-ca`, `--receipt-manifest`) can report Applied
+  only for a fresh exact-publication set from every required authorized daemon
+  pod; consumers must honor `receiptExpiresAt`. These are authenticated node
+  self-reports, **not attestation**, and prove neither kernel generation
+  atomicity nor prevention. All non-nil selectors, including `{}`, stay
   **Pending**. Library identity/manifest work does not enable workload routing.
 - **Resolved since `98d2b90`:** the earlier merged regression had
   [`manifest.SupportedCompilerVersion`](../internal/workload/manifest/manifest.go)
@@ -48,11 +55,12 @@ and acceptance gates; its dated findings must not be read as current status.
   Merged release workflow checks do not configure repository protection. No
   protection was changed and no release or CI run was triggered for this update.
 
-### Merged readiness milestones (all dated 2026-11-14)
+### Merged readiness milestones (PRs #28–50 dated 2026-11-14; PRs #48–61 merged 2026-11-14/16)
 
-This is the merged subset of PRs #28–50 (with later main reconciliation noted), not a declaration that their larger
-readiness work packages are complete. Evidence details live in the linked PRs
-and focused documents, not in a new measurement or test run for this page.
+This is the merged subset of PRs #28–50 plus the newer PRs #48–61 listed below,
+not a declaration that their larger readiness work packages are complete.
+Evidence details live in the linked PRs and focused documents, not in a new
+measurement or test run for this page.
 
 | Merged PRs | Milestone | Remaining boundary |
 |---|---|---|
@@ -67,15 +75,28 @@ and focused documents, not in a new measurement or test run for this page.
 | [#41](https://github.com/yasindce1998/Warmor/pull/41) | Exact scoped kernel keys, truthful audit/refusal encoding, idle-reader shutdown, real-daemon VM outcome gate; compiler-7 manifest compatibility | Reviewed head `1ea758e` and current-head VM evidence above; private recording fixture `54d9ea5` retained. Literal path identity is not inode/content/mount-namespace identity; no generation-atomic or multi-node isolation claim |
 | [#43](https://github.com/yasindce1998/Warmor/pull/43) | Historical readiness progress checkpoint | Superseded for current merged/open status by this snapshot |
 | [#47](https://github.com/yasindce1998/Warmor/pull/47) | Merged optional acknowledged userspace-decision telemetry and bounded server gate APIs | Library/embedded activation and submission wiring; no automatic rollout actuator, no telemetry-derived controller Applied proof, signed attribution remains disabled |
+| [#48](https://github.com/yasindce1998/Warmor/pull/48), [#53](https://github.com/yasindce1998/Warmor/pull/53) | Shared policy-host declaration metadata and supervised enforcer Host integration: `--experimental-supervised-policy-host`, `--policy-host`, `--policy-host-sha256`, `--policy-declaration-digests` | Experimental Linux opt-in, off by default, requires `--verify-key`; not a production sandbox, packaged-isolation release or whole-daemon VM gate. See [supervised host activation](design/supervised-host-activation.md) |
+| [#51](https://github.com/yasindce1998/Warmor/pull/51) | Opt-in kernel generation activation: `--experimental-atomic-generations --require-lsm`, one-pointer map publication, generation-tagged dispatch | Off by default; incompatible with signed assignments and telemetry; whole-daemon VM evidence and workload routing still open. See [generation activation](design/generation-activation.md) |
+| [#52](https://github.com/yasindce1998/Warmor/pull/52), [#60](https://github.com/yasindce1998/Warmor/pull/60) | Compiler subprocess cleanup/output bounds and compiler artifact integration | Hard compilation isolation is still not a completed release gate |
+| [#57](https://github.com/yasindce1998/Warmor/pull/57) | Authenticated node activation receipts (controller and daemon opt-in) | Node self-reports, not attestation; not an every-node enforcement or prevention proof. See [receipt boundaries](design/authenticated-node-receipts.md) |
+| [#61](https://github.com/yasindce1998/Warmor/pull/61) | Windows ETW/eBPF stability hardening, bind/listen and identity capture | eBPF-for-Windows programs are still not built or run in CI; kernel blocking unverified |
 
-**Not shipped in main `971471e`:** shared policy-host declaration metadata [#48](https://github.com/yasindce1998/Warmor/pull/48),
+**Newly merged since `971471e`:** policy-host declaration metadata [#48](https://github.com/yasindce1998/Warmor/pull/48),
 generation-atomic activation [#51](https://github.com/yasindce1998/Warmor/pull/51),
 compiler subprocess cleanup/output bounds [#52](https://github.com/yasindce1998/Warmor/pull/52),
-and supervised enforcer Host integration [#53](https://github.com/yasindce1998/Warmor/pull/53).
-Authenticated node application receipts are reachable here only as explicit
-opt-in PR #57 integration, not yet a merged-main/live-cluster acceptance claim;
-capture-quality accounting remains unmerged work. Neither pending branch code nor a successful job on another
-commit closes a main release gate.
+supervised enforcer Host integration [#53](https://github.com/yasindce1998/Warmor/pull/53),
+authenticated node receipts [#57](https://github.com/yasindce1998/Warmor/pull/57),
+release git isolation [#58](https://github.com/yasindce1998/Warmor/pull/58),
+kernel collision fixture [#59](https://github.com/yasindce1998/Warmor/pull/59),
+compiler artifact integration [#60](https://github.com/yasindce1998/Warmor/pull/60)
+and Windows ETW/eBPF stability [#61](https://github.com/yasindce1998/Warmor/pull/61).
+All are opt-in or library/API work with the boundaries in the table above and in
+their linked design docs; none closes a production-release or whole-daemon VM
+gate. Commit [`d62a460`](https://github.com/yasindce1998/Warmor/commit/d62a460)
+then published the shared agent control-plane contract (`pkg/controlplane`, the
+conformance suite, an external-consumer module and
+[`control-plane-protocol.md`](control-plane-protocol.md)); see the fleet table.
+Capture-quality accounting and per-workload routing remain open.
 
 ## Status legend
 
@@ -96,13 +117,13 @@ commit closes a main release gate.
 | Tracepoint monitoring (execve, openat, connect) | Partial | `warmor-daemon` loads the tracepoint programs and streams events to userspace. The exec tracepoint also captures argv (≤16 args, 63 bytes each) and the parent's comm and PID | Missing/truncated input, ring/queue loss and tracepoint/LSM duplicate context remain coverage limits; complete capture-quality accounting is not merged |
 | LSM-BPF hooks (`bprm_check_security`, `file_open`, `socket_connect`, `socket_bind`, `socket_listen`, `ptrace_access_check`, `sb_mount`) | Partial | All 7 attach when `CONFIG_BPF_LSM=y` and `bpf` is in the active LSM list. CI tests the attach in a VM on longterm/stable kernels. With `--lsm-enforce`, a hook returns `-EPERM` **only when the kernel policy map already has a deny entry** for that key. With `--default-deny` (exec/connect only), an **allowlist policy** (`default_action: deny` + exact `eq` rules) is preloaded into the map at startup and a map miss is refused too — see [design/kernel-default-deny.md](design/kernel-default-deny.md) | On a map miss the hook **allows** the operation and emits an event, unless the domain is default-deny marked (opt-in, eligibility-gated). The policy map is not preloaded for non-allowlist policies. If the event ring is full the event is dropped and counted (`warmor_lsm_events_dropped_total`); with `--on-event-loss=deny` an unknown exec/connect is then refused. |
 | LSM event delivery (`--lsm-ringbuf-size`, `--on-event-loss`) | Partial | 4 MiB ring by default, batched reader wakeups and per-hook LSM ring-drop counters | Sustained overload still drops events; LSM counters do not account for every tracepoint/userspace/sink loss. October VM delivery/latency results below are historical, not a current lossless guarantee |
-| Kernel policy map population (WASM to BPF feedback) | Partial | Exact structured cgroup/path or endpoint keys; tracepoint-origin exec/connect feedback requires complete shared inputs and declarations covered by the key. Sync outcomes are counted, failures rate-limit logged, reload clears/rebuilds state and fences stale persistence | Literal path is not inode/content/mount-namespace identity. Policy-derived paths >127 bytes, unknown cgroups, basename file events, non-connect events and unknown/temporal dependencies do not sync. The 65,536-entry LRU's keys alone cost 18 MiB before values/overhead. LSM-origin decisions are not synced; other hooks do not gain general blocking from this path. Kernel rebuilds remain non-atomic; deploy matching BPF objects/userspace together |
+| Kernel policy map population (WASM to BPF feedback) | Partial | Exact structured cgroup/path or endpoint keys; tracepoint-origin exec/connect feedback requires complete shared inputs and declarations covered by the key. Sync outcomes are counted, failures rate-limit logged, reload clears/rebuilds state and fences stale persistence | Literal path is not inode/content/mount-namespace identity. Policy-derived paths >127 bytes, unknown cgroups, basename file events, non-connect events and unknown/temporal dependencies do not sync. The 65,536-entry LRU's keys alone cost 18 MiB before values/overhead. LSM-origin decisions are not synced; other hooks do not gain general blocking from this path. The default rebuild remains non-atomic; the opt-in `--experimental-atomic-generations` path is generation-tagged and publishes one map pointer. Deploy matching BPF objects/userspace together |
 | Userspace deny (all event types) | Partial | Non-audit DENY requests verified process termination. Linux uses pidfds, monotonic event/process lifetime checks and no numeric-PID fallback; attempted/succeeded/failed/refused outcomes are separate. Already kernel-denied LSM events skip duplicate termination | Detect-then-kill happens **after** the operation began/completed. Missing identity, stale events, namespace mismatch, unavailable pidfds or insufficient capabilities can refuse/fail termination; a deny decision is not proof of a kill. See [termination safety](PROCESS_TERMINATION_SAFETY.md) |
 | `--audit` mode | Shipped | Overrides kernel and userspace enforcement, including integrity enforce mode and static-rule preloads; Windows uses ETW instead of blocking eBPF hooks. The Helm chart defaults to audit | Standalone CLI still defaults to userspace enforcement unless `--audit` is passed |
 | `--lsm-enforce`, `--require-lsm`, `--no-lsm` | Shipped | `--lsm-enforce` enables blocking when LSM loads; `--require-lsm` refuses startup if LSM cannot load; `--no-lsm` skips LSM and conflicts with `--require-lsm` | `--require-lsm` alone does **not** enable blocking. Without `--require-lsm`, unavailable LSM can degrade to tracepoints; without `--lsm-enforce`, loaded LSM policy hooks are audit-only. Global audit overrides blocking. Signed required-default-deny additionally requires both flags and eligible domains |
 | `sendto` / `recvfrom` hooks | Missing | None | No such hooks exist |
 | Decision cache (userspace) | Partial | 10,000 entries, 5-minute TTL, O(1) LRU; input-aware keys, declared PID elision and temporal bypass. Undeclared ABI ≥3 policies conservatively bypass caching | Guest dependency declarations remain a trust boundary; no workload-generation routing. Do not apply October undeclared-policy hit-rate results to today's cache behavior |
-| Hot reload (SIGHUP/file watcher) | Partial | Fresh candidate loads before draining old event handling/actions; failed load preserves the old evaluator. Successful activation resets cache/kernel state and retires old runtime after drain. YAML is compiled by content, not shadowed by sibling WASM | Legacy kernel rebuild has an allow-on-miss window and nontransactional rollback; queued kernel observations have no generation tag. Signed-assignment mode refuses generic reload/SIGHUP/watchers and uses its own activation owner |
+| Hot reload (SIGHUP/file watcher) | Partial | Fresh candidate loads before draining old event handling/actions; failed load preserves the old evaluator. Successful activation resets cache/kernel state and retires old runtime after drain. YAML is compiled by content, not shadowed by sibling WASM | The default legacy rebuild has an allow-on-miss window and nontransactional rollback, with no generation tag on queued observations. The opt-in generation path retains both evaluators across a live commit and a pending durable hook; signed assignments still refuse generic reload/SIGHUP/watchers and use their own activation owner |
 | Fail-closed on WASM error | Shipped | An evaluation error, an exceeded `--eval-timeout` (default 50 ms) or the 16 MiB per-instance memory cap is treated as DENY | None known |
 | `--log-level` | Shipped | Daemon forwards the setting; enforcer validates and honors it | None known |
 | Process lineage | Partial | A tracker and enricher exist and run. The exec tracepoint reports the parent's PID, so Linux ancestry works and `parent_comm` reaches ABI v4 policies | Ancestry is unknown on Windows/macOS events (ETW reports PPID but not into the tracker; macOS reports neither). LSM-origin exec events carry no parent/argv. |
@@ -125,7 +146,7 @@ commit closes a main release gate.
 | `warmor-policy-bundle` | Shipped | OCI push/pull of policy bundles, Ed25519 `--keygen`, `--sign-key`, `--verify-key` | Signature verification only happens in `--pull --verify-key` |
 | Policy signature verification in the daemon | Shipped | `--verify-key` checks detached Ed25519 signatures over exact WASM bytes at startup/reload/download; invalid signatures retain the old policy | This mode alone has no assignment authorization or replay protection; YAML is refused. Separate signed-assignment opt-in is described below |
 | Signed deployment assignments (`--signed-assignments`, PR #49) | Partial, opt-in | Separate artifact/assignment trust, exact audience/scope, fresh trust/time checks, immutable revisions and durable replay marks. Signed root `assignment.json` in `agentstore` is the **sole publication/startup authority**, replacing legacy `current`/`previous` commits | Merged standalone daemon/relay path only, **not** generation-atomic or supervised Host integration and not evidence of a deployed production fleet. Requires independently provisioned declaration-digest pins and clock-health input; generic reload is refused. See [operator contract](SIGNED_POLICY_ASSIGNMENTS.md) |
-| Supervised whole-WASM policy host (PR #45) | Experimental API + dedicated command | Optional Linux API and `warmor-policy-host` executable enforce child limits, descriptor sanitization and kill/reap deadlines | No daemon flag/backend wiring in merged main; default decoding/compilation/evaluation remains in-process. Shared declaration metadata (#48), enforcer integration (#53), packaging and stronger isolation gates are not shipped. See [contract](design/supervised-policy-host.md) |
+| Supervised whole-WASM policy host (PRs #45, #48, #53) | Experimental opt-in, off by default | Linux daemon flags `--experimental-supervised-policy-host`, `--policy-host`, `--policy-host-sha256`, `--policy-declaration-digests` route decoding/compilation/evaluation to the pinned `warmor-policy-host` child; shared declaration metadata, descriptor sanitization and kill/reap deadlines are wired | Requires `--verify-key` and an administrator-pinned host binary; not a production sandbox, packaged-isolation release or whole-daemon VM gate. The default backend remains in-process. See [activation contract](design/supervised-host-activation.md) |
 | Temporal constraints in YAML (`temporal:`) | Shipped | `max_container_age`, `min_container_age`, `time_of_day` (UTC, midnight wrap), `days_of_week`, compiled into the WASM policy; the rule acts outside the window. See [Temporal Policies](temporal-policies.md) | Container age is Linux-only and needs a container cgroup and `hostPID`; unknown age fails closed, so age rules also act on host processes. Event types with temporal rules bypass the decision cache and the kernel fast path. Not allowed on `allow` rules. |
 
 ### Current defaults and resource boundaries (source, not measurements)
@@ -165,8 +186,9 @@ commit closes a main release gate.
 | Feature | Status | What works today | Known gaps |
 |---------|--------|------------------|------------|
 | `warmor-server` REST API and durable state | Partial | Agent/admin APIs, manual rollouts and durable revisions/assignments/registrations; production CLI requires authenticated TLS and `--state-file` unless explicit `--insecure`. Runtime binding ownership follows authenticated identity | Local single-writer snapshot, not HA; full snapshot rewritten on each heartbeat. Embedded defaults can remain ephemeral; drift/canary counters are not durable. See [state/recovery](POLICY_SERVER_STATE.md) |
+| Public agent control-plane contract (`pkg/controlplane`) | Shipped | Protocol v1 wire types, routes, headers, query parameters and size limits published for hosted control planes; the server and agent use the same constants, a conformance suite and external-consumer module run in CI, and the compatibility policy is in [control-plane-protocol.md](control-plane-protocol.md) | Advisory version headers only — unknown versions are ignored, not rejected. No hosted control plane ships from this repo; the `warmor-saas` boundary and repo layout are proposed in [ADR 0001](design/adr-0001-warmor-saas-boundary.md) and [the layout](design/warmor-saas-repo-layout.md) |
 | mTLS, JWT (HMAC and EdDSA libraries; server uses HMAC) | Shipped | Agent requests require ID matching JWT subject or certificate CommonName; downloads are assignment-limited; cross-runtime binding mutation is refused; admins retain cross-agent access | Migrate generic/shared credentials. Registration labels are still agent-reported, not attested runtime scope |
-| Daemon policy download and activation | Partial | Full `(policy ID, version, digest)` comparison; failed activation is retried without advancing active identity. POSIX immutable module/signature revisions preserve a bootable last-known-good pair. Acknowledgement follows drained activation and durable publication | Heartbeat identity is authenticated **self-report**, not an attested node application receipt. Windows `--server` is explicitly refused. Kernel activation is not generation-atomic; revision GC is not implemented. Fallback seed remains incompatible with `--verify-key` |
+| Daemon policy download and activation | Partial | Full `(policy ID, version, digest)` comparison; failed activation is retried without advancing active identity. POSIX immutable module/signature revisions preserve a bootable last-known-good pair. Acknowledgement follows drained activation and durable publication | Heartbeat identity is authenticated **self-report**, not an attested node application receipt. Windows `--server` is explicitly refused. The default activation is not generation-atomic and is incompatible with the opt-in generation path; revision GC is not implemented. Fallback seed remains incompatible with `--verify-key` |
 | Percentage rollouts (A/B, consistent hashing) | Shipped | Create, ramp, complete and abort through the admin API (`warmorctl`'s Rollouts tab is view-only) | Ramping is manual |
 | Acknowledged decision telemetry / canary analysis | Partial: opt-in APIs and embedded collector | Bounded per-activation userspace allow/deny/error populations, authenticated session/assignment fences and server-side gate APIs; cache hits count as events | Not successful enforcement, kernel traffic or full capture quality; daemon receipt mode does not allocate a collector or lease. No automatic rollout actuator; signed deployment telemetry is sealed pending a signed attribution contract. See [telemetry contract](design/canary-acknowledged-telemetry.md) |
 | Canary auto-rollback (deny-rate analyzer) | Library-only actuator | `CanaryAnalyzer` and optional acknowledged telemetry gate APIs exist with tests | No end-to-end automatic rollout/rollback owner. **There is no automatic rollback.** |
@@ -216,7 +238,7 @@ KVM VM, not bare metal. "Declared" policies export `warmor_fields_read`
 (every compiled YAML policy); "undeclared" ones do not (the test fixture and
 every Rust crate under `policies/`).
 Cache, activation, runtime and sink behavior have since changed. These retained
-numbers are **not measurements of `ce1d5ab`**, a current pod-limit benchmark, or
+numbers are **not measurements of `d62a460`**, a current pod-limit benchmark, or
 proof of a production budget. No performance tests were run for this docs update.
 
 | Metric | Design target | Historical result (2026-10-15) |
@@ -232,11 +254,12 @@ proof of a production budget. No performance tests were run for this docs update
 
 The [readiness plan's required gates](PRODUCTION_READINESS_PLAN.md#required-release-gates)
 remain the acceptance criteria, not a claim that no hardening has started. In
-particular: configure and verify missing remote protection; review and validate
-pending generation/Host work against the existing gates without losing exact-key,
-outcome or standalone signed activation guarantees; prove real workload routing
-and real-cluster receipt acceptance (the opt-in self-report implementation here
-is not that evidence); complete capture/loss, rollback, soak,
-multi-node and native-platform validation.
+particular: configure and verify missing remote protection; validate the
+now-merged generation/Host opt-ins with whole-daemon VM evidence against the
+existing gates, without losing exact-key, outcome or standalone signed
+activation guarantees (signed assignments remain incompatible with atomic
+generations); prove real workload routing and real-cluster receipt acceptance
+(the opt-in self-report implementation here is not that evidence); complete
+capture/loss, rollback, soak, multi-node and native-platform validation.
 Existing CI formatting, VM attach/IMA and release artifact checks are useful
 partial gates, not proof that these remaining gates passed.

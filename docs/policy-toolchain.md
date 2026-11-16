@@ -19,8 +19,9 @@ Audit log ─────► warmor-policy-gen ──┘            │         
 ```
 
 All tools are built by `go build -o bin/ ./cmd/...` or the matching
-`make build-policy-{merge,diff,bundle}` target. Every tool supports
-`--version`.
+`make build-policy-{merge,diff,bundle}` target. Every policy-toolchain tool
+below supports `--version`; the daemon, server, controller and `warmorctl` TUI
+use their own flag sets.
 
 ## SBOM policies — `warmor-sbom-policy`
 
@@ -152,7 +153,7 @@ warmor-policy-merge --dir ./policies -o merged.yaml   # whole directory
 | `--strategy` | `union` | Merge strategy (see below) |
 | `--annotate` | `true` | Add source provenance to rule reasons |
 | `--dedup` | `true` | Deduplicate identical rules and variable entries |
-| `--validate` | `false` | Validate merged policy against the compiler schema |
+| `--validate` | `false` | Print a "Validation passed" confirmation; compiler validation always runs regardless of this flag |
 
 ### Merge strategies
 

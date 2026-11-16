@@ -86,7 +86,7 @@ files with your change.
 | `make bench` / `make bench-kernel` | Run the benchmark harness (see [docs/PERFORMANCE.md](docs/PERFORMANCE.md)) |
 | `make deps` / `make clean` | Install dependencies / clean artifacts |
 
-The 15 binaries under `cmd/` are listed in the
+The 16 shipped binaries under `cmd/` are listed in the
 [README](README.md#policy-toolchain). Two are development helpers:
 `test-ebpf` (loads the monitors and prints events) and `test-wasm`
 (evaluates sample events against a policy). Neither needs root to build.

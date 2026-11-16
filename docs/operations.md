@@ -8,7 +8,7 @@ runtime integration. For first-time setup see
 
 > **Status on `main`:** standalone Linux is the supported path. The Helm
 > chart and Kubernetes manifests do **not** work yet (see
-> [Kubernetes](#kubernetes-not-working-on-main-yet) below). Kernel blocking
+> [Kubernetes](#kubernetes) below). Kernel blocking
 > covers repeat exec/connect denies only; everything else is detected and
 > then killed with `SIGKILL`. See [Feature Status](STATUS.md).
 

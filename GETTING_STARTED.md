@@ -45,8 +45,6 @@ sudo ./scripts/install-prereqs.sh
 
 It will tell you exactly what got installed and what's still missing (with reasons why).
 
-> **Known issue:** the script adds the `wasm32-wasi` Rust target, but the policy compiler needs `wasm32-unknown-unknown`. Run `rustup target add wasm32-unknown-unknown` after the script.
-
 ### Manual Install
 
 If you prefer to install manually:
@@ -177,12 +175,12 @@ default_action: allow
 ### Compile Your Policy
 
 ```bash
-# Validate, then compile YAML → WASM (flags must come before the file name)
+# Validate, then compile YAML → WASM (flags may appear before or after the file name)
 ./bin/warmor-compile --validate my-policy.yaml
 ./bin/warmor-compile -o my-policy.wasm my-policy.yaml
 ```
 
-`warmor-compile` generates Rust and runs `cargo build --target wasm32-unknown-unknown`, so it needs the Rust toolchain from Step 1. Unknown YAML keys are silently ignored. Run `./bin/warmor-compile --rust-only my-policy.yaml` to see exactly what was generated.
+`warmor-compile` generates Rust and runs `cargo build --target wasm32-unknown-unknown`, so it needs the Rust toolchain from Step 1. Unknown YAML keys are rejected. Run `./bin/warmor-compile --rust-only my-policy.yaml` to see exactly what was generated.
 
 ---
 
@@ -294,14 +292,13 @@ operations guide.
 warmor/
 ├── cmd/                    # All CLI tools (warmor-daemon, warmor-compile, etc.)
 ├── internal/               # Core engine (eBPF, WASM runtime, enforcer, etc.)
-├── policies/               # Example Rust WASM policies + yaml-example/ (several have
-│   ├── example/            #   known ABI issues on main; see docs/STATUS.md)
+├── policies/               # Example Rust WASM policies (10 crates, ABI 4) + yaml-example/
 │   ├── container-escape/
 │   ├── crypto-mining/
 │   ├── lateral-movement/
 │   ├── yaml-example/       #   53 categorized YAML policies
 │   └── ...
-├── examples/policies/      # 6 YAML examples
+├── examples/policies/      # 7 YAML examples
 ├── bpf/                    # Linux eBPF C source code
 ├── deploy/helm/warmor/     # Kubernetes Helm chart
 └── docs/                   # Full documentation

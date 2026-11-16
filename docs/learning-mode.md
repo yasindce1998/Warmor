@@ -118,9 +118,9 @@ data, _ := session.MarshalPolicy()
 |----------|-------------|---------|
 | Process execution | `binary path` | `/usr/bin/curl` |
 | File access | `file path` | `/etc/resolv.conf` |
-| Outbound connections | `proto:addr:port` | `tcp:10.0.1.5:443` |
-| Socket binds | `proto:port` | `tcp:8080` |
-| Socket listens | `proto:port` | `tcp:8080` |
+| Outbound connections | `connect\|proto:addr:port` | `connect\|tcp:10.0.1.5:443` |
+| Socket binds | `bind\|proto:port` | `bind\|tcp:8080` |
+| Socket listens | `listen\|proto:port` | `listen\|tcp:8080` |
 | Mounts | `mount type` | `proc` |
 | Ptrace | `target comm` | `node` |
 

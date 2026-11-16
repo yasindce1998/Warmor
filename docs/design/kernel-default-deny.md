@@ -148,7 +148,7 @@ map accordingly (`POLICY_MAP_MAX_ENTRIES`, 65536 by default).
   marks.
 - Applied at startup and after every policy reload, from the *new*
   policy's static table.
-- Metrics: `warmor_default_deny_active{event_type}` gauge (1 when
+- Metrics: `warmor_kernel_default_deny_active{event_type}` gauge (1 when
   marked) and the existing `warmor_ebpf_map_entries{map_name="policy_map"}`
   for preload size. A requested-but-ineligible domain logs why (e.g.
   "rule 'block-tmp' uses glob") and sets the gauge to 0.

@@ -109,7 +109,10 @@ rotation protections and default export redaction remain unchanged. See
 - `ES_EVENT_TYPE_AUTH_CREATE` — file creation
 
 **NOTIFY (monitoring only):**
+- `ES_EVENT_TYPE_NOTIFY_EXEC` — process execution
 - `ES_EVENT_TYPE_NOTIFY_EXIT` — process termination
+- `ES_EVENT_TYPE_NOTIFY_FORK` — process fork (subscribed, not yet handled)
+- `ES_EVENT_TYPE_NOTIFY_UNLINK` — file unlink
 - `ES_EVENT_TYPE_NOTIFY_WRITE` — file write
 - `ES_EVENT_TYPE_NOTIFY_CONNECT` — network connection
 
@@ -120,7 +123,7 @@ Capabilities{
     ProcessMonitoring: true,
     FileMonitoring:    true,
     NetworkMonitoring: true,
-    Enforcement:       false, // AUTH events are answered ALLOW on main
+    Enforcement:       true, // reported capability; AUTH events are still answered ALLOW on main
 }
 ```
 

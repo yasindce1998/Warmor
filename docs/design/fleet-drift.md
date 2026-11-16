@@ -12,8 +12,9 @@ Owner: policy server + enforcer.
   `exec:bash`, `network:curl`) into a bounded local collector. This is one
   host-level observation, not a container-image fingerprint.
 - Rates are events per minute over a **rolling ten-minute window**, not since
-  daemon startup. Sixty time buckets bound state independently of event volume;
-  expiry can conservatively omit at most one bucket at the oldest boundary.
+  daemon startup. A 61-slot ring (sixty time buckets plus one guard slot) bounds
+  state independently of event volume; expiry can conservatively omit at most
+  one bucket at the oldest boundary.
 - Pattern cardinality is capped at 1,024, including the `__other__` overflow
   pattern. Comms are attacker-controlled; their short length does not itself
   bound the number of distinct patterns. Keys are capped at 256 bytes.
