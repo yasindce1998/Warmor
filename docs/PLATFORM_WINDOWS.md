@@ -8,6 +8,11 @@ wherever a kernel hook exists, and **ETW** for everything else.
 > but have **not yet been built or run in CI**: hosted runners can't load
 > kernel drivers. Verify them on a test-signed Windows 11 / Server 2022 VM
 > before relying on kernel blocking.
+>
+> Reliability fixes and PID-reuse hardening have landed; the two items that
+> still need a real VM are the endpoint mapping and native driver load.
+> Production HVCI also depends on Microsoft's Proof-of-Verification signing
+> pipeline — see [the hardening plan](windows-hardening-plan.md).
 
 ## How it works
 
@@ -79,10 +84,14 @@ alone. The check and `TerminateProcess` use the same handle.
 | `path` (process) | Drive-letter image path, e.g. `C:\Windows\System32\cmd.exe` (translated from the NT device path) |
 | `args` (process) | Command line split with `CommandLineToArgvW` rules. The eBPF hook copies it in the kernel. ETW has no command line, so the consumer reads it from the live process; processes that exit within ETW's ~1 s delivery delay have no `args` in ETW mode. **Note:** the WASM policy ABI does not pass `args` yet on any platform, so `args` conditions in YAML currently compile to a path check. |
 | file `operation` | `open`, `create`, `write` (first write per handle only), `delete`, `rename`. There is no `read`: ETW has no read-intent event, and read I/O events are too noisy to subscribe to. |
-| network `operation` | `connect`, `accept`, `sendto` (UDP, deduplicated per peer for 10 s) |
+| network `operation` | `connect`, `accept`, `sendto` (UDP, deduplicated per peer for 10 s). Bind/listen reuse `connect` and carry `hook: bind|listen`, matching the Linux LSM sensor. |
 | network `protocol` | `tcp`, `udp`, `tcp6`, `udp6` (IPv4-mapped addresses are unmapped) |
+| `user`, `domain` (process) | Account name and domain from the process token (eBPF process hook only). Exposed to policies via the WASM JSON ABI. |
+| `is_admin`, `logon_id`, `socket_cookie` (network) | Requesting-user identity from netebpfext (`is_admin`: -1 unknown, 0 no, 1 yes). Exposed via the WASM JSON ABI. |
 
-The daemon ignores its own file and network I/O.
+The daemon ignores its own file and network I/O. Bind/listen blocking requires
+the optional `cgroup/bind4`, `bind6`, `listen4`, `listen6` programs; without
+them those operations fall back to userspace evaluation.
 
 ## Requirements
 
@@ -205,15 +214,42 @@ for the security boundary and upgrade/disclosure caveats.
 - **Enforcement stops with the daemon.** Programs and maps are not pinned:
   if the daemon exits, the hooks detach and everything is allowed until it
   restarts (the SCM restarts the service).
-- **No runtime health check.** If eBPF-for-Windows fails while the daemon is
-  running, the daemon does not switch that event type to ETW.
+- **Backend failure degrades to "not monitored", it does not fail over.**
+  The daemon detects eBPF reader death and ETW provider loss at runtime and
+  marks the event type `BackendNone` (visible in logs, metrics and
+  capabilities), but does not start a fresh ETW session for an event type
+  that eBPF previously owned.
 - **Command-line rules can't block in the kernel.** Kernel process
   decisions depend only on the image path.
-- **Bind/listen are not hooked.** eBPF-for-Windows has `cgroup/bind*` and
-  `cgroup/listen*` attach types, but Warmor doesn't use them yet.
+- **Bind/listen are only covered on the eBPF path.** The four optional hooks
+  are attempted when eBPF-for-Windows >= 1.4 is installed; there is no ETW
+  fallback for them.
 - `JobObjectSandbox` and `SetProcessIntegrityLevel`
   (`internal/enforcer/sandbox_windows.go`) exist but are not wired into the
   enforcer yet.
+
+## Hardening work landed
+
+- **Removed helper call** — the net program used a helper ID removed in
+  eBPF-for-Windows 1.0; it now uses `bpf_get_current_pid_tgid()`.
+- **PID reuse in the eBPF network path** — records carry the process creation
+  time captured at hook time; the kill path uses `ProcessCreateTime` with a
+  2 s tolerance.
+- **Blocked process creation** now also removes the PID from `proc_info`.
+- **Runtime health** — readers back off, stop after repeated errors, and the
+  platform re-checks backends every 2 s. Exported as
+  `warmor_windows_backend_health{event_type}` and
+  `warmor_windows_backend_transitions_total`.
+- **ETW shutdown hang** fixed; **unsafe command-line read** bounds-checked;
+  **unresolved process identities** marked and counted.
+- **Service lifecycle** — SCM sees `Running` only after the enforcer starts;
+  fatal startup errors reach the Application event log.
+- **Bind/listen blocking** — `cgroup/bind4/6` and `listen4/6` (IDs 14–17).
+- **Identity helpers** — `bpf_is_current_admin`, `bpf_get_current_logon_id`,
+  `bpf_get_socket_cookie`, and ntosebpfext account name/domain; exposed on
+  events and in the WASM JSON ABI.
+
+See [the hardening plan](windows-hardening-plan.md) for what remains.
 
 ## Troubleshooting
 

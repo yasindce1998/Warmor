@@ -30,6 +30,8 @@
 // ── Network directions ─────────────────────────────────────────────────────
 #define WARMOR_DIR_CONNECT 0 // connect4/6: TCP connect or first UDP send to a tuple
 #define WARMOR_DIR_ACCEPT  1 // recv_accept4/6: TCP accept or first UDP receive
+#define WARMOR_DIR_BIND    2 // bind4/6: local address/port being bound
+#define WARMOR_DIR_LISTEN  3 // listen4/6: local address/port being listened on
 
 // Windows address families.
 #define WARMOR_AF_INET  2
@@ -39,6 +41,9 @@
 #define WARMOR_IMAGE_PATH_CHARS 512
 // Command line bytes copied into process records.
 #define WARMOR_CMDLINE_BYTES 2048
+// Account name / domain buffers, in UTF-16 code units, from ntosebpfext's
+// bpf_process_get_account_name / _domain helpers.
+#define WARMOR_ACCOUNT_CHARS 64
 
 // NTSTATUS returned by the process hook to deny a creation.
 #define WARMOR_STATUS_ACCESS_DENIED ((int)0xC0000022)
@@ -53,7 +58,7 @@ struct warmor_rec_hdr
     uint64_t pid;
 };
 
-// 3120 bytes. Too large for the 512-byte BPF stack; built in a per-CPU
+// 3384 bytes. Too large for the 512-byte BPF stack; built in a per-CPU
 // scratch map.
 struct warmor_proc_rec
 {
@@ -66,6 +71,11 @@ struct warmor_proc_rec
     uint16_t cmd_len;                               // 46 bytes
     uint8_t image[WARMOR_IMAGE_PATH_CHARS * 2];     // 48 UTF-16LE NT path
     uint8_t cmd[WARMOR_CMDLINE_BYTES];              // 1072 UTF-16LE
+    uint16_t account_len;                           // 3120 bytes, excluding NUL
+    uint16_t domain_len;                            // 3122 bytes
+    uint32_t pad;                                   // 3124
+    uint8_t account[WARMOR_ACCOUNT_CHARS * 2];      // 3128 UTF-16LE
+    uint8_t domain[WARMOR_ACCOUNT_CHARS * 2];       // 3256 UTF-16LE
 };
 
 // 24 bytes.
@@ -76,19 +86,29 @@ struct warmor_proc_exit_rec
     uint32_t pad;              // 20
 };
 
-// 64 bytes.
+// 96 bytes.
 struct warmor_net_rec
 {
     struct warmor_rec_hdr hdr; // 0
     uint64_t image_hash;       // 16 0 = process not tracked yet
-    uint8_t family;            // 24
-    uint8_t direction;         // 25
-    uint8_t protocol;          // 26 IPPROTO_*
-    uint8_t pad;               // 27
-    uint16_t remote_port;      // 28 network order
-    uint16_t local_port;       // 30 network order
-    uint8_t remote_addr[16];   // 32 IPv4 uses the first 4 bytes
-    uint8_t local_addr[16];    // 48
+    // FILETIME of the process that made this call, copied from proc_info at
+    // hook time. This is process identity, not the event time: userspace uses
+    // it to reject PID reuse before terminating. 0 = unknown.
+    uint64_t creation_time;    // 24
+    uint8_t family;            // 32
+    uint8_t direction;         // 33
+    uint8_t protocol;          // 34 IPPROTO_*
+    uint8_t pad;               // 35
+    uint16_t remote_port;      // 36 network order (0 for bind/listen)
+    uint16_t local_port;       // 38 network order
+    uint8_t remote_addr[16];   // 40 IPv4 uses the first 4 bytes (0 for bind/listen)
+    uint8_t local_addr[16];    // 56
+    // Requesting-user identity from netebpfext. is_admin is -1 when the
+    // runtime could not determine it (e.g. a system bind with no token).
+    int32_t is_admin;          // 72
+    uint32_t pad2;             // 76
+    uint64_t logon_id;         // 80 0 = unknown
+    uint64_t socket_cookie;    // 88 0 = unknown
 };
 
 // ── Map keys and values ────────────────────────────────────────────────────
@@ -116,11 +136,31 @@ struct warmor_policy_value
 };
 
 // proc_info value, keyed by uint32_t PID. Written by userspace from process
-// events so the network hooks can tell which image is connecting.
+// events so the network hooks can tell which image is connecting. The
+// creation time travels with the hash so a network record identifies the
+// process that existed when the hook ran, not whichever process later reused
+// the PID while the record waited in the ring buffer.
 struct warmor_proc_info
 {
-    uint64_t image_hash;
+    uint64_t image_hash;    // 0
+    uint64_t creation_time; // 8 FILETIME, 0 = unknown
 };
+
+// Byte length of a NUL-terminated UTF-16LE buffer, excluding the NUL. Used
+// for the account name/domain filled by ntosebpfext; the caller leaves two
+// bytes free so a terminator always fits.
+static __inline uint16_t
+warmor_utf16_len(const uint8_t* buf, uint32_t max_bytes)
+{
+    uint32_t i;
+    for (i = 0; i + 1 < max_bytes; i += 2) {
+        uint16_t c = (uint16_t)buf[i] | ((uint16_t)buf[i + 1] << 8);
+        if (c == 0) {
+            break;
+        }
+    }
+    return (uint16_t)(i > max_bytes ? max_bytes : i);
+}
 
 // ── Image hashing ──────────────────────────────────────────────────────────
 

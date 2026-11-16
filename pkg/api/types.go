@@ -170,6 +170,22 @@ type Event struct {
 	// (Filename holds the target's comm).
 	TargetCgroupID uint64 `json:"target_cgroup_id,omitempty"`
 
+	// ProcessCreateTime is when the process that produced the event was
+	// created, as reported by the kernel/sensor. Windows uses it to check for
+	// PID reuse before terminating: an event that waited in a ring buffer can
+	// otherwise be attributed to a newer process that recycled the PID.
+	// Zero means the sensor did not report it; callers fall back to Timestamp.
+	ProcessCreateTime time.Time `json:"process_create_time,omitzero"`
+
+	// Windows identity captured by eBPF-for-Windows sensors. Empty/zero means
+	// the runtime could not determine the value. IsAdmin: -1 unknown, 0 no,
+	// 1 yes (for network events this is the requesting user).
+	User         string `json:"user,omitempty"`
+	Domain       string `json:"domain,omitempty"`
+	IsAdmin      int8   `json:"is_admin,omitempty"`
+	LogonID      uint64 `json:"logon_id,omitempty"`
+	SocketCookie uint64 `json:"socket_cookie,omitempty"`
+
 	// processSet records that Type was explicitly set to EventTypeProcess
 	// (the zero value), via SetType or a JSON "type" key, so GetType does
 	// not fall back to sub-event inference.

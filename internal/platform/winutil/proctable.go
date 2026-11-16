@@ -22,6 +22,10 @@ type ProcInfo struct {
 	Comm       string // lowercased image file name
 	CmdLine    string
 	CreateTime time.Time
+	// Unresolved marks an entry created because a live-process query failed
+	// (system and protected/PPL processes refuse it). Such entries have no
+	// image or comm, so comm/path policies cannot match their events.
+	Unresolved bool
 
 	exitedAt time.Time
 }

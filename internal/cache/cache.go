@@ -85,6 +85,13 @@ type Key struct {
 	cgroupID   uint64
 	parentComm string
 
+	// Windows identity, visible to policies through the WASM JSON ABI.
+	user         string
+	domain       string
+	isAdmin      int8
+	logonID      uint64
+	socketCookie uint64
+
 	hasProcess  bool
 	procFile    string
 	procArgs    string // length-prefixed join of Process.Args
@@ -237,13 +244,18 @@ func (c *DecisionCache) Stats() CacheStats {
 func (c *DecisionCache) makeKey(event *api.Event) Key {
 	typ := event.GetType()
 	k := Key{
-		typ:        typ,
-		uid:        event.UID,
-		gid:        event.GID,
-		comm:       event.Comm,
-		filename:   event.Filename,
-		cgroupID:   event.CgroupID,
-		parentComm: event.ParentComm,
+		typ:          typ,
+		uid:          event.UID,
+		gid:          event.GID,
+		comm:         event.Comm,
+		filename:     event.Filename,
+		cgroupID:     event.CgroupID,
+		parentComm:   event.ParentComm,
+		user:         event.User,
+		domain:       event.Domain,
+		isAdmin:      event.IsAdmin,
+		logonID:      event.LogonID,
+		socketCookie: event.SocketCookie,
 	}
 	if c.pidRelevant == nil || c.pidRelevant(typ) {
 		k.pid = event.PID

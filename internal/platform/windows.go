@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
+	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/internal/platform/efw"
 	"github.com/yasindce1998/warmor/internal/platform/etw"
 	"github.com/yasindce1998/warmor/internal/platform/winutil"
@@ -47,7 +49,8 @@ type WindowsPlatform struct {
 	etw  *etw.Consumer
 
 	mu       sync.RWMutex
-	backends map[api.EventType]string
+	backends map[api.EventType]string // current, may be BackendNone after degradation
+	wanted   map[api.EventType]string // selected at startup, for re-evaluation
 
 	stopOnce sync.Once
 	stopErr  error
@@ -59,6 +62,7 @@ func NewWindowsPlatform(cfg WindowsConfig) (Platform, error) {
 		cfg:      cfg,
 		procs:    winutil.NewProcTable(),
 		backends: make(map[api.EventType]string),
+		wanted:   make(map[api.EventType]string),
 	}, nil
 }
 
@@ -89,6 +93,9 @@ func (p *WindowsPlatform) Load(ctx context.Context) error {
 	}
 	if p.ebpf != nil && p.ebpf.Network() {
 		p.backends[api.EventTypeNetwork] = BackendEBPF
+	}
+	for et, backend := range p.backends {
+		p.wanted[et] = backend
 	}
 
 	// Processes started before us: the process table resolves their PIDs
@@ -159,20 +166,85 @@ func (p *WindowsPlatform) Start(ctx context.Context, eventChan chan<- *api.Event
 	}
 
 	// A provider that failed to enable leaves its event type unmonitored.
-	p.mu.Lock()
-	for et, provider := range map[api.EventType]etw.Provider{
-		api.EventTypeProcess: etw.ProviderProcess,
-		api.EventTypeNetwork: etw.ProviderNetwork,
-		api.EventTypeFile:    etw.ProviderFile,
-	} {
-		if p.backends[et] == BackendETW && !p.etw.Enabled(provider) {
-			p.backends[et] = BackendNone
-		}
-	}
-	p.mu.Unlock()
+	// refreshHealth records that in backends, the health gauge and the log.
+	p.refreshHealth()
+	go p.monitorHealth(ctx)
 
 	p.logBackends()
 	return nil
+}
+
+// providerForEvent maps an event type to the ETW provider that would serve it
+// when eBPF is unavailable.
+func providerForEvent(et api.EventType) etw.Provider {
+	switch et {
+	case api.EventTypeProcess:
+		return etw.ProviderProcess
+	case api.EventTypeNetwork:
+		return etw.ProviderNetwork
+	case api.EventTypeFile:
+		return etw.ProviderFile
+	}
+	return etw.Provider(0)
+}
+
+// monitorHealth re-evaluates backend liveness periodically. eBPF-for-Windows
+// and ETW can both fail while the daemon is running; without this the daemon
+// keeps reporting healthy while an event type is no longer monitored.
+func (p *WindowsPlatform) monitorHealth(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.refreshHealth()
+		}
+	}
+}
+
+// refreshHealth recomputes which backend is actually monitoring each event
+// type. An eBPF reader that stopped after repeated errors, or an ETW provider
+// that was never enabled (or was lost), degrades that event type to
+// BackendNone. The change is logged and exported as a metric and transition.
+func (p *WindowsPlatform) refreshHealth() {
+	if p.etw == nil {
+		return
+	}
+	p.mu.Lock()
+	for _, et := range []api.EventType{api.EventTypeProcess, api.EventTypeNetwork, api.EventTypeFile} {
+		wanted := p.wanted[et]
+		current := wanted
+		switch wanted {
+		case BackendETW:
+			if !p.etw.Enabled(providerForEvent(et)) {
+				current = BackendNone
+			}
+		case BackendEBPF:
+			if p.ebpf == nil ||
+				(et == api.EventTypeProcess && !p.ebpf.ProcessHealthy()) ||
+				(et == api.EventTypeNetwork && !p.ebpf.NetworkHealthy()) {
+				current = BackendNone
+			}
+		}
+		if current != p.backends[et] {
+			from := p.backends[et]
+			p.backends[et] = current
+			p.mu.Unlock()
+			state := "restored"
+			if current == BackendNone {
+				state = "degraded"
+			}
+			log.Printf("Windows: %s backend %s → %s (monitoring %s)", et, from, current, state)
+			metrics.RecordWindowsBackendTransition(et, from, current)
+			metrics.SetWindowsBackendHealth(et, current != BackendNone)
+			p.mu.Lock()
+		} else {
+			metrics.SetWindowsBackendHealth(et, current != BackendNone)
+		}
+	}
+	p.mu.Unlock()
 }
 
 func (p *WindowsPlatform) logBackends() {
@@ -223,14 +295,24 @@ func (p *WindowsPlatform) Close() error { return p.Stop() }
 
 func (p *WindowsPlatform) Capabilities() Capabilities {
 	b := p.Backends()
+	process := b[api.EventTypeProcess] != BackendNone
+	file := b[api.EventTypeFile] != BackendNone
+	network := b[api.EventTypeNetwork] != BackendNone
+	kernel := false
+	for _, et := range []api.EventType{api.EventTypeProcess, api.EventTypeNetwork, api.EventTypeFile} {
+		if b[et] == BackendEBPF {
+			kernel = true
+		}
+	}
 	return Capabilities{
-		ProcessMonitoring: b[api.EventTypeProcess] != BackendNone,
-		FileMonitoring:    b[api.EventTypeFile] != BackendNone,
-		NetworkMonitoring: b[api.EventTypeNetwork] != BackendNone,
-		// Every backend can at least terminate the offending process.
-		Enforcement: true,
-		// Kernel blocking for the event types served by eBPF.
-		LSMEnforcement: p.ebpf != nil,
+		ProcessMonitoring: process,
+		FileMonitoring:    file,
+		NetworkMonitoring: network,
+		// Every live backend can at least terminate the offending process.
+		Enforcement: process || file || network,
+		// Kernel blocking only for event types still served by a live eBPF
+		// reader, not merely because a hook loaded at startup.
+		LSMEnforcement: kernel,
 	}
 }
 

@@ -15,8 +15,14 @@
 # "bpf" directory next to warmor-daemon.exe.
 #
 # Signing: test-signed images load only with `bcdedit /set testsigning on`.
-# Production machines (HVCI on) need images signed through Microsoft's
-# attestation signing; see docs/PLATFORM_WINDOWS.md.
+# Production (HVCI on) is NOT satisfied by self- or attestation-signing:
+# eBPF-for-Windows >= 1.0 requires Proof-of-Verification, i.e. a Microsoft
+# eBPF-verification-EKU signature produced by its signing pipeline. Resolve
+# access to that pipeline before planning a production rollout; see
+# docs/windows-hardening-plan.md and docs/PLATFORM_WINDOWS.md.
+
+# Requires eBPF-for-Windows >= 1.0 (bpf_get_current_pid_tgid is global in 1.x).
+$RequiredEbpfVersion = "1.0.0"
 
 param(
     [Parameter(Mandatory = $true)] [string] $EbpfIncludeDir,
@@ -27,6 +33,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Write-Host "Target: eBPF-for-Windows >= $RequiredEbpfVersion (native images, Proof-of-Verification)"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $programs = @(

@@ -18,11 +18,21 @@ func putUTF16(dst []byte, s string) int {
 
 func TestLayoutConstants(t *testing.T) {
 	// Pinned against bpf-windows/warmor_efw.h.
-	if procOffCmd != 1072 || procOffCmd+cmdlineBytes != procRecSize {
-		t.Fatalf("warmor_proc_rec layout: cmd at %d, size %d", procOffCmd, procRecSize)
+	if procOffCmd != 1072 || procOffAccountLen != 3120 ||
+		procOffAccount != 3128 || procOffDomain != 3256 ||
+		procOffDomain+accountChars*2 != procRecSize {
+		t.Fatalf("warmor_proc_rec layout: cmd %d accountLen %d account %d domain %d size %d",
+			procOffCmd, procOffAccountLen, procOffAccount, procOffDomain, procRecSize)
 	}
-	if netOffLocalAddr+16 != netRecSize {
+	if netOffCookie+8 != netRecSize {
 		t.Fatalf("warmor_net_rec layout: size %d", netRecSize)
+	}
+	if procInfoSize != 16 {
+		t.Fatalf("warmor_proc_info layout: size %d, want 16", procInfoSize)
+	}
+	if netOffCreation != 24 || netOffFamily != 32 || netOffIsAdmin != 72 || netOffLogonID != 80 {
+		t.Fatalf("warmor_net_rec offsets: creation %d family %d admin %d logon %d",
+			netOffCreation, netOffFamily, netOffIsAdmin, netOffLogonID)
 	}
 }
 
@@ -40,6 +50,10 @@ func TestParseProcessCreate(t *testing.T) {
 	cmd := `cmd.exe /c whoami`
 	n = putUTF16(b[procOffCmd:], cmd)
 	binary.LittleEndian.PutUint16(b[procOffCmdLen:], uint16(n))
+	n = putUTF16(b[procOffAccount:], "svc-warmor")
+	binary.LittleEndian.PutUint16(b[procOffAccountLen:], uint16(n))
+	n = putUTF16(b[procOffDomain:], "CORP")
+	binary.LittleEndian.PutUint16(b[procOffDomainLen:], uint16(n))
 
 	v, err := parseRecord(b)
 	if err != nil {
@@ -48,7 +62,8 @@ func TestParseProcessCreate(t *testing.T) {
 	r := asProcess(t, v)
 	if r.Exit || r.Verdict != VerdictBlocked || r.PID != 4242 || r.PPID != 100 ||
 		r.CreationTime != 133500000000000000 || r.ImageHash != 0xfeed ||
-		r.NTImage != img || r.CmdLine != cmd {
+		r.NTImage != img || r.CmdLine != cmd ||
+		r.Account != "svc-warmor" || r.Domain != "CORP" {
 		t.Fatalf("unexpected record: %+v", r)
 	}
 }
@@ -72,6 +87,10 @@ func TestParseNetwork(t *testing.T) {
 	binary.LittleEndian.PutUint32(b[0:], recNetwork)
 	binary.LittleEndian.PutUint64(b[8:], 9)
 	binary.LittleEndian.PutUint64(b[netOffImageHash:], 0xabc)
+	binary.LittleEndian.PutUint64(b[netOffCreation:], 133600000000000000)
+	binary.LittleEndian.PutUint32(b[netOffIsAdmin:], uint32(1))
+	binary.LittleEndian.PutUint64(b[netOffLogonID:], 0x1234)
+	binary.LittleEndian.PutUint64(b[netOffCookie:], 0xabcd)
 	b[netOffFamily] = afInet
 	b[netOffDirection] = DirConnect
 	b[netOffProtocol] = protoTCP
@@ -86,7 +105,8 @@ func TestParseNetwork(t *testing.T) {
 	}
 	r := asNetwork(t, v)
 	if r.Remote != netip.MustParseAddrPort("1.2.3.4:443") || r.Local != netip.MustParseAddrPort("10.0.0.1:50000") ||
-		r.Operation() != "connect" || r.ProtocolName() != "tcp" || r.ImageHash != 0xabc || r.PID != 9 {
+		r.Operation() != "connect" || r.ProtocolName() != "tcp" || r.ImageHash != 0xabc || r.PID != 9 ||
+		r.CreationTime != 133600000000000000 || r.IsAdmin != 1 || r.LogonID != 0x1234 || r.SocketCookie != 0xabcd {
 		t.Fatalf("unexpected record: %+v", r)
 	}
 
@@ -101,6 +121,26 @@ func TestParseNetwork(t *testing.T) {
 	r = asNetwork(t, v)
 	if r.Remote.Addr().String() != "2001:db8::7" || r.Operation() != "accept" || r.ProtocolName() != "udp6" || !r.IPv6Family {
 		t.Fatalf("unexpected IPv6 record: %+v", r)
+	}
+
+	// bind/listen keep Operation="connect" and expose the hook name, matching
+	// the Linux LSM sensor. The local endpoint is mirrored into Remote.
+	for dir, hook := range map[uint8]string{DirBind: "bind", DirListen: "listen"} {
+		b[netOffDirection] = dir
+		b[netOffFamily] = afInet
+		binary.BigEndian.PutUint16(b[netOffRemotePort:], 8080)
+		binary.BigEndian.PutUint16(b[netOffLocalPort:], 8080)
+		copy(b[netOffRemoteAddr:], []byte{127, 0, 0, 1})
+		copy(b[netOffLocalAddr:], []byte{127, 0, 0, 1})
+		v, err = parseRecord(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r = asNetwork(t, v)
+		if r.Hook() != hook || r.Operation() != "connect" ||
+			r.Remote != netip.MustParseAddrPort("127.0.0.1:8080") {
+			t.Fatalf("unexpected %s record: %+v", hook, r)
+		}
 	}
 }
 
@@ -174,8 +214,17 @@ func TestNetKey(t *testing.T) {
 	if _, err := netKey(0, "connect", "tcp", netip.MustParseAddrPort("1.1.1.1:1")); err == nil {
 		t.Error("unknown image must not produce a key")
 	}
-	if _, err := netKey(1, "bind", "tcp", netip.MustParseAddrPort("1.1.1.1:1")); err == nil {
-		t.Error("operations without a hook must not produce a key")
+	if _, err := netKey(1, "bogus", "tcp", netip.MustParseAddrPort("1.1.1.1:1")); err == nil {
+		t.Error("unknown operation must not produce a key")
+	}
+	for op, wantDir := range map[string]uint8{"bind": DirBind, "listen": DirListen} {
+		k, err := netKey(1, op, "tcp", netip.MustParseAddrPort("127.0.0.1:8080"))
+		if err != nil {
+			t.Fatalf("netKey(%s): %v", op, err)
+		}
+		if k[9] != wantDir || binary.BigEndian.Uint16(k[12:14]) != 8080 {
+			t.Fatalf("netKey(%s) = %x, want dir %d port 8080", op, k, wantDir)
+		}
 	}
 }
 

@@ -31,10 +31,12 @@ const (
 	VerdictAudit   Verdict = 2
 )
 
-// Network directions.
+// Network directions. bind/listen use the local endpoint as their key.
 const (
 	DirConnect = 0
 	DirAccept  = 1
+	DirBind    = 2
+	DirListen  = 3
 )
 
 // Windows address families.
@@ -54,36 +56,45 @@ const (
 	cmdlineBytes   = 2048
 
 	recHdrSize      = 16
-	procRecSize     = 3120
+	procRecSize     = 3384
 	procExitRecSize = 24
-	netRecSize      = 64
+	netRecSize      = 96
 	netKeySize      = 32
 	policyValueSize = 4
-	procInfoSize    = 8
+	procInfoSize    = 16
 )
 
 // Offsets inside struct warmor_proc_rec.
 const (
-	procOffPPID      = 16
-	procOffCreation  = 24
-	procOffImageHash = 32
-	procOffExitCode  = 40
-	procOffImageLen  = 44
-	procOffCmdLen    = 46
-	procOffImage     = 48
-	procOffCmd       = procOffImage + imagePathChars*2
+	procOffPPID       = 16
+	procOffCreation   = 24
+	procOffImageHash  = 32
+	procOffExitCode   = 40
+	procOffImageLen   = 44
+	procOffCmdLen     = 46
+	procOffImage      = 48
+	procOffCmd        = procOffImage + imagePathChars*2
+	accountChars      = 64
+	procOffAccountLen = procOffCmd + cmdlineBytes       // 3120
+	procOffDomainLen  = procOffAccountLen + 2           // 3122
+	procOffAccount    = procOffAccountLen + 8           // 3128
+	procOffDomain     = procOffAccount + accountChars*2 // 3256
 )
 
 // Offsets inside struct warmor_net_rec.
 const (
 	netOffImageHash  = 16
-	netOffFamily     = 24
-	netOffDirection  = 25
-	netOffProtocol   = 26
-	netOffRemotePort = 28
-	netOffLocalPort  = 30
-	netOffRemoteAddr = 32
-	netOffLocalAddr  = 48
+	netOffCreation   = 24 // FILETIME of the process at hook time, 0 = unknown
+	netOffFamily     = 32
+	netOffDirection  = 33
+	netOffProtocol   = 34
+	netOffRemotePort = 36
+	netOffLocalPort  = 38
+	netOffRemoteAddr = 40
+	netOffLocalAddr  = 56
+	netOffIsAdmin    = 72
+	netOffLogonID    = 80
+	netOffCookie     = 88
 )
 
 // ProcessRecord is a decoded process create or exit record.
@@ -97,18 +108,31 @@ type ProcessRecord struct {
 	ExitCode     uint32
 	NTImage      string
 	CmdLine      string
+	// Account and Domain come from the process token via ntosebpfext. Empty
+	// means the helper failed or the information was unavailable.
+	Account string
+	Domain  string
 }
 
-// NetworkRecord is a decoded connect/accept record.
+// NetworkRecord is a decoded connect/accept/bind/listen record.
 type NetworkRecord struct {
-	Verdict    Verdict
-	PID        uint32
-	ImageHash  uint64
-	Direction  uint8
-	Protocol   uint8
-	Remote     netip.AddrPort
-	Local      netip.AddrPort
-	IPv6Family bool
+	Verdict Verdict
+	PID     uint32
+	// CreationTime is the FILETIME captured from proc_info when the hook
+	// ran. It identifies the process that made the call even if the PID is
+	// recycled before userspace reads the record; 0 means unknown.
+	CreationTime uint64
+	ImageHash    uint64
+	Direction    uint8
+	Protocol     uint8
+	Remote       netip.AddrPort
+	Local        netip.AddrPort
+	IPv6Family   bool
+	// Requesting-user identity from netebpfext. IsAdmin is -1 when the
+	// runtime could not determine it; LogonID/Cookie are 0 when unknown.
+	IsAdmin      int32
+	LogonID      uint64
+	SocketCookie uint64
 }
 
 var errShortRecord = errors.New("efw: short record")
@@ -130,6 +154,8 @@ func parseRecord(b []byte) (any, error) {
 		}
 		imageLen := int(binary.LittleEndian.Uint16(b[procOffImageLen:]))
 		cmdLen := int(binary.LittleEndian.Uint16(b[procOffCmdLen:]))
+		accountLen := int(binary.LittleEndian.Uint16(b[procOffAccountLen:]))
+		domainLen := int(binary.LittleEndian.Uint16(b[procOffDomainLen:]))
 		return &ProcessRecord{
 			Verdict:      verdict,
 			PID:          pid,
@@ -139,6 +165,8 @@ func parseRecord(b []byte) (any, error) {
 			ExitCode:     binary.LittleEndian.Uint32(b[procOffExitCode:]),
 			NTImage:      utf16le(b[procOffImage:procOffImage+imagePathChars*2], imageLen),
 			CmdLine:      utf16le(b[procOffCmd:procOffCmd+cmdlineBytes], cmdLen),
+			Account:      utf16le(b[procOffAccount:procOffAccount+accountChars*2], accountLen),
+			Domain:       utf16le(b[procOffDomain:procOffDomain+accountChars*2], domainLen),
 		}, nil
 
 	case recProcessExit:
@@ -156,11 +184,15 @@ func parseRecord(b []byte) (any, error) {
 			return nil, errShortRecord
 		}
 		rec := &NetworkRecord{
-			Verdict:   verdict,
-			PID:       pid,
-			ImageHash: binary.LittleEndian.Uint64(b[netOffImageHash:]),
-			Direction: b[netOffDirection],
-			Protocol:  b[netOffProtocol],
+			Verdict:      verdict,
+			PID:          pid,
+			CreationTime: binary.LittleEndian.Uint64(b[netOffCreation:]),
+			ImageHash:    binary.LittleEndian.Uint64(b[netOffImageHash:]),
+			Direction:    b[netOffDirection],
+			Protocol:     b[netOffProtocol],
+			IsAdmin:      int32(binary.LittleEndian.Uint32(b[netOffIsAdmin:])),
+			LogonID:      binary.LittleEndian.Uint64(b[netOffLogonID:]),
+			SocketCookie: binary.LittleEndian.Uint64(b[netOffCookie:]),
 		}
 		remotePort := binary.BigEndian.Uint16(b[netOffRemotePort:])
 		localPort := binary.BigEndian.Uint16(b[netOffLocalPort:])
@@ -199,15 +231,32 @@ func utf16le(b []byte, n int) string {
 	return string(utf16.Decode(units))
 }
 
-// Operation and protocol names, matching the ETW backend and Linux.
+// Operation and protocol names, matching the ETW backend and Linux. bind and
+// listen intentionally keep the "connect" operation and carry their identity
+// in Hook, exactly as the Linux LSM sensor does, so policies are portable.
 func (r *NetworkRecord) Operation() string {
 	if r.Direction == DirAccept {
 		return "accept"
+	}
+	if r.Direction == DirBind || r.Direction == DirListen {
+		return "connect"
 	}
 	if r.Protocol == protoUDP {
 		return "sendto"
 	}
 	return "connect"
+}
+
+// Hook returns the Linux-compatible hook name for bind/listen records. Other
+// directions leave it empty, which the enforcer treats as a plain connect.
+func (r *NetworkRecord) Hook() string {
+	switch r.Direction {
+	case DirBind:
+		return "bind"
+	case DirListen:
+		return "listen"
+	}
+	return ""
 }
 
 func (r *NetworkRecord) ProtocolName() string {
@@ -240,6 +289,10 @@ func netKey(imageHash uint64, op, proto string, remote netip.AddrPort) ([]byte, 
 		k[9] = DirConnect
 	case "accept":
 		k[9] = DirAccept
+	case "bind":
+		k[9] = DirBind
+	case "listen":
+		k[9] = DirListen
 	default:
 		return nil, fmt.Errorf("efw: operation %q has no kernel hook", op)
 	}

@@ -69,9 +69,22 @@ warmor_process(process_md_t* ctx)
     rec->ppid = ctx->parent_process_id;
     rec->creation_time = ctx->creation_time;
 
-    // Leave room for the NUL the hash loop stops at.
-    bpf_process_get_image_path(ctx, rec->image, sizeof(rec->image) - 2);
+    // Leave room for the NUL the hash loop stops at. On failure (path too
+    // long) the zeroed buffer leaves image_hash == 0: the creation is still
+    // reported, but no kernel deny rule can match it. That truncation is
+    // observable from userspace as a process event with an empty image.
+    (void)bpf_process_get_image_path(ctx, rec->image, sizeof(rec->image) - 2);
     rec->image_hash = warmor_image_hash(rec->image, &rec->image_len);
+
+    // Account identity from the process token (ntosebpfext helpers). A
+    // failure leaves the zeroed buffer and a zero length: unknown identity,
+    // never a fabricated one. Leave room for the NUL as with the image path.
+    if (bpf_process_get_account_name(ctx, rec->account, sizeof(rec->account) - 2) >= 0) {
+        rec->account_len = warmor_utf16_len(rec->account, sizeof(rec->account));
+    }
+    if (bpf_process_get_account_domain(ctx, rec->domain, sizeof(rec->domain) - 2) >= 0) {
+        rec->domain_len = warmor_utf16_len(rec->domain, sizeof(rec->domain));
+    }
 
     if (ctx->command_end > ctx->command_start) {
         uint32_t len = (uint32_t)(ctx->command_end - ctx->command_start);
