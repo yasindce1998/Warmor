@@ -100,10 +100,10 @@ func main() {
 
 	if *validatePolicy != "" {
 		if *supervisedPolicyHost || *policyHostPath != "" || *policyHostSHA256 != "" || *policyDeclarationDigests != "" || *policyHostLoadTimeout != 5*time.Second {
-			log.Fatal("--validate-policy uses the legacy in-process validator; do not combine with supervised backend flags")
+			daemonFatal("--validate-policy uses the legacy in-process validator; do not combine with supervised backend flags")
 		}
 		if *signedAssignments {
-			log.Fatal("--validate-policy checks only artifact validity; it cannot be combined with --signed-assignments")
+			daemonFatal("--validate-policy checks only artifact validity; it cannot be combined with --signed-assignments")
 		}
 		os.Exit(runValidatePolicy(*validatePolicy, *verifyKey, os.Stdout, os.Stderr))
 	}
@@ -121,23 +121,23 @@ func main() {
 // closed (the Windows service manager's stop request).
 func runDaemon(stop <-chan struct{}) {
 	if err := checkSignedBackendCombination(*signedAssignments, *atomicGenerations, *supervisedPolicyHost); err != nil {
-		log.Fatal(err)
+		daemonFatal(err)
 	}
 	if err := setupGenerationVM(); err != nil {
-		log.Fatal(err)
+		daemonFatal(err)
 	}
 	if err := validateNodeReceiptMode(); err != nil {
-		log.Fatal(err)
+		daemonFatal(err)
 	}
 	hostConfig, err := supervisedBackendConfig(*supervisedPolicyHost, *policyHostPath, *policyHostSHA256, *policyDeclarationDigests, *evalTimeout, *policyHostLoadTimeout)
 	if err != nil {
-		log.Fatal(err)
+		daemonFatal(err)
 	}
 	// Reject an unsupported fleet publication mode before loading monitors,
 	// seeding a fallback, creating aliases, or starting any network client.
 	if *serverURL != "" {
 		if err := checkPolicyRevisionSupport(); err != nil {
-			log.Fatal(err)
+			daemonFatal(err)
 		}
 	}
 	// Print banner
@@ -145,31 +145,31 @@ func runDaemon(stop <-chan struct{}) {
 
 	// Check for elevated privileges (root on Unix, Administrator on Windows)
 	if !isElevated() {
-		log.Fatal("❌ This program must be run with elevated privileges (root on Linux/macOS, Administrator on Windows)")
+		daemonFatal("❌ This program must be run with elevated privileges (root on Linux/macOS, Administrator on Windows)")
 	}
 
 	pub, err := loadVerifyKey(*verifyKey)
 	if err != nil {
-		log.Fatalf("❌ %v", err)
+		daemonFatalf("❌ %v", err)
 	}
 	var signedManager *signedPolicyManager
 	if *signedAssignments {
 		if *assignmentBootstrap != "" && *assignmentRecovery != "" {
-			log.Fatal("assignment bootstrap and recovery are mutually exclusive")
+			daemonFatal("assignment bootstrap and recovery are mutually exclusive")
 		}
 		if *serverURL == "" || *agentID == "" || *policyFallback != "" {
-			log.Fatal("signed assignments require --server and explicit --agent-id, and forbid --policy-fallback")
+			daemonFatal("signed assignments require --server and explicit --agent-id, and forbid --policy-fallback")
 		}
 		signedManager, err = openSignedPolicy(*assignmentConfigPath, *assignmentClockPath, *assignmentStateDir, pub, *assignmentBootstrap != "")
 		if err != nil {
-			log.Fatalf("signed assignment configuration/state: %v", err)
+			daemonFatalf("signed assignment configuration/state: %v", err)
 		}
 		defer signedManager.store.Close()
 		if signedManager.target.Audience != *agentID {
-			log.Fatal("assignment audience must equal explicitly configured --agent-id")
+			daemonFatal("assignment audience must equal explicitly configured --agent-id")
 		}
 	} else if *assignmentConfigPath != "" || *assignmentClockPath != "" || *assignmentStateDir != "" || *assignmentBootstrap != "" || *assignmentRecovery != "" {
-		log.Fatal("assignment options require --signed-assignments; refusing to ignore trust configuration")
+		daemonFatal("assignment options require --signed-assignments; refusing to ignore trust configuration")
 	}
 
 	log.Printf("Policy: %s", *policyPath)
@@ -214,7 +214,7 @@ func runDaemon(stop <-chan struct{}) {
 				path := strings.TrimPrefix(spec, "file:")
 				s, err := streaming.NewFileSink(path, *eventFileMax)
 				if err != nil {
-					log.Fatalf("event sink %s: %v", spec, err)
+					daemonFatalf("event sink %s: %v", spec, err)
 				}
 				sinks = append(sinks, s)
 			case strings.HasPrefix(spec, "webhook:"):
@@ -238,18 +238,18 @@ func runDaemon(stop <-chan struct{}) {
 					rest = rest[i+3:]
 				}
 				if network != "udp" && network != "tcp" {
-					log.Fatalf("event sink %s: network must be udp or tcp", spec)
+					daemonFatalf("event sink %s: network must be udp or tcp", spec)
 				}
 				if rest == "" {
-					log.Fatalf("event sink %s: missing host:port", spec)
+					daemonFatalf("event sink %s: missing host:port", spec)
 				}
 				s, err := streaming.NewSyslogSink(streaming.SyslogConfig{Network: network, Addr: rest})
 				if err != nil {
-					log.Fatalf("event sink %s: %v", spec, err)
+					daemonFatalf("event sink %s: %v", spec, err)
 				}
 				sinks = append(sinks, s)
 			default:
-				log.Fatalf("unknown event sink: %s (valid: stdout, file:<path>, webhook:<url>, syslog:[udp|tcp://]host:port)", spec)
+				daemonFatalf("unknown event sink: %s (valid: stdout, file:<path>, webhook:<url>, syslog:[udp|tcp://]host:port)", spec)
 			}
 		}
 		log.Printf("Event Sinks: %s", *eventSink)
@@ -258,29 +258,29 @@ func runDaemon(stop <-chan struct{}) {
 	// Web dashboard (--dashboard-port): served on its own HTTP server so
 	// the SSE stream is not cut by the metrics server's write timeout.
 	if *dashboardPort < 0 || *dashboardPort > 65535 {
-		log.Fatal("dashboard port must be between 0 (off) and 65535")
+		daemonFatal("dashboard port must be between 0 (off) and 65535")
 	}
 	if *dashboardPort != 0 {
 		token, err := dashboard.LoadToken(*dashboardTokenFile)
 		if err != nil {
-			log.Fatalf("dashboard authentication: %v", err)
+			daemonFatalf("dashboard authentication: %v", err)
 		}
 		dashHandler := dashboard.New(200)
 		dashboardServer, err := dashboard.NewServer(dashboard.ServerConfig{
 			Bind: *dashboardBind, Port: *dashboardPort, Token: token,
 		}, dashHandler)
 		if err != nil {
-			log.Fatalf("dashboard server: %v", err)
+			daemonFatalf("dashboard server: %v", err)
 		}
 		listener, err := net.Listen("tcp", dashboardServer.Addr)
 		if err != nil {
-			log.Fatalf("dashboard listen: %v", err)
+			daemonFatalf("dashboard listen: %v", err)
 		}
 		defer dashboardServer.Close()
 		sinks = append(sinks, dashboard.NewSink(dashHandler))
 		go func() {
 			if err := dashboardServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Fatalf("dashboard server: %v", err)
+				daemonFatalf("dashboard server: %v", err)
 			}
 		}()
 		go func() {
@@ -308,22 +308,22 @@ func runDaemon(stop <-chan struct{}) {
 
 	ringSize, err := parseByteSize(*lsmRingSize)
 	if err != nil {
-		log.Fatalf("❌ --lsm-ringbuf-size: %v", err)
+		daemonFatalf("❌ --lsm-ringbuf-size: %v", err)
 	}
 	if *onEventLoss != "log" && *onEventLoss != "deny" {
-		log.Fatalf("❌ invalid --on-event-loss %q (valid: log, deny)", *onEventLoss)
+		daemonFatalf("❌ invalid --on-event-loss %q (valid: log, deny)", *onEventLoss)
 	}
 
 	digests, err := loadIntegrityDigests(*integrityMode, *integrityDB)
 	if err != nil {
-		log.Fatalf("❌ %v", err)
+		daemonFatalf("❌ %v", err)
 	}
 
 	// Bootstrap server-managed deployments: seed the policy path from the
 	// fallback if nothing is there yet (see seedPolicyFile).
 	if signedManager == nil {
 		if err := seedPolicyFile(*policyPath, *policyFallback, pub != nil); err != nil {
-			log.Fatalf("❌ %v", err)
+			daemonFatalf("❌ %v", err)
 		}
 	}
 
@@ -367,11 +367,11 @@ func runDaemon(stop <-chan struct{}) {
 		}
 		wire, readErr := crypto.ReadFileLimited(bundlePath, assignment.MaxBundleBytes)
 		if readErr != nil {
-			log.Fatal(readErr)
+			daemonFatal(readErr)
 		}
 		bundle, decodeErr := assignment.DecodeBundle(wire)
 		if decodeErr != nil {
-			log.Fatal(decodeErr)
+			daemonFatal(decodeErr)
 		}
 		enf, err = signedManager.bootstrap(ctx, bundle, enforcerOpts)
 		if err == nil {
@@ -394,7 +394,7 @@ func runDaemon(stop <-chan struct{}) {
 		}
 	}
 	if err != nil {
-		log.Fatalf("❌ Failed to create enforcer: %v", err)
+		daemonFatalf("❌ Failed to create enforcer: %v", err)
 	}
 	defer enf.Close()
 
@@ -426,7 +426,7 @@ func runDaemon(stop <-chan struct{}) {
 		if signedManager != nil {
 			st, stateErr := signedManager.store.Snapshot()
 			if stateErr != nil {
-				log.Fatal(stateErr)
+				daemonFatal(stateErr)
 			}
 			clientCfg.SignedAssignments = true
 			clientCfg.InitialAssignment = &policyserver.PolicyAssignment{PolicyID: restored.Policy.ID, Version: int64(restored.Policy.Version), WASMHash: restored.Policy.SHA256, Envelope: st.Active.Envelope, DeploymentSequence: restored.Sequence}
@@ -439,14 +439,14 @@ func runDaemon(stop <-chan struct{}) {
 			update = func(a *policyserver.PolicyAssignment, data []byte) error {
 				err := signedManager.update(a, data, enf.ActivateAssignment)
 				if signedManager.fatal != nil {
-					log.Fatalf("signed activation requires restart/reconciliation: %v", signedManager.fatal)
+					daemonFatalf("signed activation requires restart/reconciliation: %v", signedManager.fatal)
 				}
 				return err
 			}
 		}
 		policyClient, err = newPolicyClient(clientCfg, update)
 		if err != nil {
-			log.Fatalf("❌ Policy server: %v", err)
+			daemonFatalf("❌ Policy server: %v", err)
 		}
 		log.Printf("Policy Server: %s", *serverURL)
 	}
@@ -468,11 +468,13 @@ func runDaemon(stop <-chan struct{}) {
 		}
 	}
 	if err := start(); err != nil {
-		log.Fatalf("❌ Failed to start enforcer: %v", err)
+		daemonFatalf("❌ Failed to start enforcer: %v", err)
 	}
+	// The Windows SCM waits for this before reporting the service as Running.
+	signalServiceReady()
 	receiptClient, err := newNodeReceiptClient(enf)
 	if err != nil {
-		log.Fatalf("Node receipts: %v", err)
+		daemonFatalf("Node receipts: %v", err)
 	}
 	if receiptClient != nil {
 		receiptCtx, stopReceipts := context.WithCancel(ctx)

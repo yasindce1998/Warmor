@@ -59,7 +59,14 @@ func (m *PolicyMap) SyncEvent(ev *api.Event, action uint8, audit bool) error {
 		if err != nil {
 			return fmt.Errorf("%w: remote address %q", ErrNotKernelMatchable, ev.Network.RemoteAddr)
 		}
-		key, err := netKey(m.imageHash(ev.PID, ev.Filename), ev.Network.Operation, ev.Network.Protocol,
+		// bind/listen reuse Operation="connect" for cross-platform policy
+		// portability; their hook name selects the right kernel direction.
+		op := ev.Network.Operation
+		switch ev.Hook {
+		case "bind", "listen":
+			op = ev.Hook
+		}
+		key, err := netKey(m.imageHash(ev.PID, ev.Filename), op, ev.Network.Protocol,
 			netip.AddrPortFrom(addr, ev.Network.RemotePort))
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrNotKernelMatchable, err)
@@ -111,14 +118,20 @@ func (m *PolicyMap) put(mp *ebpf.Map, key []byte, action uint8, audit bool) erro
 // processes seen by ETW or the startup snapshot; processes reported by the
 // eBPF process hook are tracked as their records arrive.
 func (m *PolicyMap) TrackProcess(info winutil.ProcInfo) {
-	m.trackHash(info.PID, winutil.ImageHash(info.NTImage))
+	m.trackHash(info.PID, winutil.ImageHash(info.NTImage), winutil.FiletimeFromTime(info.CreateTime))
 }
 
-func (m *PolicyMap) trackHash(pid uint32, hash uint64) {
+// trackHash publishes a PID's image hash and creation time to the network
+// hooks. The creation time travels into every network record so userspace can
+// reject a stale record whose PID has since been recycled.
+func (m *PolicyMap) trackHash(pid uint32, hash, creationTime uint64) {
 	if m == nil || m.procInfo == nil || hash == 0 {
 		return
 	}
-	_ = m.procInfo.Put(u32Bytes(pid), u64Bytes(hash))
+	v := make([]byte, procInfoSize)
+	binary.LittleEndian.PutUint64(v[0:8], hash)
+	binary.LittleEndian.PutUint64(v[8:16], creationTime)
+	_ = m.procInfo.Put(u32Bytes(pid), v)
 }
 
 // ForgetProcess drops a PID from the network hooks' process map, so a reused

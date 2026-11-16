@@ -114,7 +114,7 @@ func (c *Consumer) Start(eventChan chan<- *api.Event) error {
 
 	session, err := startSession(c.opts.SessionName)
 	if err != nil {
-		active.Store(nil)
+		c.abortStart()
 		return err
 	}
 	c.session = session
@@ -128,7 +128,7 @@ func (c *Consumer) Start(eventChan chan<- *api.Event) error {
 	}
 	if len(c.enabled) == 0 {
 		_ = stopSessionByName(c.opts.SessionName)
-		active.Store(nil)
+		c.abortStart()
 		return errors.New("etw: no provider could be enabled")
 	}
 
@@ -136,7 +136,7 @@ func (c *Consumer) Start(eventChan chan<- *api.Event) error {
 	trace, err := openRealtimeTrace(c.opts.SessionName, callbackPtr)
 	if err != nil {
 		_ = stopSessionByName(c.opts.SessionName)
-		active.Store(nil)
+		c.abortStart()
 		return err
 	}
 	c.trace = trace
@@ -150,6 +150,16 @@ func (c *Consumer) Start(eventChan chan<- *api.Event) error {
 
 	log.Printf("ETW: session %q started (providers: %v)", c.opts.SessionName, c.EnabledProviders())
 	return nil
+}
+
+// abortStart releases the singleton and the done channel on a failed Start.
+// Without this, a later Stop() waits five seconds on a channel that no
+// processTrace goroutine will ever close, and logs a spurious timeout error
+// on every graceful shutdown.
+func (c *Consumer) abortStart() {
+	c.session = 0
+	active.Store(nil)
+	close(c.done)
 }
 
 // Enabled reports whether a provider is delivering events.
@@ -278,7 +288,9 @@ func (c *Consumer) handleProcess(rec *eventRecord) *api.Event {
 		if !c.enabled[ProviderProcess] {
 			return nil
 		}
-		return winutil.ProcessEvent(info, ts)
+		ev := winutil.ProcessEvent(info, ts)
+		ev.ProcessCreateTime = info.CreateTime
+		return ev
 
 	case processEventStop:
 		c.opts.Procs.Exit(pid)
@@ -393,11 +405,14 @@ func (c *Consumer) lookupProcess(pid uint32) winutil.ProcInfo {
 	if p, ok := c.opts.Procs.Get(pid); ok {
 		return p
 	}
-	info := winutil.ProcInfo{PID: pid, CreateTime: time.Now()}
+	// Do not fabricate a creation time from time.Now(): the kill path would
+	// read it as process identity and could terminate a recycled PID.
+	info := winutil.ProcInfo{PID: pid, Unresolved: true}
 	if nt, err := winutil.QueryImageNT(pid); err == nil {
 		info.NTImage = nt
 		info.Image = c.opts.Paths.TranslateImage(nt)
 		info.Comm = winutil.CommFromPath(nt)
+		info.Unresolved = false
 		if ct, err := winutil.ProcessCreateTime(pid); err == nil {
 			info.CreateTime = ct
 		}
@@ -408,6 +423,9 @@ func (c *Consumer) lookupProcess(pid uint32) winutil.ProcInfo {
 	// services) refuse the query, and they issue file I/O constantly. A
 	// later start event for the PID replaces the entry.
 	c.opts.Procs.Put(info)
+	if info.Unresolved {
+		metrics.RecordWindowsUnresolvedProcess()
+	}
 	return info
 }
 

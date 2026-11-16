@@ -316,7 +316,7 @@ See [Architecture Deep Dive](docs/architecture.md) for data flow diagrams.
 |----------|-----------|
 | **Getting Started** | [Getting Started](GETTING_STARTED.md) &bull; [Build Guide](BUILD.md) |
 | **Architecture** | [System Design](docs/architecture.md) &bull; [Security Posture](docs/SECURITY_POSTURE.md) &bull; [BPF Compatibility](docs/BPF_COMPATIBILITY.md) |
-| **Platforms** | [Linux](docs/PLATFORM_LINUX.md) &bull; [Windows](docs/PLATFORM_WINDOWS.md) &bull; [macOS](docs/PLATFORM_MACOS.md) |
+| **Platforms** | [Linux](docs/PLATFORM_LINUX.md) &bull; [Windows](docs/PLATFORM_WINDOWS.md) &bull; [Windows hardening plan](docs/windows-hardening-plan.md) &bull; [macOS](docs/PLATFORM_MACOS.md) |
 | **Policies** | [Authoring Guide](docs/policy-authoring.md) &bull; [Rust Examples](docs/rust-policy-examples.md) &bull; [YAML DSL](docs/policy-authoring.md) |
 | **Toolchain** | [Policy Toolchain](docs/policy-toolchain.md) — generate (SBOM/audit), merge, diff, simulate, sign & distribute |
 | **Intelligence** | [Learning Mode](docs/learning-mode.md) &bull; [Escape Detection](docs/escape-detection.md) &bull; [Supply Chain](docs/supply-chain-integrity.md) |

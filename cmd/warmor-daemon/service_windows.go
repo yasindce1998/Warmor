@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/windows/svc"
@@ -25,20 +26,62 @@ const serviceDescription = "WASM-powered workload security enforcement daemon"
 // to drain before the service reports stopped anyway.
 const serviceStopTimeout = 20 * time.Second
 
+// serviceStartTimeout bounds how long the SCM waits while the daemon loads
+// its platform and policy. Reporting Running earlier would let a health check
+// see a "running" service that is not enforcing anything yet.
+const serviceStartTimeout = 120 * time.Second
+
 type warmorService struct {
-	run  func(stop <-chan struct{})
-	elog *eventlog.Log
+	run   func(stop <-chan struct{})
+	elog  *eventlog.Log
+	ready <-chan struct{}
 }
 
 func (s *warmorService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
-	changes <- svc.Status{State: svc.StartPending}
+	changes <- svc.Status{State: svc.StartPending, WaitHint: uint32(serviceStartTimeout / time.Millisecond)}
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer func() {
+			if v := recover(); v != nil {
+				if f, ok := v.(serviceFatal); ok {
+					s.error("startup failed: " + string(f))
+				} else {
+					s.error(fmt.Sprintf("enforcer panicked: %v", v))
+				}
+			}
+		}()
 		s.run(stop)
 	}()
+
+	// Do not advertise Running until the platform and policy are live.
+	startupDeadline := time.NewTimer(serviceStartTimeout)
+	defer startupDeadline.Stop()
+startup:
+	for {
+		select {
+		case <-s.ready:
+			break startup
+		case <-done:
+			s.error("enforcer exited before becoming ready")
+			return false, 1
+		case <-startupDeadline.C:
+			s.error("enforcer did not become ready in time")
+			close(stop)
+			return false, 1
+		case c := <-r:
+			switch c.Cmd {
+			case svc.Interrogate:
+				changes <- c.CurrentStatus
+			case svc.Stop, svc.Shutdown:
+				s.info("service stop requested during startup")
+				close(stop)
+				return false, 0
+			}
+		}
+	}
 
 	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 	s.info("service running")
@@ -102,6 +145,20 @@ func serviceLogPath() string {
 	return filepath.Join(base, "Warmor", "warmor-daemon.log")
 }
 
+// serviceReadyCh is closed by the daemon once the enforcer has started. The
+// service reports Running only after that, so readiness probes cannot observe
+// a service that is up but not monitoring.
+var (
+	serviceReadyCh   chan struct{}
+	serviceReadyOnce sync.Once
+)
+
+func signalServiceReady() {
+	if serviceReadyCh != nil {
+		serviceReadyOnce.Do(func() { close(serviceReadyCh) })
+	}
+}
+
 func runService(run func(stop <-chan struct{})) {
 	elog, err := eventlog.Open(serviceName)
 	if err != nil {
@@ -109,6 +166,9 @@ func runService(run func(stop <-chan struct{})) {
 	} else {
 		defer elog.Close()
 	}
+	serviceEventLog = elog
+	runningAsService = true
+	serviceReadyCh = make(chan struct{})
 
 	logPath := serviceLogPath()
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o750); err == nil {
@@ -118,7 +178,7 @@ func runService(run func(stop <-chan struct{})) {
 		}
 	}
 
-	if err := svc.Run(serviceName, &warmorService{run: run, elog: elog}); err != nil {
+	if err := svc.Run(serviceName, &warmorService{run: run, elog: elog, ready: serviceReadyCh}); err != nil {
 		if elog != nil {
 			_ = elog.Error(1, fmt.Sprintf("%s service failed: %v", serviceName, err))
 		}

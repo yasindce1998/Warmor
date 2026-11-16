@@ -317,6 +317,16 @@ func marshalEventForWASM(event *api.Event, abiVersion uint32) ([]byte, error) {
 		"gid":      event.GID,
 		"comm":     event.Comm,
 		"filename": "",
+		// Windows identity from the eBPF sensor. Always present so policies
+		// can deserialize into a fixed struct on every platform; empty/zero
+		// means the sensor did not provide it. Policies that read these keys
+		// must not declare a finite fields_read mask (no field bits yet),
+		// which is already the case for hand-written Rust policies.
+		"user":          event.User,
+		"domain":        event.Domain,
+		"is_admin":      event.IsAdmin,
+		"logon_id":      event.LogonID,
+		"socket_cookie": event.SocketCookie,
 	}
 	if abiVersion >= TemporalABIVersion {
 		wall, age := temporalInputs(event)

@@ -37,6 +37,12 @@ const (
 	attachCgroupInet4RecvAccept = 5
 	attachCgroupInet6RecvAccept = 6
 	attachProcess               = 11 // implemented by ntosebpfext
+	// bind/listen attach types were added in eBPF-for-Windows v1.4. Same
+	// CGROUP_SOCK_ADDR program type, so REJECT is a hard WFP block.
+	attachCgroupInet4Bind   = 14
+	attachCgroupInet6Bind   = 15
+	attachCgroupInet4Listen = 16
+	attachCgroupInet6Listen = 17
 )
 
 // Options configures a Loader.
@@ -55,7 +61,10 @@ func Available() error {
 	if err := windows.NewLazySystemDLL("ebpfapi.dll").Load(); err != nil {
 		return fmt.Errorf("ebpfapi.dll not found (install eBPF-for-Windows): %w", err)
 	}
-	path, _ := windows.UTF16PtrFromString(`\\.\ebpfctl`)
+	path, err := windows.UTF16PtrFromString(`\\.\ebpfctl`)
+	if err != nil {
+		return fmt.Errorf("invalid eBPF control device path: %w", err)
+	}
 	h, err := windows.CreateFile(path, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 		nil, windows.OPEN_EXISTING, 0, 0)
 	if err != nil {
@@ -63,6 +72,14 @@ func Available() error {
 	}
 	_ = windows.CloseHandle(h)
 	return nil
+}
+
+// monitoredReader ties a ring buffer to the liveness flag of the backend it
+// belongs to, so a failed reader can degrade only its own event type.
+type monitoredReader struct {
+	rd     *ringbuf.Reader
+	health *atomic.Bool
+	kind   string
 }
 
 // Loader owns the loaded programs, their links and ring buffer readers.
@@ -73,10 +90,17 @@ type Loader struct {
 	proc *ebpf.Collection
 
 	links   []link.Link
-	readers []*ringbuf.Reader
+	readers []monitoredReader
 
 	netOK  bool
 	procOK bool
+
+	// Per-reader liveness. A reader that hits repeated errors marks its
+	// backend unhealthy and stops, so WindowsPlatform can drop that event
+	// type from its reported capabilities instead of staying green while
+	// nothing is being monitored.
+	netHealthy  atomic.Bool
+	procHealthy atomic.Bool
 
 	policy *PolicyMap
 
@@ -171,6 +195,10 @@ func (l *Loader) loadNet(path string) error {
 	}{
 		{"warmor_recv_accept4", attachCgroupInet4RecvAccept},
 		{"warmor_recv_accept6", attachCgroupInet6RecvAccept},
+		{"warmor_bind4", attachCgroupInet4Bind},
+		{"warmor_bind6", attachCgroupInet6Bind},
+		{"warmor_listen4", attachCgroupInet4Listen},
+		{"warmor_listen6", attachCgroupInet6Listen},
 	}
 
 	var links []link.Link
@@ -205,8 +233,9 @@ func (l *Loader) loadNet(path string) error {
 
 	l.net = coll
 	l.links = append(l.links, links...)
-	l.readers = append(l.readers, rd)
+	l.readers = append(l.readers, monitoredReader{rd: rd, health: &l.netHealthy, kind: "network"})
 	l.netOK = true
+	l.netHealthy.Store(true)
 	log.Printf("eBPF: network hooks attached (%d programs)", len(links))
 	return nil
 }
@@ -236,8 +265,9 @@ func (l *Loader) loadProc(path string) error {
 
 	l.proc = coll
 	l.links = append(l.links, lk)
-	l.readers = append(l.readers, rd)
+	l.readers = append(l.readers, monitoredReader{rd: rd, health: &l.procHealthy, kind: "process"})
 	l.procOK = true
+	l.procHealthy.Store(true)
 	log.Println("eBPF: process hook attached")
 	return nil
 }
@@ -264,29 +294,65 @@ func (l *Loader) Network() bool { return l.netOK }
 // Process reports whether the process hook is enforcing.
 func (l *Loader) Process() bool { return l.procOK }
 
+// NetworkHealthy reports whether the network ring buffer reader is still
+// delivering events. It turns false after repeated read errors.
+func (l *Loader) NetworkHealthy() bool { return l.netHealthy.Load() }
+
+// ProcessHealthy reports whether the process ring buffer reader is still
+// delivering events.
+func (l *Loader) ProcessHealthy() bool { return l.procHealthy.Load() }
+
 // PolicyMap returns the kernel policy map syncer.
 func (l *Loader) PolicyMap() *PolicyMap { return l.policy }
 
+// maxReaderErrors is how many consecutive ring buffer errors a reader
+// tolerates before its backend is declared unhealthy and the reader stops.
+const maxReaderErrors = 8
+
 // Start delivers kernel events to eventChan until Stop.
 func (l *Loader) Start(ctx context.Context, eventChan chan<- *api.Event) {
-	for _, rd := range l.readers {
+	for _, m := range l.readers {
 		l.wg.Add(1)
-		go func(rd *ringbuf.Reader) {
+		go func(m monitoredReader) {
 			defer l.wg.Done()
-			l.readLoop(ctx, rd, eventChan)
-		}(rd)
+			l.readLoop(ctx, m.rd, eventChan, m.health, m.kind)
+		}(m)
 	}
 }
 
-func (l *Loader) readLoop(ctx context.Context, rd *ringbuf.Reader, eventChan chan<- *api.Event) {
+func (l *Loader) readLoop(ctx context.Context, rd *ringbuf.Reader, eventChan chan<- *api.Event, health *atomic.Bool, kind string) {
 	var rec ringbuf.Record
+	consecutive := 0
+	backoff := 5 * time.Millisecond
 	for {
 		if err := rd.ReadInto(&rec); err != nil {
 			if errors.Is(err, ringbuf.ErrClosed) || ctx.Err() != nil {
 				return
 			}
 			l.bad.Add(1)
+			consecutive++
+			if consecutive >= maxReaderErrors {
+				if health.Swap(false) {
+					log.Printf("eBPF: %s reader stopped after %d consecutive errors; backend degraded", kind, consecutive)
+				}
+				return
+			}
+			// A faulted reader must not become a tight loop burning a core.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < time.Second {
+				backoff *= 2
+			}
 			continue
+		}
+		consecutive = 0
+		backoff = 5 * time.Millisecond
+		if health != nil && !health.Load() {
+			health.Store(true)
+			log.Printf("eBPF: %s reader recovered", kind)
 		}
 		l.received.Add(1)
 
@@ -342,19 +408,30 @@ func (l *Loader) handle(decoded any) *api.Event {
 		}
 		l.opts.Procs.Put(info)
 		if r.Verdict == VerdictBlocked {
-			// The creation was denied: the process never runs.
+			// The creation was denied: the process never runs. Drop the PID
+			// from the network hooks too, otherwise a recycled PID inherits
+			// the blocked image's rules before its own start record arrives.
 			l.opts.Procs.Exit(r.PID)
+			l.policy.ForgetProcess(r.PID)
 		} else {
-			l.policy.trackHash(r.PID, r.ImageHash)
+			l.policy.trackHash(r.PID, r.ImageHash, uint64(r.CreationTime))
 		}
 		ev := winutil.ProcessEvent(info, ts)
 		ev.LSMEvent = r.Verdict == VerdictBlocked
+		ev.ProcessCreateTime = ts
+		ev.User = r.Account
+		ev.Domain = r.Domain
 		return ev
 
 	case *NetworkRecord:
 		metrics.RecordLSMDecision(r.Operation(), verdictAction(r.Verdict))
 		ts := time.Now()
 		proc, _ := l.opts.Procs.Get(r.PID)
+		// Creation time is process identity, captured by the hook. If the
+		// hook had no proc_info entry, leave identity unknown: reading the
+		// process table now could return a newer process that recycled the
+		// PID while the record waited in the ring buffer.
+		identity := winutil.TimeFromFiletime(r.CreationTime)
 		netEv := &api.NetworkEvent{
 			BaseEvent:  api.BaseEvent{Type: api.EventTypeNetwork, PID: r.PID, Comm: proc.Comm, Timestamp: ts},
 			Operation:  r.Operation(),
@@ -365,13 +442,20 @@ func (l *Loader) handle(decoded any) *api.Event {
 			LocalPort:  r.Local.Port(),
 		}
 		return &api.Event{
-			Type:      api.EventTypeNetwork,
-			PID:       r.PID,
-			Comm:      proc.Comm,
-			Filename:  proc.Image,
-			Timestamp: ts,
-			Network:   netEv,
-			LSMEvent:  r.Verdict == VerdictBlocked,
+			Type:              api.EventTypeNetwork,
+			PID:               r.PID,
+			Comm:              proc.Comm,
+			Filename:          proc.Image,
+			Timestamp:         ts,
+			ProcessCreateTime: identity,
+			// Match the Linux LSM sensor: bind/listen reuse Operation=connect
+			// and carry the hook name separately. Kernel keys use the hook.
+			Hook:         r.Hook(),
+			IsAdmin:      int8(r.IsAdmin),
+			LogonID:      r.LogonID,
+			SocketCookie: r.SocketCookie,
+			Network:      netEv,
+			LSMEvent:     r.Verdict == VerdictBlocked,
 		}
 	}
 	return nil
@@ -386,8 +470,8 @@ func (l *Loader) Stats() (received, dropped, malformed uint64) {
 // is pinned) and waits for the readers. Safe to call more than once.
 func (l *Loader) Stop() error {
 	l.stopOnce.Do(func() {
-		for _, rd := range l.readers {
-			_ = rd.Close()
+		for _, m := range l.readers {
+			_ = m.rd.Close()
 		}
 		l.wg.Wait()
 		l.close()

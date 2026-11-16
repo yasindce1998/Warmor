@@ -15,13 +15,22 @@ import (
 // event, so the process the event was about has already exited.
 var errPIDReused = errors.New("PID reused by a newer process")
 
+// pidReuseSkew tolerates small differences between the sensor's creation
+// time and GetProcessTimes. FILETIME conversion and ETW timestamp granularity
+// can differ by a few ticks; treating any difference as PID reuse would fail
+// open and leave the real offender alive.
+const pidReuseSkew = 2 * time.Second
+
 // terminateEventProcess terminates the process an event came from. Windows
-// recycles PIDs quickly and ETW delivers events late, so the PID may already
-// belong to another process: the process is only terminated if it was
-// created no later than the event. The check and the termination use the
-// same handle, so the process cannot change between them.
+// recycles PIDs quickly and kernel events can be delayed, so the PID may
+// already belong to another process. Prefer the creation time captured by the
+// kernel at hook time (ProcessCreateTime); otherwise fall back to the event
+// time. The check and termination use the same handle.
 func terminateEventProcess(event *api.Event) (bool, error) {
-	pid, seen := event.PID, event.Timestamp
+	pid, seen := event.PID, event.ProcessCreateTime
+	if seen.IsZero() {
+		seen = event.Timestamp
+	}
 	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
 		return false, fmt.Errorf("OpenProcess(%d): %w", pid, err)
@@ -33,7 +42,7 @@ func terminateEventProcess(event *api.Event) (bool, error) {
 		if err := windows.GetProcessTimes(handle, &created, &exited, &kernel, &user); err != nil {
 			return false, fmt.Errorf("GetProcessTimes(%d): %w", pid, err)
 		}
-		if time.Unix(0, created.Nanoseconds()).After(seen) {
+		if time.Unix(0, created.Nanoseconds()).After(seen.Add(pidReuseSkew)) {
 			return false, fmt.Errorf("TerminateProcess(%d): %w", pid, errPIDReused)
 		}
 	}
