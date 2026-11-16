@@ -354,6 +354,8 @@ class RefRepository:
     """Own all repository/config/ref/remote writes inside a fresh private temp."""
 
     def __init__(self):
+        if not shutil.which("git"):
+            raise RuntimeError("release ref isolation tests require Git")
         self.tmp = tempfile.TemporaryDirectory(prefix="warmor-release-ref-")
         self.base = Path(self.tmp.name).resolve()
         self.root = self.base / "repo"
@@ -385,6 +387,9 @@ class RefRepository:
                 or gitdir.is_symlink() or not gitdir.is_dir()
                 or (gitdir / "commondir").exists()):
             raise RuntimeError("release fixture repository is not test-owned")
+        config = gitdir / "config"
+        if config.is_symlink() or not config.is_file() or config.stat().st_nlink != 1:
+            raise RuntimeError("release fixture config is not test-owned")
         actual = Path(self._run("rev-parse", "--absolute-git-dir").strip()).resolve()
         common = Path(self._run("rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
         worktree = Path(self._run("rev-parse", "--show-toplevel").strip()).resolve()
@@ -472,6 +477,22 @@ class RefTests(unittest.TestCase):
 
 
 class GitIsolationTests(unittest.TestCase):
+    def test_environment_removes_all_ambient_git_controls(self):
+        env = isolated_git_environment({
+            "PATH": "/test-path", "GIT_DIR": "/not-owned", "GIT_WORK_TREE": "/not-owned",
+            "GIT_COMMON_DIR": "/not-owned", "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "core.worktree", "GIT_CONFIG_VALUE_0": "/not-owned",
+            "GIT_CONFIG_PARAMETERS": "'core.worktree=/not-owned'",
+            "GIT_OBJECT_DIRECTORY": "/not-owned", "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/not-owned",
+            "GIT_EXEC_PATH": "/not-owned", "GIT_SSH_COMMAND": "must-not-execute",
+        })
+        self.assertEqual(env["PATH"], "/test-path")
+        self.assertEqual({key: value for key, value in env.items() if key.startswith("GIT_")}, {
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": "file",
+        })
+
     def test_ref_fixtures_ignore_hostile_ambient_git_without_touching_sentinel(self):
         sentinel = RefRepository()
         self.addCleanup(sentinel.close)
@@ -515,6 +536,17 @@ class GitIsolationTests(unittest.TestCase):
         original = owned.root / ".git"
         original.rename(owned.root / "retained.git")
         original.write_text("gitdir: " + str(sentinel.root / ".git") + "\n")
+        with self.assertRaisesRegex(RuntimeError, "not test-owned"):
+            owned.git("config", "user.name", "must not write")
+        self.assertEqual((sentinel.root / ".git" / "config").read_bytes(), before)
+
+    def test_ref_fixture_refuses_common_dir_before_mutation(self):
+        owned = RefRepository()
+        sentinel = RefRepository()
+        self.addCleanup(owned.close)
+        self.addCleanup(sentinel.close)
+        before = (sentinel.root / ".git" / "config").read_bytes()
+        (owned.root / ".git" / "commondir").write_text(str(sentinel.root / ".git") + "\n")
         with self.assertRaisesRegex(RuntimeError, "not test-owned"):
             owned.git("config", "user.name", "must not write")
         self.assertEqual((sentinel.root / ".git" / "config").read_bytes(), before)
