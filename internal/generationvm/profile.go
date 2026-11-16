@@ -187,8 +187,18 @@ type evidence struct {
 	Audit, KernelDenied, Enforced, Attempted bool
 }
 
+// isOutcomeFixturePath matches the outcome fixture directory used by the
+// integration tests. That directory moved from /var/tmp to /tmp so uid 65534
+// can traverse it when the host checkout lives in a private home directory;
+// keep both spellings so evidence from either fixture layout is still recorded
+// rather than silently dropped.
+func isOutcomeFixturePath(filename string) bool {
+	return strings.HasPrefix(filename, "/tmp/warmor-outcome-fixtures/") ||
+		strings.HasPrefix(filename, "/var/tmp/warmor-outcome-fixtures/")
+}
+
 func record(phase string, event *api.Event, result *api.ActionResult) {
-	if event == nil || event.GetType() != api.EventTypeProcess || !strings.HasPrefix(event.Filename, "/var/tmp/warmor-outcome-fixtures/") {
+	if event == nil || event.GetType() != api.EventTypeProcess || !isOutcomeFixturePath(event.Filename) {
 		return
 	}
 	profile.Lock()
