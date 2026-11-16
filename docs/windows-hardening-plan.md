@@ -7,17 +7,8 @@ code audits and the upstream eBPF-for-Windows research. See
 
 ## Where things stand
 
-| Area | Today | Blocker to "good" |
-|---|---|---|
-| ETW process/file/network detection | Tested on a hosted Windows runner | Outcome tests still check event delivery, not enforcement results |
-| ETW detect-then-terminate | Ships | PID-reuse and identity gaps fixed in code; needs Windows CI validation |
-| eBPF network/process kernel blocking | Code exists, never built/run in CI | No driver-capable CI VM; signing pipeline unresolved |
-| eBPF bind/listen blocking | Implemented (attach IDs 14–17), unverified | Needs VM verification of the local-endpoint field mapping |
-| Identity in policy | Network admin/logon/cookie, process user/domain | Needs VM verification; ABI-6 contract for YAML conditions |
-| File **blocking** | Not possible | No eBPF file hook — needs a minifilter driver |
-| Registry / LSASS-handle monitoring | Missing | Needs ETW Threat-Intelligence from a PPL process |
-| Fleet publication (`--server`) | Explicitly refused on Windows | Needs a native atomic revision backend |
-| Event Viewer policy events | Only service lifecycle | Need a deny-only, opt-in logger |
+See [PLATFORM_WINDOWS.md](PLATFORM_WINDOWS.md) for the platform's current
+behaviour and [Feature Status](STATUS.md) for the current status matrix.
 
 ## Upstream eBPF-for-Windows: what changed by 2026
 

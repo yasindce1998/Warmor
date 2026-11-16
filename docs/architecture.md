@@ -1,7 +1,7 @@
 # warmor Architecture
 
 **Last Updated:** 2026-10-29
-**Status:** Describes current `main`. Phases 1-8 are partially done, and Phase 9 is mostly library-only. See [Feature Status](STATUS.md) for the per-feature reference.
+**Status:** Describes current `main`. See [Feature Status](STATUS.md) for the per-feature reference, including which Phase 9 intelligence features ship and which remain library-only.
 
 ---
 
@@ -509,20 +509,9 @@ Application → Syscall → ESF Hook → ESF Client → warmor Daemon → WASM �
 
 ## Performance Characteristics
 
-Measured 2026-10-15 on one laptop (WSL2; kernel numbers in a nested KVM VM).
-Methodology, raw output and caveats are in [PERFORMANCE.md](PERFORMANCE.md).
-"Declared" policies export their fields-read declaration (every compiled
-YAML policy); "undeclared" ones do not.
-
-| Metric | Design target | Measured |
-|--------|---------------|----------|
-| P95 evaluation latency (cache miss, WASM) | <100μs | 32μs YAML, 38μs fixture, 55μs Rust `advanced` crate |
-| P95 latency, cache hit | | 1.2–1.3μs |
-| Kernel fast path (BPF map hit) | <1μs | 0.11μs connect, 0.34μs exec (BPF program run time) |
-| Kernel, event sent to userspace | | about +13–20μs per event (reader wake-up) |
-| Throughput (daemon event loop) | 100k events/s | 175k/s declared, 24k–41k/s undeclared |
-| CPU overhead | <5% | 11% of one core at 10k events/s declared |
-| Memory | <50MB | 60–128MB RSS (not met) |
+Measured latency, throughput and resource numbers (historical, not remeasured
+for current `main`) are in [PERFORMANCE.md](PERFORMANCE.md) and the
+[status snapshot](STATUS.md#8-historical-performance--not-remeasured-for-this-snapshot).
 
 ---
 
@@ -692,14 +681,8 @@ YAML policy); "undeclared" ones do not.
 
 ## Development Phases
 
-See [STATUS.md](STATUS.md) for the per-feature, per-phase reference. In short:
-
-- **Phases 1-2:** done. DENY is enforced by `SIGKILL`.
-- **Phases 3-8:** partial. Highlights:
-  - LSM hooks attach, but only exec/connect get kernel entries.
-  - The policy server, mTLS/JWT, signed bundles and `warmorctl` ship.
-  - The Helm chart, CRD, webhook, containerd and per-container policy do not work or are missing.
-- **Phase 9:** `warmor-learn`, `warmor-simulate`, YAML temporal policies, in-kernel integrity, escape detection, drift collection, attack graph and blast radius metrics ship. Canary auto-rollback and fleet drift comparison remain library-only.
+Phase and per-feature status is tracked in [STATUS.md](STATUS.md); the
+forward-looking roadmap is in [PRD.md](PRD.md) (§7.1 is its single source of truth).
 
 ## Future Enhancements
 

@@ -315,18 +315,10 @@ See [Architecture Deep Dive](docs/architecture.md) for data flow diagrams.
 
 ## Documentation
 
-| Category | Documents |
-|----------|-----------|
-| **Getting Started** | [Getting Started](GETTING_STARTED.md) &bull; [Build Guide](BUILD.md) |
-| **Architecture** | [System Design](docs/architecture.md) &bull; [Security Posture](docs/SECURITY_POSTURE.md) &bull; [BPF Compatibility](docs/BPF_COMPATIBILITY.md) &bull; [Control-plane Protocol](docs/control-plane-protocol.md) &bull; [SaaS boundary ADR](docs/design/adr-0001-warmor-saas-boundary.md) &bull; [SaaS repo layout](docs/design/warmor-saas-repo-layout.md) &bull; [Integration history](docs/design/integration-history.md) |
-| **Platforms** | [Linux](docs/PLATFORM_LINUX.md) &bull; [Windows](docs/PLATFORM_WINDOWS.md) &bull; [Windows hardening plan](docs/windows-hardening-plan.md) &bull; [macOS](docs/PLATFORM_MACOS.md) |
-| **Policies** | [Authoring Guide](docs/policy-authoring.md) &bull; [Rust Examples](docs/rust-policy-examples.md) &bull; [YAML DSL](docs/policy-authoring.md) |
-| **Toolchain** | [Policy Toolchain](docs/policy-toolchain.md) — generate (SBOM/audit), merge, diff, simulate, sign & distribute |
-| **Intelligence** | [Learning Mode](docs/learning-mode.md) &bull; [Escape Detection](docs/escape-detection.md) &bull; [Supply Chain](docs/supply-chain-integrity.md) |
-| **Fleet** | [Canary Rollout](docs/canary-rollout.md) &bull; [Temporal](docs/temporal-policies.md) |
-| **Kubernetes** | [CRD Usage](docs/crd-usage.md) &bull; [Helm Chart](deploy/helm/warmor/) |
-| **Releases** | [Releasing](docs/RELEASING.md) &bull; [Release Validation](docs/RELEASE_VALIDATION.md) &bull; [Dependency Validation](docs/DEPENDENCY_VALIDATION.md) &bull; [Release Support](docs/RELEASE_SUPPORT.md) |
-| **Project** | [Feature Status](docs/STATUS.md) &bull; [PRD, Phase Tracking & Roadmap](docs/PRD.md) |
+The full [documentation index](docs/README.md) covers every guide, contract and
+design document. Start with [Getting Started](GETTING_STARTED.md) or the
+[Build Guide](BUILD.md); [Feature Status](docs/STATUS.md) is the source of truth
+for what ships today.
 
 ---
 

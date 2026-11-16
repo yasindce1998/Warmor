@@ -10,10 +10,10 @@ WARMOR_JWT_SECRET="your-secret" warmor-server \
   --policy-dir /srv/warmor-policies --verify-key policy-signing.pub
 ```
 
-Prefer supplying the secret through the environment instead of process arguments.
-`--ca-cert` additionally enables mTLS. `--insecure` is the explicit development
-exception for plaintext or ephemeral state; configured authentication still
-applies in that mode.
+Authentication flags (`--tls-cert`/`--tls-key`, `--ca-cert` for mTLS,
+`--jwt-secret`, `--insecure` for development) follow the normal server setup;
+see [Policy server and mTLS](operations.md#policy-server-and-mtls). The
+durable-state-specific startup requirement is the mandatory `--state-file` above.
 
 ## Guarantees and boundaries
 

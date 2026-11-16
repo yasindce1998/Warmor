@@ -6,11 +6,7 @@ runtime integration. For first-time setup see
 [GETTING_STARTED.md](../GETTING_STARTED.md); for flags see
 [PLATFORM_LINUX.md](PLATFORM_LINUX.md).
 
-> **Status on `main`:** standalone Linux is the supported path. The Helm
-> chart and Kubernetes manifests do **not** work yet (see
-> [Kubernetes](#kubernetes) below). Kernel blocking
-> covers repeat exec/connect denies only; everything else is detected and
-> then killed with `SIGKILL`. See [Feature Status](STATUS.md).
+> **Status:** see [Feature Status](STATUS.md) for current feature status.
 
 ## Run as a systemd service
 
@@ -136,12 +132,10 @@ This starts:
 - **Prometheus** on `http://localhost:9091`, which scrapes warmor metrics
 - **Grafana** on `http://localhost:3000` with a pre-provisioned dashboard (login: admin/warmor)
 
-The daemon exports `warmor_events_total`, `warmor_cache_hits_total`,
-`warmor_cache_misses_total`, `warmor_cache_size`,
-`warmor_evaluation_latency_microseconds`, `warmor_policy_info`,
-`warmor_events_processing_errors_total` and `warmor_audit_denied_total` on
-`--metrics-port` (default 9090), plus the LSM-decision, policy-load,
-heartbeat, WASM-exec and loader-status metrics the dashboards and alerts use.
+The daemon exports events, cache, evaluation-latency, policy, LSM-decision,
+policy-load, heartbeat, WASM-exec and loader-status metrics on `--metrics-port`
+(default 9090); see [architecture.md](architecture.md#6-observability) for names
+and [Feature Status](STATUS.md) for status.
 
 ## Container runtime integration
 

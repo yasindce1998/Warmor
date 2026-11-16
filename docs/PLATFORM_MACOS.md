@@ -1,12 +1,6 @@
 # macOS Platform Guide
 
-> **Status on `main`: Experimental, detection only.** The ESF client answers
-> **every AUTH event with ALLOW**, so nothing is blocked on macOS today. The
-> cgo ESF code is not compiled in CI (`CGO_ENABLED=0`). New release archives
-> contain **tools only; no macOS daemon**. Older cgo-disabled daemon downloads
-> cannot start ESF. Building from source with cgo is experimental and remains
-> unverified against the native SDK; it is not a supported runnable artifact.
-> See [Feature Status](STATUS.md).
+> **Status on `main`: Experimental, detection only.** See [Feature Status](STATUS.md).
 
 ## Architecture
 

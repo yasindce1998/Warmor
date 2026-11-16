@@ -126,6 +126,6 @@ data, _ := session.MarshalPolicy()
 
 ## Tips
 
-- **Record a full operational cycle** -- short windows miss infrequent behaviors like log rotation or cron jobs.
-- **Filter by cgroup** -- targeting specific containers produces tighter policies than learning everything at once.
-- **Combine with policy-gen** -- use `warmor-policy-gen` for offline audit-log analysis and `warmor-learn` for live observation; merge results with `warmor-policy-merge`.
+Record a full operational cycle, filter by cgroup, and combine with offline
+`warmor-policy-gen` analysis — see
+[learning caveats](POLICY_TOOL_CONTRACTS.md#learning-is-a-proposal-not-a-security-equivalence-proof).

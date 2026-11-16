@@ -1,8 +1,6 @@
 # Rust WASM Policy Examples
 
-> **Status:** all 10 crates build and are checked against the real host in CI (`TestPolicyCrates`). All crates declare `abi_version() -> 4`, so they receive the process context (`args`, `parent_comm`, `cgroup_id`, `direction`; see [Host contract](#host-contract)) as well as the time context. `bytes_sent`/`bytes_recv` are not sent (no sensor produces them yet).
->
-> See [Feature Status](STATUS.md).
+> **Status:** all 10 crates build and are checked against the real host in CI; see [Feature Status](STATUS.md).
 
 Warmor ships with advanced Rust-based WASM policy examples in the `policies/` directory. These demonstrate security enforcement patterns compiled to WebAssembly and evaluated by the daemon in userspace.
 
