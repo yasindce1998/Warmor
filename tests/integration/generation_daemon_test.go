@@ -43,7 +43,7 @@ func TestPrepareGenerationDaemonArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"allowed", "first-denied", "reload-denied", "rule-audit", "global-audit", "file-victim"} {
+	for _, name := range []string{"allowed", "first-denied", "reload-denied", "rule-audit", "global-audit", "file-victim", "compile-heavy-denied", "init-loop-denied", "signed-malformed-denied"} {
 		copyExecutable(t, self, filepath.Join(dir, name))
 	}
 	for _, version := range []string{"A", "B"} {

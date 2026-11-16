@@ -149,36 +149,50 @@ func (f *outcomeFixture) installPolicyHost(t *testing.T) {
 func (d *daemonProcess) hostPIDs(t *testing.T) []int {
 	t.Helper()
 	var pids []int
-	// os/exec may fork on any Go runtime thread, not only the thread-group leader.
-	tasks, err := filepath.Glob(fmt.Sprintf("/proc/%d/task/*/children", d.cmd.Process.Pid))
+	// Discover the daemon's children through the kernel-reported PPid rather
+	// than /proc/<pid>/task/*/children. That file is optional (procfs may be
+	// built without it) and, even when present, does not reliably list a child
+	// forked from a short-lived Go runtime thread. PPid is authoritative and
+	// names the daemon's thread-group id, so it still proves a real child.
+	statuses, err := filepath.Glob("/proc/[0-9]*/status")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, task := range tasks {
-		children, err := os.ReadFile(task)
+	wantPPid := strconv.Itoa(d.cmd.Process.Pid)
+	for _, statusPath := range statuses {
+		status, err := os.ReadFile(statusPath)
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, field := range strings.Fields(string(children)) {
-			pid, err := strconv.Atoi(field)
-			if err != nil {
-				t.Fatal(err)
+		ppid := ""
+		for _, line := range strings.Split(string(status), "\n") {
+			if strings.HasPrefix(line, "PPid:") {
+				ppid = strings.TrimSpace(strings.TrimPrefix(line, "PPid:"))
+				break
 			}
-			cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-			if os.IsNotExist(err) {
-				continue
-			}
-			// A just-exited child can be visible as a zombie until cmd.Wait
-			// completes. Keep counting it: disappearance, not empty cmdline,
-			// is the reaping oracle.
-			if err != nil || (len(cmdline) != 0 && string(cmdline) != "warmor-policy-host\x00--serve\x00" && string(cmdline) != "warmor-policy-host\x00") {
-				t.Fatalf("unexpected daemon child %d: %q %v", pid, cmdline, err)
-			}
-			pids = append(pids, pid)
 		}
+		if ppid != wantPPid {
+			continue
+		}
+		dir := filepath.Dir(statusPath)
+		pid, err := strconv.Atoi(filepath.Base(dir))
+		if err != nil {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join(dir, "cmdline"))
+		if os.IsNotExist(err) {
+			continue
+		}
+		// A just-exited child can be visible as a zombie until cmd.Wait
+		// completes. Keep counting it: disappearance, not empty cmdline,
+		// is the reaping oracle.
+		if err != nil || (len(cmdline) != 0 && string(cmdline) != "warmor-policy-host\x00--serve\x00" && string(cmdline) != "warmor-policy-host\x00") {
+			t.Fatalf("unexpected daemon child %d: %q %v", pid, cmdline, err)
+		}
+		pids = append(pids, pid)
 	}
 	return pids
 }
