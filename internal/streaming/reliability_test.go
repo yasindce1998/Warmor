@@ -132,6 +132,47 @@ func TestPipelineShutdownIngressLossAccounting(t *testing.T) {
 	}
 }
 
+type slowCloseSink struct {
+	mockSink
+	closeStarted chan struct{}
+	release      chan struct{}
+}
+
+func (s *slowCloseSink) Close() error {
+	close(s.closeStarted)
+	<-s.release
+	return nil
+}
+
+// A shared shutdown budget can expire during a clean but slow finalization
+// (e.g. a final fsync). Every accepted event still drained and every sink
+// closed successfully, so that late timer must not be reported as a failure.
+func TestPipelineLateTimerDuringCleanDrainIsNotAnError(t *testing.T) {
+	sink := &slowCloseSink{closeStarted: make(chan struct{}), release: make(chan struct{})}
+	p := NewPipeline(PipelineConfig{Sinks: []Sink{sink}, ShutdownTimeout: 20 * time.Millisecond})
+	p.Emit(&api.Event{PID: 1}, nil)
+	waitFor(t, func() bool { return sink.count() == 1 })
+
+	done := make(chan error, 1)
+	go func() { done <- p.Close() }()
+	<-sink.closeStarted
+	<-p.ctx.Done() // the budget expires while finalization is still in progress
+	close(sink.release)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("clean drain reported failure: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after clean finalization")
+	}
+	s := p.Stats()
+	if s.EventsEmitted != 1 || s.ShutdownDropped != 0 || s.Sinks[0].Written != 1 || s.Sinks[0].ShutdownDropped != 0 {
+		t.Fatalf("clean drain accounting: %+v %+v", s, s.Sinks[0])
+	}
+}
+
 type flushBlockingSink struct {
 	mockSink
 	started chan struct{}
