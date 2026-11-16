@@ -375,6 +375,7 @@ Ubuntu 22.04+, Fedora 36+, and Debian 12+ ship with BTF enabled by default.
 
 | Goal | Where to Go |
 |------|------------|
+| Browse the full documentation index | [docs/README.md](docs/README.md) |
 | Understand the architecture | [docs/architecture.md](docs/architecture.md) |
 | Run it as a service, manage a fleet, monitor it | [docs/operations.md](docs/operations.md) |
 | Generate, merge, diff, simulate and distribute policies | [docs/policy-toolchain.md](docs/policy-toolchain.md) |

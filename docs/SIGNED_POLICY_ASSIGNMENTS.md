@@ -287,10 +287,11 @@ wins over already retained relay content.
 agent identity, or explicit insecure development mode. Exact target scope remains
 independently agent-verified. The response is one canonical `assignment.Bundle`:
 base64 `envelope` (exact canonical bytes), base64 `wasm`, and base64 raw
-`artifact_signature`. Protocol responses have `X-Warmor-Signed-Assignment: 1`.
-Conditional polling uses `if_sequence` plus `if_envelope_hash`. Heartbeats retain
-`deployment_sequence` and `envelope_hash` alongside full policy identity. A
-same-artifact renewal with a higher sequence is activated, not skipped.
+`artifact_signature`; headers and conditional-poll query parameters follow
+[Control-plane protocol](control-plane-protocol.md#headers-and-query-parameters).
+Heartbeats retain `deployment_sequence` and `envelope_hash` alongside full
+policy identity; a same-artifact renewal with a higher sequence is activated,
+not skipped.
 
 Signed relay publication is explicit per audience. It is **not** driven by
 legacy label selectors, upload activation, rollouts, abort or canary handlers;

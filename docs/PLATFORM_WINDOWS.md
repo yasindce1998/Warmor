@@ -3,16 +3,7 @@
 Warmor on Windows uses **[eBPF-for-Windows](https://github.com/microsoft/ebpf-for-windows)**
 wherever a kernel hook exists, and **ETW** for everything else.
 
-> **Status: beta.** The ETW path is exercised by CI on a real Windows runner.
-> The eBPF-for-Windows programs are written against the official SDK headers
-> but have **not yet been built or run in CI**: hosted runners can't load
-> kernel drivers. Verify them on a test-signed Windows 11 / Server 2022 VM
-> before relying on kernel blocking.
->
-> Reliability fixes and PID-reuse hardening have landed; the two items that
-> still need a real VM are the endpoint mapping and native driver load.
-> Production HVCI also depends on Microsoft's Proof-of-Verification signing
-> pipeline — see [the hardening plan](windows-hardening-plan.md).
+> **Status: beta.** See [Feature Status](STATUS.md).
 
 ## How it works
 

@@ -13,6 +13,13 @@ UID, flags, or operation), and network observations to endpoints/operations.
 Review and narrow allow rules before deployment. Leading literal `$` values are
 escaped and colliding/truncated generated rule names are made unique.
 
+Observation-window caveats (single source for `warmor-learn` and the policy-gen
+toolchain): a learning window must cover at least one full operational cycle
+(log rotation, cron jobs) or infrequent legitimate behavior will be missed.
+Scope observation to specific cgroups for tighter policies, and combine offline
+`warmor-policy-gen` audit-log analysis with live `warmor-learn` observation using
+`warmor-policy-merge`.
+
 The CLI refuses mount/ptrace and unsupported hooks rather than emitting invalid
 standalone YAML events or broadening them into ordinary process/file permissions.
 It refuses empty policies, redacted/truncated evidence, incomplete target fields,

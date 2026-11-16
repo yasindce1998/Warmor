@@ -129,8 +129,8 @@ as `glob`, subnet networks as `starts_with`.
 
 Generated policies are a starting point: remove health-check noise, tighten
 globs, add explicit deny rules, and put uncertain rules in `mode: audit`.
-Record at least one full operational cycle (log rotation, cron jobs) or you
-will miss infrequent legitimate behavior.
+Observation-window caveats are shared with `warmor-learn` (see
+[learning caveats](POLICY_TOOL_CONTRACTS.md#learning-is-a-proposal-not-a-security-equivalence-proof)).
 
 ## Merging policies — `warmor-policy-merge`
 

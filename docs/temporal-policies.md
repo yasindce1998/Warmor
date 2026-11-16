@@ -1,6 +1,6 @@
 # Temporal Policies
 
-> **Status: Shipped for YAML policies, Linux container age.** `warmor-compile` compiles a rule's `temporal:` block into the WASM policy, and `warmor-daemon` sends the policy the event's time and its container's age. Container age is only known for container cgroups on Linux (see [Limits](#limits)); everywhere else an age constraint treats the age as unknown and **fails closed**. See [Feature Status](STATUS.md).
+> **Status:** shipped for YAML policies (Linux container age); see [Feature Status](STATUS.md).
 
 A temporal block restricts *when* a rule's operation is permitted: by container age, UTC time of day and UTC day of week.
 

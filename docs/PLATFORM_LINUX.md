@@ -57,36 +57,11 @@ CI currently exercises the LSM programs on 6.1, 6.18 and the stable/mainline
 ci-kernels channels.
 
 ### Kernel Configuration
-Required kernel options:
-```
-CONFIG_BPF=y
-CONFIG_BPF_SYSCALL=y
-CONFIG_BPF_JIT=y
-CONFIG_HAVE_EBPF_JIT=y
-CONFIG_BPF_EVENTS=y
-CONFIG_DEBUG_INFO_BTF=y
-CONFIG_BPF_LSM=y
-```
 
-For LSM enforcement, `bpf` must also appear in the active LSM list at boot:
-```
-# /proc/cmdline or GRUB: lsm=lockdown,capability,...,bpf
-```
-
-Check your kernel:
-```bash
-# Check kernel version
-uname -r
-
-# Check BPF support
-zgrep CONFIG_BPF /proc/config.gz
-
-# Check BTF support
-ls /sys/kernel/btf/vmlinux
-
-# Check BPF LSM is active
-cat /sys/kernel/security/lsm   # should contain "bpf"
-```
+The required kernel options (`CONFIG_BPF_LSM=y`, `CONFIG_DEBUG_INFO_BTF=y`,
+plus `bpf` in the active LSM list), how to verify them, and what happens when a
+requirement is unmet are documented in
+[BPF_COMPATIBILITY.md](BPF_COMPATIBILITY.md#kernel-requirements).
 
 #### WSL2 Note
 
@@ -96,7 +71,8 @@ missing, mount it manually:
 sudo mount -t securityfs none /sys/kernel/security
 ```
 Warmor's `IsLSMSupported()` also falls back to parsing `/proc/cmdline`, so the
-agent starts correctly either way.
+agent starts correctly either way (see
+[BPF_COMPATIBILITY.md](BPF_COMPATIBILITY.md#kernel-requirements)).
 
 ### Build Dependencies
 ```bash
@@ -372,10 +348,11 @@ Posture guidance for combining these flags is in
 
 ## Limitations
 
-1. **Kernel Version Dependency** - Requires kernel 5.7+ (5.8+ recommended for ring buffers)
-2. **BTF Requirement** - Needs BTF information for CO-RE
-3. **Verifier Limits** - Complex programs may hit verifier limits
-4. **No Userspace Tracing** - Only kernel-level syscalls
+- **Kernel version / BTF / verifier caveats** — see the canonical
+  [kernel requirements](BPF_COMPATIBILITY.md#kernel-requirements) and
+  [known risks](BPF_COMPATIBILITY.md#known-risks--limitations) in
+  [BPF_COMPATIBILITY.md](BPF_COMPATIBILITY.md).
+- **No Userspace Tracing** - Only kernel-level syscalls
 
 ## Future Enhancements
 

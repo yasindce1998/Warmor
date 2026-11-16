@@ -3,7 +3,7 @@
 **Project Name:** warmor (WebAssembly + Armor)  
 **Tagline:** Cross-platform, Wasm-powered system-level security enforcer  
 **Date:** 2026-10-14
-**Status:** Phases 1-2 done; phases 3-8 partial; phase 9 mostly library-only. Per-feature reference: [Feature Status](STATUS.md)
+**Status:** Per-feature and per-phase reference: [Feature Status](STATUS.md).
 
 ---
 
@@ -24,31 +24,9 @@ Traditional security enforcers (AppArmor, SELinux, eBPF) are:
 
 ## Implementation Status Overview
 
-### Phase Completion
-
-Status as of current `main`. "Partial" means the phase's headline features are reachable from a binary but with gaps listed in [STATUS.md](STATUS.md).
-
-| Phase | Status | What is actually done | Platform |
-|-------|--------|----------|----------|
-| **Phase 1** | Done | eBPF + WASM integration; execve/openat/connect tracepoints; SIGHUP reload | Linux |
-| **Phase 2** | Done, with gaps | ALLOW/DENY/LOG (DENY = `SIGKILL`); decision cache (not LRU, PID in key); Prometheus metrics. `--log-level` is ignored. | Linux |
-| **Phase 3** | Partial | Type-safe process/file/network events. **No** `sendto`/`recvfrom` hooks. Overhead measured in [PERFORMANCE.md](PERFORMANCE.md). | Linux |
-| **Phase 4** | Partial | Platform abstraction. Windows ETW (detect-then-terminate) works and is tested in CI. eBPF-for-Windows has never been built or run in CI. macOS ESF answers every AUTH event ALLOW and is not compiled in CI. | Linux/Windows/macOS |
-| **Phase 5** | Partial | YAML DSL and `warmor-compile` work. The Helm chart installs and the daemon runs (kind e2e-tested in CI), with a policy compiled into the image. | Linux |
-| **Phase 6** | Partial | 7 LSM hooks attach (tested in a VM in CI). Kernel blocking happens only on a policy-map hit, and only exec and connect entries are ever written. A miss is allowed. | Linux |
-| **Phase 7** | Partial | Policy server with registration, heartbeats, versioned policies and percentage rollouts. The SIEM syslog sink ships (`--event-sink syslog:`); NetFilter and sandbox remain library-only. | All |
-| **Phase 8** | Partial | mTLS/JWT, signed OCI bundles (`warmor-policy-bundle`), daemon signature verification (`--verify-key`) and the `warmorctl` TUI work. The OCI hook is experimental (no auth, bindings unused). containerd and per-container policy are missing. | All |
-| **Phase 9** | Partial | `warmor-learn` and `warmor-simulate` ship. Escape detection, YAML temporal policies, the MITRE attack graph (`--attack-graph`), the SSE dashboard (`--dashboard-port`), and the SIEM syslog sink ship. `--drift` collects locally; daemon fleet submission awaits real workload identity (server comparator/API/metrics exist). In-kernel integrity is experimental (unverified on an IMA kernel in CI). Canary auto-rollback is library-only (not wired into any binary). | Linux |
-
-### Key Metrics
-
-Measured 2026-10-15 on one laptop; see [PERFORMANCE.md](PERFORMANCE.md) for the method and caveats. Targets are in parentheses.
-
-- **Performance:** P95 1.2–1.3μs on a cache hit; 32μs (YAML policy) to 55μs (Rust crate) on a miss (target <100μs P95)
-- **Cache Hit Rate:** 95.4% for policies that declare the fields they read (every YAML policy), 0% for those that do not (target >90%)
-- **Memory Usage:** 60–128MB RSS, not met (target <50MB per instance)
-- **Platform Support:** Linux enforcing; Windows and macOS experimental
-- **Event types:** process, file and network on all platforms; bind, listen, ptrace and mount via LSM on Linux
+Phase completion and per-feature status are tracked in [STATUS.md](STATUS.md);
+measured performance and targets are in [PERFORMANCE.md](PERFORMANCE.md).
+The forward-looking roadmap remains in §7.1 below.
 
 ### Current Implementation Highlights
 
@@ -419,24 +397,9 @@ warmor_errors_total{type="wasm_panic|timeout|invalid_decision"}
 
 ### 5.1 Performance
 
-These are targets. Measured values (2026-10-15, one laptop, see
-[PERFORMANCE.md](PERFORMANCE.md)) are in italics; "declared" policies export
-their fields-read declaration (every YAML policy), "undeclared" ones do not.
-
-**Latency** (cache miss, i.e. a WASM evaluation; a hit is P95 1.2–1.3μs):
-- P50: <50μs per syscall evaluation (*12μs YAML, 15μs fixture, 25μs Rust crate*)
-- P95: <100μs per syscall evaluation (*32μs, 38μs, 55μs*)
-- P99: <500μs per syscall evaluation (*81μs, 89μs, 115μs*)
-
-**Throughput:**
-- Support 100,000+ syscalls/second per enforcer (*175k events/s declared, 24k–41k undeclared, through the single-goroutine event loop*)
-- Horizontal scaling via multiple enforcer instances (*not implemented*)
-- Efficient batching for bulk operations (*not implemented*)
-
-**Resource Usage:**
-- Memory: <100MB per enforcer instance (*60–104MB declared, 105–128MB undeclared*)
-- CPU: <5% overhead on typical workload (*not measured on a real workload; synthetic: 11% of one core at 10k events/s declared*)
-- Disk: <10MB for enforcer binary + policies (*not measured*)
+Performance targets and measured results are tracked in
+[PERFORMANCE.md](PERFORMANCE.md), with the historical snapshot also in
+[STATUS.md](STATUS.md#8-historical-performance--not-remeasured-for-this-snapshot).
 
 ### 5.2 Reliability
 
@@ -511,18 +474,20 @@ server (the Helm chart — working, observe-only on nodes without BPF-LSM; see [
 
 The original phase-by-phase checklists (Phases 1–9, "Weeks 1–44") have been
 superseded by [STATUS.md](STATUS.md), the per-feature, per-phase reference
-of what ships on `main` and what is missing, verified against the code. The
-phase-completion table at the top of this document is the condensed view.
+of what ships on `main` and what is missing, verified against the code.
 
-In short: Phases 1–2 are done (with gaps), Phases 3–8 are partial, and
-Phase 9's intelligence features are mostly library-only. The forward-looking
-plan continues below.
+The forward-looking roadmap continues below. Current phase-by-phase status,
+including which Phase 9 intelligence features ship and which remain
+library-only, is in [STATUS.md](STATUS.md).
 
 ---
 
 ## 7.1 Future Roadmap (Post-Phase 9)
 
-**Before the items below:** finish the open Phase 2-9 gaps listed in [STATUS.md](STATUS.md). That means kernel default-deny and preloaded rules, daemon signature verification, WASM resource limits, wiring the library-only features, a working Helm chart, and fixing the Rust crate ABIs.
+**Before the items below:** finish the open Phase 2–9 gaps listed in
+[STATUS.md](STATUS.md), including whole-daemon VM validation for the opt-in
+generation and supervised-host paths, real workload routing and cluster receipt
+acceptance, capture/loss, rollback, soak and native-platform validation.
 
 Planned enhancements beyond the current release. Tracked here as the single source of truth (formerly `docs/ROADMAP.md`).
 
@@ -563,11 +528,8 @@ Planned enhancements beyond the current release. Tracked here as the single sour
 
 ### 8.1 Technical Metrics
 
-**Performance** (targets; measured in [PERFORMANCE.md](PERFORMANCE.md)):
-- Policy evaluation latency P95 <100μs (*miss: 32μs YAML, 55μs Rust crate; hit: 1.3μs*)
-- CPU overhead <5% on typical workload (*not measured on a real workload*)
-- Memory usage <100MB per instance (*60–128MB RSS*)
-- Cache hit rate >90% (*95.4% declared policies, 0% undeclared*)
+**Performance:** see [PERFORMANCE.md](PERFORMANCE.md) and the
+[historical snapshot](STATUS.md#8-historical-performance--not-remeasured-for-this-snapshot).
 
 **Reliability:**
 - 99.9% uptime

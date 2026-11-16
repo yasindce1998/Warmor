@@ -4,8 +4,8 @@
 > `b1cbb53` (2026-11-13). Findings, evidence, priorities, acceptance criteria and
 > the original next-batch recommendation below are preserved, not silently
 > rewritten as current defects or completed work. The implementation-progress
-> section is an earlier checkpoint. For merged-main status at `ce1d5ab`, see
-> [STATUS.md](STATUS.md) and the [dated addendum](#merged-main-progress-addendum--2026-11-14).
+> section is an earlier checkpoint. For current merged-main status, see
+> [STATUS.md](STATUS.md).
 
 ## Recommendation
 
@@ -521,62 +521,3 @@ could lead an operator to use an unsafe posture.
 **Next actionable batch:** implement orders 1, 2, and 4 as independent focused
 changes, while designing the exact kernel identity and revision-activation
 contracts that orders 3 and 6 require.
-
-## Merged-main progress addendum — 2026-11-14
-
-This addendum records progress at merged main **`ce1d5ab`**; it does not change
-the plan's scope, erase the original findings, or clear a release. The
-[dated milestone table](STATUS.md)
-links the merged subset of PRs #28–50 and qualifies each delivery. In particular,
-the earlier “open” list is historical: #36–42, #44–46, #49 and #50 have
-merged. Controller last-known-good publication, durable fleet activation,
-private recording/tool contracts, bounded intelligence and tested-artifact
-release workflows are now merged implementations, not reasons to reimplement
-the old baseline. They are not whole-system enforcement certification.
-
-- **Merged #41:** exact scoped keys, actual audit/refusal encoding, reader-stop
-  correction and whole-daemon VM outcomes. Reviewed head `1ea758e` has 36
-  completed checks (34 success, two publication jobs intentionally skipped).
-  The [current-head VM job](https://github.com/yasindce1998/Warmor/actions/runs/43618178948/job/132517792957)
-  tested merge checkout `6e7b0f0` onto `98d2b90`; retained log
-  `.worktrees/pr41-vm-1ea758e.log` shows exact-key/collision/default-deny/scope,
-  EPERM, audit non-refusal, truncation, IPv6, load/attach and real-daemon
-  baseline/LKG/audit/UID 65534 SIGKILL/clean-stop passes. Private guest recording
-  fixture `54d9ea5` and compiler compatibility change `5a0bf5a` were independently
-  reviewed. The earlier `5aa4556` VM run is historical, not current-head proof.
-- **Main advanced to `971471e` for the PR #57 reconciliation:** #47 acknowledged
-  canary telemetry APIs/embedded collector have merged, but not an automatic
-  rollout actuator or telemetry-derived controller Applied proof. #54 compiler-7
-  compatibility and #56 deterministic test fixtures are retained. This merge
-  needs its own checks; old `40de5eb` CI is not new-head validation.
-- **Still unmerged in that main snapshot:** #48 shared Host metadata,
-  #51 kernel generations, #52 compiler
-  subprocess bounds, #53 supervised enforcer Host integration, authenticated
-  node application receipts (present only as explicit opt-in PR #57 integration
-  here) and capture-quality accounting. #41 does not prove
-  these integrations or full multi-node/workload isolation.
-- **Merged #49 is explicit opt-in standalone signed activation:** `agentstore`
-  `assignment.json` is its sole durable publication/startup authority, not a
-  chained legacy pointer commit. It is not combined with generation activation
-  or supervised Host. Default evaluator compilation remains in-process.
-- **No workload-enforcement claim:** selectors (including `{}`) remain Pending;
-  CRs report Published, `Applied=Unknown` by default. Explicit receipt mode can
-  report Applied only with fresh exact-publication evidence from every required
-  authorized daemon pod; consumers must enforce `receiptExpiresAt`. Receipts are
-  authenticated self-reports, not attestation, live-cluster acceptance or proof
-  of enforcement. Fleet/signed-intent mode is explicitly incompatible.
-  Identity/coordinator/manifest preparation is not daemon/kernel routing.
-- **Resolved regression:** main `98d2b90` had manifest/compiler **6/7** mismatch
-  and rejected construction. #41's reviewed `5a0bf5a` explicitly restores
-  compiler-7 compatibility with compiled-composition regressions. Both are now
-  **7**; the former mismatch is not a current-main blocker or workload-routing proof.
-- **Remote release blocker:** read-only GitHub checks on 2026-11-14, with main at
-  `98d2b90`, found main unprotected and repository rulesets empty; no subsequent
-  protection configuration is established here. Workflow gates do not establish
-  remote branch/tag protection. No settings were changed, release approved, or
-  CI run triggered by this docs update.
-
-Current pool/default/resource facts and historical October performance caveats
-are in [STATUS.md](STATUS.md). No new performance measurements, privileged
-enforcement tests or deployment proof are supplied by this addendum; all three
-required release gates remain open.
