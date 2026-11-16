@@ -41,6 +41,12 @@ COPY deploy/default-policy.yaml /src/default-policy.yaml
 RUN mkdir -p /work && cd /work \
  && cp /src/default-policy.yaml . \
  && warmor-compile -o /work/policy.wasm default-policy.yaml
+# Stage public, traversable parent directories for the baked policy files.
+# A bare COPY of a file into a non-existent directory makes BuildKit apply the
+# file's --chmod to the auto-created parent too, leaving it non-traversable for
+# the non-root runtime. Pre-creating the parents at 0755 keeps --chmod=0644
+# scoped to the file itself. Compiler output under /work stays private (0600).
+RUN install -d -m 0755 /public/etc/warmor /public/etc/warmor-controller
 
 # The WarmorPolicy controller. Unlike the agent image (distroless), this
 # one needs the Rust toolchain at runtime: it compiles WarmorPolicy
@@ -54,12 +60,14 @@ COPY --from=builder /warmor-controller /warmor-controller
 # The baked default is public image content. Compiler outputs intentionally
 # default to 0600; grant the image's non-root runtime explicit read access here,
 # not through a broader compiler publication mode.
+COPY --from=policy --chmod=0755 /public/etc/warmor-controller /etc/warmor-controller
 COPY --chmod=0644 --from=policy /work/policy.wasm /etc/warmor-controller/default-policy.wasm
 EXPOSE 9090
 ENTRYPOINT ["/warmor-controller"]
 
 FROM gcr.io/distroless/static-debian12:latest@sha256:d75cdd72874d4790092fcb1b058493ecf6bb5bf2b2b897045b00ff01d91843f2 AS daemon
 COPY --from=builder /warmor-daemon /warmor-daemon
+COPY --from=policy --chmod=0755 /public/etc/warmor /etc/warmor
 COPY --chmod=0644 --from=policy /work/policy.wasm /etc/warmor/policy.wasm
 EXPOSE 9090
 ENTRYPOINT ["/warmor-daemon"]
