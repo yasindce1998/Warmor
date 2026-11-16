@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/yasindce1998/warmor/internal/privatefile"
 )
 
 // createOutcomeRecordings is called only with the freshly created guest-local
@@ -165,6 +167,21 @@ func TestOutcomeRecordingDirectoryRejectsExistingSymlink(t *testing.T) {
 	}
 }
 
+func TestOutcomeRecordingUsesPrivateFileContract(t *testing.T) {
+	work := t.TempDir()
+	dir, err := createOutcomeRecordings(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := privatefile.OpenAppend(filepath.Join(dir, "host.ndjson"), false, false)
+	if err != nil {
+		t.Fatalf("guest recording must satisfy real private sink ownership checks: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOutcomeRecordingDirectoryRejectsSharedOrPublicPath(t *testing.T) {
 	work := t.TempDir()
 	dir, err := createOutcomeRecordings(work)
@@ -196,6 +213,18 @@ func runHelper() int {
 	if os.Getuid() != 65534 || os.Geteuid() != 65534 {
 		fmt.Fprintln(os.Stderr, "helper must actually run as uid/euid 65534")
 		return 90
+	}
+	if os.Getenv("WARMOR_OUTCOME_CACHE_PROBE") == "1" {
+		fmt.Println("READY uid=65534")
+		for {
+			var trigger [1]byte
+			if n, err := os.Stdin.Read(trigger[:]); err != nil || n != 1 {
+				return 0
+			}
+			if _, err := os.ReadFile(os.Getenv("WARMOR_OUTCOME_FILE")); err != nil {
+				return 92
+			}
+		}
 	}
 	if os.Getenv("WARMOR_OUTCOME_FILE") != "" {
 		fmt.Println("READY uid=65534")

@@ -365,6 +365,25 @@ func TestCompileDeadlineReapsAndPreservesIndependentGoodHost(t *testing.T) {
 	}
 }
 
+func TestInitializationLoopDeadlineReapsAndPreservesGoodHost(t *testing.T) {
+	c := config(t)
+	c.LoadTimeout = 100 * time.Millisecond
+	s := supervisor(t, c)
+	good := startHost(t, s, wasmtest.ConstPolicy(0, nil))
+	started := time.Now()
+	h, err := s.Start(context.Background(), staged(t, wasmtest.InitializationLoopPolicy()))
+	var failure *Failure
+	if h != nil || !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &failure) || failure.Phase != "load" {
+		t.Fatalf("initialization fixture must reach authoritative load deadline: host=%v err=%v", h, err)
+	}
+	if time.Since(started) > c.InitializationTimeout+time.Second || len(s.slots) != 1 {
+		t.Fatal("initialization loop exceeded bound or candidate was not reaped")
+	}
+	if r, err := good.Evaluate(context.Background(), &api.Event{}); err != nil || r.Action != api.ActionAllow {
+		t.Fatalf("initialization failure disrupted LKG: %+v %v", r, err)
+	}
+}
+
 func TestSignatureStagingAndExecutableTrust(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	data := wasmtest.ConstPolicy(0, nil)

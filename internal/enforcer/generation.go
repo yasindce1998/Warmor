@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
-	"runtime"
 	"sync"
 	"time"
 
@@ -16,6 +14,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/generationvm"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/platform"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/internal/wasm"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -39,9 +38,8 @@ const generationDrainTimeout = 5 * time.Second
 
 type evaluationGeneration struct {
 	id        uint64
-	evaluator *wasm.PolicyEvaluator
-	pool      *wasm.Pool
-	runtime   *wasm.Runtime
+	evaluator Evaluator
+	backend   *policyBackend
 	cache     *cache.DecisionCache
 	policyID  string
 	refs      int
@@ -75,9 +73,11 @@ func (e *Enforcer) enableGenerations(gp platform.GenerationPlatform) error {
 	if kernel == nil {
 		return errors.New("atomic generations require loaded Linux BPF LSM")
 	}
-	old := &evaluationGeneration{id: 0, evaluator: e.evaluator, pool: e.pool,
-		runtime: e.wasmRuntime, cache: e.cache, policyID: e.policyID}
+	old := &evaluationGeneration{id: 0, evaluator: e.evaluator, backend: e.ownedBackend(), cache: e.cache, policyID: e.policyID}
 	e.generations = &generationDispatch{states: map[uint64]*evaluationGeneration{0: old}, kernel: kernel}
+	if e.telemetry != nil {
+		e.telemetry.Seal() // a single legacy collector cannot own overlapping leases
+	}
 	gp.SetEventCapture(e.captureGeneration)
 	// Startup has no userspace work yet, but legacy samples can already be
 	// queued. Keep ID 0 until the reader starts and proves the first flush.
@@ -90,7 +90,7 @@ func (e *Enforcer) enableGenerations(gp platform.GenerationPlatform) error {
 		return err
 	}
 	e.generations.states[1] = &evaluationGeneration{id: 1, evaluator: e.evaluator,
-		pool: e.pool, runtime: e.wasmRuntime, cache: e.cache, policyID: e.policyID}
+		backend: e.backend, cache: e.cache, policyID: e.policyID}
 	// Generation states now own caches. Do not retain the initial cache's
 	// dependency closures (and its retired evaluator) through the legacy field.
 	e.cache = nil
@@ -169,7 +169,7 @@ func (e *Enforcer) generationSpec(src staticRulesSource) (kernelmap.GenerationSp
 	for _, d := range []struct {
 		typ    uint8
 		name   string
-		domain wasm.StaticDomain
+		domain policymeta.StaticDomain
 	}{
 		{0, "exec", src.StaticRulesProcess()}, {2, "connect", src.StaticRulesNetwork()},
 	} {
@@ -231,6 +231,9 @@ func (e *Enforcer) finishGeneration() error {
 			return errors.Join(ErrActivationPending, ctx.Err())
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(ErrActivationPending, err)
+	}
 	if err := g.kernel.AcknowledgeDrain(p.old.id); err != nil {
 		return errors.Join(ErrActivationPending, err)
 	}
@@ -238,7 +241,7 @@ func (e *Enforcer) finishGeneration() error {
 	delete(g.states, p.old.id)
 	current := g.states[g.current]
 	g.mu.Unlock()
-	if p.old.pool != current.pool {
+	if p.old.backend != current.backend {
 		closeEvaluationGeneration(p.old)
 	}
 	g.pending = nil
@@ -246,10 +249,7 @@ func (e *Enforcer) finishGeneration() error {
 }
 
 func closeEvaluationGeneration(s *evaluationGeneration) {
-	ctx := context.Background()
-	s.evaluator.Close(ctx)
-	s.pool.Close(ctx)
-	s.runtime.Close(ctx)
+	s.backend.close()
 }
 
 // activateGeneration is called with activationMu held. Kernel Activate is the
@@ -287,23 +287,12 @@ func (e *Enforcer) activateGeneration(path string, commit func() error) error {
 	if err != nil {
 		return err
 	}
-	rt, err := wasm.NewRuntime(e.ctx, wasm.RuntimeConfig{CacheDir: wasm.DefaultCacheDir()})
+	backend, err := e.candidateBackend(path, data)
 	if err != nil {
 		return err
 	}
-	if err := rt.LoadPolicyBytes(e.ctx, data); err != nil {
-		rt.Close(e.ctx)
-		return err
-	}
-	pool, err := wasm.NewPool(e.ctx, rt, runtime.NumCPU())
-	if err != nil {
-		rt.Close(e.ctx)
-		return err
-	}
-	hostname, _ := os.Hostname()
-	evaluator := wasm.NewPolicyEvaluator(pool, hostname)
-	evaluator.SetTimeout(e.evalTimeout)
-	state := &evaluationGeneration{evaluator: evaluator, pool: pool, runtime: rt,
+	evaluator := backend.evaluator
+	state := &evaluationGeneration{evaluator: evaluator, backend: backend,
 		cache: cache.NewDecisionCache(10000, 5*time.Minute), policyID: policyID(path)}
 	setCacheDependencies(state.cache, evaluator)
 	active := false
@@ -335,8 +324,12 @@ func (e *Enforcer) activateGeneration(path string, commit func() error) error {
 	g.current = state.id
 	e.policyGen.Store(state.id)
 	e.evaluatorMu.Lock()
-	e.evaluator, e.pool, e.wasmRuntime = evaluator, pool, rt
+	e.evaluator, e.pool, e.wasmRuntime = evaluator, backend.pool, backend.runtime
+	e.backend = backend
 	e.policyID = state.policyID
+	if e.telemetry != nil {
+		e.telemetry.Seal() // generic generation activation never carries legacy attribution
+	}
 	e.evaluatorMu.Unlock()
 	g.mu.Unlock()
 	e.decisionMu.Unlock()

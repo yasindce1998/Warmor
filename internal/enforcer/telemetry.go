@@ -25,6 +25,9 @@ func (e *Enforcer) ActivatePolicyTelemetry(path string, commit func() error, ass
 	if e.signedAssignment {
 		return fmt.Errorf("signed assignment mode refuses legacy telemetry activation")
 	}
+	if e.generations != nil {
+		return fmt.Errorf("legacy telemetry attribution with atomic generations is unsupported")
+	}
 	if e.telemetry == nil {
 		return fmt.Errorf("enforcer telemetry is not configured")
 	}

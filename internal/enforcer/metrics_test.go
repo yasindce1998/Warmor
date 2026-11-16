@@ -31,7 +31,7 @@ func histCount(t *testing.T, h *prometheus.HistogramVec, labels ...string) uint6
 func TestHandleEvent_RecordsEventAndWASMMetrics(t *testing.T) {
 	e, _ := newTestEnforcer(t, testEnforcerOpts{poolSize: 1, policyWasm: wasmtest.LoopOnUIDPolicy()})
 	e.policyID = "metrics-test.wasm"
-	e.evaluator.SetTimeout(20 * time.Millisecond)
+	inProcessEvaluator(t, e).SetTimeout(20 * time.Millisecond)
 
 	processed := testutil.ToFloat64(metrics.EventsProcessed.WithLabelValues("PROCESS"))
 	execs := histCount(t, metrics.WASMExecDuration, "metrics-test.wasm")

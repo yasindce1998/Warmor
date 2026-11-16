@@ -310,6 +310,9 @@ func (m *signedPolicyManager) update(a *policyserver.PolicyAssignment, data []by
 // The caller validates candidate ABI/build/kernel posture using enforcer.New
 // before commit; no live event loop starts before durable state is selected.
 func (m *signedPolicyManager) bootstrap(ctx context.Context, b assignment.Bundle, opts *enforcer.Options) (*enforcer.Enforcer, error) {
+	if err := checkSignedBackendCombination(true, opts.AtomicGenerations, opts.SupervisedBackend != nil); err != nil {
+		return nil, err
+	}
 	e, err := assignment.Decode(b.Envelope)
 	if err != nil {
 		return nil, err

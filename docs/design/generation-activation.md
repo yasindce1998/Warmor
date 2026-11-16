@@ -302,3 +302,16 @@ another session holding its global runner lock; rerunning with
 `--allow-serial-runners` passed. Logs: `/tmp/opencode/generation-activation-sighup-`
 `{tests,race,lint,vet}.log`. No full-suite rerun or VM execution is claimed for
 this focused follow-up. No other owner branch was changed.
+
+### Supervised-host integration (PR53)
+
+This tree also carries the opt-in supervised whole-WASM policy host (PR53). The
+enforcer's generation dispatch owns its evaluator lifetimes through the shared
+`Evaluator`/`policyBackend` abstraction, so an active generation can carry a
+supervised backend as well as the default in-process pool/runtime. Generation
+activation and reload remain opt-in; the supervised host is never enabled by
+default. See `supervised-policy-host.md`, `supervised-evaluator-integration.md`
+and `supervised-host-activation.md` for the supervised trust, lifecycle and
+daemon-gate contracts. The telemetry and signed-assignment refusal rules above
+apply unchanged to supervised generations: legacy telemetry and signed-mode
+activation are rejected before any generation preparation or durable commit.

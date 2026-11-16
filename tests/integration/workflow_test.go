@@ -94,7 +94,7 @@ func TestRunnerUsesPreparedBinariesInVM(t *testing.T) {
 	}
 	runner := string(data)
 	for _, required := range []string{
-		`go test -c -tags integration -o "$ARTIFACTS/kernel.test" ./internal/ebpf`,
+		`go_with_worktree_vcs test -c -tags integration -o "$ARTIFACTS/kernel.test" ./internal/ebpf`,
 		`WARMOR_REQUIRE_BPF_LSM=1 bash tests/integration/run-vm.sh verifier "$ARTIFACTS"`,
 		`WARMOR_OUTCOME_VM=1 bash tests/integration/run-vm.sh outcomes "$ARTIFACTS"`,
 		`"$VIMTO" -kernel "$KERNEL" exec --`,

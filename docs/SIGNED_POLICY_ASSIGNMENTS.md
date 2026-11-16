@@ -12,6 +12,12 @@ base activation path; Windows fleet mode remains explicitly refused. The
 standalone signer/store primitives cross-compile for Windows; enforce private
 Windows ACLs where Unix mode bits are not available.
 
+The combined Host integration retains this **standalone** signed mode with
+agentstore as sole publication/startup authority. `--signed-assignments` with
+either experimental atomic generations or supervised Host is explicitly refused
+before opening state, outputs, monitors or children. Artifact-signed Host mode
+with unsigned deployment intent remains a separate supported experiment.
+
 ## Two separate trust roles
 
 1. **Artifact author/release key:** existing detached Ed25519 signature over

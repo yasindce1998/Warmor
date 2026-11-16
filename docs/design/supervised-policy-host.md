@@ -1,10 +1,11 @@
 # Supervised policy host: opt-in backend contract
 
 Status: **implemented and tested as an optional Linux API, not the enforcer's
-default backend or a completed isolation release gate**. The existing concrete
-`*wasm.PolicyEvaluator` remains unchanged. No daemon flag enables this backend
-yet. This work starts from `de59b21` and does not integrate activation or release
-packaging changes on other branches.
+default backend or a completed isolation release gate**. The experimental
+adapter in `supervised-evaluator-integration.md` adds explicit daemon flags and
+backend lifecycle ownership; the in-process backend remains the default.
+Linux archive/image packaging now includes the opt-in helper; see
+`supervised-host-deployment.md`. Actual VM results remain required.
 
 ## Ownership and trust boundary
 
@@ -177,13 +178,14 @@ under a trusted wazero/Go host**, not a sandbox for a compromised native worker:
   process rlimits.
 - Declarations now have an optional bounded metadata API; see its separate
   trust contract above. Caching/default-deny remain disabled by default for the
-  supervised backend and no enforcer integration consumes this API yet.
-- The enforcer still owns a concrete in-process evaluator. Interface extraction,
-  atomic verified activation/rollback, checked-out host drain, bounded replacement
-  backoff, failure metrics, expected workload scope and fail-closed enforcement
-  tests remain required **before wiring this backend as the default**.
-- Release artifacts, container/service packaging and installed-host trust/upgrade
-  tests are not provided by this checkpoint. No shipped isolation claim is made.
+  supervised backend unless exact declaration digests are independently attested.
+  The experimental adapter now consumes only effective trusted methods.
+- The adapter drains old hosts with captured generation leases and never
+  automatically respawns failed hosts. Whole-daemon supported-kernel VM evidence,
+  workload scope and packaging remain required **before making it the default**.
+- Linux archives and the daemon image include the helper without enabling it.
+  The dedicated VM gate and installed-host trust/upgrade evidence remain required;
+  no shipped isolation claim is made by packaging alone.
 
 ## Verification
 

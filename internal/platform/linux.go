@@ -58,7 +58,7 @@ type LinuxPlatform struct {
 	wg            sync.WaitGroup
 	config        LinuxConfig
 	lsmEnabled    bool
-	scope         cgroupScope
+	lsmBlocking   bool                  // true only after successful enforce-toggle initialization
 	capture       func(*api.Event) bool // installed before Start; never changed afterward
 	drainMu       sync.Mutex
 	drainPending  chan struct{}
@@ -66,11 +66,13 @@ type LinuxPlatform struct {
 	readerFailed  chan struct{}
 	readerErr     error
 	lsmEvents     lsmEventStream // production loader or VM-free reader fixture
+	scope         cgroupScope
 }
 
 type lsmEventStream interface {
 	ReadLSMEvent() (*ebpf.Event, error)
 	FlushLSMEvents() error
+	StopReaders() error
 }
 
 func NewLinuxPlatform(config LinuxConfig) (Platform, error) {
@@ -113,6 +115,7 @@ func (p *LinuxPlatform) Load(ctx context.Context) (loadErr error) {
 			p.ebpfLoader = nil
 			p.lsmLoader = nil
 			p.lsmEnabled = false
+			p.lsmBlocking = false
 		}
 	}()
 	loader, err := ebpf.Load()
@@ -184,15 +187,8 @@ func (p *LinuxPlatform) Load(ctx context.Context) (loadErr error) {
 		p.lsmEvents = lsmLoader
 		p.lsmEnabled = true
 
-		// Scope MUST be established before enabling blocking. Optional LSM
-		// does not make filter failures optional: never expand to the host.
-		if len(p.config.CgroupFilter) > 0 {
-			if err := lsmLoader.ReplaceCgroupFilter(cgroupIDs); err != nil {
-				return fmt.Errorf("set LSM cgroup filter: %w", err)
-			}
-		}
-		if err := lsmLoader.SetEnforceMode(p.config.LSMEnforce); err != nil {
-			return fmt.Errorf("set LSM enforce mode: %w", err)
+		if err := p.initializeLSMPosture(cgroupIDs, lsmLoader.ReplaceCgroupFilter, lsmLoader.SetEnforceMode); err != nil {
+			return err
 		}
 	}
 
@@ -209,6 +205,29 @@ func (p *LinuxPlatform) Load(ctx context.Context) (loadErr error) {
 	p.logSecurityPosture()
 	return nil
 }
+
+// initializeLSMPosture publishes blocking status only after both scope and the
+// kernel toggle have been written successfully. Injection tests this boundary
+// without loading BPF or installing hooks.
+func (p *LinuxPlatform) initializeLSMPosture(ids []uint64, replaceScope func([]uint64) error, setEnforce func(bool) error) error {
+	p.lsmBlocking = false
+	// Scope MUST be established before enabling blocking. Optional LSM does
+	// not make filter failures optional: never expand to the host.
+	if len(p.config.CgroupFilter) > 0 {
+		if err := replaceScope(ids); err != nil {
+			return fmt.Errorf("set LSM cgroup filter: %w", err)
+		}
+	}
+	if err := setEnforce(p.config.LSMEnforce); err != nil {
+		return fmt.Errorf("set LSM enforce mode: %w", err)
+	}
+	p.lsmBlocking = p.config.LSMEnforce
+	return nil
+}
+
+// LSMBlocking reports initialized blocking posture, not merely loaded hooks.
+// The posture is fixed after Load and is never modified by policy activation.
+func (p *LinuxPlatform) LSMBlocking() bool { return p.lsmEnabled && p.lsmBlocking }
 
 // loadIntegrity enables the content-hash exec check when configured. It needs
 // the LSM programs, so asking for it without them is an error rather than a
@@ -244,7 +263,7 @@ func (p *LinuxPlatform) loadIntegrity() error {
 // blocking, merely auditing, or absent.
 func (p *LinuxPlatform) logSecurityPosture() {
 	switch {
-	case p.lsmEnabled && p.config.LSMEnforce:
+	case p.LSMBlocking():
 		fmt.Println("Security posture: LSM-BPF kernel enforcement ACTIVE (deny rules blocked in-kernel)")
 	case p.lsmEnabled:
 		fmt.Println("Security posture: LSM-BPF loaded in AUDIT-ONLY mode (deny rules logged, not blocked); pass --lsm-enforce to block")
@@ -496,9 +515,10 @@ func (p *LinuxPlatform) monitorLSMEventsFrom(ctx context.Context, read func() (*
 				}
 				continue
 			}
-			p.readerError(err)
 			p.drainMu.Lock()
 			p.readerErr = err
+			// Withdraw local readiness before waking generation drain waiters.
+			p.readerError(err)
 			if p.readerFailed != nil {
 				close(p.readerFailed)
 			}
@@ -623,6 +643,10 @@ func (p *LinuxPlatform) PolicyGenerations() PolicyGenerations {
 func (g *linuxPolicyGenerations) Drain(ctx context.Context) error {
 	p := g.p
 	p.drainMu.Lock()
+	if err := p.drainStatus(ctx); err != nil {
+		p.drainMu.Unlock()
+		return err
+	}
 	if p.readerErr != nil {
 		err := p.readerErr
 		p.drainMu.Unlock()
@@ -642,6 +666,10 @@ func (g *linuxPolicyGenerations) Drain(ctx context.Context) error {
 	select {
 	case <-fence:
 		p.drainMu.Lock()
+		if err := p.drainStatus(ctx); err != nil {
+			p.drainMu.Unlock()
+			return err
+		}
 		if p.drainPending == fence {
 			p.drainPending = nil
 		}
@@ -656,6 +684,18 @@ func (g *linuxPolicyGenerations) Drain(ctx context.Context) error {
 		err := p.readerErr
 		p.drainMu.Unlock()
 		return err
+	}
+}
+
+func (p *LinuxPlatform) drainStatus(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-p.stopChan:
+		return errors.New("LSM reader stopped before drain")
+	default:
+		return nil
 	}
 }
 
@@ -712,14 +752,13 @@ func (p *LinuxPlatform) Stop() error {
 		// Readers can be idle forever (including ReadLSMEvent's deadline
 		// retry loop). Interrupt them before waiting, but keep enforcement
 		// hooks/maps alive until Close finishes the resource lifecycle.
-		// Do not hold drainMu or a generation dispatch/worker lock here:
-		// reader completion may need them. stopChan aborts pending drains,
-		// never acknowledging an interrupted flush as a completed fence.
 		var errs []error
 		if p.ebpfLoader != nil {
 			errs = append(errs, p.ebpfLoader.StopReaders())
 		}
-		if p.lsmLoader != nil {
+		if p.lsmEvents != nil {
+			errs = append(errs, p.lsmEvents.StopReaders())
+		} else if p.lsmLoader != nil {
 			errs = append(errs, p.lsmLoader.StopReaders())
 		}
 		p.stopErr = errors.Join(errs...)

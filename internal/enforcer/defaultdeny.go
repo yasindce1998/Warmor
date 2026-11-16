@@ -8,7 +8,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/ebpf"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
 	"github.com/yasindce1998/warmor/internal/metrics"
-	"github.com/yasindce1998/warmor/internal/wasm"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 )
 
 // defaultDenySyncer is implemented by policy maps whose kernel programs
@@ -22,8 +22,8 @@ type defaultDenySyncer interface {
 // staticRulesSource is the evaluator's kernel default-deny declaration:
 // the module's static-rules tables (compiler.StaticRulesExport).
 type staticRulesSource interface {
-	StaticRulesProcess() wasm.StaticDomain
-	StaticRulesNetwork() wasm.StaticDomain
+	StaticRulesProcess() policymeta.StaticDomain
+	StaticRulesNetwork() policymeta.StaticDomain
 }
 
 // applyDefaultDeny preloads the policy's static rules into the kernel
@@ -80,7 +80,7 @@ func (e *Enforcer) preloadDefaultDeny(src staticRulesSource, dd defaultDenySynce
 	domains := []struct {
 		name      string
 		eventType uint8
-		domain    wasm.StaticDomain
+		domain    policymeta.StaticDomain
 	}{
 		{"exec", ebpf.EventTypeExec, src.StaticRulesProcess()},
 		{"connect", ebpf.EventTypeNetwork, src.StaticRulesNetwork()},

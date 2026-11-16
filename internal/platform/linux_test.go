@@ -279,7 +279,7 @@ func TestLogSecurityPosture(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p := &LinuxPlatform{lsmEnabled: tc.lsmEnabled, config: LinuxConfig{LSMEnforce: tc.enforce}}
+			p := &LinuxPlatform{lsmEnabled: tc.lsmEnabled, lsmBlocking: tc.enforce, config: LinuxConfig{LSMEnforce: tc.enforce}}
 			out := captureStdout(t, p.logSecurityPosture)
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("posture output %q does not contain %q", out, tc.want)

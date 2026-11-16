@@ -29,6 +29,15 @@ import (
 // everything else.
 var testPolicyPath = filepath.Join("..", "wasm", "testdata", "allow_policy.wasm")
 
+func inProcessEvaluator(t *testing.T, e *Enforcer) *wasm.PolicyEvaluator {
+	t.Helper()
+	evaluator, ok := e.evaluator.(*wasm.PolicyEvaluator)
+	if !ok {
+		t.Fatal("test requires the legacy in-process evaluator")
+	}
+	return evaluator
+}
+
 // ---- fakes ----
 
 // fakePlatform is an in-memory platform.Platform that never touches the kernel.
@@ -324,7 +333,7 @@ func TestHandleEvent_PolicyAllow(t *testing.T) {
 	// Test allow/cache semantics, not the production 50ms latency bound. Keep
 	// evaluation bounded without turning hosted-runner scheduling into a deny.
 	// The looping-policy timeout and fail-closed tests retain their own budgets.
-	e.evaluator.SetTimeout(5 * time.Second)
+	inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 
 	event := &api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls", CgroupID: 7}
 	e.handleEvent(event)
@@ -389,7 +398,7 @@ func TestHandleEvent_PolicyLog(t *testing.T) {
 	e, _ := newTestEnforcer(t, testEnforcerOpts{})
 	// Exercise LOG semantics, not scheduler speed under native CI contention.
 	// Default and looping-policy deadline contracts have independent coverage.
-	e.evaluator.SetTimeout(5 * time.Second)
+	inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 
 	e.handleEvent(&api.Event{PID: 0, UID: 1000, Comm: "python3", Filename: "/usr/bin/python3"})
 
@@ -711,7 +720,7 @@ func TestHandleEvent_NetFilterAllowedAddressGoesToPolicy(t *testing.T) {
 		netFilter: &NetFilterConfig{BlockCIDRs: []string{"10.0.0.0/8"}},
 	})
 	// Exercise policy/cache routing, not the production 50ms latency bound.
-	e.evaluator.SetTimeout(5 * time.Second)
+	inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 
 	e.handleEvent(&api.Event{
 		PID:     0,
@@ -734,7 +743,7 @@ func TestHandleEvent_NetFilterNilNetworkPayload(t *testing.T) {
 	})
 	// Test missing-payload delegation/cache semantics, not the production 50ms
 	// latency bound; keep benign evaluation bounded on contended native runners.
-	e.evaluator.SetTimeout(5 * time.Second)
+	inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 
 	// Network type with no payload: no remote addr to check, falls through.
 	event := &api.Event{PID: 0, UID: 1000, Comm: "x", Type: api.EventTypeNetwork}
@@ -1141,7 +1150,7 @@ func TestPrintStats_WithEvents(t *testing.T) {
 	// This tests decision/cache statistics, not the production 50ms latency
 	// bound. Keep evaluation bounded without letting hosted-runner scheduling
 	// turn successful policy decisions into uncached timeout failures.
-	e.evaluator.SetTimeout(5 * time.Second)
+	inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 
 	allow := &api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"}
 	e.handleEvent(allow)
@@ -1296,7 +1305,7 @@ func TestReloadPolicy_SwapsEvaluatorAndClearsCache(t *testing.T) {
 	e, _ := newTestEnforcer(t, testEnforcerOpts{})
 	// Seed a real allowed decision without imposing the latency-test budget.
 	// The replacement evaluator and timeout/fail-closed tests are unchanged.
-	e.evaluator.SetTimeout(5 * time.Second)
+	inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 
 	e.handleEvent(&api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"})
 	if stats := e.GetStats(); stats.Allowed != 1 || stats.Denied != 0 || stats.Logged != 0 {
@@ -1429,7 +1438,7 @@ func TestReloadPolicy_Errors(t *testing.T) {
 			// contended hosted runner can exhaust the production 50ms budget
 			// during setup, leaving no cached ALLOW to preserve. Keep a bounded
 			// test-only budget; timeout/fail-closed tests keep their own limits.
-			e.evaluator.SetTimeout(5 * time.Second)
+			inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 			allowedEvent := &api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls"}
 			e.handleEvent(allowedEvent)
 			if stats := e.GetStats(); stats.Allowed != 1 || stats.Denied != 0 {

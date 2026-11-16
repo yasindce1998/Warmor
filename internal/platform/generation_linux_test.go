@@ -27,6 +27,13 @@ type generationStream struct {
 
 func (s *generationStream) ReadLSMEvent() (*ebpf.Event, error) { r := <-s.reads; return r.event, r.err }
 func (s *generationStream) FlushLSMEvents() error              { s.flushes.Add(1); return s.flushErr }
+func (s *generationStream) StopReaders() error {
+	select {
+	case s.reads <- generationRead{err: ringbuf.ErrClosed}:
+	default:
+	}
+	return nil
+}
 
 func generationPlatform(t *testing.T) (*LinuxPlatform, *generationStream, chan *api.Event) {
 	t.Helper()

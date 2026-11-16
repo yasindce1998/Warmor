@@ -2,8 +2,10 @@
 
 Status: **not implemented in the default enforcer**. An opt-in separate-process
 backend now exists; see [its contract and limitations](supervised-policy-host.md).
-It is not wired into the concrete enforcer evaluator or release packaging and
-does not implement the stronger cgroup/native-compromise boundary below.
+It is wired into the enforcer only through the explicit experimental adapter in
+[supervised evaluator integration](supervised-evaluator-integration.md), not
+release packaging. It does not implement the stronger cgroup/native-compromise
+boundary below.
 Admission limits on the existing path remain defense in depth, not a killable
 compilation worker. Do not claim default hard policy-load CPU/RSS or wall-time
 bounds, or admit untrusted binary publishers on that premise.
@@ -56,7 +58,9 @@ modules. Normal YAML-generated modules and the checked-in JSON fixture are
 tested. They are not a complete upper bound on compiler RSS, stack usage,
 algorithmic complexity, native code size, table growth during execution, or
 wall time. An adversarial function below the size cap can still be expensive.
-There is no configuration switch that makes the current path isolated.
+There is no switch that makes the default in-process path isolated. The explicit
+supervised backend selects a different, child-only runtime path; it does not
+upgrade the default path or satisfy all the stronger release gates below.
 
 ## Required architecture
 

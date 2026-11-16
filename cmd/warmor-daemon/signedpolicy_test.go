@@ -20,6 +20,7 @@ import (
 	"github.com/yasindce1998/warmor/internal/enforcer"
 	"github.com/yasindce1998/warmor/internal/platform"
 	"github.com/yasindce1998/warmor/internal/policybuild"
+	"github.com/yasindce1998/warmor/internal/policyhost"
 	"github.com/yasindce1998/warmor/internal/policyserver"
 	"github.com/yasindce1998/warmor/internal/streaming"
 	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
@@ -138,6 +139,21 @@ func bootstrapFixture(t *testing.T, f *signedFixture, sinks ...streaming.Sink) (
 	}
 	t.Cleanup(func() { _ = e.Close() })
 	return e, p
+}
+
+func TestSignedBootstrapUnsupportedBackendsRejectBeforeStoreOrDecode(t *testing.T) {
+	// A nil manager and invalid bundle are intentional: unsupported modes must
+	// reject before touching a replay store, staging, decoding, or platform.
+	var manager *signedPolicyManager
+	for _, opts := range []*enforcer.Options{
+		{AtomicGenerations: true},
+		{SupervisedBackend: &policyhost.Config{}},
+		{AtomicGenerations: true, SupervisedBackend: &policyhost.Config{}},
+	} {
+		if e, err := manager.bootstrap(context.Background(), assignment.Bundle{}, opts); err == nil || e != nil {
+			t.Fatal("unsupported signed bootstrap reached store/decode", err)
+		}
+	}
 }
 
 func TestSignedModeHTTPRelayRealActivationRestartRollback(t *testing.T) {

@@ -33,7 +33,7 @@ func TestTelemetryCountsEventsNotCachedOutcomes(t *testing.T) {
 	e, _ := newTestEnforcer(t, testEnforcerOpts{})
 	// Count semantics, not scheduler speed under race/native CI load. Keep a
 	// bounded test-only deadline; evaluation-error quality is exercised below.
-	e.evaluator.SetTimeout(5 * time.Second)
+	inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 	attachTestTelemetry(t, e)
 	event := &api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls", CgroupID: 7}
 	for i := 0; i < 5; i++ {
@@ -106,7 +106,7 @@ func TestTelemetryFinalizedEventPopulation(t *testing.T) {
 			e, _ := newTestEnforcer(t, tc.opts)
 			// Population/cache assertions must not depend on a 50ms wall-clock
 			// budget under instrumentation. Production timeout is unchanged.
-			e.evaluator.SetTimeout(5 * time.Second)
+			inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
 			attachTestTelemetry(t, e)
 			for range 3 {
 				e.handleEvent(&tc.event)

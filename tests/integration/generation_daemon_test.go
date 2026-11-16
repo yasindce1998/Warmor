@@ -43,7 +43,11 @@ func TestPrepareGenerationDaemonArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"allowed", "first-denied", "reload-denied", "rule-audit", "global-audit", "file-victim"} {
+	// Keep this list in sync with newFixture in outcomes_test.go: the daemon
+	// outcome tests copy the whole set into the guest, so preparation must
+	// create every helper executable, including the rejection probes added for
+	// compile-heavy, init-loop and signed-malformed candidates.
+	for _, name := range []string{"allowed", "first-denied", "reload-denied", "rule-audit", "global-audit", "file-victim", "compile-heavy-denied", "init-loop-denied", "signed-malformed-denied"} {
 		copyExecutable(t, self, filepath.Join(dir, name))
 	}
 	for _, version := range []string{"A", "B"} {
