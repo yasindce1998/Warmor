@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	"github.com/cilium/ebpf"
+
+	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 // fakeBackend is an in-memory policyMapBackend.
@@ -247,5 +250,125 @@ func TestDefaultDeny_RejectsInvalidModeAndNilMap(t *testing.T) {
 	// reload path calls it unconditionally.
 	if err := (&PolicyMapManager{}).ClearDefaultDeny(); err != nil {
 		t.Errorf("ClearDefaultDeny without the map: %v", err)
+	}
+}
+
+// TestEventPolicyKeyBindUsesBindDomain pins the hook-aware split: a bind LSM
+// event (which carries Operation="connect" on the wire) must be keyed in the
+// EVENT_TYPE_BIND domain, while connect keeps the EVENT_TYPE_NETWORK domain.
+// Both use the same exact endpoint bytes, but must never alias each other.
+func TestEventPolicyKeyBindUsesBindDomain(t *testing.T) {
+	newNet := func(hook string) *api.Event {
+		return &api.Event{
+			Type: api.EventTypeNetwork, CgroupID: 42, LSMEvent: hook != "", Hook: hook,
+			Network: &api.NetworkEvent{Operation: "connect", RemoteAddr: "127.0.0.1", RemotePort: 8443},
+		}
+	}
+	kc, err := eventPolicyKey(newNet("connect"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb, err := eventPolicyKey(newNet("bind"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kc.EventType != EventTypeNetwork || kb.EventType != EventTypeBind {
+		t.Fatalf("event types connect/bind = %d/%d, want %d/%d", kc.EventType, kb.EventType, EventTypeNetwork, EventTypeBind)
+	}
+	if kc.CgroupID != 42 || kb.CgroupID != 42 ||
+		kc.Family != kb.Family || kc.Port != kb.Port || kc.Address != kb.Address {
+		t.Fatalf("connect/bind endpoint bytes differ: %+v vs %+v", kc, kb)
+	}
+	// The tracepoint connect (empty hook) must stay in the connect domain.
+	kp, err := eventPolicyKey(newNet(""))
+	if err != nil || kp.EventType != EventTypeNetwork {
+		t.Fatalf("empty-hook connect: key=%+v err=%v", kp, err)
+	}
+	// Misleading Operation without a bind hook is not a bind key, and hooks
+	// with no exact endpoint key are refused outright.
+	if _, err := eventPolicyKey(&api.Event{
+		Type: api.EventTypeNetwork, CgroupID: 42,
+		Network: &api.NetworkEvent{Operation: "bind", RemoteAddr: "127.0.0.1", RemotePort: 8443},
+	}); !errors.Is(err, ErrNotKernelMatchable) {
+		t.Fatalf("Operation=bind without Hook=bind: %v", err)
+	}
+	for _, hook := range []string{"listen", "connect_unix", "ptrace"} {
+		if _, err := eventPolicyKey(newNet(hook)); !errors.Is(err, ErrNotKernelMatchable) {
+			t.Fatalf("hook %q: got %v, want ErrNotKernelMatchable", hook, err)
+		}
+	}
+}
+
+// TestKernelKeyFieldsForEventBindSoundness checks the hook-aware key-field
+// report the enforcer uses to gate writes. A bind decision is matchable only
+// from {remote_addr, remote_port}; reading `operation` (or any other field)
+// makes it unsound and must be refused before any map write.
+func TestKernelKeyFieldsForEventBindSoundness(t *testing.T) {
+	m := &PolicyMapManager{}
+	bind := &api.Event{
+		Type: api.EventTypeNetwork, CgroupID: 42, LSMEvent: true, Hook: "bind",
+		Network: &api.NetworkEvent{Operation: "connect", RemoteAddr: "127.0.0.1", RemotePort: 8443},
+	}
+	keyFields := m.KernelKeyFieldsForEvent(bind)
+	if want := []string{"remote_addr", "remote_port"}; !reflect.DeepEqual(keyFields, want) {
+		t.Fatalf("bind key fields = %v, want %v", keyFields, want)
+	}
+	endpointOnly := compiler.FieldMask(keyFields...)
+	for _, tc := range []struct {
+		name   string
+		fields uint32
+		want   bool // determined by key => safe to sync
+	}{
+		{"endpoint only", endpointOnly, true},
+		{"endpoint + operation", endpointOnly | compiler.FieldBitOperation, false},
+		{"endpoint + protocol", endpointOnly | compiler.FieldBitProtocol, false},
+		{"endpoint + uid", endpointOnly | compiler.FieldBitUID, false},
+		{"undeclared", compiler.FieldsUnknown, false},
+	} {
+		got := tc.fields&^endpointOnly == 0 && tc.fields != compiler.FieldsUnknown
+		if got != tc.want {
+			t.Errorf("%s: determined=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// Hooks with no exact kernel key report no fields, so the enforcer's
+	// decisionDeterminedByKernelKey refuses them.
+	for _, hook := range []string{"listen", "connect_unix", "ptrace"} {
+		bind.Hook = hook
+		if got := m.KernelKeyFieldsForEvent(bind); len(got) != 0 {
+			t.Errorf("hook %q key fields = %v, want none", hook, got)
+		}
+	}
+}
+
+// TestSyncEventBindDenyWritesExactKernelKey proves the kernel map entry is
+// written after a bind DENY, under the bind domain, without leaking into the
+// connect domain or dropping the audit flag.
+func TestSyncEventBindDenyWritesExactKernelKey(t *testing.T) {
+	b := newFakeBackend()
+	m := &PolicyMapManager{policyMap: b}
+	bind := &api.Event{
+		Type: api.EventTypeNetwork, CgroupID: 42, LSMEvent: true, Hook: "bind",
+		Network: &api.NetworkEvent{Operation: "connect", RemoteAddr: "127.0.0.1", RemotePort: 8443},
+	}
+	if err := m.SyncEvent(bind, ActionDeny, true); err != nil {
+		t.Fatalf("SyncEvent bind DENY: %v", err)
+	}
+	bindKey, err := endpointPolicyKey(42, EventTypeBind, "127.0.0.1", 8443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, ok := b.entries[bindKey]
+	if !ok {
+		t.Fatalf("bind DENY not written to policy map: %+v", b.entries)
+	}
+	if v.Action != ActionDeny || v.Audit != 1 {
+		t.Fatalf("bind entry = %+v, want action=deny audit=1", v)
+	}
+	connectKey, err := endpointPolicyKey(42, EventTypeNetwork, "127.0.0.1", 8443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.entries[connectKey]; ok {
+		t.Fatal("bind DENY leaked into the connect domain")
 	}
 }

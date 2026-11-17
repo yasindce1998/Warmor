@@ -17,40 +17,146 @@ type setRuleOnly struct{ fakePolicyMap }
 
 func (*setRuleOnly) KernelKeyFields() {} // wrong signature: not a kernelKeyFielder
 
+// hookAwareFake mirrors the Linux PolicyMapManager: bind and connect share
+// event type network but only Hook=="bind" has an exact kernel key, and that
+// key carries just the remote endpoint. Hooks with no exact key are refused.
+type hookAwareFake struct{ fakePolicyMap }
+
+func (*hookAwareFake) KernelKeyFieldsForEvent(event *api.Event) []string {
+	if event == nil {
+		return nil
+	}
+	switch event.GetType() {
+	case api.EventTypeProcess:
+		if event.Hook != "" && event.Hook != "exec" {
+			return nil
+		}
+		return []string{"path"}
+	case api.EventTypeNetwork:
+		switch event.Hook {
+		case "", "connect", "bind":
+			return []string{"remote_addr", "remote_port"}
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
 func TestDecisionDeterminedByKernelKey(t *testing.T) {
 	linux := &fakePolicyMap{}
+	hookAware := &hookAwareFake{}
 	windows := &eventSyncRecorder{}
 	path := compiler.FieldBitPath
 	ep := compiler.FieldBitRemoteAddr | compiler.FieldBitRemotePort
 
+	proc := &api.Event{Type: api.EventTypeProcess, CgroupID: 1, Filename: "/bin/sh"}
+	file := &api.Event{Type: api.EventTypeFile, CgroupID: 1, Filename: "/etc/shadow"}
+	net := func(hook string) *api.Event {
+		return &api.Event{
+			Type: api.EventTypeNetwork, CgroupID: 1, Hook: hook,
+			Network: &api.NetworkEvent{Operation: "connect", RemoteAddr: "127.0.0.1", RemotePort: 8443},
+		}
+	}
+
 	tests := []struct {
 		name   string
 		pm     PolicyMapSyncer
-		typ    api.EventType
+		event  *api.Event
 		fields uint32
 		want   bool
 	}{
-		{"constant decision", linux, api.EventTypeProcess, 0, true},
-		{"path only", linux, api.EventTypeProcess, path, true},
-		{"path and uid", linux, api.EventTypeProcess, path | compiler.FieldBitUID, false},
-		{"comm", linux, api.EventTypeProcess, compiler.FieldBitComm, false},
-		{"args", linux, api.EventTypeProcess, path | compiler.FieldBitArgs, false},
-		{"pid", linux, api.EventTypeProcess, compiler.FieldBitPID, false},
-		{"undeclared", linux, api.EventTypeProcess, wasm.FieldsUnknown, false},
-		{"path and wall clock", linux, api.EventTypeProcess, path | compiler.FieldBitTime, false},
-		{"path and container age", linux, api.EventTypeProcess, path | compiler.FieldBitContainerAge, false},
-		{"endpoint and wall clock (windows)", windows, api.EventTypeNetwork, ep | compiler.FieldBitTime, false},
-		{"endpoint", linux, api.EventTypeNetwork, ep, true},
-		{"endpoint+protocol (linux key lacks it)", linux, api.EventTypeNetwork, ep | compiler.FieldBitProtocol, false},
-		{"endpoint+protocol (windows key has it)", windows, api.EventTypeNetwork, ep | compiler.FieldBitProtocol, true},
-		{"endpoint+local port", windows, api.EventTypeNetwork, ep | compiler.FieldBitLocalPort, false},
-		{"file never keyed", linux, api.EventTypeFile, 0, false},
-		{"syncer without key description", &setRuleOnly{}, api.EventTypeProcess, 0, false},
+		{"constant decision", linux, proc, 0, true},
+		{"path only", linux, proc, path, true},
+		{"path and uid", linux, proc, path | compiler.FieldBitUID, false},
+		{"comm", linux, proc, compiler.FieldBitComm, false},
+		{"args", linux, proc, path | compiler.FieldBitArgs, false},
+		{"pid", linux, proc, compiler.FieldBitPID, false},
+		{"undeclared", linux, proc, wasm.FieldsUnknown, false},
+		{"path and wall clock", linux, proc, path | compiler.FieldBitTime, false},
+		{"path and container age", linux, proc, path | compiler.FieldBitContainerAge, false},
+		{"endpoint and wall clock (windows)", windows, net("connect"), ep | compiler.FieldBitTime, false},
+		{"endpoint", linux, net("connect"), ep, true},
+		{"endpoint+protocol (linux key lacks it)", linux, net("connect"), ep | compiler.FieldBitProtocol, false},
+		{"endpoint+protocol (windows key has it)", windows, net("connect"), ep | compiler.FieldBitProtocol, true},
+		{"endpoint+local port", windows, net("connect"), ep | compiler.FieldBitLocalPort, false},
+		{"file never keyed", linux, file, 0, false},
+		{"syncer without key description", &setRuleOnly{}, proc, 0, false},
+		// Hook-aware bind gating: a bind decision is kernel-matchable only
+		// under the exact bind key and only from endpoint fields.
+		{"bind endpoint", hookAware, net("bind"), ep, true},
+		{"bind endpoint via hook-agnostic fallback", linux, net("bind"), ep, true},
+		{"bind + operation is not key-determined", hookAware, net("bind"), ep | compiler.FieldBitOperation, false},
+		{"bind + protocol is not key-determined", hookAware, net("bind"), ep | compiler.FieldBitProtocol, false},
+		{"bind + uid is not key-determined", hookAware, net("bind"), ep | compiler.FieldBitUID, false},
+		{"bind with connect_unix hook has no key", hookAware, net("connect_unix"), ep, false},
+		{"bind with listen hook has no key", hookAware, net("listen"), ep, false},
+		{"exec hook respected for process", hookAware, proc, path, true},
+		{"non-exec process hook has no key", hookAware, &api.Event{Type: api.EventTypeProcess, Hook: "ptrace", Filename: "/bin/sh"}, path, false},
 	}
 	for _, tc := range tests {
-		if got := decisionDeterminedByKernelKey(tc.pm, tc.typ, tc.fields); got != tc.want {
-			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		t.Run(tc.name, func(t *testing.T) {
+			if got := decisionDeterminedByKernelKey(tc.pm, tc.event, tc.fields); got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBindLSMWritebackFoldsAudit checks the LSM gate relaxation in
+// persistDecision: a bind LSM miss may be written back because the kernel
+// already accepted the bind, userspace evaluated the complete event and the
+// key is exact. Other LSM events stay record-only. Audit downgrade must still
+// reach the kernel (audit=1 means a would-deny, never a block).
+func TestBindLSMWritebackFoldsAudit(t *testing.T) {
+	endpointMask := &[3]uint32{0, 0, compiler.FieldBitRemoteAddr | compiler.FieldBitRemotePort}
+	newBind := func() *api.Event {
+		return &api.Event{
+			Type: api.EventTypeNetwork, CgroupID: 42, LSMEvent: true, Hook: "bind",
+			Network: &api.NetworkEvent{Operation: "connect", Protocol: "tcp", RemoteAddr: "127.0.0.1", RemotePort: 8443},
 		}
+	}
+
+	for _, tc := range []struct {
+		name      string
+		auditMode bool
+		wantAudit bool
+	}{
+		{"plain deny", false, false},
+		{"audit downgraded deny", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &eventSyncRecorder{}
+			e, _ := newTestEnforcer(t, testEnforcerOpts{
+				policyMap:  rec,
+				policyWasm: wasmtest.ConstPolicy(1, endpointMask), // deny all, declares endpoint-only reads
+			})
+			e.auditMode = tc.auditMode
+			e.handleEvent(newBind())
+			if len(rec.events) != 1 {
+				t.Fatalf("bind LSM DENY not written back: %+v", rec)
+			}
+			if rec.actions[0] != 1 {
+				t.Fatalf("action = %d, want DENY", rec.actions[0])
+			}
+			if rec.audits[0] != tc.wantAudit {
+				t.Fatalf("audit = %v, want %v", rec.audits[0], tc.wantAudit)
+			}
+		})
+	}
+
+	// A non-bind LSM event is still recorded, never re-synced.
+	rec := &eventSyncRecorder{}
+	e, _ := newTestEnforcer(t, testEnforcerOpts{
+		policyMap:  rec,
+		policyWasm: wasmtest.ConstPolicy(1, endpointMask),
+	})
+	e.handleEvent(&api.Event{
+		Type: api.EventTypeNetwork, CgroupID: 42, LSMEvent: true, Hook: "connect",
+		Network: &api.NetworkEvent{Operation: "connect", RemoteAddr: "127.0.0.1", RemotePort: 8443},
+	})
+	if len(rec.events) != 0 {
+		t.Fatalf("non-bind LSM event was synced: %+v", rec)
 	}
 }
 
