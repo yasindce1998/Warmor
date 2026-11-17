@@ -3,6 +3,7 @@
 package ebpf
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"reflect"
@@ -58,6 +59,39 @@ func (f *fakeGenerationBackend) publish(m generationMap) error {
 	f.active = m.(*fakeGenerationMap)
 	f.publications++
 	return nil
+}
+
+// generationConfigSpy models the out-of-band LSM config maps (lsm_cfg loss,
+// lsm_enforce, lsm_cgroup_filter, unix_watch). The generation manager has no
+// reference to these maps and must never write them during activation.
+type generationConfigSpy struct {
+	mu     sync.Mutex
+	writes int
+	value  []byte
+}
+
+func (s *generationConfigSpy) put(_, value any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.writes++
+	if b, ok := value.([]byte); ok {
+		s.value = append([]byte(nil), b...)
+	}
+	return nil
+}
+
+// configWritingBackend is a fakeGenerationBackend that also holds a config
+// spy, so a future change that tries to fold config writes into generation
+// publication would be caught by the lifecycle test below.
+type configWritingBackend struct {
+	*fakeGenerationBackend
+	config *generationConfigSpy
+}
+
+func (b *configWritingBackend) publish(m generationMap) error {
+	// Only the active_generation pointer is published. Config maps are separate
+	// objects and are deliberately not referenced here.
+	return b.fakeGenerationBackend.publish(m)
 }
 
 func generationFixture() GenerationSpec {
@@ -491,5 +525,139 @@ func TestLoaderPassesInnerTemplateToGenerationBackend(t *testing.T) {
 	backend, ok := l.PolicyGenerations().backend.(kernelGenerationBackend)
 	if !ok || backend.template != template {
 		t.Fatal("loader did not pass the BTF template to the generation backend")
+	}
+}
+
+// GenerationManager owns at most two inner maps: active+candidate or
+// active+retiring. A third Prepare is rejected while either is held, so
+// repeated success/failure cycles cannot grow the number of live FDs. See
+// docs/design/generation-crash-continuity.md §2.
+func TestGenerationManagerBoundedFDsAcrossRepeatedCycles(t *testing.T) {
+	b := &fakeGenerationBackend{}
+	m := &GenerationManager{backend: b}
+	openMaps := func() int {
+		n := 0
+		for _, mp := range b.maps {
+			if mp.closes == 0 {
+				n++
+			}
+		}
+		return n
+	}
+
+	if err := m.Prepare(1, generationFixture()); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Activate(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AcknowledgeDrain(0); err != nil {
+		t.Fatal(err)
+	}
+	if got := openMaps(); got > 1 {
+		t.Fatalf("startup open maps = %d, want <= 1", got)
+	}
+
+	const cycles = 12
+	for i := 0; i < cycles; i++ {
+		id := uint64(i + 2)
+		if err := m.Prepare(id, generationFixture()); err != nil {
+			t.Fatalf("cycle %d prepare: %v", i, err)
+		}
+		if got := openMaps(); got > 2 {
+			t.Fatalf("cycle %d: open maps = %d > 2 while candidate held", i, got)
+		}
+		if err := m.Activate(id); err != nil {
+			t.Fatalf("cycle %d activate: %v", i, err)
+		}
+		if got := openMaps(); got > 2 {
+			t.Fatalf("cycle %d: open maps = %d > 2 while retiring held", i, got)
+		}
+		if err := m.Prepare(id+1, GenerationSpec{}); !errors.Is(err, ErrGenerationBusy) {
+			t.Fatalf("cycle %d: third buffer admitted: %v", i, err)
+		}
+		if err := m.AcknowledgeDrain(id - 1); err != nil {
+			t.Fatalf("cycle %d retire: %v", i, err)
+		}
+		if got := openMaps(); got != 1 {
+			t.Fatalf("cycle %d: quiescent open maps = %d, want 1", i, got)
+		}
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The generation transaction swaps only active_generation[0]. The enforce
+// toggle, loss config and cgroup filter are out-of-band maps written by the
+// loader/platform; activation must leave them byte-for-byte untouched. See
+// docs/design/generation-crash-continuity.md §3.
+func TestGenerationManagerNeverWritesConfigMaps(t *testing.T) {
+	cfg := &generationConfigSpy{value: []byte("onloss=log;enforce=0;filter=none")}
+	b := &configWritingBackend{fakeGenerationBackend: &fakeGenerationBackend{}, config: cfg}
+	m := &GenerationManager{backend: b}
+	before := append([]byte(nil), cfg.value...)
+
+	// Prove the spy is live so the zero-writes assertion is meaningful.
+	if err := cfg.put(nil, []byte("touched")); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.writes != 1 || bytes.Equal(before, cfg.value) {
+		t.Fatal("config spy not live")
+	}
+	cfg.writes = 0
+	cfg.value = append([]byte(nil), before...)
+
+	// Successful activations with drain acknowledgement.
+	if err := m.Prepare(1, generationFixture()); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Activate(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AcknowledgeDrain(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Prepare(2, GenerationSpec{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Activate(2); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AcknowledgeDrain(1); err != nil {
+		t.Fatal(err)
+	}
+	event := &api.Event{Type: api.EventTypeProcess, CgroupID: 42, Filename: "/bin/dynamic"}
+	if err := m.SyncEvent(2, event, ActionAllow, true); err != nil {
+		t.Fatal(err)
+	}
+	// Candidate abort path.
+	if err := m.Prepare(3, GenerationSpec{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Abort(3); err != nil {
+		t.Fatal(err)
+	}
+	// Failed publication path.
+	b.publishErr = errors.New("outer update failed")
+	if err := m.Prepare(4, GenerationSpec{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Activate(4); !errors.Is(err, b.publishErr) {
+		t.Fatalf("failed publication: %v", err)
+	}
+	b.publishErr = nil
+	if err := m.Abort(4); err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.writes != 0 {
+		t.Fatalf("generation lifecycle wrote config maps %d times", cfg.writes)
+	}
+	if !bytes.Equal(before, cfg.value) {
+		t.Fatalf("config snapshot changed: got %q, want %q", cfg.value, before)
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
