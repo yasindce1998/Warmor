@@ -98,6 +98,41 @@ func TestGenerationGateManifestCoversEveryGenerationFixture(t *testing.T) {
 	}
 }
 
+// The event-loss regressions are not TestLSM_Generation* fixtures, so the
+// coverage scan above would not notice their omission. Require them by name and
+// verify (via AST) that the names are real test functions, not misselections.
+func TestGenerationGateEventLossFixturesAreRequired(t *testing.T) {
+	required := []string{"TestLSM_EventLossIsCounted", "TestLSM_OnEventLossDeny"}
+	manifest := map[string]bool{}
+	for _, name := range generationGateManifest(t) {
+		manifest[name] = true
+	}
+	files, err := filepath.Glob("../../internal/ebpf/*_integration_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defined := map[string]bool{}
+	for _, path := range files {
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && strings.HasPrefix(fn.Name.Name, "Test") {
+				defined[fn.Name.Name] = true
+			}
+		}
+	}
+	for _, name := range required {
+		if !manifest[name] {
+			t.Errorf("event-loss regression missing from strict PASS oracle: %s", name)
+		}
+		if !defined[name] {
+			t.Errorf("required event-loss fixture does not exist (would mis-select the gate): %s", name)
+		}
+	}
+}
+
 func TestGenerationGateWorkflow(t *testing.T) {
 	data, err := os.ReadFile("../../.github/workflows/lsm-test.yml")
 	if err != nil {

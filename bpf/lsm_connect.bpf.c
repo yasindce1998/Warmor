@@ -112,7 +112,7 @@ int BPF_PROG(lsm_connect_check, struct socket *sock, struct sockaddr *address, i
 	// No match — emit for userspace evaluation. If the ring is full nobody
 	// will evaluate it; --on-event-loss decides.
 	if (!emit_lsm_event_generation(snapshot.generation, EVENT_TYPE_NETWORK, 0, 0, 0, cgid, family, port, addr_v4, addr_v6))
-		return lost_verdict();
+		return lost_verdict(EVENT_TYPE_NETWORK);
 	return 0;
 }
 

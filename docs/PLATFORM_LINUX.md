@@ -153,15 +153,16 @@ shipped alert rules fire on any drop.
 # Bigger ring for bursty hosts (power of two)
 sudo ./warmor-daemon --policy policy.wasm --lsm-enforce --lsm-ringbuf-size 16MiB
 
-# Fail closed: refuse unknown execs and connects whose event can't be queued
+# Fail closed: refuse exec/connect/bind/listen/ptrace/mount whose event can't be queued
 sudo ./warmor-daemon --policy policy.wasm --lsm-enforce --on-event-loss deny
 ```
 
-`--on-event-loss=deny` only applies in enforce mode and only to exec and
-connect, and it can refuse legitimate operations during a flood. The default
-(`log`) keeps them allowed and counted. Scoping the daemon to pod cgroups
-(`--cgroup-filter auto`) is the most effective way to reduce volume, because
-`file_open` sends an event for every open in scope.
+`--on-event-loss=deny` only applies in enforce mode. It fails closed for the six
+blocking hooks (exec, connect, bind, listen, ptrace, mount); `file_open` and
+integrity events stay audit-only. It can refuse legitimate operations during a
+flood. The default (`log`) keeps them allowed and counted. Scoping the daemon
+to pod cgroups (`--cgroup-filter auto`) is the most effective way to reduce
+volume, because `file_open` sends an event for every open in scope.
 
 ### Systemd Service
 Create `/etc/systemd/system/warmor.service`:
@@ -336,7 +337,7 @@ sudo aa-complain /usr/local/bin/warmor-daemon
 | `--no-lsm` | `false` | Skip LSM-BPF entirely (tracepoint-only). |
 | `--audit` | `false` | Log would-be denials; kill and block nothing. The only true dry-run mode. |
 | `--lsm-ringbuf-size` | `4 MiB` | Size of the LSM event ring buffer (power of two). Bigger rings absorb bursts. |
-| `--on-event-loss` | `log` | What to do when the ring is full: `log` (default; dropped events are counted per hook) or `deny` (fail closed: refuse unknown execs/connects whose event could not be queued; enforce mode only). |
+| `--on-event-loss` | `log` | What to do when the ring is full: `log` (default; dropped events are counted per hook) or `deny` (fail closed: refuse unknown exec/connect/bind/listen/ptrace/mount events that could not be queued; enforce mode only; file and integrity remain audit-only). |
 | `--cgroup-filter` | — | Restrict the LSM programs to the given cgroup paths, or `auto` for pod cgroups. |
 | `--verify-key` | — | Ed25519 public key PEM; require a valid detached `<policy>.sig` at startup, on reload and on every policy-server download. Fails closed. see [Policy toolchain](policy-toolchain.md#detached-signatures-daemon-and-policy-server). |
 | `--integrity-db` / `--integrity-mode` | — | Content-hash exec integrity: a sleepable LSM program hashes each exec with IMA and refuses (`enforce`) or reports (`audit`) binaries whose SHA-256 is not in the database. Requires `CONFIG_IMA` with SHA-256. See [supply-chain-integrity.md](supply-chain-integrity.md). |

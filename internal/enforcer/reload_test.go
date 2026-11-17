@@ -3,10 +3,12 @@ package enforcer
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/yasindce1998/warmor/internal/wasm/wasmtest"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -26,6 +28,41 @@ func TestReloadPolicy_ClearsKernelPolicyMap(t *testing.T) {
 	}
 	if rules := pm.snapshot(); len(rules) != 0 {
 		t.Fatalf("stale kernel rules survived reload: %+v", rules)
+	}
+}
+
+// The legacy reload path reuses one decision cache across evaluators. A
+// verdict cached under the old policy must never be served after the userspace
+// swap, even though the new policy would decide differently for the same event.
+func TestReloadPolicy_DropsDecisionCacheFromOldPolicy(t *testing.T) {
+	isolateCacheDir(t)
+	e, _ := newTestEnforcer(t, testEnforcerOpts{policyWasm: wasmtest.ConstPolicy(0, &[3]uint32{})})
+	event := &api.Event{PID: 0, UID: 1000, Comm: "tool", Filename: "/bin/tool"}
+
+	// Cache an allow decision made by the old policy.
+	e.handleEvent(event)
+	if n := e.cache.Stats().Size; n != 1 {
+		t.Fatalf("cache size before reload = %d, want 1", n)
+	}
+	if _, hit := e.cache.Get(event); !hit {
+		t.Fatal("old policy decision was not cached")
+	}
+
+	newPath := filepath.Join(t.TempDir(), "deny.wasm")
+	if err := os.WriteFile(newPath, wasmtest.ConstPolicy(1, &[3]uint32{}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.policyPath = newPath
+	if err := e.ReloadPolicy(); err != nil {
+		t.Fatalf("ReloadPolicy: %v", err)
+	}
+	if n := e.cache.Stats().Size; n != 0 {
+		t.Fatalf("stale decisions survived reload: %d cached", n)
+	}
+
+	e.handleEvent(event)
+	if got := e.GetStats(); got.Allowed != 1 || got.Denied != 1 {
+		t.Fatalf("stats = %+v, want 1 allow (old policy) and 1 deny (new policy)", got)
 	}
 }
 

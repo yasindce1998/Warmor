@@ -26,6 +26,13 @@ func (h *ActionHandler) RecordKernelDenied(event *api.Event, result *api.ActionR
 // whose decision could not change what the kernel did. It reports whether
 // the event was consumed.
 func (e *Enforcer) handleKernelVerdict(event *api.Event) bool {
+	// A kernel verdict is only trustworthy on an in-tree LSM event: those are
+	// the only events carrying a kernel-attested verdict and raw kernel
+	// timestamp. Tracepoint or synthetic events can set the flags in memory;
+	// they must still go through normal userspace policy evaluation.
+	if !event.LSMEvent || event.KernelTimestampNS == 0 {
+		return false
+	}
 	if !event.KernelDenied && !event.IntegrityViolation {
 		return false
 	}

@@ -67,6 +67,7 @@ func (e *Enforcer) checkEscape(event *api.Event) bool {
 	// Learning mode records a would-deny but never kills.
 	deny.Audit = e.learningMode
 	_ = e.actionHandler.Enforce(e.ctx, event, deny)
+	e.reportOutcome(event, deny, nil)
 	e.logger.LogEvent(event, deny)
 	metrics.RecordEvent(deny.Action.String())
 	if e.pipeline != nil {

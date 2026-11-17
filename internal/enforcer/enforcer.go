@@ -171,7 +171,12 @@ type Enforcer struct {
 	// that made it is still current, so an evaluation that was in flight
 	// during a reload cannot repopulate the map with a stale decision after
 	// it was cleared.
-	policyGen      atomic.Uint64
+	policyGen atomic.Uint64
+	// cacheMisses counts actual cache-lookup misses (the same events that
+	// call metrics.RecordCacheMiss). It is explicit rather than derived from
+	// decision totals so early-deny paths, which never consult the cache,
+	// cannot inflate it.
+	cacheMisses    atomic.Uint64
 	generations    *generationDispatch
 	pipeline       *streaming.Pipeline
 	lineageTracker *lineage.Tracker
@@ -386,12 +391,18 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	// Degraded if kernel LSM enforcement was asked for but is not active
 	// (RequireLSM already failed Load in that case).
 	metrics.SetEBPFLoaderStatus(caps.LSMEnforcement || !opts.LSMEnforce)
+	if opts.LSMEnforce && !caps.LSMEnforcement {
+		// The platform already prints a startup warning in this case. Repeat
+		// it through the structured logger so the degraded posture is
+		// unmistakable in daemon logs even when stdout warnings are lost.
+		logger.LogInfo("⚠ DEGRADED POSTURE: --lsm-enforce requested but BPF LSM is unavailable; running in observe-only mode (pass --require-lsm to fail closed)")
+	}
 	var policyMapSyncer PolicyMapSyncer
 	if caps.LSMEnforcement {
 		if kernelBlocking {
 			logger.LogInfo("✓ LSM-BPF kernel blocking initialized")
 		} else {
-			logger.LogInfo("LSM-BPF hooks loaded; kernel blocking is not established")
+			logger.LogInfo("⚠ DEGRADED POSTURE: LSM-BPF hooks loaded but kernel blocking is not established; userspace-only enforcement")
 		}
 		if pm, ok := plat.PolicyMap().(PolicyMapSyncer); ok {
 			policyMapSyncer = pm
@@ -709,6 +720,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 				Audit: e.learningMode,
 			}
 			_ = e.actionHandler.Enforce(e.ctx, event, result)
+			e.reportOutcome(event, result, nil)
 			e.logger.LogEvent(event, result)
 			metrics.RecordEvent(result.Action.String())
 			if e.pipeline != nil {
@@ -725,6 +737,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 				Audit: e.learningMode,
 			}
 			_ = e.actionHandler.Enforce(e.ctx, event, result)
+			e.reportOutcome(event, result, nil)
 			e.logger.LogEvent(event, result)
 			metrics.RecordEvent(result.Action.String())
 			if e.pipeline != nil {
@@ -747,6 +760,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 					Audit: e.learningMode,
 				}
 				_ = e.actionHandler.Enforce(e.ctx, event, result)
+				e.reportOutcome(event, result, nil)
 				e.logger.LogEvent(event, result)
 				metrics.RecordEvent(result.Action.String())
 				if e.pipeline != nil {
@@ -799,7 +813,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 		e.logger.LogEvent(event, result)
 		metrics.RecordEvent(result.Action.String())
 		metrics.RecordLatency(float64(result.Latency.Microseconds()))
-		e.recordTelemetryDecision(result, nil)
+		e.reportOutcome(event, result, nil)
 		if e.pipeline != nil {
 			e.pipeline.Emit(event, result)
 		}
@@ -807,6 +821,7 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	}
 
 	metrics.RecordCacheMiss()
+	e.cacheMisses.Add(1)
 
 	if evaluator.ReadsContainerAge(event.GetType()) {
 		e.annotateContainerStart(event)
@@ -1203,7 +1218,7 @@ func (e *Enforcer) GetStats() api.EnforcementStats {
 		EnforcementFailed:    actionStats.EnforcementFailed,
 		EnforcementRefused:   actionStats.EnforcementRefused,
 		CacheHits:            cacheStats.TotalHits,
-		CacheMisses:          actionStats.Allowed + actionStats.Denied + actionStats.Logged - cacheStats.TotalHits,
+		CacheMisses:          e.cacheMisses.Load(),
 	}
 }
 
@@ -1362,6 +1377,11 @@ func (e *Enforcer) activatePolicy(path string, expected *assignment.Policy, dura
 		}
 	}
 	e.evaluatorMu.Unlock()
+	// The legacy path reuses one decision cache across evaluators. Drop every
+	// verdict made by the old policy now, while eventMu still drains new
+	// events and decisionMu still fences in-flight writers, so no decision
+	// cached under the previous policy can outlive the userspace swap.
+	e.cache.Clear()
 	setCacheDependencies(e.cache, newEvaluator)
 	e.decisionMu.Unlock()
 	activated = true

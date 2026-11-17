@@ -54,7 +54,10 @@ int BPF_PROG(lsm_mount_check, const char *dev_name, const struct path *path,
 		return 0;
 	}
 
-	emit_lsm_event_aux_generation(snapshot.generation, EVENT_TYPE_MOUNT, 0, type_buf, len, cgid, 0, 0, 0, 0, dev_name, 0);
+	// No match — emit for userspace evaluation. If the ring is full nobody
+	// will evaluate it; --on-event-loss decides (fail closed when configured).
+	if (!emit_lsm_event_aux_generation(snapshot.generation, EVENT_TYPE_MOUNT, 0, type_buf, len, cgid, 0, 0, 0, 0, dev_name, 0))
+		return lost_verdict(EVENT_TYPE_MOUNT);
 	return 0;
 }
 

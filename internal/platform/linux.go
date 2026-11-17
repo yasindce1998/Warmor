@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -124,12 +123,16 @@ func (p *LinuxPlatform) Load(ctx context.Context) (loadErr error) {
 	}
 	p.ebpfLoader = loader
 
+	// BPF's bpf_get_current_cgroup_id() (kernfs node id) only matches the
+	// statx-inode scope IDs used for cgroup filtering and kernel default-deny
+	// marking on cgroup v2. Refuse v1/unknown views before arming either.
+	if err := p.requireCgroupV2ForEnforcement(); err != nil {
+		return err
+	}
+
 	var cgroupIDs []uint64
 	if len(p.config.CgroupFilter) > 0 {
 		p.scope.enabled = true
-		if _, err := os.ReadFile(filepath.Join(p.config.CgroupRoot, "cgroup.controllers")); err != nil {
-			return fmt.Errorf("host cgroup v2 hierarchy not readable at %s: %w", p.config.CgroupRoot, err)
-		}
 		if len(p.config.CgroupFilter) == 1 && p.config.CgroupFilter[0] == "auto" {
 			cgroupIDs, err = ebpf.DiscoverPodCgroups(p.config.CgroupRoot)
 			if err != nil {
@@ -204,6 +207,19 @@ func (p *LinuxPlatform) Load(ctx context.Context) (loadErr error) {
 
 	p.logSecurityPosture()
 	return nil
+}
+
+// requireCgroupV2ForEnforcement asserts the cgroup view before any feature
+// that correlates BPF cgroup IDs with userspace scope IDs is armed. Kernel
+// default-deny marking (--lsm-enforce) and cgroup filtering both depend on
+// bpf_get_current_cgroup_id() matching the statx-inode IDs from cgroup.go,
+// which only holds on cgroup v2. It is a no-op when neither is requested, so
+// observe-only runs on v1 are unaffected.
+func (p *LinuxPlatform) requireCgroupV2ForEnforcement() error {
+	if !p.config.LSMEnforce && len(p.config.CgroupFilter) == 0 {
+		return nil
+	}
+	return ebpf.RequireCgroupV2(p.config.CgroupRoot)
 }
 
 // initializeLSMPosture publishes blocking status only after both scope and the
@@ -614,6 +630,19 @@ func (p *LinuxPlatform) deliver(ctx context.Context, event *api.Event) bool {
 	}
 	if event.DispatchBarrier == nil {
 		generationvm.Capture(event)
+	}
+	// Delivery is intentionally blocking (backpressure), not drop-on-full:
+	// these events feed kernel verdicts and carry generation dispatch fences,
+	// so shedding one would change enforcement semantics and could strand a
+	// generation drain. Probe with a non-blocking send first only to make
+	// that backpressure visible; when the channel is full, count the blocked
+	// delivery and fall through to the original blocking select below. No
+	// event is dropped and ordering/cancellation behavior is unchanged.
+	select {
+	case p.eventChan <- event:
+		return true
+	default:
+		metrics.RecordEventChannelBackpressure()
 	}
 	select {
 	case p.eventChan <- event:

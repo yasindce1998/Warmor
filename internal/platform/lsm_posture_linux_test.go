@@ -4,11 +4,33 @@ package platform
 
 import (
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/yasindce1998/warmor/internal/ebpf"
 )
+
+// The cgroup-v2 identity assertion only gates features that correlate BPF
+// cgroup IDs with userspace scope IDs; observe-only runs are unaffected.
+func TestRequireCgroupV2ForEnforcementGate(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	observe := &LinuxPlatform{config: LinuxConfig{CgroupRoot: missing}}
+	if err := observe.requireCgroupV2ForEnforcement(); err != nil {
+		t.Fatalf("observe-only run must not require cgroup v2: %v", err)
+	}
+
+	for _, cfg := range []LinuxConfig{
+		{LSMEnforce: true, CgroupRoot: missing},
+		{CgroupFilter: []string{"auto"}, CgroupRoot: missing},
+	} {
+		p := &LinuxPlatform{config: cfg}
+		if err := p.requireCgroupV2ForEnforcement(); err == nil {
+			t.Fatalf("cfg %+v: a non-v2 view must be refused", cfg)
+		}
+	}
+}
 
 // Exercise the actual initialization ordering/status publication with fake map
 // writers, never attach BPF or change a host-wide enforcement toggle.

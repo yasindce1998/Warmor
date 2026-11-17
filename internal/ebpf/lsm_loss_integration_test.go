@@ -4,7 +4,10 @@ package ebpf
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
@@ -148,6 +151,204 @@ func TestLSM_OnEventLossDeny(t *testing.T) {
 
 		if denied != tc.wantDeny {
 			t.Errorf("on-event-loss=%d: exec denied=%v (err %v), want denied=%v", tc.mode, denied, ferr, tc.wantDeny)
+		}
+	}
+}
+
+// fillLSMRingForLoss fills a one-page LSM ring with file_open misses while
+// nobody is reading it. file_open is an audit-only hook: even with
+// --on-event-loss=deny its events are counted but the opens still succeed, so
+// the flood itself cannot be refused (and it leaves no reader to drain the
+// events the hook under test is about to drop).
+func fillLSMRingForLoss(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "filler")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		fd, err := syscall.Open(path, syscall.O_RDONLY, 0)
+		if err != nil {
+			t.Fatalf("filler open: %v (audit hook must not fail closed)", err)
+		}
+		_ = syscall.Close(fd)
+	}
+}
+
+// TestLSM_OnEventLossDenyBlockingHooks extends the exec/connect coverage to
+// every blocking hook. With --on-event-loss=deny and enforce on, an operation
+// whose miss event cannot be queued must be refused with EPERM so that a
+// flood cannot hide a would-be denial. With the default log mode it must
+// still be allowed (and the drop counted). Audit-only hooks (file, integrity)
+// must keep allowing on a drop — the filler opens above are an implicit
+// check of that for file_open.
+func TestLSM_OnEventLossDenyBlockingHooks(t *testing.T) {
+	requireRoot(t)
+	requireLSM(t)
+
+	// run performs the target operation, calling fill() at the point where
+	// the ring must already be full. hook is the lsm_drops label for the
+	// event the operation emits.
+	type scenario struct {
+		name string
+		hook string
+		// prepare runs before the LSM loader is attached. Any exec that must
+		// succeed with an empty ring belongs here: with --on-event-loss=deny
+		// a fork/exec after the ring is full is refused by the exec hook.
+		prepare func(t *testing.T) func() // returns cleanup
+		run     func(t *testing.T, fill func()) error
+	}
+
+	local := net.IPv4(127, 0, 0, 1).To4()
+	var ptraceVictim *exec.Cmd
+	scenarios := []scenario{
+		{
+			name: "bind",
+			hook: "bind",
+			run: func(t *testing.T, fill func()) error {
+				fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer syscall.Close(fd)
+				addr := &syscall.SockaddrInet4{}
+				copy(addr.Addr[:], local)
+				fill()
+				return syscall.Bind(fd, addr)
+			},
+		},
+		{
+			name: "listen",
+			hook: "listen",
+			run: func(t *testing.T, fill func()) error {
+				fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer syscall.Close(fd)
+				addr := &syscall.SockaddrInet4{}
+				copy(addr.Addr[:], local)
+				// The listen hook ignores port 0, so bind to an
+				// ephemeral port before the ring is full.
+				if err := syscall.Bind(fd, addr); err != nil {
+					t.Fatal(err)
+				}
+				fill()
+				return syscall.Listen(fd, 1)
+			},
+		},
+		{
+			name: "ptrace",
+			hook: "ptrace",
+			// Both children are started before the LSM loader is attached:
+			// in deny mode any exec after the ring is full would fail closed
+			// with EPERM from the exec hook, not the ptrace verdict measured
+			// here. The probe establishes that this environment permits
+			// ptrace at all; the victim is a fresh child so no attach/detach
+			// cycle is repeated on the measured operation.
+			prepare: func(t *testing.T) func() {
+				probe := exec.Command("/bin/sleep", "30")
+				if err := probe.Start(); err != nil {
+					t.Skipf("cannot start ptrace probe: %v", err)
+				}
+				if err := syscall.PtraceAttach(probe.Process.Pid); err != nil {
+					_ = probe.Process.Kill()
+					_ = probe.Wait()
+					t.Skipf("ptrace not permitted here: %v", err)
+				}
+				_ = syscall.PtraceDetach(probe.Process.Pid)
+				_ = probe.Process.Kill()
+				_ = probe.Wait()
+				victim := exec.Command("/bin/sleep", "30")
+				if err := victim.Start(); err != nil {
+					t.Skipf("cannot start ptrace victim: %v", err)
+				}
+				ptraceVictim = victim
+				return func() { _ = victim.Process.Kill(); _ = victim.Wait() }
+			},
+			run: func(t *testing.T, fill func()) error {
+				fill()
+				err := syscall.PtraceAttach(ptraceVictim.Process.Pid)
+				if err == nil {
+					_ = syscall.PtraceDetach(ptraceVictim.Process.Pid)
+				}
+				return err
+			},
+		},
+		{
+			name: "mount",
+			hook: "mount",
+			run: func(t *testing.T, fill func()) error {
+				// Confirm the environment permits mounting tmpfs.
+				probe := t.TempDir()
+				if err := syscall.Mount("warmor-test-src", probe, "tmpfs", 0, ""); err != nil {
+					t.Skipf("mount not permitted here: %v", err)
+				}
+				_ = syscall.Unmount(probe, 0)
+				target := t.TempDir()
+				fill()
+				err := syscall.Mount("warmor-test-src", target, "tmpfs", 0, "")
+				if err == nil {
+					_ = syscall.Unmount(target, 0)
+				}
+				return err
+			},
+		},
+	}
+
+	for _, s := range scenarios {
+		for _, mode := range []OnEventLoss{OnLossLog, OnLossDeny} {
+			t.Run(fmt.Sprintf("%s/%d", s.name, mode), func(t *testing.T) {
+				if s.prepare != nil {
+					if cleanup := s.prepare(t); cleanup != nil {
+						defer cleanup()
+					}
+				}
+				loader, err := LoadLSMWithOptions(LSMOptions{
+					RingBufferSize: uint32(os.Getpagesize()),
+					OnEventLoss:    mode,
+				})
+				if err != nil {
+					t.Fatalf("LoadLSMWithOptions: %v", err)
+				}
+				if loader == nil {
+					t.Skip("BPF LSM unavailable")
+				}
+				defer loader.Close()
+				if err := loader.SetEnforceMode(true); err != nil {
+					t.Fatal(err)
+				}
+
+				// Snapshot drops right after the flood, so the assertion
+				// below measures only the operation's own ring-full emit
+				// and not background activity during the flood.
+				var beforeOp map[string]uint64
+				opErr := s.run(t, func() {
+					fillLSMRingForLoss(t)
+					var err error
+					beforeOp, err = loader.EventDrops()
+					if err != nil {
+						t.Fatal(err)
+					}
+				})
+				after, err := loader.EventDrops()
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				denied := errors.Is(opErr, syscall.EPERM)
+				wantDeny := mode == OnLossDeny
+				if denied != wantDeny {
+					t.Errorf("on-event-loss=%d: %s denied=%v (err %v), want denied=%v",
+						mode, s.name, denied, opErr, wantDeny)
+				}
+				// The verdict only comes from the ring-full path if the
+				// operation actually tried (and failed) to emit.
+				if delta := after[s.hook] - beforeOp[s.hook]; delta == 0 {
+					t.Errorf("%s: no dropped %s event; ring-full path was not exercised",
+						s.name, s.hook)
+				}
+			})
 		}
 	}
 }

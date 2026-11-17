@@ -39,6 +39,89 @@ func ResolveCgroupIDs(paths []string) ([]uint64, error) {
 	return ids, nil
 }
 
+// CgroupView identifies which cgroup hierarchy version is mounted at a root.
+type CgroupView int
+
+const (
+	CgroupViewUnknown CgroupView = iota // neither a v2 nor a v1 hierarchy was identified
+	CgroupViewV1
+	CgroupViewV2
+)
+
+func (v CgroupView) String() string {
+	switch v {
+	case CgroupViewV1:
+		return "v1"
+	case CgroupViewV2:
+		return "v2"
+	default:
+		return "unknown"
+	}
+}
+
+// DetectCgroupView reports the cgroup hierarchy version mounted at cgroupRoot.
+// The superblock magic from statfs is authoritative and works even when a
+// non-root v2 subtree is configured. The marker-based fallback exists so the
+// detection is testable with ordinary temporary directories (tmpfs), which
+// carry no cgroup superblock.
+func DetectCgroupView(cgroupRoot string) CgroupView {
+	var st unix.Statfs_t
+	if err := unix.Statfs(cgroupRoot, &st); err == nil {
+		switch st.Type {
+		case unix.CGROUP2_SUPER_MAGIC:
+			return CgroupViewV2
+		case unix.CGROUP_SUPER_MAGIC:
+			return CgroupViewV1
+		}
+	}
+	return detectCgroupViewByFiles(cgroupRoot)
+}
+
+// detectCgroupViewByFiles infers the version from well-known control files:
+//   - cgroup.controllers at the root is the cgroup v2 unified-hierarchy marker;
+//   - cgroup.procs without cgroup.controllers is a v1 controller mount;
+//   - otherwise v1 controller subdirectories (each with cgroup.procs) identify
+//     the classic /sys/fs/cgroup tmpfs layout.
+func detectCgroupViewByFiles(cgroupRoot string) CgroupView {
+	if info, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err == nil && !info.IsDir() {
+		return CgroupViewV2
+	}
+	if info, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.procs")); err == nil && !info.IsDir() {
+		return CgroupViewV1
+	}
+	entries, err := os.ReadDir(cgroupRoot)
+	if err != nil {
+		return CgroupViewUnknown
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if info, err := os.Stat(filepath.Join(cgroupRoot, entry.Name(), "cgroup.procs")); err == nil && !info.IsDir() {
+			return CgroupViewV1
+		}
+	}
+	return CgroupViewUnknown
+}
+
+// RequireCgroupV2 refuses to proceed unless cgroupRoot is a cgroup v2
+// hierarchy. BPF identifies a process's cgroup with
+// bpf_get_current_cgroup_id() (the kernfs node id), while userspace resolves
+// scope IDs from the statx inode of the cgroup directory (ResolveCgroupID).
+// These values coincide only on cgroup v2: on v1 (or an unknown view) the
+// kernel ID is unusable for comparison, so default-deny kernel marking and
+// cgroup filtering would silently mis-enforce. Callers must fail closed.
+func RequireCgroupV2(cgroupRoot string) error {
+	switch view := DetectCgroupView(cgroupRoot); view {
+	case CgroupViewV2:
+		return nil
+	case CgroupViewV1:
+		return fmt.Errorf("cgroup v1 detected at %s: kernel cgroup IDs (bpf_get_current_cgroup_id) and userspace scope IDs (statx inode) only match on cgroup v2; refusing cgroup filtering or kernel default-deny marking", cgroupRoot)
+	default:
+		return fmt.Errorf("cannot determine cgroup hierarchy version at %s: refusing cgroup filtering or kernel default-deny marking without a confirmed cgroup v2 view", cgroupRoot)
+	}
+}
+
 // podCgroupDirRe matches the per-pod cgroup directory names kubelet creates:
 // systemd driver "kubepods-pod<uid>.slice" / "kubepods-<qos>-pod<uid>.slice"
 // (prefixed "kubelet-" when kubelet's cgroupRoot is /kubelet, as in kind)

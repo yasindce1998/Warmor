@@ -294,6 +294,33 @@ func TestLSMLoader_PolicyMapAccessor(t *testing.T) {
 	}
 }
 
+func TestParseOnEventLoss(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want OnEventLoss
+		ok   bool
+	}{
+		{"", OnLossLog, true},
+		{"log", OnLossLog, true},
+		{"deny", OnLossDeny, true},
+		{"LOG", OnLossLog, false},
+		{"bogus", OnLossLog, false},
+	} {
+		got, err := ParseOnEventLoss(tc.in)
+		if (err == nil) != tc.ok {
+			t.Errorf("ParseOnEventLoss(%q): err=%v, want ok=%v", tc.in, err, tc.ok)
+		}
+		if got != tc.want {
+			t.Errorf("ParseOnEventLoss(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+	// These are written into lsm_cfg.on_loss and compared against ON_LOSS_*
+	// in bpf/warmor_lsm.h; they are part of the kernel/userspace ABI.
+	if OnLossLog != 0 || OnLossDeny != 1 {
+		t.Fatalf("OnEventLoss wire values changed: log=%d deny=%d", OnLossLog, OnLossDeny)
+	}
+}
+
 func TestKernelBTFAvailable(t *testing.T) {
 	_, err := os.Stat("/sys/kernel/btf/vmlinux")
 	if got := kernelBTFAvailable(); got != (err == nil) {

@@ -177,14 +177,25 @@ func HashPattern(pattern string) uint32 {
 	return h.Sum32()
 }
 
-// Longest strings the BPF programs read in full, per event type. Each program
-// reads its string into a fixed buffer and skips the policy map when the read
-// fills the buffer (the string may have been truncated), so only strings of at
-// most bufsize-2 bytes can ever be matched by a rule.
+// Per-domain caps for string-keyed policy identities. These bound what may be
+// written into the kernel policy map; they are NOT the raw sizes of the BPF
+// sensor buffers.
+//
+// The exec cap is the shared exact-path identity limit, 127 bytes
+// (kernelmap.MaxPolicyPathBytes), NOT the 254 bytes that lsm_exec's
+// policy_key.path[256] could physically hold. The binary WASM ABI exposes only
+// 128 primary-string bytes and reserves one for the truncation/NUL boundary.
+// Accepting a 128..254-byte key would let a raw/external writer install a
+// kernel allow for a path WASM only ever saw as a truncated prefix, breaking
+// the complete-allowlist proof that kernel default-deny depends on. Userspace
+// evaluation is unaffected: WASM still sees the full path; only kernel-map
+// writes beyond 127 bytes are refused, never silently truncated. See
+// docs/design/kernel-default-deny.md. Mount and ptrace are tighter still,
+// bounded by their own sensor buffers.
 const (
-	maxExecPatternLen   = 254 // lsm_exec policy_key.path[256]
-	maxMountPatternLen  = 62  // lsm_mount type_buf[64]
-	maxPtracePatternLen = 15  // task comm, TASK_COMM_LEN 16 (never truncated)
+	maxExecPatternLen   = kernelmap.MaxPolicyPathBytes // 127: WASM ABI 128 minus one reserved byte, not the 256-byte BPF key buffer
+	maxMountPatternLen  = 62                           // lsm_mount type_buf[64]
+	maxPtracePatternLen = 15                           // task comm, TASK_COMM_LEN 16 (never truncated)
 )
 
 // ErrNotKernelMatchable is returned for rules the BPF programs could never
@@ -195,8 +206,19 @@ var ErrNotKernelMatchable = kernelmap.ErrNotKernelMatchable
 
 // stringPolicyKey preserves every byte, with a zero-padded tail. No path
 // cleaning, symlink resolution, or basename substitution is performed.
+// Patterns longer than the shared exact-input limit are refused outright:
+// truncating one would make a partial path a reusable kernel identity that
+// WASM never evaluated in full.
 func stringPolicyKey(cgroupID uint64, eventType uint8, pattern string) (PolicyKey, error) {
 	key := PolicyKey{CgroupID: cgroupID, EventType: eventType}
+	// Enforce the 127-byte identity limit for every string-keyed domain before
+	// the per-domain switch. The BPF key buffer is 256 bytes, but only the
+	// first 127 are a valid complete identity (binary WASM ABI: 128 bytes with
+	// one reserved); anything longer must not reach the kernel map.
+	if len(pattern) > kernelmap.MaxPolicyPathBytes {
+		return key, fmt.Errorf("pattern of %d bytes for event type %d exceeds kernel identity limit %d: %w",
+			len(pattern), eventType, kernelmap.MaxPolicyPathBytes, ErrNotKernelMatchable)
+	}
 	var maxLen int
 	switch eventType {
 	case EventTypeExec:
@@ -285,7 +307,10 @@ func HashPort(port uint16) uint32 {
 }
 
 // SetRule adds or updates a policy rule in the BPF map. Patterns the kernel
-// cannot match exactly are refused with ErrNotKernelMatchable.
+// cannot match exactly — including exec paths longer than
+// kernelmap.MaxPolicyPathBytes (127) — are refused with ErrNotKernelMatchable.
+// They are never truncated to fit the 256-byte BPF key buffer: userspace WASM
+// evaluation still sees the full path, but only kernel-map sync is refused.
 func (m *PolicyMapManager) SetRule(cgroupID uint64, eventType uint8, pattern string, action uint8, audit bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
