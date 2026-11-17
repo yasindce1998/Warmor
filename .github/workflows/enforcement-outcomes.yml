@@ -53,13 +53,10 @@ jobs:
             kernel: ghcr.io/cilium/ci-kernels:stable-selftests
             minor: ''
           - version: '6.1.188'
-            kernel: local
+            kernel: ${{ github.workspace }}/kernel-out/vmlinuz
             minor: '6.1'
     env:
-      # Resolve the absolute path here: matrix include values are static and
-      # ${ { github.workspace } } is not expanded there, which made vimto treat
-      # a relative path as an OCI image reference and fail with UNAUTHORIZED.
-      KERNEL: ${{ matrix.version == '6.1.188' && format('{0}/kernel-out/vmlinuz', github.workspace) || matrix.kernel }}
+      KERNEL: ${{ matrix.kernel }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -74,6 +71,9 @@ jobs:
       - name: Require the restored 6.1.188 kernel image
         if: matrix.version == '6.1.188'
         run: test -f kernel-out/vmlinuz
+      - name: Use the absolute kernel path for vimto
+        if: matrix.version == '6.1.188'
+        run: echo "KERNEL=$GITHUB_WORKSPACE/kernel-out/vmlinuz" >> "$GITHUB_ENV"
       - name: Configure VM cache outside the shared checkout
         run: |
           mkdir -p "$RUNNER_TEMP/warmor-outcome-cache"
