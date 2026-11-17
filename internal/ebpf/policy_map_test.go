@@ -292,7 +292,7 @@ func TestEventPolicyKeyBindUsesBindDomain(t *testing.T) {
 	}); !errors.Is(err, ErrNotKernelMatchable) {
 		t.Fatalf("Operation=bind without Hook=bind: %v", err)
 	}
-	for _, hook := range []string{"listen", "connect_unix", "ptrace"} {
+	for _, hook := range []string{"connect_unix", "ptrace"} {
 		if _, err := eventPolicyKey(newNet(hook)); !errors.Is(err, ErrNotKernelMatchable) {
 			t.Fatalf("hook %q: got %v, want ErrNotKernelMatchable", hook, err)
 		}
@@ -331,8 +331,9 @@ func TestKernelKeyFieldsForEventBindSoundness(t *testing.T) {
 		}
 	}
 	// Hooks with no exact kernel key report no fields, so the enforcer's
-	// decisionDeterminedByKernelKey refuses them.
-	for _, hook := range []string{"listen", "connect_unix", "ptrace"} {
+	// decisionDeterminedByKernelKey refuses them. (Listen has its own key and
+	// is covered in TestKernelKeyFieldsForEventListenerSoundness.)
+	for _, hook := range []string{"connect_unix", "ptrace"} {
 		bind.Hook = hook
 		if got := m.KernelKeyFieldsForEvent(bind); len(got) != 0 {
 			t.Errorf("hook %q key fields = %v, want none", hook, got)
@@ -370,5 +371,161 @@ func TestSyncEventBindDenyWritesExactKernelKey(t *testing.T) {
 	}
 	if _, ok := b.entries[connectKey]; ok {
 		t.Fatal("bind DENY leaked into the connect domain")
+	}
+}
+
+// TestEventPolicyKeyListenUsesListenDomain pins that a listen LSM event is
+// keyed in the EVENT_TYPE_LISTEN domain from {family, port} only. The listen
+// sensor reports no address and labels the family through Protocol; the key
+// must never alias a connect or bind key for the same port/family, and the
+// misleading Operation field must not be trusted to pick the domain.
+func TestEventPolicyKeyListenUsesListenDomain(t *testing.T) {
+	newListen := func(protocol string, port uint16) *api.Event {
+		return &api.Event{
+			Type: api.EventTypeNetwork, CgroupID: 42, LSMEvent: true, Hook: "listen",
+			Network: &api.NetworkEvent{Operation: "listen", Protocol: protocol, RemotePort: port},
+		}
+	}
+	kl, err := eventPolicyKey(newListen("tcp", 8080))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kl.EventType != EventTypeListen || kl.CgroupID != 42 || kl.Family != 2 {
+		t.Fatalf("listen key = %+v, want listen/42/family 2", kl)
+	}
+	if kl.Port != [2]byte{0x1f, 0x90} {
+		t.Fatalf("listen port bytes = %x, want 1f90", kl.Port)
+	}
+	if kl.Address != [16]byte{} || kl.Path != [256]byte{} || kl.Pad != [4]uint8{} {
+		t.Fatalf("listen key has a nonzero address/path/pad: %+v", kl)
+	}
+
+	// IPv6 selects family 10; the port bytes stay big-endian.
+	kl6, err := eventPolicyKey(newListen("tcp6", 8080))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kl6.EventType != EventTypeListen || kl6.Family != 10 || kl6.Port != kl.Port {
+		t.Fatalf("listen tcp6 key = %+v", kl6)
+	}
+
+	// Same cgroup/family/port, but a different domain: never alias connect
+	// or bind. "0.0.0.0"/"::" produce the same all-zero address the listen
+	// key has, so only the event type separates them.
+	for _, tc := range []struct {
+		addr string
+		kl   PolicyKey
+	}{{"0.0.0.0", kl}, {"::", kl6}} {
+		for _, typ := range []uint8{EventTypeNetwork, EventTypeBind} {
+			ke, err := endpointPolicyKey(42, typ, tc.addr, 8080)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.kl == ke {
+				t.Fatalf("listen key aliased domain %d for %s", typ, tc.addr)
+			}
+		}
+	}
+
+	// Operation is not the domain discriminator: some paths report
+	// Operation="connect" for a listen hook, which must still be a listen key.
+	opEvent := newListen("tcp", 8080)
+	opEvent.Network.Operation = "connect"
+	kOp, err := eventPolicyKey(opEvent)
+	if err != nil || kOp != kl {
+		t.Fatalf("listen with Operation=connect: key=%+v err=%v", kOp, err)
+	}
+
+	// An unknown family label is refused rather than guessed.
+	if _, err := eventPolicyKey(newListen("udp", 8080)); !errors.Is(err, ErrNotKernelMatchable) {
+		t.Fatalf("unknown protocol: %v", err)
+	}
+}
+
+// TestKernelKeyFieldsForEventListenerSoundness checks the hook-aware key-field
+// report used to gate writes. A listen decision is matchable only from
+// remote_port: the kernel key has no remote_addr and protocol is key metadata
+// that is deliberately not a policy-visible key field. Anything else makes it
+// unsound and must be refused before any map write.
+func TestKernelKeyFieldsForEventListenerSoundness(t *testing.T) {
+	m := &PolicyMapManager{}
+	listen := &api.Event{
+		Type: api.EventTypeNetwork, CgroupID: 42, LSMEvent: true, Hook: "listen",
+		Network: &api.NetworkEvent{Operation: "listen", Protocol: "tcp", RemotePort: 8080},
+	}
+	keyFields := m.KernelKeyFieldsForEvent(listen)
+	if want := []string{"remote_port"}; !reflect.DeepEqual(keyFields, want) {
+		t.Fatalf("listen key fields = %v, want %v", keyFields, want)
+	}
+	portOnly := compiler.FieldMask(keyFields...)
+	for _, tc := range []struct {
+		name   string
+		fields uint32
+		want   bool // determined by key => safe to sync
+	}{
+		{"port only", portOnly, true},
+		{"port + remote addr", portOnly | compiler.FieldBitRemoteAddr, false},
+		{"port + protocol", portOnly | compiler.FieldBitProtocol, false},
+		{"port + operation", portOnly | compiler.FieldBitOperation, false},
+		{"port + uid", portOnly | compiler.FieldBitUID, false},
+		{"port + wall clock", portOnly | compiler.FieldBitTime, false},
+		{"port + container age", portOnly | compiler.FieldBitContainerAge, false},
+		{"undeclared", compiler.FieldsUnknown, false},
+	} {
+		got := tc.fields&^portOnly == 0 && tc.fields != compiler.FieldsUnknown
+		if got != tc.want {
+			t.Errorf("%s: determined=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// The other network hooks keep their exact endpoint report.
+	listen.Hook = "connect"
+	if got := m.KernelKeyFieldsForEvent(listen); !reflect.DeepEqual(got, []string{"remote_addr", "remote_port"}) {
+		t.Errorf("connect key fields changed: %v", got)
+	}
+}
+
+// TestSyncEventListenDenyWritesExactKernelKey proves a listen DENY is written
+// under the family+port listen key (dynamic-only, no address), preserves the
+// audit flag, and never leaks into the connect or bind domains.
+func TestSyncEventListenDenyWritesExactKernelKey(t *testing.T) {
+	b := newFakeBackend()
+	m := &PolicyMapManager{policyMap: b}
+	listen := &api.Event{
+		Type: api.EventTypeNetwork, CgroupID: 42, LSMEvent: true, Hook: "listen",
+		Network: &api.NetworkEvent{Operation: "listen", Protocol: "tcp", RemotePort: 8080},
+	}
+	if err := m.SyncEvent(listen, ActionDeny, true); err != nil {
+		t.Fatalf("SyncEvent listen DENY: %v", err)
+	}
+	listenKey := listenPolicyKey(42, 2, 8080)
+	v, ok := b.entries[listenKey]
+	if !ok {
+		t.Fatalf("listen DENY not written to policy map: %+v", b.entries)
+	}
+	if v.Action != ActionDeny || v.Audit != 1 {
+		t.Fatalf("listen entry = %+v, want action=deny audit=1", v)
+	}
+	for _, typ := range []uint8{EventTypeNetwork, EventTypeBind} {
+		ke, err := endpointPolicyKey(42, typ, "0.0.0.0", 8080)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := b.entries[ke]; ok {
+			t.Fatalf("listen DENY leaked into domain %d", typ)
+		}
+	}
+
+	// A tcp6 listen on the same port is a distinct key (family 10), and its
+	// audit flag is carried independently.
+	listen6 := &api.Event{
+		Type: api.EventTypeNetwork, CgroupID: 42, LSMEvent: true, Hook: "listen",
+		Network: &api.NetworkEvent{Operation: "listen", Protocol: "tcp6", RemotePort: 8080},
+	}
+	if err := m.SyncEvent(listen6, ActionDeny, false); err != nil {
+		t.Fatalf("SyncEvent listen tcp6 DENY: %v", err)
+	}
+	v6, ok := b.entries[listenPolicyKey(42, 10, 8080)]
+	if !ok || v6.Action != ActionDeny || v6.Audit != 0 {
+		t.Fatalf("listen tcp6 entry = %+v, want action=deny audit=0", v6)
 	}
 }

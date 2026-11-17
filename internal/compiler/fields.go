@@ -23,14 +23,17 @@ import (
 // the declaration must be exhaustive or cached and kernel-compiled decisions
 // will be applied to events the policy would have decided differently.
 //
-// Note for network policies on Linux: bind and connect share this single
-// network declaration (the ABI has no separate bind domain), while the live
-// sensor reports operation "connect" for bind events. Because the kernel's
-// bind key covers only remote_addr/remote_port, a policy that reads
+// Note for network policies on Linux: bind, listen and connect share this
+// single network declaration (the ABI has no separate per-hook domain), while
+// the live sensor reports operation "connect" for bind events. Because the
+// kernel's bind key covers only remote_addr/remote_port, a policy that reads
 // "operation" cannot have its bind decisions compiled into the kernel map;
 // such decisions are refused rather than applied to other events. For now,
 // network policies that want the bind kernel fast-path must not read
-// "operation".
+// "operation". Listen is keyed by family+port only: its kernel key carries no
+// address, so a listen decision that reads "remote_addr" or "protocol" is
+// likewise refused rather than applied to other events; only "remote_port"
+// is a sound listen key field.
 const (
 	FieldBitPID        = policymeta.FieldBitPID
 	FieldBitUID        = policymeta.FieldBitUID
@@ -45,6 +48,13 @@ const (
 	FieldBitRemotePort = policymeta.FieldBitRemotePort
 	FieldBitLocalPort  = policymeta.FieldBitLocalPort
 
+	// Process-context capture fields, added to the vocabulary so policies that
+	// read them can declare the dependency. The host capture-quality gate
+	// treats their absence on a trusted live event as incomplete capture.
+	FieldBitPPID       = policymeta.FieldBitPPID
+	FieldBitParentComm = policymeta.FieldBitParentComm
+	FieldBitCgroupID   = policymeta.FieldBitCgroupID
+
 	// FieldBitTime and FieldBitContainerAge are not event fields but the
 	// temporal context the host sends to ABI >= 3 modules (the event's wall
 	// clock and its container's age). A decision depending on either can
@@ -52,6 +62,13 @@ const (
 	// and no kernel key covers it.
 	FieldBitTime         = policymeta.FieldBitTime
 	FieldBitContainerAge = policymeta.FieldBitContainerAge
+
+	// FieldBitRequireCompleteCapture is a policy-level declaration bit in the
+	// fields-read mask. When a non-unknown mask carries it, the host gate
+	// verifies that every capturable field in that mask was captured in full
+	// before evaluating. It is a declaration of NEED, never a guest claim that
+	// its inputs were actually complete (the host derives that itself).
+	FieldBitRequireCompleteCapture = policymeta.FieldBitRequireCompleteCapture
 
 	// FieldsUnknown means the decision may depend on any part of the event.
 	FieldsUnknown = policymeta.FieldsUnknown
@@ -73,6 +90,13 @@ var fieldBits = map[string]uint32{
 	"remote_addr": FieldBitRemoteAddr,
 	"remote_port": FieldBitRemotePort,
 	"local_port":  FieldBitLocalPort,
+
+	// Process-context capture fields (ABI v4 JSON / declaration vocabulary).
+	// They are kept out of fieldsForEvent until codegen emits host callbacks
+	// for them, but their bits are available for declarations and the gate.
+	"ppid":        FieldBitPPID,
+	"parent_comm": FieldBitParentComm,
+	"cgroup_id":   FieldBitCgroupID,
 
 	// Temporal context, read by rules with a temporal: block.
 	"wall_clock":    FieldBitTime,
@@ -123,10 +147,18 @@ var eventTypeIDs = []struct {
 // FieldBitTime/FieldBitContainerAge for rules with a temporal block that
 // reads the clock or container age. The default action and rule order are
 // constants of the policy, so these inputs fully determine the decision.
+//
+// A policy with RequireCompleteCapture ORs FieldBitRequireCompleteCapture into
+// every event's mask. That bit is a policy-level request for a host-side
+// quality gate; it is carried through the same warmor_fields_read declaration
+// export and never asserts that the inputs were actually captured well.
 func FieldsRead(policy *Policy) map[int]uint32 {
 	out := make(map[int]uint32, len(eventTypeIDs))
 	for _, et := range eventTypeIDs {
 		var m uint32
+		if policy != nil && policy.RequireCompleteCapture {
+			m |= FieldBitRequireCompleteCapture
+		}
 		for _, r := range rulesForEvent(policy, et.name) {
 			for _, list := range [][]Condition{r.Conditions.All, r.Conditions.Any, r.Conditions.Not} {
 				for _, c := range list {

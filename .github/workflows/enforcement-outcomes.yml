@@ -40,16 +40,40 @@ concurrency:
 
 jobs:
   whole-daemon-outcomes:
-    name: Whole-daemon prevention and termination (VM)
-    runs-on: ubuntu-24.04
+    name: Whole-daemon prevention and termination (${{ matrix.version }})
+    # Match lsm-test.yml's ima-kernel runner so actions/cache restores the
+    # exact kernel image that workflow built for 6.1.188.
+    runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: stable
+            kernel: ghcr.io/cilium/ci-kernels:stable-selftests
+            minor: ''
+          - version: '6.1.188'
+            kernel: ${{ github.workspace }}/kernel-out/vmlinuz
+            minor: '6.1'
     env:
-      KERNEL: ghcr.io/cilium/ci-kernels:stable-selftests
+      KERNEL: ${{ matrix.kernel }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Restore cached 6.1.188 IMA kernel built by lsm-test.yml
+        if: matrix.version == '6.1.188'
+        uses: actions/cache/restore@v4
+        with:
+          path: kernel-out
+          key: ima-kernel-6.1.188-${{ hashFiles('ci/kernel/**', 'scripts/build-ci-kernel.sh') }}
+      - name: Require the restored 6.1.188 kernel image
+        if: matrix.version == '6.1.188'
+        run: test -f kernel-out/vmlinuz
+      - name: Use the absolute kernel path for vimto
+        if: matrix.version == '6.1.188'
+        run: echo "KERNEL=$GITHUB_WORKSPACE/kernel-out/vmlinuz" >> "$GITHUB_ENV"
       - name: Configure VM cache outside the shared checkout
         run: |
           mkdir -p "$RUNNER_TEMP/warmor-outcome-cache"

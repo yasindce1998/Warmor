@@ -90,7 +90,7 @@ func TestParentReadyValidationRejectsMalformedObservations(t *testing.T) {
 		"missing events":    func(r *Ready) { r.Metadata.Events = nil },
 		"duplicate events":  func(r *Ready) { r.Metadata.Events[1] = r.Metadata.Events[0] },
 		"missing domain":    func(r *Ready) { r.Metadata.Domains = r.Metadata.Domains[:1] },
-		"unknown ABI":       func(r *Ready) { r.Metadata.ABIVersion = 6 },
+		"unknown ABI":       func(r *Ready) { r.Metadata.ABIVersion = 7 },
 		"unknown flags":     func(r *Ready) { r.Metadata.Events[0].Flags |= 1 << 31 },
 		"long path": func(r *Ready) {
 			r.Metadata.Domains[0].Rules[0].Pattern = strings.Repeat("a", policymeta.MaxPatternBytes+1)

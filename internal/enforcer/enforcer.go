@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -89,6 +91,16 @@ type Options struct {
 	// "deny") configure the kernel event ring; see platform.Config.
 	LSMRingBufferSize uint32
 	OnEventLoss       string
+
+	// OnIncompleteInput ("log", "audit" or "deny") configures the host-side
+	// capture-quality gate. When a policy declares it requires complete
+	// capture (policymeta.FieldBitRequireCompleteCapture) and the event is
+	// missing one of the capturable fields the policy reads, "deny" fails
+	// closed in enforce mode, "audit" records a would-deny, and "log" (the
+	// default) only logs. This mirrors --on-event-loss but is enforced in the
+	// userspace decision path against host-computed event quality: no guest
+	// export can prove its own inputs were complete.
+	OnIncompleteInput string
 
 	// DefaultDeny preloads the policy's static allow rules into the kernel
 	// policy map and marks the eligible domains default-deny, so the BPF
@@ -204,14 +216,20 @@ type Enforcer struct {
 	evalTimeout     time.Duration
 	policyID        string // metrics label (see policyID()); guarded by evaluatorMu
 	syncFailLog     logLimiter
-	auditMode       bool
-	learningMode    bool
-	defaultDeny     bool
-	ctx             context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
-	stopOnce        sync.Once
-	processing      atomic.Bool
+	// syncHealth tracks recent kernel policy-map sync outcomes for posture
+	// reporting only; the zero value is healthy. It never gates Ready().
+	syncHealth   kernelSyncHealth
+	auditMode    bool
+	learningMode bool
+	defaultDeny  bool
+	// onIncompleteInput is the normalized capture-quality gate mode
+	// ("log", "audit" or "deny"); empty is treated as "log".
+	onIncompleteInput string
+	ctx               context.Context
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
+	stopOnce          sync.Once
+	processing        atomic.Bool
 }
 
 // newPlatform constructs the platform monitor. It is a variable so tests can
@@ -297,6 +315,18 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	logger.LogStartup(policyPath)
 	if opts.AuditMode || opts.LearningMode {
 		logger.LogInfo("Dry-run posture: kernel blocking and userspace termination disabled; integrity checks audit-only")
+	}
+
+	// Normalize the capture-quality gate mode once. An empty value keeps the
+	// historical behavior (log-only) so existing deployments are unaffected.
+	onIncompleteInput := opts.OnIncompleteInput
+	if onIncompleteInput == "" {
+		onIncompleteInput = "log"
+	}
+	switch onIncompleteInput {
+	case "log", "audit", "deny":
+	default:
+		return nil, fmt.Errorf("invalid OnIncompleteInput %q (valid: log, audit, deny)", opts.OnIncompleteInput)
 	}
 
 	// Initialize network filter if configured. This only validates config,
@@ -541,39 +571,40 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	ctx, cancel := context.WithCancel(ctx)
 
 	e := &Enforcer{
-		platform:         plat,
-		wasmRuntime:      backend.runtime,
-		evaluator:        evaluator,
-		pool:             backend.pool,
-		backend:          backend,
-		supervisor:       supervisor,
-		signedAssignment: opts.ExpectedAssignment != nil,
-		kernelEnforce:    kernelBlocking,
-		requireLSM:       opts.RequireLSM,
-		lsmEnforce:       opts.LSMEnforce,
-		cache:            decisionCache,
-		actionHandler:    actionHandler,
-		logger:           logger,
-		metricsServer:    metricsServer,
-		policyMap:        policyMapSyncer,
-		pipeline:         pipeline,
-		lineageTracker:   tracker,
-		intelligence:     intel,
-		driftCollector:   driftCollector,
-		telemetry:        opts.Telemetry,
-		netFilter:        netFilter,
-		sandbox:          sandboxMgr,
-		escape:           escapeDetector,
-		containerStarts:  cgroups,
-		policyPath:       policyPath,
-		verifyKey:        append(ed25519.PublicKey(nil), opts.PolicyVerifyKey...),
-		policyID:         pid,
-		evalTimeout:      opts.EvalTimeout,
-		auditMode:        opts.AuditMode,
-		learningMode:     opts.LearningMode,
-		defaultDeny:      opts.DefaultDeny,
-		ctx:              ctx,
-		cancel:           cancel,
+		platform:          plat,
+		wasmRuntime:       backend.runtime,
+		evaluator:         evaluator,
+		pool:              backend.pool,
+		backend:           backend,
+		supervisor:        supervisor,
+		signedAssignment:  opts.ExpectedAssignment != nil,
+		kernelEnforce:     kernelBlocking,
+		requireLSM:        opts.RequireLSM,
+		lsmEnforce:        opts.LSMEnforce,
+		cache:             decisionCache,
+		actionHandler:     actionHandler,
+		logger:            logger,
+		metricsServer:     metricsServer,
+		policyMap:         policyMapSyncer,
+		pipeline:          pipeline,
+		lineageTracker:    tracker,
+		intelligence:      intel,
+		driftCollector:    driftCollector,
+		telemetry:         opts.Telemetry,
+		netFilter:         netFilter,
+		sandbox:           sandboxMgr,
+		escape:            escapeDetector,
+		containerStarts:   cgroups,
+		policyPath:        policyPath,
+		verifyKey:         append(ed25519.PublicKey(nil), opts.PolicyVerifyKey...),
+		policyID:          pid,
+		evalTimeout:       opts.EvalTimeout,
+		auditMode:         opts.AuditMode,
+		learningMode:      opts.LearningMode,
+		defaultDeny:       opts.DefaultDeny,
+		onIncompleteInput: onIncompleteInput,
+		ctx:               ctx,
+		cancel:            cancel,
 	}
 	backend = nil // e now owns the complete backend lifetime
 	if opts.ExpectedAssignment != nil {
@@ -591,7 +622,14 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		}
 	}
 
-	metricsServer.SetReadinessCheck(e.Ready)
+	// Readiness reporting also refreshes the kernel-sync posture gauge, but the
+	// verdict is unchanged: a degraded kernel fast path never makes the daemon
+	// unready (observability only).
+	metricsServer.SetReadinessCheck(func() error {
+		err := e.Ready()
+		metrics.SetKernelSyncHealthy(e.KernelSyncHealthy())
+		return err
+	})
 
 	// Preload the kernel default-deny domains from the policy's static
 	// rules. No events flow yet; decisionMu is uncontended but held for
@@ -680,6 +718,48 @@ func (e *Enforcer) eventLoop() {
 			e.handleEvent(event)
 		}
 	}
+}
+
+// captureQualityGate is the HOST-ENFORCED input-quality gate. It compares the
+// capturable fields a policy declared it requires (a worker observation carried
+// on fields_read) against the quality mask derived from kernel telemetry on
+// the raw event. The declaration can only name inputs to verify; the host, and
+// only the host, decides whether they were actually captured well. No guest
+// export, module metadata or worker claim can prove input completeness here.
+//
+// It returns a replacement verdict when the gate fires, or logOnly when the
+// configured mode is "log" (the issue is logged but evaluation proceeds).
+// A policy with no declaration returns no verdict and no issue, preserving the
+// behavior of every existing policy.
+func (e *Enforcer) captureQualityGate(event *api.Event, evaluator policymeta.Source) (verdict *api.ActionResult, logOnly bool) {
+	required := policymeta.RequiredCaptureFields(evaluator.FieldsRead(event.GetType()))
+	if required == 0 {
+		return nil, false
+	}
+	incomplete := policymeta.IncompleteCaptureFields(event)
+	missing := required & incomplete
+	if missing == 0 {
+		return nil, false
+	}
+
+	mode := e.onIncompleteInput
+	if mode == "" {
+		mode = "log"
+	}
+	reason := fmt.Sprintf("incomplete input capture: policy requires complete %s",
+		strings.Join(policymeta.CaptureFieldNames(missing), ", "))
+	if mode == "log" {
+		return nil, true
+	}
+	result := &api.ActionResult{
+		Action:    api.ActionDeny,
+		Reason:    reason,
+		Timestamp: time.Now(),
+		// "audit" is a would-deny: recorded but never enforced. "deny" in a
+		// global audit/learning dry-run is downgraded by ActionHandler.Enforce.
+		Audit: mode == "audit",
+	}
+	return result, false
 }
 
 // handleEvent processes a single event with caching and metrics
@@ -815,6 +895,30 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	if captured != nil {
 		evaluator, gen, pid = captured.evaluator, captured.id, captured.policyID
 	}
+
+	// HOST-ENFORCED capture-quality gate. It runs before the decision cache and
+	// before evaluation: an event missing a field the policy declared required
+	// must never be evaluated against empty values nor reuse a cached verdict.
+	// Completeness comes from the raw event only; the declaration only selects
+	// which inputs to check. A gate verdict is event-specific and is therefore
+	// never persisted to the cache or the kernel policy map.
+	if verdict, logOnly := e.captureQualityGate(event, evaluator); verdict != nil {
+		_ = e.actionHandler.Enforce(e.ctx, event, verdict)
+		e.reportOutcome(event, verdict, nil)
+		e.logger.LogEvent(event, verdict)
+		metrics.RecordEvent(verdict.Action.String())
+		metrics.RecordLatency(0)
+		if e.pipeline != nil {
+			e.pipeline.Emit(event, verdict)
+		}
+		return
+	} else if logOnly {
+		e.logger.LogInfo("incomplete input capture (on-incomplete-input=log): " +
+			strings.Join(policymeta.CaptureFieldNames(
+				policymeta.RequiredCaptureFields(evaluator.FieldsRead(event.GetType()))&
+					policymeta.IncompleteCaptureFields(event)), ", "))
+	}
+
 	cacheUsable := true
 	if host, ok := evaluator.(*hostEvaluator); ok {
 		cacheUsable = host.Alive()
@@ -902,12 +1006,13 @@ type kernelKeyFielder interface {
 }
 
 // hookKernelKeyFielder is the stronger form implemented by maps whose kernel
-// key depends on the LSM hook as well as the event type. On Linux, bind and
-// connect share event type network but use different policy_map domains
-// (EVENT_TYPE_BIND vs EVENT_TYPE_NETWORK); a bind decision may only be
-// written under the bind key, which exists solely for Hook=="bind". Maps that
+// key depends on the LSM hook as well as the event type. On Linux, bind,
+// listen and connect share event type network but use different policy_map
+// domains (EVENT_TYPE_BIND, EVENT_TYPE_LISTEN vs EVENT_TYPE_NETWORK); a bind
+// decision may only be written under the bind key (Hook=="bind") and a listen
+// decision only under the port-only listen key (Hook=="listen"). Maps that
 // implement this interface are always queried through it, so a hook without
-// an exact key (e.g. connect_unix, listen) never receives a decision.
+// an exact key (e.g. connect_unix) never receives a decision.
 type hookKernelKeyFielder interface {
 	KernelKeyFieldsForEvent(event *api.Event) []string
 }
@@ -1032,18 +1137,20 @@ func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, g
 	// LSM-origin events are normally recorded, never re-synced: the kernel
 	// already reached its verdict from a policy snapshot, and writing a fresh
 	// decision back could apply it to events from a different generation.
-	// Bind is the single deliberate exception. The bind hook (lsm_bind.bpf.c)
-	// looks up the exact {cgroup, family, addr, port, EVENT_TYPE_BIND} key; on
-	// a miss it emits this event and returns 0, so the kernel has *already
-	// accepted* this bind and there is no in-flight operation left to
-	// re-decide. Userspace then evaluates the complete event, and the write
-	// goes back under that very same exact key, so no other operation is
-	// affected. Bind is dynamic-only (no default-deny domain): a miss stays
-	// an allow until a DENY is explicitly installed, so no allowlist
-	// completeness is claimed. Audit downgrade is folded in by syncDecision.
-	bindWriteback := event.LSMEvent && !event.KernelDenied &&
-		event.GetType() == api.EventTypeNetwork && event.Hook == "bind"
-	if e.policyMap != nil && (!event.LSMEvent || bindWriteback) &&
+	// Bind and listen are the only deliberate exceptions. Both hooks look up
+	// an exact key (bind: {cgroup, family, addr, port, EVENT_TYPE_BIND};
+	// listen: {cgroup, family, port, EVENT_TYPE_LISTEN} — no address) and, on
+	// a miss, emit this event and return 0. So the kernel has *already
+	// accepted* the operation and there is no in-flight operation left to
+	// re-decide. Userspace evaluates the complete event and the write goes
+	// back under that very same exact key, so no other operation is affected.
+	// Both are dynamic-only (no default-deny domain): a miss stays an allow
+	// until a DENY is explicitly installed, so no allowlist completeness is
+	// claimed. Audit downgrade is folded in by syncDecision.
+	lsmMissWriteback := event.LSMEvent && !event.KernelDenied &&
+		event.GetType() == api.EventTypeNetwork &&
+		(event.Hook == "bind" || event.Hook == "listen")
+	if e.policyMap != nil && (!event.LSMEvent || lsmMissWriteback) &&
 		(e.supervisor == nil || evaluator.LinuxKernelCacheEligible(event.GetType())) {
 		// Failures are counted and rate-limit logged inside; the event
 		// itself is already enforced in userspace.
@@ -1143,20 +1250,160 @@ var (
 	errNotKeyDetermined = errors.New("decision not determined by the kernel key")
 )
 
+// Bounds for the kernel fast-path posture. The window keeps a single old
+// failure from degrading the posture forever; the thresholds keep it from
+// flapping on a transient blip.
+const (
+	kernelSyncWindow           = 32
+	kernelSyncFailureThreshold = 8 // degrade only when the window holds > 8 failures
+	kernelSyncRecoveryStreak   = 4 // require 4 consecutive successes to recover
+)
+
+// kernelSyncHealth tracks recent kernel policy-map sync outcomes for posture
+// reporting. It is observability-only: Enforcer.Ready() deliberately does not
+// consult it, so a degrading fast path never makes the daemon unready. The zero
+// value is healthy, so an enforcer that has never synced reports health.
+type kernelSyncHealth struct {
+	mu       sync.Mutex
+	outcomes [kernelSyncWindow]bool // ring buffer; true means a failure
+	next     int
+	filled   int
+	failures int
+	goodRun  int
+	degraded bool
+}
+
+// record folds in one sync outcome and returns the resulting posture.
+func (h *kernelSyncHealth) record(success bool) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.filled < kernelSyncWindow {
+		h.filled++
+	} else if h.outcomes[h.next] {
+		h.failures--
+	}
+	h.outcomes[h.next] = !success
+	if !success {
+		h.failures++
+	}
+	h.next = (h.next + 1) % kernelSyncWindow
+
+	if success {
+		h.goodRun++
+	} else {
+		h.goodRun = 0
+	}
+
+	// Hysteresis: a single failure (or a lone success) cannot flip the
+	// posture. We degrade only past the failure threshold and recover only
+	// after a streak of successes, then start a fresh window so one failure
+	// after recovery does not immediately degrade again.
+	switch {
+	case h.goodRun >= kernelSyncRecoveryStreak:
+		h.outcomes = [kernelSyncWindow]bool{}
+		h.next, h.filled, h.failures, h.goodRun, h.degraded = 0, 0, 0, 0, false
+	case h.failures > kernelSyncFailureThreshold:
+		h.degraded = true
+	}
+	return !h.degraded
+}
+
+func (h *kernelSyncHealth) healthy() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return !h.degraded
+}
+
+// stats is a test-only view of the recent failure count and posture.
+func (h *kernelSyncHealth) stats() (failures int, healthy bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.failures, !h.degraded
+}
+
+// kernelSyncFailureReason maps a sync error to the bounded reason set exported
+// by internal/metrics. It never returns a raw error string: label cardinality
+// must stay fixed even as new error text appears in the kernel layer.
+func kernelSyncFailureReason(err error) string {
+	switch {
+	case err == nil:
+		return metrics.SyncReasonUnknown // callers only pass failures
+	case errors.Is(err, errStaleDecision), errors.Is(err, kernelmap.ErrStaleGeneration):
+		return metrics.SyncReasonGenerationStale
+	case errors.Is(err, errNotKeyDetermined), errors.Is(err, kernelmap.ErrNotKernelMatchable):
+		return metrics.SyncReasonInvalidKey
+	case errors.Is(err, syscall.E2BIG), errors.Is(err, syscall.ENOSPC):
+		return metrics.SyncReasonMapFull
+	case errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EACCES):
+		return metrics.SyncReasonVerifierReject
+	default:
+		return metrics.SyncReasonUnknown
+	}
+}
+
+// recordKernelSyncOutcome updates the posture and publishes it. The platform
+// sink, when present, mirrors the signal for readiness reporting; it does not
+// change the platform's Ready() verdict.
+func (e *Enforcer) recordKernelSyncOutcome(success bool) {
+	healthy := e.syncHealth.record(success)
+	metrics.SetKernelSyncHealthy(healthy)
+	if sink, ok := e.platform.(interface{ SetKernelSyncHealthy(bool) }); ok {
+		sink.SetKernelSyncHealthy(healthy)
+	}
+}
+
+// recordKernelSyncFailure counts one decision that did not reach the kernel
+// fast path under a bounded reason and updates the posture.
+func (e *Enforcer) recordKernelSyncFailure(err error) {
+	metrics.RecordKernelSyncFailure(kernelSyncFailureReason(err))
+	e.recordKernelSyncOutcome(false)
+}
+
+// KernelSyncHealthy reports whether recent kernel policy-map syncs are below
+// the degraded threshold. It is an observability signal only: Ready() does not
+// consult it, so kernel fast-path degradation never makes the daemon unready.
+func (e *Enforcer) KernelSyncHealthy() bool {
+	return e.syncHealth.healthy()
+}
+
+// ReadinessPosture is an observability view of local readiness. KernelSyncHealthy
+// is reported next to the readiness gate but is explicitly not part of it.
+type ReadinessPosture struct {
+	Ready             bool
+	KernelSyncHealthy bool
+}
+
+// ReadinessReport returns the current readiness posture for reporting. Its
+// Ready field comes from the unchanged Ready() gate; the kernel-sync signal is
+// informational so dashboards can spot degrading fast-path coverage.
+func (e *Enforcer) ReadinessReport() ReadinessPosture {
+	return ReadinessPosture{
+		Ready:             e.Ready() == nil,
+		KernelSyncHealthy: e.KernelSyncHealthy(),
+	}
+}
+
 // recordSync counts the outcome of one kernel sync and logs failures, at
 // most once per syncFailureLogInterval.
 func (e *Enforcer) recordSync(event *api.Event, err error) {
 	switch {
 	case err == nil:
 		metrics.RecordPolicyMapSync(metrics.SyncSynced)
+		metrics.RecordKernelSyncSuccess()
+		e.recordKernelSyncOutcome(true)
 	case errors.Is(err, errStaleDecision):
 		metrics.RecordPolicyMapSync(metrics.SyncSkippedStale)
+		e.recordKernelSyncFailure(err)
 	case errors.Is(err, errNotKeyDetermined):
 		metrics.RecordPolicyMapSync(metrics.SyncSkippedUnsound)
+		e.recordKernelSyncFailure(err)
 	case errors.Is(err, kernelmap.ErrNotKernelMatchable):
 		metrics.RecordPolicyMapSync(metrics.SyncSkippedUnmatchable)
+		e.recordKernelSyncFailure(err)
 	default:
 		metrics.RecordPolicyMapSync(metrics.SyncFailed)
+		e.recordKernelSyncFailure(err)
 		if ok, suppressed := e.syncFailLog.allow(time.Now()); ok && e.logger != nil {
 			msg := fmt.Sprintf("sync %s decision to kernel policy map (userspace still enforces it)", event.GetType())
 			if suppressed > 0 {

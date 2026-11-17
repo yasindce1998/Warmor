@@ -3,6 +3,8 @@
 package ebpf
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"strings"
 	"testing"
@@ -131,5 +133,82 @@ func TestSyncFromWASMSkipsOverlongRuleWithoutTruncatedKey(t *testing.T) {
 	}
 	if _, ok := b.entries[mustStringKey(t, 42, EventTypeExec, overlong[:kernelmap.MaxPolicyPathBytes])]; ok {
 		t.Fatal("SyncFromWASM installed a truncated prefix key")
+	}
+}
+
+// TestListenPolicyKeyWireBytes pins the exact 288-byte layout of the listen
+// key against lsm_listen.bpf.c: only cgroup_id, EVENT_TYPE_LISTEN, the raw
+// skc_family and the big-endian port are set. The address, path and pad bytes
+// are never populated by the kernel hook and must stay zero.
+func TestListenPolicyKeyWireBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		family     uint8
+		port       uint16
+		wantFamily byte
+		wantPort   []byte
+	}{
+		{"v4", 2, 8080, 2, []byte{0x1f, 0x90}},  // 8080 = 0x1f90
+		{"v6", 10, 443, 10, []byte{0x01, 0xbb}}, // 443 = 0x01bb
+		{"v4 edge", 2, 0x1234, 2, []byte{0x12, 0x34}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k := listenPolicyKey(0x0102030405060708, tc.family, tc.port)
+			b, err := k.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(b) != 288 {
+				t.Fatalf("key length = %d, want 288", len(b))
+			}
+			if binary.NativeEndian.Uint64(b[:8]) != 0x0102030405060708 {
+				t.Fatalf("cgroup bytes = %x", b[:8])
+			}
+			if b[8] != EventTypeListen {
+				t.Fatalf("event_type = %d, want %d", b[8], EventTypeListen)
+			}
+			if b[9] != tc.wantFamily {
+				t.Fatalf("family = %d, want %d", b[9], tc.wantFamily)
+			}
+			if !bytes.Equal(b[10:12], tc.wantPort) {
+				t.Fatalf("port bytes = %x, want %x", b[10:12], tc.wantPort)
+			}
+			// address[16] + path[256] + pad[4] = 276 zero bytes.
+			if tail := b[12:]; !bytes.Equal(tail, make([]byte, len(tail))) {
+				t.Fatalf("listen key tail (address/path/pad) is not zero: %x", tail)
+			}
+		})
+	}
+}
+
+// TestConnectBindKeysRemainByteIdentical guards the requirement that adding
+// listen support does not perturb the existing connect/bind endpoint keys:
+// family, big-endian port and the canonical address bytes are unchanged for
+// both EVENT_TYPE_NETWORK and EVENT_TYPE_BIND.
+func TestConnectBindKeysRemainByteIdentical(t *testing.T) {
+	for _, tc := range []struct {
+		addr   string
+		family byte
+		raw    []byte
+	}{
+		{"192.168.1.20", 2, []byte{192, 168, 1, 20}},
+		{"2001:db8::1", 10, []byte{0x20, 1, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}},
+	} {
+		for _, typ := range []uint8{EventTypeNetwork, EventTypeBind} {
+			k, err := endpointPolicyKey(1, typ, tc.addr, 0x1234)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := k.MarshalBinary()
+			if b[8] != typ || b[9] != tc.family ||
+				!bytes.Equal(b[10:12], []byte{0x12, 0x34}) ||
+				!bytes.Equal(b[12:12+len(tc.raw)], tc.raw) {
+				t.Fatalf("domain %d %s wire bytes changed: %x", typ, tc.addr, b)
+			}
+			// Every byte past the address must still be zero for an endpoint key.
+			if tail := b[12+len(tc.raw):]; !bytes.Equal(tail, make([]byte, len(tail))) {
+				t.Fatalf("domain %d %s nonzero tail: %x", typ, tc.addr, tail)
+			}
+		}
 	}
 }

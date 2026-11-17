@@ -49,12 +49,13 @@ func TestMetadataActualUnknownABIFailsLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rt.Close(ctx)
-	// Replace the fixture's actual abi_version return from 3 to 6 without
-	// providing any separate policy-supplied metadata document.
+	// Replace the fixture's actual abi_version return from 3 to 7 (the first
+	// future version this host does not implement) without providing any
+	// separate policy-supplied metadata document.
 	module := wasmtest.AgeKnownPolicy(nil)
 	for i := len(module) - 3; i >= 0; i-- {
 		if module[i] == 0x41 && module[i+1] == 3 && module[i+2] == 0x0b {
-			module[i+1] = 6
+			module[i+1] = 7
 			break
 		}
 	}

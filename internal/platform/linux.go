@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
@@ -73,6 +74,23 @@ type LinuxPlatform struct {
 	readerErr     error
 	lsmEvents     lsmEventStream // production loader or VM-free reader fixture
 	scope         cgroupScope
+	// kernelSync is observability-only posture state mirroring recent
+	// userspace→kernel policy-map sync health. Ready() never reads it: a
+	// degraded kernel fast path must not make the daemon unready.
+	kernelSync atomic.Bool // true = degraded; zero value is healthy
+}
+
+// SetKernelSyncHealthy mirrors the enforcer's kernel fast-path posture for
+// readiness reporting. It is deliberately informational: LinuxPlatform.Ready()
+// ignores it so degraded sync coverage never flips readiness by default.
+func (p *LinuxPlatform) SetKernelSyncHealthy(healthy bool) {
+	p.kernelSync.Store(!healthy)
+}
+
+// KernelSyncHealthy reports the mirrored kernel fast-path posture. It starts
+// healthy (zero value) so an idle daemon reports healthy coverage.
+func (p *LinuxPlatform) KernelSyncHealthy() bool {
+	return !p.kernelSync.Load()
 }
 
 type lsmEventStream interface {

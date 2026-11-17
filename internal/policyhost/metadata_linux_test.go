@@ -185,7 +185,7 @@ func TestRealWorkerMalformedDeclarationsStayIneligible(t *testing.T) {
 		t.Fatal("future finite fields optimized")
 	}
 	s := supervisor(t, config(t))
-	if h, err := s.Start(context.Background(), staged(t, declarationGuest(nil, 0, 6))); err == nil || h != nil || len(s.slots) != 0 {
+	if h, err := s.Start(context.Background(), staged(t, declarationGuest(nil, 0, 7))); err == nil || h != nil || len(s.slots) != 0 {
 		t.Fatal("unsupported actual ABI produced a host or leaked capacity")
 	}
 }

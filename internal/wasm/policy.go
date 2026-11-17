@@ -8,6 +8,7 @@ import (
 	"math"
 
 	wazeroapi "github.com/tetratelabs/wazero/api"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -305,7 +306,11 @@ func copyStringToBuffer(dst []byte, s string) {
 // unknown (see temporalInputs). With process context (modules declaring
 // ABI version >= 4, see docs/design/abi-v4-process-context.md) it also
 // carries cgroup_id (all types), parent_comm and args (PROCESS) and
-// direction (NETWORK).
+// direction (NETWORK). ABI version 6 additionally carries capture-quality
+// metadata computed by the HOST from kernel telemetry (never from a guest
+// export): capture_quality maps field paths to "truncated"/"unknown". The
+// authoritative timestamp-guarded quality mask stays host-side (the gate and
+// get_field_u32 field 16). Modules declaring <=5 never see this key.
 func marshalEventForWASM(event *api.Event, abiVersion uint32) ([]byte, error) {
 	// Every key below is always present so policies that deserialize into a
 	// fixed struct do not fail to parse (and deny) on event types that lack a
@@ -319,9 +324,9 @@ func marshalEventForWASM(event *api.Event, abiVersion uint32) ([]byte, error) {
 		"filename": "",
 		// Windows identity from the eBPF sensor. Always present so policies
 		// can deserialize into a fixed struct on every platform; empty/zero
-		// means the sensor did not provide it. Policies that read these keys
-		// must not declare a finite fields_read mask (no field bits yet),
-		// which is already the case for hand-written Rust policies.
+		// means the sensor did not provide it. No declaration bit exists for
+		// these Windows-only keys, so a policy that reads them must not claim
+		// a finite fields_read mask (as hand-written Rust policies do).
 		"user":          event.User,
 		"domain":        event.Domain,
 		"is_admin":      event.IsAdmin,
@@ -335,6 +340,13 @@ func marshalEventForWASM(event *api.Event, abiVersion uint32) ([]byte, error) {
 	}
 	if abiVersion >= ProcessContextABIVersion {
 		m["cgroup_id"] = event.CgroupID
+	}
+	if abiVersion >= CaptureQualityABIVersion {
+		// Host-computed only. A guest cannot influence this value, so it
+		// cannot use it to claim that its own inputs were complete. The
+		// authoritative, timestamp-guarded mask stays host-side for the gate
+		// and the get_field_u32 callback; this is informational carriage.
+		m["capture_quality"] = policymeta.FieldQualityStates(event)
 	}
 
 	switch event.GetType() {

@@ -17,9 +17,10 @@ type setRuleOnly struct{ fakePolicyMap }
 
 func (*setRuleOnly) KernelKeyFields() {} // wrong signature: not a kernelKeyFielder
 
-// hookAwareFake mirrors the Linux PolicyMapManager: bind and connect share
-// event type network but only Hook=="bind" has an exact kernel key, and that
-// key carries just the remote endpoint. Hooks with no exact key are refused.
+// hookAwareFake mirrors the Linux PolicyMapManager: bind, listen and connect
+// share event type network but use different exact keys. Bind/connect carry
+// the remote endpoint; listen carries only remote_port (family+port, no
+// address). Hooks with no exact key are refused.
 type hookAwareFake struct{ fakePolicyMap }
 
 func (*hookAwareFake) KernelKeyFieldsForEvent(event *api.Event) []string {
@@ -36,6 +37,8 @@ func (*hookAwareFake) KernelKeyFieldsForEvent(event *api.Event) []string {
 		switch event.Hook {
 		case "", "connect", "bind":
 			return []string{"remote_addr", "remote_port"}
+		case "listen":
+			return []string{"remote_port"}
 		default:
 			return nil
 		}
@@ -90,7 +93,11 @@ func TestDecisionDeterminedByKernelKey(t *testing.T) {
 		{"bind + protocol is not key-determined", hookAware, net("bind"), ep | compiler.FieldBitProtocol, false},
 		{"bind + uid is not key-determined", hookAware, net("bind"), ep | compiler.FieldBitUID, false},
 		{"bind with connect_unix hook has no key", hookAware, net("connect_unix"), ep, false},
-		{"bind with listen hook has no key", hookAware, net("listen"), ep, false},
+		{"listen endpoint addr is not key-determined", hookAware, net("listen"), ep, false},
+		{"listen remote_port only is key-determined", hookAware, net("listen"), compiler.FieldBitRemotePort, true},
+		{"listen port + protocol is not key-determined", hookAware, net("listen"), compiler.FieldBitRemotePort | compiler.FieldBitProtocol, false},
+		{"listen port + uid is not key-determined", hookAware, net("listen"), compiler.FieldBitRemotePort | compiler.FieldBitUID, false},
+		{"listen port + wall clock is not key-determined", hookAware, net("listen"), compiler.FieldBitRemotePort | compiler.FieldBitTime, false},
 		{"exec hook respected for process", hookAware, proc, path, true},
 		{"non-exec process hook has no key", hookAware, &api.Event{Type: api.EventTypeProcess, Hook: "ptrace", Filename: "/bin/sh"}, path, false},
 	}
@@ -157,6 +164,95 @@ func TestBindLSMWritebackFoldsAudit(t *testing.T) {
 	})
 	if len(rec.events) != 0 {
 		t.Fatalf("non-bind LSM event was synced: %+v", rec)
+	}
+}
+
+// listenSyncRecorder mirrors the Linux PolicyMapManager's hook-aware key
+// report and records SyncEvent calls, so the listen LSM write-back gate can be
+// tested end-to-end (port-only key, no address).
+type listenSyncRecorder struct{ eventSyncRecorder }
+
+func (*listenSyncRecorder) KernelKeyFieldsForEvent(event *api.Event) []string {
+	if event == nil || event.GetType() != api.EventTypeNetwork {
+		return nil
+	}
+	switch event.Hook {
+	case "", "connect", "bind":
+		return []string{"remote_addr", "remote_port"}
+	case "listen":
+		return []string{"remote_port"}
+	default:
+		return nil
+	}
+}
+
+// TestListenLSMWritebackFoldsAudit checks the LSM gate relaxation in
+// persistDecision: a listen LSM miss may be written back because the kernel
+// already accepted the listen, userspace evaluated the complete event and the
+// key is the exact port-only listen key. Other LSM events stay record-only.
+// Audit downgrade must still reach the kernel (audit=1 = would-deny, no block).
+func TestListenLSMWritebackFoldsAudit(t *testing.T) {
+	portOnly := &[3]uint32{0, 0, compiler.FieldBitRemotePort}
+	newListen := func() *api.Event {
+		return &api.Event{
+			Type: api.EventTypeNetwork, CgroupID: 42, LSMEvent: true, Hook: "listen",
+			Network: &api.NetworkEvent{Operation: "listen", Protocol: "tcp", RemotePort: 8080},
+		}
+	}
+
+	for _, tc := range []struct {
+		name      string
+		auditMode bool
+		wantAudit bool
+	}{
+		{"plain deny", false, false},
+		{"audit downgraded deny", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &listenSyncRecorder{}
+			e, _ := newTestEnforcer(t, testEnforcerOpts{
+				policyMap:  rec,
+				policyWasm: wasmtest.ConstPolicy(1, portOnly), // deny all, declares port-only reads
+			})
+			e.auditMode = tc.auditMode
+			e.handleEvent(newListen())
+			if len(rec.events) != 1 {
+				t.Fatalf("listen LSM DENY not written back: %+v", rec)
+			}
+			if rec.actions[0] != 1 {
+				t.Fatalf("action = %d, want DENY", rec.actions[0])
+			}
+			if rec.audits[0] != tc.wantAudit {
+				t.Fatalf("audit = %v, want %v", rec.audits[0], tc.wantAudit)
+			}
+		})
+	}
+
+	// A policy that reads a field the listen key cannot cover (remote_addr)
+	// must NOT be written back even though this is an LSM listen miss.
+	readsAddr := &[3]uint32{0, 0, compiler.FieldBitRemoteAddr | compiler.FieldBitRemotePort}
+	rec := &listenSyncRecorder{}
+	e, _ := newTestEnforcer(t, testEnforcerOpts{
+		policyMap:  rec,
+		policyWasm: wasmtest.ConstPolicy(1, readsAddr),
+	})
+	e.handleEvent(newListen())
+	if len(rec.events) != 0 {
+		t.Fatalf("unsound listen LSM decision was written back: %+v", rec)
+	}
+
+	// A non-listen LSM event is still recorded, never re-synced.
+	rec2 := &listenSyncRecorder{}
+	e2, _ := newTestEnforcer(t, testEnforcerOpts{
+		policyMap:  rec2,
+		policyWasm: wasmtest.ConstPolicy(1, portOnly),
+	})
+	e2.handleEvent(&api.Event{
+		Type: api.EventTypeNetwork, CgroupID: 42, LSMEvent: true, Hook: "connect",
+		Network: &api.NetworkEvent{Operation: "connect", Protocol: "tcp", RemoteAddr: "127.0.0.1", RemotePort: 8080},
+	})
+	if len(rec2.events) != 0 {
+		t.Fatalf("non-listen LSM event was synced: %+v", rec2)
 	}
 }
 

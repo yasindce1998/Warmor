@@ -15,7 +15,7 @@ check_log() {
   while IFS= read -r test; do
     [ "$(grep -Ec -- "^--- PASS: ${test} \([0-9.]+s\)$" "$log" || true)" = 1 ] || return 1
   done < <(required_tests)
-  for test in release-compiled-reload-LKG-and-idle-shutdown opposing-captured-reload-LKG-and-idle-shutdown fleet-live-durable-and-drain-pending-no-false-ack SIGTERM-cancels-held-generation-worker; do
+  for test in release-compiled-reload-LKG-and-idle-shutdown opposing-captured-reload-LKG-and-idle-shutdown fleet-live-durable-and-drain-pending-no-false-ack SIGTERM-cancels-held-generation-worker map-write-failure-keeps-old-generation-no-gap clean-restart-first-denied-persists; do
     [ "$(grep -Ec -- "^    --- PASS: TestDaemonGenerationOutcomes/${test} \([0-9.]+s\)$" "$log" || true)" = 1 ] || return 1
   done
   grep -qx PASS "$log"
