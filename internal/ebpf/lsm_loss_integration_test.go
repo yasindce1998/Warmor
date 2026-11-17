@@ -236,11 +236,21 @@ func TestLSM_OnEventLossDenyBlockingHooks(t *testing.T) {
 			name: "ptrace",
 			hook: "ptrace",
 			run: func(t *testing.T, fill func()) error {
+				// Start the measured child FIRST, while the ring is empty.
+				// In --on-event-loss=deny mode a later exec would fail closed
+				// once the probe/flood has filled the ring, which is not the
+				// ptrace verdict this scenario measures.
+				cmd := exec.Command("/bin/sleep", "30")
+				if err := cmd.Start(); err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+
 				// Probe with a throwaway child: some environments (Yama
 				// ptrace_scope) permit the first attach but refuse a
-				// re-attach after detach. Use a fresh child for the
-				// measured operation so an EPERM can only come from the
-				// ring-full verdict, not from re-attach policy.
+				// re-attach after detach. Use a separate child so an EPERM
+				// can only come from the ring-full verdict, not from
+				// re-attach policy.
 				probe := exec.Command("/bin/sleep", "30")
 				if err := probe.Start(); err != nil {
 					t.Fatal(err)
@@ -255,11 +265,6 @@ func TestLSM_OnEventLossDenyBlockingHooks(t *testing.T) {
 				_ = probe.Wait()
 				time.Sleep(20 * time.Millisecond)
 
-				cmd := exec.Command("/bin/sleep", "30")
-				if err := cmd.Start(); err != nil {
-					t.Fatal(err)
-				}
-				defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 				fill()
 				err := syscall.PtraceAttach(cmd.Process.Pid)
 				if err == nil {
