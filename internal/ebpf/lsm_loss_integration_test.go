@@ -236,19 +236,30 @@ func TestLSM_OnEventLossDenyBlockingHooks(t *testing.T) {
 			name: "ptrace",
 			hook: "ptrace",
 			run: func(t *testing.T, fill func()) error {
+				// Probe with a throwaway child: some environments (Yama
+				// ptrace_scope) permit the first attach but refuse a
+				// re-attach after detach. Use a fresh child for the
+				// measured operation so an EPERM can only come from the
+				// ring-full verdict, not from re-attach policy.
+				probe := exec.Command("/bin/sleep", "30")
+				if err := probe.Start(); err != nil {
+					t.Fatal(err)
+				}
+				if err := syscall.PtraceAttach(probe.Process.Pid); err != nil {
+					_ = probe.Process.Kill()
+					_ = probe.Wait()
+					t.Skipf("ptrace not permitted here: %v", err)
+				}
+				_ = syscall.PtraceDetach(probe.Process.Pid)
+				_ = probe.Process.Kill()
+				_ = probe.Wait()
+				time.Sleep(20 * time.Millisecond)
+
 				cmd := exec.Command("/bin/sleep", "30")
 				if err := cmd.Start(); err != nil {
 					t.Fatal(err)
 				}
 				defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-				// Confirm the environment permits ptrace at all, so
-				// an EPERM from the LSM is not confused with a
-				// Yama/capability restriction.
-				if err := syscall.PtraceAttach(cmd.Process.Pid); err != nil {
-					t.Skipf("ptrace not permitted here: %v", err)
-				}
-				_ = syscall.PtraceDetach(cmd.Process.Pid)
-				time.Sleep(20 * time.Millisecond)
 				fill()
 				err := syscall.PtraceAttach(cmd.Process.Pid)
 				if err == nil {
