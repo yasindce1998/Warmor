@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -204,14 +205,17 @@ type Enforcer struct {
 	evalTimeout     time.Duration
 	policyID        string // metrics label (see policyID()); guarded by evaluatorMu
 	syncFailLog     logLimiter
-	auditMode       bool
-	learningMode    bool
-	defaultDeny     bool
-	ctx             context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
-	stopOnce        sync.Once
-	processing      atomic.Bool
+	// syncHealth tracks recent kernel policy-map sync outcomes for posture
+	// reporting only; the zero value is healthy. It never gates Ready().
+	syncHealth   kernelSyncHealth
+	auditMode    bool
+	learningMode bool
+	defaultDeny  bool
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	stopOnce     sync.Once
+	processing   atomic.Bool
 }
 
 // newPlatform constructs the platform monitor. It is a variable so tests can
@@ -591,7 +595,14 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		}
 	}
 
-	metricsServer.SetReadinessCheck(e.Ready)
+	// Readiness reporting also refreshes the kernel-sync posture gauge, but the
+	// verdict is unchanged: a degraded kernel fast path never makes the daemon
+	// unready (observability only).
+	metricsServer.SetReadinessCheck(func() error {
+		err := e.Ready()
+		metrics.SetKernelSyncHealthy(e.KernelSyncHealthy())
+		return err
+	})
 
 	// Preload the kernel default-deny domains from the policy's static
 	// rules. No events flow yet; decisionMu is uncontended but held for
@@ -1143,20 +1154,160 @@ var (
 	errNotKeyDetermined = errors.New("decision not determined by the kernel key")
 )
 
+// Bounds for the kernel fast-path posture. The window keeps a single old
+// failure from degrading the posture forever; the thresholds keep it from
+// flapping on a transient blip.
+const (
+	kernelSyncWindow           = 32
+	kernelSyncFailureThreshold = 8 // degrade only when the window holds > 8 failures
+	kernelSyncRecoveryStreak   = 4 // require 4 consecutive successes to recover
+)
+
+// kernelSyncHealth tracks recent kernel policy-map sync outcomes for posture
+// reporting. It is observability-only: Enforcer.Ready() deliberately does not
+// consult it, so a degrading fast path never makes the daemon unready. The zero
+// value is healthy, so an enforcer that has never synced reports health.
+type kernelSyncHealth struct {
+	mu       sync.Mutex
+	outcomes [kernelSyncWindow]bool // ring buffer; true means a failure
+	next     int
+	filled   int
+	failures int
+	goodRun  int
+	degraded bool
+}
+
+// record folds in one sync outcome and returns the resulting posture.
+func (h *kernelSyncHealth) record(success bool) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.filled < kernelSyncWindow {
+		h.filled++
+	} else if h.outcomes[h.next] {
+		h.failures--
+	}
+	h.outcomes[h.next] = !success
+	if !success {
+		h.failures++
+	}
+	h.next = (h.next + 1) % kernelSyncWindow
+
+	if success {
+		h.goodRun++
+	} else {
+		h.goodRun = 0
+	}
+
+	// Hysteresis: a single failure (or a lone success) cannot flip the
+	// posture. We degrade only past the failure threshold and recover only
+	// after a streak of successes, then start a fresh window so one failure
+	// after recovery does not immediately degrade again.
+	switch {
+	case h.goodRun >= kernelSyncRecoveryStreak:
+		h.outcomes = [kernelSyncWindow]bool{}
+		h.next, h.filled, h.failures, h.goodRun, h.degraded = 0, 0, 0, 0, false
+	case h.failures > kernelSyncFailureThreshold:
+		h.degraded = true
+	}
+	return !h.degraded
+}
+
+func (h *kernelSyncHealth) healthy() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return !h.degraded
+}
+
+// stats is a test-only view of the recent failure count and posture.
+func (h *kernelSyncHealth) stats() (failures int, healthy bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.failures, !h.degraded
+}
+
+// kernelSyncFailureReason maps a sync error to the bounded reason set exported
+// by internal/metrics. It never returns a raw error string: label cardinality
+// must stay fixed even as new error text appears in the kernel layer.
+func kernelSyncFailureReason(err error) string {
+	switch {
+	case err == nil:
+		return metrics.SyncReasonUnknown // callers only pass failures
+	case errors.Is(err, errStaleDecision), errors.Is(err, kernelmap.ErrStaleGeneration):
+		return metrics.SyncReasonGenerationStale
+	case errors.Is(err, errNotKeyDetermined), errors.Is(err, kernelmap.ErrNotKernelMatchable):
+		return metrics.SyncReasonInvalidKey
+	case errors.Is(err, syscall.E2BIG), errors.Is(err, syscall.ENOSPC):
+		return metrics.SyncReasonMapFull
+	case errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EACCES):
+		return metrics.SyncReasonVerifierReject
+	default:
+		return metrics.SyncReasonUnknown
+	}
+}
+
+// recordKernelSyncOutcome updates the posture and publishes it. The platform
+// sink, when present, mirrors the signal for readiness reporting; it does not
+// change the platform's Ready() verdict.
+func (e *Enforcer) recordKernelSyncOutcome(success bool) {
+	healthy := e.syncHealth.record(success)
+	metrics.SetKernelSyncHealthy(healthy)
+	if sink, ok := e.platform.(interface{ SetKernelSyncHealthy(bool) }); ok {
+		sink.SetKernelSyncHealthy(healthy)
+	}
+}
+
+// recordKernelSyncFailure counts one decision that did not reach the kernel
+// fast path under a bounded reason and updates the posture.
+func (e *Enforcer) recordKernelSyncFailure(err error) {
+	metrics.RecordKernelSyncFailure(kernelSyncFailureReason(err))
+	e.recordKernelSyncOutcome(false)
+}
+
+// KernelSyncHealthy reports whether recent kernel policy-map syncs are below
+// the degraded threshold. It is an observability signal only: Ready() does not
+// consult it, so kernel fast-path degradation never makes the daemon unready.
+func (e *Enforcer) KernelSyncHealthy() bool {
+	return e.syncHealth.healthy()
+}
+
+// ReadinessPosture is an observability view of local readiness. KernelSyncHealthy
+// is reported next to the readiness gate but is explicitly not part of it.
+type ReadinessPosture struct {
+	Ready             bool
+	KernelSyncHealthy bool
+}
+
+// ReadinessReport returns the current readiness posture for reporting. Its
+// Ready field comes from the unchanged Ready() gate; the kernel-sync signal is
+// informational so dashboards can spot degrading fast-path coverage.
+func (e *Enforcer) ReadinessReport() ReadinessPosture {
+	return ReadinessPosture{
+		Ready:             e.Ready() == nil,
+		KernelSyncHealthy: e.KernelSyncHealthy(),
+	}
+}
+
 // recordSync counts the outcome of one kernel sync and logs failures, at
 // most once per syncFailureLogInterval.
 func (e *Enforcer) recordSync(event *api.Event, err error) {
 	switch {
 	case err == nil:
 		metrics.RecordPolicyMapSync(metrics.SyncSynced)
+		metrics.RecordKernelSyncSuccess()
+		e.recordKernelSyncOutcome(true)
 	case errors.Is(err, errStaleDecision):
 		metrics.RecordPolicyMapSync(metrics.SyncSkippedStale)
+		e.recordKernelSyncFailure(err)
 	case errors.Is(err, errNotKeyDetermined):
 		metrics.RecordPolicyMapSync(metrics.SyncSkippedUnsound)
+		e.recordKernelSyncFailure(err)
 	case errors.Is(err, kernelmap.ErrNotKernelMatchable):
 		metrics.RecordPolicyMapSync(metrics.SyncSkippedUnmatchable)
+		e.recordKernelSyncFailure(err)
 	default:
 		metrics.RecordPolicyMapSync(metrics.SyncFailed)
+		e.recordKernelSyncFailure(err)
 		if ok, suppressed := e.syncFailLog.allow(time.Now()); ok && e.logger != nil {
 			msg := fmt.Sprintf("sync %s decision to kernel policy map (userspace still enforces it)", event.GetType())
 			if suppressed > 0 {
