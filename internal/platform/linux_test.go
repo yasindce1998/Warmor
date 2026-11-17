@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -376,6 +377,239 @@ func TestDeliverWithCapacityDoesNotCountBackpressure(t *testing.T) {
 	}
 	if after := testutil.ToFloat64(metrics.EventChannelBackpressure); after != before {
 		t.Fatalf("backpressure counter = %v, want unchanged %v", after, before)
+	}
+}
+
+// ---- LSM ↔ tracepoint correlation tests ------------------------------------
+
+func dedupTPEvent(cgroup uint64, pid uint32, ts uint64) *api.Event {
+	return &api.Event{
+		Type: api.EventTypeProcess, CgroupID: cgroup, PID: pid, KernelTimestampNS: ts,
+		Comm: "sh", Filename: "/bin/sh", PPID: 9, ParentComm: "init",
+		Process: &api.ProcessEvent{
+			BaseEvent: api.BaseEvent{Type: api.EventTypeProcess, PID: pid, CgroupID: cgroup},
+			Filename:  "/bin/sh", Args: []string{"/bin/sh", "-c", "echo hi"},
+		},
+	}
+}
+
+func dedupLSMEvent(cgroup uint64, pid uint32, ts uint64, hook string) *api.Event {
+	return &api.Event{
+		Type: api.EventTypeProcess, CgroupID: cgroup, PID: pid, KernelTimestampNS: ts,
+		KernelDenied: true, PolicyGeneration: 77, LSMEvent: true, Hook: hook,
+		Comm: "sh", Filename: "/bin/sh",
+		Process: &api.ProcessEvent{
+			BaseEvent: api.BaseEvent{Type: api.EventTypeProcess, PID: pid, CgroupID: cgroup},
+			Filename:  "/bin/sh",
+		},
+	}
+}
+
+func TestCorrelatorPairsWithinSkew(t *testing.T) {
+	c := newEventCorrelator()
+	tp := dedupTPEvent(7, 42, 1000)
+	if out := c.register(tp); len(out) != 0 {
+		t.Fatalf("fresh register evicted %d events", len(out))
+	}
+	twin, expired := c.correlate(dedupLSMEvent(7, 42, 1000+uint64(time.Millisecond), "exec"))
+	if twin != tp || len(expired) != 0 {
+		t.Fatalf("expected twin within skew: twin=%v expired=%d", twin == tp, len(expired))
+	}
+	if c.lru.Len() != 0 {
+		t.Fatalf("consumed twin left in window: %d", c.lru.Len())
+	}
+	// The twin was consumed: a second LSM cannot claim it again.
+	if twin, _ := c.correlate(dedupLSMEvent(7, 42, 1000, "exec")); twin != nil {
+		t.Fatal("a twin was correlated twice")
+	}
+}
+
+func TestCorrelatorPIDReuseRejected(t *testing.T) {
+	c := newEventCorrelator()
+	tp := dedupTPEvent(7, 42, 1000)
+	c.register(tp)
+	// Same (cgroup,pid,type) but a wildly different kernel stamp: PID reuse,
+	// not the same operation. Never pair, never drop the buffered twin.
+	twin, expired := c.correlate(dedupLSMEvent(7, 42, 1000+corrMaxSkewNS+1, "exec"))
+	if twin != nil || len(expired) != 0 {
+		t.Fatalf("PID-reuse pair must be rejected: twin=%v expired=%d", twin != nil, len(expired))
+	}
+	if c.lru.Len() != 1 {
+		t.Fatalf("rejected twin must stay buffered for TTL delivery: %d", c.lru.Len())
+	}
+}
+
+func TestCorrelatorCgroupMismatchRejected(t *testing.T) {
+	c := newEventCorrelator()
+	tp := dedupTPEvent(7, 42, 1000)
+	c.register(tp)
+	twin, _ := c.correlate(dedupLSMEvent(8, 42, 1000, "exec")) // different cgroup
+	if twin != nil {
+		t.Fatal("a different cgroup must not share a twin")
+	}
+	// Both remain: one buffered twin, the LSM decision delivered by the caller.
+	if c.lru.Len() != 1 {
+		t.Fatalf("mismatched cgroup lost the buffered twin: %d", c.lru.Len())
+	}
+}
+
+func TestCorrelatorTTLExpiry(t *testing.T) {
+	c := newEventCorrelator()
+	base := time.Unix(100, 0)
+	c.now = func() time.Time { return base }
+	tp := dedupTPEvent(7, 42, 1000)
+	c.register(tp)
+
+	// Before TTL: still pairable.
+	if twin, _ := c.correlate(dedupLSMEvent(7, 42, 1001, "exec")); twin != tp {
+		t.Fatal("expected to pair before TTL")
+	}
+	// Re-register for the expiry path.
+	c.register(tp)
+	c.now = func() time.Time { return base.Add(corrTTL + time.Millisecond) }
+	twin, expired := c.correlate(dedupLSMEvent(7, 42, 1001, "exec"))
+	if twin != nil || len(expired) != 1 || expired[0] != tp {
+		t.Fatalf("TTL expiry must deliver twin unpaired: twin=%v expired=%d", twin != nil, len(expired))
+	}
+	if c.lru.Len() != 0 {
+		t.Fatal("expired twin not removed from window")
+	}
+}
+
+func TestCorrelatorTTLExpiryViaSweep(t *testing.T) {
+	c := newEventCorrelator()
+	base := time.Unix(100, 0)
+	c.now = func() time.Time { return base }
+	c.register(dedupTPEvent(7, 1, 1000))
+	c.register(dedupTPEvent(7, 2, 1000))
+	if out := c.flushExpired(); len(out) != 0 {
+		t.Fatalf("nothing should expire before TTL: %d", len(out))
+	}
+	c.now = func() time.Time { return base.Add(corrTTL + time.Millisecond) }
+	if out := c.flushExpired(); len(out) != 2 {
+		t.Fatalf("sweep should return both expired twins: %d", len(out))
+	}
+	if c.lru.Len() != 0 {
+		t.Fatal("sweep left entries behind")
+	}
+}
+
+func TestCorrelatorMapFullEviction(t *testing.T) {
+	c := newEventCorrelator()
+	c.maxEntries = 2
+	base := time.Unix(100, 0)
+	c.now = func() time.Time { return base }
+
+	a, b, d := dedupTPEvent(7, 1, 1000), dedupTPEvent(7, 2, 1000), dedupTPEvent(7, 3, 1000)
+	if out := c.register(a); len(out) != 0 {
+		t.Fatal("unexpected eviction")
+	}
+	if out := c.register(b); len(out) != 0 {
+		t.Fatal("unexpected eviction")
+	}
+	// At capacity: adding d must evict the least-recently-used twin (a), and
+	// hand it back for delivery rather than dropping it.
+	out := c.register(d)
+	if len(out) != 1 || out[0] != a {
+		t.Fatalf("LRU victim should be a and be returned: %d", len(out))
+	}
+	if c.lru.Len() != 2 {
+		t.Fatalf("window not bounded at 2: %d", c.lru.Len())
+	}
+	if twin, _ := c.correlate(dedupLSMEvent(7, 1, 1001, "exec")); twin != nil {
+		t.Fatal("evicted twin must not still be pairable")
+	}
+	if twin, _ := c.correlate(dedupLSMEvent(7, 2, 1001, "exec")); twin != b {
+		t.Fatal("recent twin b should still be pairable")
+	}
+}
+
+func TestCorrelatorNonTwinHooksAndMissingStamp(t *testing.T) {
+	c := newEventCorrelator()
+	// A hook with no tracepoint twin must never claim one.
+	c.register(dedupTPEvent(7, 42, 1000))
+	if twin, _ := c.correlate(dedupLSMEvent(7, 42, 1001, "mount")); twin != nil {
+		t.Fatal("mount hook must not pair with an exec tracepoint")
+	}
+	// Missing kernel stamp: never correlate, never buffer.
+	if out := c.register(&api.Event{Type: api.EventTypeProcess, PID: 43, CgroupID: 7}); len(out) != 0 || c.lru.Len() != 1 {
+		t.Fatal("stampless tracepoint should be ignored")
+	}
+	if twin, _ := c.correlate(&api.Event{Type: api.EventTypeProcess, PID: 42, CgroupID: 7, Hook: "exec"}); twin != nil {
+		t.Fatal("stampless LSM must not pair")
+	}
+}
+
+func TestInheritProcessContext(t *testing.T) {
+	tp := dedupTPEvent(7, 42, 1000)
+	tp.TruncatedFields = []string{"process.args"}
+	lsm := dedupLSMEvent(7, 42, 1100, "exec")
+	inheritProcessContext(lsm, tp)
+	if lsm.PPID != 9 || lsm.ParentComm != "init" {
+		t.Fatalf("parent context not inherited: ppid=%d comm=%q", lsm.PPID, lsm.ParentComm)
+	}
+	if lsm.Process == nil || len(lsm.Process.Args) != 3 || lsm.Process.Args[0] != "/bin/sh" {
+		t.Fatalf("argv not inherited: %+v", lsm.Process)
+	}
+	if !slices.Equal(lsm.TruncatedFields, []string{"process.args"}) {
+		t.Fatalf("truncation evidence not inherited: %v", lsm.TruncatedFields)
+	}
+	// Authoritative kernel decision fields must survive the merge unchanged.
+	if !lsm.KernelDenied || lsm.PolicyGeneration != 77 || lsm.Hook != "exec" || !lsm.LSMEvent {
+		t.Fatalf("kernel decision lost during merge: %+v", lsm)
+	}
+}
+
+func TestDeliverLSMEnrichesAndMarksDuplicate(t *testing.T) {
+	before := testutil.ToFloat64(metrics.DuplicateEvents.WithLabelValues("exec"))
+	out := make(chan *api.Event, 4)
+	p := &LinuxPlatform{stopChan: make(chan struct{}), eventChan: out, correlator: newEventCorrelator()}
+	tp := dedupTPEvent(7, 42, 1000)
+	p.correlator.register(tp)
+
+	if !p.deliverLSM(context.Background(), dedupLSMEvent(7, 42, 1100, "exec")) {
+		t.Fatal("LSM delivery failed")
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected exactly one merged event, got %d", len(out))
+	}
+	got := <-out
+	if !got.Deduplicated || !got.KernelDenied || got.PolicyGeneration != 77 {
+		t.Fatalf("merged event lost dedup/kernel fields: %+v", got)
+	}
+	if got.PPID != 9 || len(got.Process.Args) != 3 {
+		t.Fatalf("merged event lost tracepoint context: %+v", got)
+	}
+	if after := testutil.ToFloat64(metrics.DuplicateEvents.WithLabelValues("exec")); after != before+1 {
+		t.Fatalf("duplicate metric = %v, want %v", after, before+1)
+	}
+}
+
+func TestDeliverLSMUnpairedPassesBothThrough(t *testing.T) {
+	before := testutil.ToFloat64(metrics.DuplicateEvents.WithLabelValues("exec"))
+	out := make(chan *api.Event, 4)
+	p := &LinuxPlatform{stopChan: make(chan struct{}), eventChan: out, correlator: newEventCorrelator()}
+	tp := dedupTPEvent(7, 42, 1000)
+	p.correlator.register(tp)
+
+	// PID reuse: no pair, so the LSM event is delivered unchanged.
+	if !p.deliverLSM(context.Background(), dedupLSMEvent(7, 42, 1000+corrMaxSkewNS+1, "exec")) {
+		t.Fatal("LSM delivery failed")
+	}
+	got := <-out
+	if got.Deduplicated || len(got.Process.Args) != 0 {
+		t.Fatalf("unpaired LSM must not be flagged/enriched: %+v", got)
+	}
+	if after := testutil.ToFloat64(metrics.DuplicateEvents.WithLabelValues("exec")); after != before {
+		t.Fatalf("unpaired delivery must not count a duplicate: %v -> %v", before, after)
+	}
+	// The tracepoint twin is still buffered and delivered on shutdown.
+	p.Stop()
+	if len(out) != 1 {
+		t.Fatalf("shutdown should deliver the stranded twin: %d", len(out))
+	}
+	if stranded := <-out; stranded != tp || stranded.Deduplicated {
+		t.Fatalf("stranded twin delivered incorrectly: %+v", stranded)
 	}
 }
 

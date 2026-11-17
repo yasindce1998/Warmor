@@ -175,6 +175,14 @@ type Event struct {
 	// (Filename holds the target's comm).
 	TargetCgroupID uint64 `json:"target_cgroup_id,omitempty"`
 
+	// Deduplicated is set by the Linux platform when a tracepoint observation
+	// and its LSM twin were correlated into this single event. This event
+	// carries the LSM kernel decision (KernelDenied/PolicyGeneration) enriched
+	// with the tracepoint's argv/parent context; the twin was suppressed so
+	// SIEM, lineage and cache layers count the operation once. Streaming
+	// surfaces this as an InputIssue{"correlation", "deduplicated"}.
+	Deduplicated bool `json:"deduplicated,omitempty"`
+
 	// ProcessCreateTime is when the process that produced the event was
 	// created, as reported by the kernel/sensor. Windows uses it to check for
 	// PID reuse before terminating: an event that waited in a ring buffer can
