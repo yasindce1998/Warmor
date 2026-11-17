@@ -192,10 +192,15 @@ func TestLSM_OnEventLossDenyBlockingHooks(t *testing.T) {
 	type scenario struct {
 		name string
 		hook string
-		run  func(t *testing.T, fill func()) error
+		// prepare runs before the LSM loader is attached. Any exec that must
+		// succeed with an empty ring belongs here: with --on-event-loss=deny
+		// a fork/exec after the ring is full is refused by the exec hook.
+		prepare func(t *testing.T) func() // returns cleanup
+		run     func(t *testing.T, fill func()) error
 	}
 
 	local := net.IPv4(127, 0, 0, 1).To4()
+	var ptraceVictim *exec.Cmd
 	scenarios := []scenario{
 		{
 			name: "bind",
@@ -235,25 +240,16 @@ func TestLSM_OnEventLossDenyBlockingHooks(t *testing.T) {
 		{
 			name: "ptrace",
 			hook: "ptrace",
-			run: func(t *testing.T, fill func()) error {
-				// Start the measured child FIRST, while the ring is empty.
-				// In --on-event-loss=deny mode a later exec would fail closed
-				// once the probe/flood has filled the ring, which is not the
-				// ptrace verdict this scenario measures.
-				cmd := exec.Command("/bin/sleep", "30")
-				if err := cmd.Start(); err != nil {
-					t.Fatal(err)
-				}
-				defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-
-				// Probe with a throwaway child: some environments (Yama
-				// ptrace_scope) permit the first attach but refuse a
-				// re-attach after detach. Use a separate child so an EPERM
-				// can only come from the ring-full verdict, not from
-				// re-attach policy.
+			// Both children are started before the LSM loader is attached:
+			// in deny mode any exec after the ring is full would fail closed
+			// with EPERM from the exec hook, not the ptrace verdict measured
+			// here. The probe establishes that this environment permits
+			// ptrace at all; the victim is a fresh child so no attach/detach
+			// cycle is repeated on the measured operation.
+			prepare: func(t *testing.T) func() {
 				probe := exec.Command("/bin/sleep", "30")
 				if err := probe.Start(); err != nil {
-					t.Fatal(err)
+					t.Skipf("cannot start ptrace probe: %v", err)
 				}
 				if err := syscall.PtraceAttach(probe.Process.Pid); err != nil {
 					_ = probe.Process.Kill()
@@ -263,12 +259,18 @@ func TestLSM_OnEventLossDenyBlockingHooks(t *testing.T) {
 				_ = syscall.PtraceDetach(probe.Process.Pid)
 				_ = probe.Process.Kill()
 				_ = probe.Wait()
-				time.Sleep(20 * time.Millisecond)
-
+				victim := exec.Command("/bin/sleep", "30")
+				if err := victim.Start(); err != nil {
+					t.Skipf("cannot start ptrace victim: %v", err)
+				}
+				ptraceVictim = victim
+				return func() { _ = victim.Process.Kill(); _ = victim.Wait() }
+			},
+			run: func(t *testing.T, fill func()) error {
 				fill()
-				err := syscall.PtraceAttach(cmd.Process.Pid)
+				err := syscall.PtraceAttach(ptraceVictim.Process.Pid)
 				if err == nil {
-					_ = syscall.PtraceDetach(cmd.Process.Pid)
+					_ = syscall.PtraceDetach(ptraceVictim.Process.Pid)
 				}
 				return err
 			},
@@ -297,6 +299,11 @@ func TestLSM_OnEventLossDenyBlockingHooks(t *testing.T) {
 	for _, s := range scenarios {
 		for _, mode := range []OnEventLoss{OnLossLog, OnLossDeny} {
 			t.Run(fmt.Sprintf("%s/%d", s.name, mode), func(t *testing.T) {
+				if s.prepare != nil {
+					if cleanup := s.prepare(t); cleanup != nil {
+						defer cleanup()
+					}
+				}
 				loader, err := LoadLSMWithOptions(LSMOptions{
 					RingBufferSize: uint32(os.Getpagesize()),
 					OnEventLoss:    mode,

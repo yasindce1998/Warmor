@@ -424,7 +424,12 @@ func histogramState(t *testing.T) (uint64, float64) {
 func TestActionHandler_LatencyRecordedOnlyOnSuccess(t *testing.T) {
 	countBefore, sumBefore := histogramState(t)
 	h := NewActionHandler(false)
-	h.terminate = func(*api.Event) (bool, error) { return true, nil }
+	// Windows timers can have coarse resolution; without a delay the measured
+	// interval may round to zero even though the sample was recorded.
+	h.terminate = func(*api.Event) (bool, error) {
+		time.Sleep(2 * time.Millisecond)
+		return true, nil
+	}
 	r := &api.ActionResult{Action: api.ActionDeny}
 	if err := h.Enforce(context.Background(), &api.Event{PID: 42}, r); err != nil {
 		t.Fatal(err)
