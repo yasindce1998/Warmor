@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/yasindce1998/warmor/internal/cache"
 	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/lineage"
@@ -1048,6 +1050,43 @@ func TestSyncToPolicyMap_AuditModeFlagsRules(t *testing.T) {
 	want := policyRule{cgroupID: 1, eventType: 0, pattern: "/bin/sh", action: 1, audit: true}
 	if len(rules) != 1 || rules[0] != want {
 		t.Fatalf("rules = %+v, want [%+v]", rules, want)
+	}
+}
+
+// The audit-suppressed kernel-deny counter must track the gap between a
+// userspace DENY and the kernel's actual behavior: the LSM programs compute
+// blocked = is_enforce_enabled() && !val->audit, so only audit-flagged denies
+// are counted. Real kernel denials and allows must never increment it.
+func TestSyncDecision_CountsOnlyAuditSuppressedDenies(t *testing.T) {
+	ev := &api.Event{CgroupID: 1, Filename: "/bin/sh"}
+	cases := []struct {
+		name      string
+		auditMode bool
+		result    *api.ActionResult
+		wantDelta float64
+	}{
+		{"real kernel deny", false, &api.ActionResult{Action: api.ActionDeny}, 0},
+		{"per-result audit deny", false, &api.ActionResult{Action: api.ActionDeny, Audit: true}, 1},
+		{"global audit-mode deny", true, &api.ActionResult{Action: api.ActionDeny}, 1},
+		{"audit allow", true, &api.ActionResult{Action: api.ActionAllow}, 0},
+		{"log is not a deny", false, &api.ActionResult{Action: api.ActionLog}, 0},
+	}
+
+	total := testutil.ToFloat64(metrics.AuditSuppressedKernelDeniesTotal)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := testutil.ToFloat64(metrics.AuditSuppressedKernelDeniesTotal)
+			e := &Enforcer{policyMap: &fakePolicyMap{}, auditMode: tc.auditMode}
+			if err := e.syncDecision(ev, tc.result, 0, 0); err != nil {
+				t.Fatalf("syncDecision: %v", err)
+			}
+			if got := testutil.ToFloat64(metrics.AuditSuppressedKernelDeniesTotal) - before; got != tc.wantDelta {
+				t.Errorf("counter delta = %v, want %v", got, tc.wantDelta)
+			}
+		})
+	}
+	if got := testutil.ToFloat64(metrics.AuditSuppressedKernelDeniesTotal) - total; got != 2 {
+		t.Fatalf("total counter delta = %v, want 2 (only the two audit-suppressed denies)", got)
 	}
 }
 

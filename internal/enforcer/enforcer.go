@@ -55,7 +55,13 @@ type Options struct {
 	// established (fail-closed startup). Without it, an unsupported kernel
 	// degrades to tracepoint-only observation.
 	RequireLSM bool
-	SkipLSM    bool
+	// RequireEnforcePosture fails startup when LSMEnforce was requested but
+	// kernel blocking was not established (LSM unavailable, or the blocking
+	// toggle could not be set). Unlike RequireLSM it does not change behavior
+	// when enforcement was not requested, and it is off by default so existing
+	// deployments keep their degraded-but-running semantics.
+	RequireEnforcePosture bool
+	SkipLSM               bool
 
 	// PolicyVerifyKey, when set, makes every policy load (startup and
 	// ReloadPolicy) require a valid detached ed25519 signature at
@@ -395,7 +401,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		// The platform already prints a startup warning in this case. Repeat
 		// it through the structured logger so the degraded posture is
 		// unmistakable in daemon logs even when stdout warnings are lost.
-		logger.LogInfo("⚠ DEGRADED POSTURE: --lsm-enforce requested but BPF LSM is unavailable; running in observe-only mode (pass --require-lsm to fail closed)")
+		logger.LogInfo("⚠ DEGRADED POSTURE: --lsm-enforce requested but BPF LSM is unavailable; running in observe-only mode (pass --require-lsm or --require-enforce-posture to fail closed)")
 	}
 	var policyMapSyncer PolicyMapSyncer
 	if caps.LSMEnforcement {
@@ -407,6 +413,17 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		if pm, ok := plat.PolicyMap().(PolicyMapSyncer); ok {
 			policyMapSyncer = pm
 		}
+	}
+
+	// Optional fail-closed posture: an operator who asked for kernel blocking
+	// can require that it was actually established instead of silently
+	// degrading. kernelBlocking already folds in opts.LSMEnforce (which is
+	// false in audit/learning mode), so an explicit audit request is respected
+	// and the check only fires when enforcement was genuinely requested.
+	if opts.RequireEnforcePosture && opts.LSMEnforce && !kernelBlocking {
+		plat.Close()
+		return nil, errors.New("--require-enforce-posture was requested but kernel LSM blocking was not established " +
+			"(BPF LSM unavailable or enforce toggle not set); refusing to start in a degraded posture")
 	}
 
 	// Supervised readiness includes child-observed metadata and precedes any
@@ -1166,6 +1183,13 @@ func (e *Enforcer) syncDecision(event *api.Event, result *api.ActionResult, gen 
 	// fold global audit mode in here: the kernel must never be stricter than
 	// userspace, and an audit-flagged deny is only logged by the BPF side.
 	audit := result.Audit || e.auditMode
+	if result.Action == api.ActionDeny && audit {
+		// The kernel computes blocked = is_enforce_enabled() && !val->audit,
+		// so this deny will be logged, not refused. Count the gap between the
+		// userspace decision and the kernel's actual behavior. Real kernel
+		// denials (audit=false) are deliberately not counted here.
+		metrics.RecordAuditSuppressedKernelDeny()
+	}
 	if e.generations != nil {
 		return e.generations.kernel.SyncEvent(gen, event, action, audit)
 	}

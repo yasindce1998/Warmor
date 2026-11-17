@@ -72,6 +72,20 @@ var (
 			Help: "Total number of deny decisions downgraded to log (audit mode)",
 		},
 	)
+
+	// AuditSuppressedKernelDeniesTotal counts DENY decisions that were synced
+	// to the kernel policy map with the audit flag set. The LSM programs
+	// compute blocked = is_enforce_enabled() && !val->audit, so these denies
+	// were logged rather than refused by the kernel. This measures the gap
+	// between the userspace decision and the kernel's actual behavior; it is
+	// distinct from AuditDeniedTotal (the userspace audit downgrade) and never
+	// counts a real kernel denial (audit=false).
+	AuditSuppressedKernelDeniesTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "warmor_audit_suppressed_kernel_denies_total",
+			Help: "Total number of DENY decisions synced to the kernel with the audit flag set, so the kernel logged rather than blocked them.",
+		},
+	)
 )
 
 // RecordEvent records an event with its action
@@ -112,6 +126,12 @@ func RecordProcessingError() {
 // RecordAuditDenied records a deny decision downgraded to log in audit mode
 func RecordAuditDenied() {
 	AuditDeniedTotal.Inc()
+}
+
+// RecordAuditSuppressedKernelDeny records a DENY decision synced with the
+// audit flag set: the kernel logged it instead of refusing it.
+func RecordAuditSuppressedKernelDeny() {
+	AuditSuppressedKernelDeniesTotal.Inc()
 }
 
 // Policy signature rejection sources.
