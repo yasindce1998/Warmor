@@ -256,6 +256,7 @@ func FromAPIEvent(event *api.Event, result *api.ActionResult) *SecurityEvent {
 	// lease, or signal an internal reader fence. The numeric capture ID remains.
 	input.GenerationContext = nil
 	input.DispatchBarrier = nil
+	input.TruncatedFields = slices.Clone(event.TruncatedFields)
 	if event.Process != nil {
 		process := *event.Process
 		process.Args = slices.Clone(event.Process.Args)
@@ -289,13 +290,28 @@ func FromAPIEvent(event *api.Event, result *api.ActionResult) *SecurityEvent {
 	if event.ContainerStart.IsZero() {
 		se.InputIssues = append(se.InputIssues, InputIssue{"container_start", "unknown"})
 	}
+	// A zero cgroup id is meaningful for a live kernel sensor (the process is
+	// untracked), but is merely "unset" in replayed/synthetic events. Only
+	// flag the former so recorded fixtures are not mislabeled as incomplete.
+	if event.CgroupID == 0 && event.KernelTimestampNS != 0 {
+		se.InputIssues = append(se.InputIssues, InputIssue{"cgroup_id", "unknown"})
+	}
 	if event.GetType() == api.EventTypeProcess {
 		if event.Process == nil || event.Process.Args == nil {
 			se.InputIssues = append(se.InputIssues, InputIssue{"process.args", "unknown"})
 		}
+		if event.PPID == 0 {
+			se.InputIssues = append(se.InputIssues, InputIssue{"ppid", "unknown"})
+		}
 		if event.ParentComm == "" {
 			se.InputIssues = append(se.InputIssues, InputIssue{"parent_comm", "unknown"})
 		}
+	}
+	// The sensor reports fields it could not read in full via truncated
+	// fields. Record them so replay/consumers never treat a partial value as
+	// the original; this does not touch the decision.
+	for _, field := range event.TruncatedFields {
+		se.InputIssues = append(se.InputIssues, InputIssue{field, "truncated"})
 	}
 	// JSON replaces invalid UTF-8 with U+FFFD. Mark loss before serialization.
 	values := map[string]string{"comm": event.Comm, "filename": event.Filename, "parent_comm": event.ParentComm, "hook": event.Hook, "mount_source": event.MountSource}

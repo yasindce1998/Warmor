@@ -1,6 +1,7 @@
 package ebpf
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -33,6 +34,13 @@ const (
 	ExecveArgLen  = 64
 )
 
+// Capture flags reported by the execve tracepoint in ExecveEvent.Flags.
+// They mirror EXECVE_FLAG_* in execve_monitor.bpf.c.
+const (
+	ExecveFlagFilenameTruncated uint32 = 1 << 0
+	ExecveFlagArgTruncated      uint32 = 1 << 1
+)
+
 type ExecveEvent struct {
 	PID        uint32
 	UID        uint32
@@ -45,6 +53,35 @@ type ExecveEvent struct {
 	PPID       uint32
 	ParentComm [16]byte
 	Args       [ExecveArgsMax][ExecveArgLen]byte
+	// Flags occupies the C struct's trailing padding; old objects leave it
+	// zero. Kept last so all earlier field offsets are unchanged.
+	Flags uint32
+}
+
+// legacyExecveEventSize is binary.Size of ExecveEvent before the trailing
+// capture-flags word was added. Objects embedded before that change emit
+// samples that end at the argv block (the C struct's trailing padding is
+// zero); newer objects carry the flags in that padding.
+const legacyExecveEventSize = 1348
+
+// decodeExecveEvent decodes a ring-buffer sample into ExecveEvent, accepting
+// both the old and the new struct size. Short samples are zero-padded to the
+// current size, so an old object's missing flags word decodes as "no
+// truncation" rather than failing the read.
+func decodeExecveEvent(sample []byte) (ExecveEvent, error) {
+	var raw ExecveEvent
+	if len(sample) < legacyExecveEventSize {
+		return raw, fmt.Errorf("execve sample too short: %d bytes", len(sample))
+	}
+	if full := binary.Size(raw); len(sample) < full {
+		padded := make([]byte, full)
+		copy(padded, sample)
+		sample = padded
+	}
+	if err := binary.Read(bytes.NewReader(sample), binary.NativeEndian, &raw); err != nil {
+		return raw, err
+	}
+	return raw, nil
 }
 
 func (e *ExecveEvent) ToEvent() Event {
@@ -62,6 +99,12 @@ func (e *ExecveEvent) ToEvent() Event {
 		ParentComm:        nullTerminatedString(e.ParentComm[:]),
 	}
 	ev.Args = execveArgs(e.Args)
+	if e.Flags&ExecveFlagFilenameTruncated != 0 {
+		ev.TruncatedFields = append(ev.TruncatedFields, "filename")
+	}
+	if e.Flags&ExecveFlagArgTruncated != 0 {
+		ev.TruncatedFields = append(ev.TruncatedFields, "process.args")
+	}
 	return ev
 }
 
@@ -177,6 +220,11 @@ type Event struct {
 	PPID       uint32
 	ParentComm string
 	Args       []string
+	// TruncatedFields lists evaluator inputs the sensor could not capture in
+	// full (e.g. "filename", "process.args"). The partial value is still
+	// carried; the flag only makes the loss observable. Currently populated
+	// for execve tracepoint events.
+	TruncatedFields []string
 
 	// LSM ring buffer events only: the raw hook event type
 	// (EventTypeExec, ...) and the kernel's decision (1 = policy_map deny

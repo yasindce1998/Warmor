@@ -26,7 +26,7 @@ type execve_monitorExecveEvent struct {
 	Ppid       uint32
 	ParentComm [16]int8
 	Args       [16][64]int8
-	_          [4]byte
+	Flags      uint32
 }
 
 // Names of all BPF objects in the ELF.
@@ -35,6 +35,7 @@ type execve_monitorExecveEvent struct {
 const (
 	execve_monitorMapCgroupFilter                      = "cgroup_filter"
 	execve_monitorMapEvents                            = "events"
+	execve_monitorMapTracepointDrops                   = "tracepoint_drops"
 	execve_monitorProgTracepointSyscallsSysEnterExecve = "tracepoint__syscalls__sys_enter_execve"
 	execve_monitorVarUnusedExecveEvent                 = "unused_execve_event"
 )
@@ -88,8 +89,9 @@ type execve_monitorProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type execve_monitorMapSpecs struct {
-	CgroupFilter *ebpf.MapSpec `ebpf:"cgroup_filter"`
-	Events       *ebpf.MapSpec `ebpf:"events"`
+	CgroupFilter    *ebpf.MapSpec `ebpf:"cgroup_filter"`
+	Events          *ebpf.MapSpec `ebpf:"events"`
+	TracepointDrops *ebpf.MapSpec `ebpf:"tracepoint_drops"`
 }
 
 // execve_monitorVariableSpecs contains global variables before they are loaded into the kernel.
@@ -119,14 +121,16 @@ func (o *execve_monitorObjects) Close() error {
 //
 // It can be passed to loadExecve_monitorObjects or ebpf.CollectionSpec.LoadAndAssign.
 type execve_monitorMaps struct {
-	CgroupFilter *ebpf.Map `ebpf:"cgroup_filter"`
-	Events       *ebpf.Map `ebpf:"events"`
+	CgroupFilter    *ebpf.Map `ebpf:"cgroup_filter"`
+	Events          *ebpf.Map `ebpf:"events"`
+	TracepointDrops *ebpf.Map `ebpf:"tracepoint_drops"`
 }
 
 func (m *execve_monitorMaps) Close() error {
 	return _Execve_monitorClose(
 		m.CgroupFilter,
 		m.Events,
+		m.TracepointDrops,
 	)
 }
 

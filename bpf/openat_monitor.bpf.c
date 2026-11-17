@@ -3,6 +3,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include "tracepoint_defs.h"
+#include "warmor_common.h"
 
 // Event structure matching Go FileEvent
 struct file_event {
@@ -49,8 +50,10 @@ int tracepoint__syscalls__sys_enter_openat(struct trace_event_raw_sys_enter* ctx
 
 	// Reserve space in ring buffer
 	event = bpf_ringbuf_reserve(&file_events, sizeof(*event), 0);
-	if (!event)
+	if (!event) {
+		count_tracepoint_drop();
 		return 0;
+	}
 
 	// Get process info
 	__u64 pid_tgid = bpf_get_current_pid_tgid();

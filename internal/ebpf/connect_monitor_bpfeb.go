@@ -34,6 +34,7 @@ type connect_monitorNetworkEvent struct {
 const (
 	connect_monitorMapCgroupFilter                       = "cgroup_filter"
 	connect_monitorMapNetworkEvents                      = "network_events"
+	connect_monitorMapTracepointDrops                    = "tracepoint_drops"
 	connect_monitorProgTracepointSyscallsSysEnterConnect = "tracepoint__syscalls__sys_enter_connect"
 	connect_monitorVarUnusedNetworkEvent                 = "unused_network_event"
 )
@@ -87,8 +88,9 @@ type connect_monitorProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type connect_monitorMapSpecs struct {
-	CgroupFilter  *ebpf.MapSpec `ebpf:"cgroup_filter"`
-	NetworkEvents *ebpf.MapSpec `ebpf:"network_events"`
+	CgroupFilter    *ebpf.MapSpec `ebpf:"cgroup_filter"`
+	NetworkEvents   *ebpf.MapSpec `ebpf:"network_events"`
+	TracepointDrops *ebpf.MapSpec `ebpf:"tracepoint_drops"`
 }
 
 // connect_monitorVariableSpecs contains global variables before they are loaded into the kernel.
@@ -118,14 +120,16 @@ func (o *connect_monitorObjects) Close() error {
 //
 // It can be passed to loadConnect_monitorObjects or ebpf.CollectionSpec.LoadAndAssign.
 type connect_monitorMaps struct {
-	CgroupFilter  *ebpf.Map `ebpf:"cgroup_filter"`
-	NetworkEvents *ebpf.Map `ebpf:"network_events"`
+	CgroupFilter    *ebpf.Map `ebpf:"cgroup_filter"`
+	NetworkEvents   *ebpf.Map `ebpf:"network_events"`
+	TracepointDrops *ebpf.Map `ebpf:"tracepoint_drops"`
 }
 
 func (m *connect_monitorMaps) Close() error {
 	return _Connect_monitorClose(
 		m.CgroupFilter,
 		m.NetworkEvents,
+		m.TracepointDrops,
 	)
 }
 

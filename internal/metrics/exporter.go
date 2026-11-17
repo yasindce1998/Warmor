@@ -256,6 +256,23 @@ func RecordLSMEventsDropped(hook string, n uint64) {
 	LSMEventsDropped.WithLabelValues(hook).Add(float64(n))
 }
 
+// TracepointEventsDropped counts tracepoint events the kernel could not queue
+// because the ring buffer was full. Each is an observation nobody received.
+var TracepointEventsDropped = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "warmor",
+		Subsystem: "tracepoint",
+		Name:      "events_dropped_total",
+		Help:      "Tracepoint events dropped because the kernel ring buffer was full (observations never delivered), by hook.",
+	},
+	[]string{"hook"},
+)
+
+// RecordTracepointEventsDropped adds n kernel-reported drops for hook.
+func RecordTracepointEventsDropped(hook string, n uint64) {
+	TracepointEventsDropped.WithLabelValues(hook).Add(float64(n))
+}
+
 // RecordLSMDecision counts one kernel-reported LSM hook outcome.
 func RecordLSMDecision(hook, action string) {
 	HookDecisions.WithLabelValues(hook, action).Inc()
@@ -373,6 +390,7 @@ func init() {
 		EBPFLoaderStatus,
 		PolicyMapSyncs,
 		LSMEventsDropped,
+		TracepointEventsDropped,
 		DefaultDeny,
 		AttackGraphContainers,
 		AttackGraphTechniques,

@@ -47,6 +47,13 @@ type tracepointMonitor interface {
 	Close() error
 }
 
+// tracepointDropSource is implemented by *ebpf.Loader. It is a separate
+// interface so test doubles of tracepointMonitor need not implement drop
+// reporting; monitorTracepointDrops obtains it with a type assertion.
+type tracepointDropSource interface {
+	TracepointDrops() (map[string]uint64, error)
+}
+
 type LinuxPlatform struct {
 	ebpfLoader    tracepointMonitor
 	lsmLoader     *ebpf.LSMLoader
@@ -301,9 +308,9 @@ func (p *LinuxPlatform) Start(ctx context.Context, eventChan chan<- *api.Event) 
 	}
 	p.eventChan = eventChan
 
-	goroutines := 3
+	goroutines := 4
 	if p.lsmEnabled {
-		goroutines = 5
+		goroutines = 6
 	}
 	if p.autoCgroups() {
 		goroutines++
@@ -312,6 +319,7 @@ func (p *LinuxPlatform) Start(ctx context.Context, eventChan chan<- *api.Event) 
 	go p.monitorProcessEvents(ctx)
 	go p.monitorFileEvents(ctx)
 	go p.monitorNetworkEvents(ctx)
+	go p.monitorTracepointDrops(ctx)
 
 	if p.lsmEnabled {
 		go p.monitorLSMEvents(ctx)
@@ -360,6 +368,7 @@ func (p *LinuxPlatform) monitorProcessEventsFrom(ctx context.Context, read func(
 			CgroupID:          ev.CgroupID,
 			PPID:              ev.PPID,
 			ParentComm:        ev.ParentComm,
+			TruncatedFields:   append([]string(nil), ev.TruncatedFields...),
 			Process: &api.ProcessEvent{
 				BaseEvent: api.BaseEvent{
 					Type:      api.EventTypeProcess,
@@ -725,6 +734,50 @@ func (p *LinuxPlatform) drainStatus(ctx context.Context) error {
 		return errors.New("LSM reader stopped before drain")
 	default:
 		return nil
+	}
+}
+
+// monitorTracepointDrops publishes the kernel's per-hook tracepoint drop
+// counters as warmor_tracepoint_events_dropped_total. A dropped tracepoint
+// event is an observation nobody received, so it must never be silent.
+// Non-Loader monitors (test doubles) simply have nothing to publish.
+func (p *LinuxPlatform) monitorTracepointDrops(ctx context.Context) {
+	defer p.wg.Done()
+	source, ok := p.ebpfLoader.(tracepointDropSource)
+	if !ok {
+		return
+	}
+	seen := make(map[string]uint64)
+	tick := time.NewTicker(dropPollInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.stopChan:
+			return
+		case <-tick.C:
+		}
+		drops, err := source.TracepointDrops()
+		if err != nil {
+			continue
+		}
+		var fresh uint64
+		for hook, total := range drops {
+			if total < seen[hook] {
+				seen[hook] = 0 // counters reset when objects are reloaded
+			}
+			if d := total - seen[hook]; d > 0 {
+				metrics.RecordTracepointEventsDropped(hook, d)
+				fresh += d
+			}
+			seen[hook] = total
+		}
+		if fresh > 0 {
+			fmt.Printf("WARNING: %d tracepoint events dropped in the last %s (ring buffer full); "+
+				"those observations were lost. See warmor_tracepoint_events_dropped_total.\n",
+				fresh, dropPollInterval)
+		}
 	}
 }
 

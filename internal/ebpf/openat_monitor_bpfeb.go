@@ -33,6 +33,7 @@ type openat_monitorFileEvent struct {
 const (
 	openat_monitorMapCgroupFilter                      = "cgroup_filter"
 	openat_monitorMapFileEvents                        = "file_events"
+	openat_monitorMapTracepointDrops                   = "tracepoint_drops"
 	openat_monitorProgTracepointSyscallsSysEnterOpenat = "tracepoint__syscalls__sys_enter_openat"
 	openat_monitorVarUnusedFileEvent                   = "unused_file_event"
 )
@@ -86,8 +87,9 @@ type openat_monitorProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type openat_monitorMapSpecs struct {
-	CgroupFilter *ebpf.MapSpec `ebpf:"cgroup_filter"`
-	FileEvents   *ebpf.MapSpec `ebpf:"file_events"`
+	CgroupFilter    *ebpf.MapSpec `ebpf:"cgroup_filter"`
+	FileEvents      *ebpf.MapSpec `ebpf:"file_events"`
+	TracepointDrops *ebpf.MapSpec `ebpf:"tracepoint_drops"`
 }
 
 // openat_monitorVariableSpecs contains global variables before they are loaded into the kernel.
@@ -117,14 +119,16 @@ func (o *openat_monitorObjects) Close() error {
 //
 // It can be passed to loadOpenat_monitorObjects or ebpf.CollectionSpec.LoadAndAssign.
 type openat_monitorMaps struct {
-	CgroupFilter *ebpf.Map `ebpf:"cgroup_filter"`
-	FileEvents   *ebpf.Map `ebpf:"file_events"`
+	CgroupFilter    *ebpf.Map `ebpf:"cgroup_filter"`
+	FileEvents      *ebpf.Map `ebpf:"file_events"`
+	TracepointDrops *ebpf.Map `ebpf:"tracepoint_drops"`
 }
 
 func (m *openat_monitorMaps) Close() error {
 	return _Openat_monitorClose(
 		m.CgroupFilter,
 		m.FileEvents,
+		m.TracepointDrops,
 	)
 }
 
