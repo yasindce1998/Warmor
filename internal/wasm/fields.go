@@ -7,6 +7,7 @@ import (
 	wazeroapi "github.com/tetratelabs/wazero/api"
 
 	"github.com/yasindce1998/warmor/internal/compiler"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -71,4 +72,20 @@ func (e *PolicyEvaluator) FieldsRead(t api.EventType) uint32 {
 		return FieldsUnknown
 	}
 	return e.pool.FieldsRead(t)
+}
+
+// RequiresCompleteCapture reports whether the policy declared, through the
+// fields-read declaration bit, that it needs complete capture for the fields
+// it reads. It is a worker observation of NEED only: the host never treats it
+// as proof of input completeness.
+func (e *PolicyEvaluator) RequiresCompleteCapture(t api.EventType) bool {
+	f := e.FieldsRead(t)
+	return f != FieldsUnknown && f&policymeta.FieldBitRequireCompleteCapture != 0
+}
+
+// RequiredCaptureFields returns the capturable fields this policy declared it
+// needs complete. Completeness itself is computed by the host from the event,
+// never from this declaration.
+func (e *PolicyEvaluator) RequiredCaptureFields(t api.EventType) uint32 {
+	return policymeta.RequiredCaptureFields(e.FieldsRead(t))
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -89,6 +90,16 @@ type Options struct {
 	// "deny") configure the kernel event ring; see platform.Config.
 	LSMRingBufferSize uint32
 	OnEventLoss       string
+
+	// OnIncompleteInput ("log", "audit" or "deny") configures the host-side
+	// capture-quality gate. When a policy declares it requires complete
+	// capture (policymeta.FieldBitRequireCompleteCapture) and the event is
+	// missing one of the capturable fields the policy reads, "deny" fails
+	// closed in enforce mode, "audit" records a would-deny, and "log" (the
+	// default) only logs. This mirrors --on-event-loss but is enforced in the
+	// userspace decision path against host-computed event quality: no guest
+	// export can prove its own inputs were complete.
+	OnIncompleteInput string
 
 	// DefaultDeny preloads the policy's static allow rules into the kernel
 	// policy map and marks the eligible domains default-deny, so the BPF
@@ -207,11 +218,14 @@ type Enforcer struct {
 	auditMode       bool
 	learningMode    bool
 	defaultDeny     bool
-	ctx             context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
-	stopOnce        sync.Once
-	processing      atomic.Bool
+	// onIncompleteInput is the normalized capture-quality gate mode
+	// ("log", "audit" or "deny"); empty is treated as "log".
+	onIncompleteInput string
+	ctx               context.Context
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
+	stopOnce          sync.Once
+	processing        atomic.Bool
 }
 
 // newPlatform constructs the platform monitor. It is a variable so tests can
@@ -297,6 +311,18 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	logger.LogStartup(policyPath)
 	if opts.AuditMode || opts.LearningMode {
 		logger.LogInfo("Dry-run posture: kernel blocking and userspace termination disabled; integrity checks audit-only")
+	}
+
+	// Normalize the capture-quality gate mode once. An empty value keeps the
+	// historical behavior (log-only) so existing deployments are unaffected.
+	onIncompleteInput := opts.OnIncompleteInput
+	if onIncompleteInput == "" {
+		onIncompleteInput = "log"
+	}
+	switch onIncompleteInput {
+	case "log", "audit", "deny":
+	default:
+		return nil, fmt.Errorf("invalid OnIncompleteInput %q (valid: log, audit, deny)", opts.OnIncompleteInput)
 	}
 
 	// Initialize network filter if configured. This only validates config,
@@ -541,39 +567,40 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 	ctx, cancel := context.WithCancel(ctx)
 
 	e := &Enforcer{
-		platform:         plat,
-		wasmRuntime:      backend.runtime,
-		evaluator:        evaluator,
-		pool:             backend.pool,
-		backend:          backend,
-		supervisor:       supervisor,
-		signedAssignment: opts.ExpectedAssignment != nil,
-		kernelEnforce:    kernelBlocking,
-		requireLSM:       opts.RequireLSM,
-		lsmEnforce:       opts.LSMEnforce,
-		cache:            decisionCache,
-		actionHandler:    actionHandler,
-		logger:           logger,
-		metricsServer:    metricsServer,
-		policyMap:        policyMapSyncer,
-		pipeline:         pipeline,
-		lineageTracker:   tracker,
-		intelligence:     intel,
-		driftCollector:   driftCollector,
-		telemetry:        opts.Telemetry,
-		netFilter:        netFilter,
-		sandbox:          sandboxMgr,
-		escape:           escapeDetector,
-		containerStarts:  cgroups,
-		policyPath:       policyPath,
-		verifyKey:        append(ed25519.PublicKey(nil), opts.PolicyVerifyKey...),
-		policyID:         pid,
-		evalTimeout:      opts.EvalTimeout,
-		auditMode:        opts.AuditMode,
-		learningMode:     opts.LearningMode,
-		defaultDeny:      opts.DefaultDeny,
-		ctx:              ctx,
-		cancel:           cancel,
+		platform:          plat,
+		wasmRuntime:       backend.runtime,
+		evaluator:         evaluator,
+		pool:              backend.pool,
+		backend:           backend,
+		supervisor:        supervisor,
+		signedAssignment:  opts.ExpectedAssignment != nil,
+		kernelEnforce:     kernelBlocking,
+		requireLSM:        opts.RequireLSM,
+		lsmEnforce:        opts.LSMEnforce,
+		cache:             decisionCache,
+		actionHandler:     actionHandler,
+		logger:            logger,
+		metricsServer:     metricsServer,
+		policyMap:         policyMapSyncer,
+		pipeline:          pipeline,
+		lineageTracker:    tracker,
+		intelligence:      intel,
+		driftCollector:    driftCollector,
+		telemetry:         opts.Telemetry,
+		netFilter:         netFilter,
+		sandbox:           sandboxMgr,
+		escape:            escapeDetector,
+		containerStarts:   cgroups,
+		policyPath:        policyPath,
+		verifyKey:         append(ed25519.PublicKey(nil), opts.PolicyVerifyKey...),
+		policyID:          pid,
+		evalTimeout:       opts.EvalTimeout,
+		auditMode:         opts.AuditMode,
+		learningMode:      opts.LearningMode,
+		defaultDeny:       opts.DefaultDeny,
+		onIncompleteInput: onIncompleteInput,
+		ctx:               ctx,
+		cancel:            cancel,
 	}
 	backend = nil // e now owns the complete backend lifetime
 	if opts.ExpectedAssignment != nil {
@@ -680,6 +707,48 @@ func (e *Enforcer) eventLoop() {
 			e.handleEvent(event)
 		}
 	}
+}
+
+// captureQualityGate is the HOST-ENFORCED input-quality gate. It compares the
+// capturable fields a policy declared it requires (a worker observation carried
+// on fields_read) against the quality mask derived from kernel telemetry on
+// the raw event. The declaration can only name inputs to verify; the host, and
+// only the host, decides whether they were actually captured well. No guest
+// export, module metadata or worker claim can prove input completeness here.
+//
+// It returns a replacement verdict when the gate fires, or logOnly when the
+// configured mode is "log" (the issue is logged but evaluation proceeds).
+// A policy with no declaration returns no verdict and no issue, preserving the
+// behavior of every existing policy.
+func (e *Enforcer) captureQualityGate(event *api.Event, evaluator policymeta.Source) (verdict *api.ActionResult, logOnly bool) {
+	required := policymeta.RequiredCaptureFields(evaluator.FieldsRead(event.GetType()))
+	if required == 0 {
+		return nil, false
+	}
+	incomplete := policymeta.IncompleteCaptureFields(event)
+	missing := required & incomplete
+	if missing == 0 {
+		return nil, false
+	}
+
+	mode := e.onIncompleteInput
+	if mode == "" {
+		mode = "log"
+	}
+	reason := fmt.Sprintf("incomplete input capture: policy requires complete %s",
+		strings.Join(policymeta.CaptureFieldNames(missing), ", "))
+	if mode == "log" {
+		return nil, true
+	}
+	result := &api.ActionResult{
+		Action:    api.ActionDeny,
+		Reason:    reason,
+		Timestamp: time.Now(),
+		// "audit" is a would-deny: recorded but never enforced. "deny" in a
+		// global audit/learning dry-run is downgraded by ActionHandler.Enforce.
+		Audit: mode == "audit",
+	}
+	return result, false
 }
 
 // handleEvent processes a single event with caching and metrics
@@ -815,6 +884,30 @@ func (e *Enforcer) handleEvent(event *api.Event) {
 	if captured != nil {
 		evaluator, gen, pid = captured.evaluator, captured.id, captured.policyID
 	}
+
+	// HOST-ENFORCED capture-quality gate. It runs before the decision cache and
+	// before evaluation: an event missing a field the policy declared required
+	// must never be evaluated against empty values nor reuse a cached verdict.
+	// Completeness comes from the raw event only; the declaration only selects
+	// which inputs to check. A gate verdict is event-specific and is therefore
+	// never persisted to the cache or the kernel policy map.
+	if verdict, logOnly := e.captureQualityGate(event, evaluator); verdict != nil {
+		_ = e.actionHandler.Enforce(e.ctx, event, verdict)
+		e.reportOutcome(event, verdict, nil)
+		e.logger.LogEvent(event, verdict)
+		metrics.RecordEvent(verdict.Action.String())
+		metrics.RecordLatency(0)
+		if e.pipeline != nil {
+			e.pipeline.Emit(event, verdict)
+		}
+		return
+	} else if logOnly {
+		e.logger.LogInfo("incomplete input capture (on-incomplete-input=log): " +
+			strings.Join(policymeta.CaptureFieldNames(
+				policymeta.RequiredCaptureFields(evaluator.FieldsRead(event.GetType()))&
+					policymeta.IncompleteCaptureFields(event)), ", "))
+	}
+
 	cacheUsable := true
 	if host, ok := evaluator.(*hostEvaluator); ok {
 		cacheUsable = host.Alive()

@@ -26,7 +26,7 @@ func TestMetadataBoundsAndAmbiguity(t *testing.T) {
 		"missing domain":         func(m *Module) { m.Domains = m.Domains[:1] },
 		"duplicate domain":       func(m *Module) { m.Domains[1] = m.Domains[0] },
 		"unknown version":        func(m *Module) { m.Version++ },
-		"unknown ABI":            func(m *Module) { m.ABIVersion = 6 },
+		"unknown ABI":            func(m *Module) { m.ABIVersion = 7 },
 		"missing ABI with flags": func(m *Module) { m.ABIVersion = 0 },
 		"unknown encoding":       func(m *Module) { m.Encoding = "future" },
 		"identity mismatch":      func(m *Module) { m.ModuleSHA256 = strings.Repeat("b", 64) },
@@ -72,7 +72,7 @@ func TestFiniteFlagsUnknownAndTemporal(t *testing.T) {
 		fields uint32
 		flags  uint32
 	}{
-		{0, 0, 0}, {6, 0, 0}, {5, 1 << 30, 0},
+		{0, 0, 0}, {7, 0, 0}, {6, 0, FlagDecisionCache | FlagLinuxKernelKey}, {5, 1 << 30, 0},
 		{5, compiler.FieldsUnknown, FlagTimeDependent | FlagContainerAge},
 		{2, compiler.FieldsUnknown, 0},
 		{5, compiler.FieldBitPath, FlagDecisionCache | FlagLinuxKernelKey},

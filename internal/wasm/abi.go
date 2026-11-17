@@ -7,6 +7,7 @@ import (
 
 	"github.com/tetratelabs/wazero"
 	wazeroapi "github.com/tetratelabs/wazero/api"
+	"github.com/yasindce1998/warmor/internal/policymeta"
 )
 
 // Policy ABI versions understood by this host. A module may declare the
@@ -23,16 +24,31 @@ import (
 //	   and docs/design/abi-v4-process-context.md
 //	5  adds argv host callback (field 15) and zero-capacity string-length
 //	   queries, used by compiled YAML args/network operation conditions
+//	6  carries capture-quality metadata to the guest: a JSON capture_quality
+//	   map and the get_field_u32 capture quality mask (field 16). It does NOT
+//	   change how the verdict is made; the host-side quality gate is
+//	   version-independent and host-enforced.
 //
-// The binary struct layout is unchanged; versions 3 and 4 fill padding/add
-// JSON keys, and version 5 extends host callbacks. The host rejects anything
-// outside this range so a policy built
+// The binary struct layout is unchanged; versions 3, 4 and 6 fill padding/add
+// JSON keys, and version 5 extends host callbacks. Modules declaring <=5 never
+// see the new keys or callbacks, so they keep their exact existing behavior.
+// The host rejects anything outside this range so a policy built
 // for a future, incompatible contract fails loudly at load time instead
 // of silently mis-evaluating every event.
 const (
 	MinABIVersion uint32 = 1
-	MaxABIVersion uint32 = 5
+	// MaxABIVersion aliases policymeta.MaxABIVersion so metadata validation
+	// and module loading can never disagree about what ABI versions exist.
+	MaxABIVersion uint32 = policymeta.MaxABIVersion
 )
+
+// CaptureQualityABIVersion is the first policy ABI version that receives
+// capture-quality metadata (the JSON capture_quality map and the get_field_u32
+// quality mask, field 16). It is a carriage feature only: a guest may observe
+// quality, but it can never export
+// a claim that its own inputs were complete. The host computes quality from
+// kernel telemetry and enforces the gate independently of this version.
+const CaptureQualityABIVersion uint32 = 6
 
 // ProcessContextABIVersion is the first policy ABI version whose modules
 // are sent process context: the event's cgroup (JSON cgroup_id, all types),

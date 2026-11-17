@@ -15,6 +15,16 @@ type Policy struct {
 	Variables     map[string]interface{} `yaml:"variables,omitempty"`
 	Rules         []Rule                 `yaml:"rules"`
 	DefaultAction string                 `yaml:"default_action"`
+	// RequireCompleteCapture is a policy-level declaration that the host must
+	// verify complete capture for every capturable field this policy reads
+	// before evaluating it. It is a request for a gate, not a guest assertion
+	// of input completeness: the host derives quality from kernel telemetry.
+	//
+	// The YAML parser decodes into its own rawPolicy struct, so compiled YAML
+	// opts in by setting `variables: {require_complete_capture: true}` (see
+	// Validate). Direct Policy construction and hand-written WASM modules can
+	// set the declaration bit directly.
+	RequireCompleteCapture bool `yaml:"require_complete_capture,omitempty"`
 }
 
 type Rule struct {
@@ -56,6 +66,17 @@ type ConditionOperator struct {
 }
 
 func (p *Policy) Validate() error {
+	// YAML opt-in for the capture-quality gate. The parser does not yet have a
+	// dedicated top-level key (rawPolicy is decoded strictly), so the declared
+	// variable is lifted into the typed field here. It is still only a worker
+	// observation of the policy's need; the host owns completeness.
+	if !p.RequireCompleteCapture {
+		if v, ok := p.Variables["require_complete_capture"]; ok {
+			if b, isBool := v.(bool); isBool && b {
+				p.RequireCompleteCapture = true
+			}
+		}
+	}
 	if p.Name == "" {
 		return fmt.Errorf("policy name is required")
 	}

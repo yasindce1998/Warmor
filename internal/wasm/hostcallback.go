@@ -7,6 +7,7 @@ import (
 	"github.com/tetratelabs/wazero"
 	wazeroapi "github.com/tetratelabs/wazero/api"
 
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -35,6 +36,15 @@ const (
 	FieldProtocol   uint32 = 13
 	FieldRemoteAddr uint32 = 14
 	FieldArgs       uint32 = 15
+
+	// FieldCaptureQuality (ABI >= 6) returns the host-computed bitmask of
+	// policymeta.FieldBit* inputs that were truncated or absent. The value is
+	// derived from kernel telemetry on the raw event; a guest cannot set it,
+	// so it can never be used to prove its own inputs were complete.
+	FieldCaptureQuality uint32 = 16
+	// FieldPPID exposes the parent PID to hand-written modules. The host gate
+	// can require it via FieldBitPPID; zero on a trusted live event is loss.
+	FieldPPID uint32 = 17
 )
 
 func registerHostCallbacks(ctx context.Context, r wazero.Runtime) error {
@@ -77,6 +87,11 @@ func hostGetFieldU32(ctx context.Context, _ wazeroapi.Module, fieldID uint32) ui
 			return uint32(event.Network.LocalPort)
 		}
 		return 0
+	case FieldPPID:
+		return event.PPID
+	case FieldCaptureQuality:
+		// Host-owned observation. No guest export feeds this value.
+		return policymeta.IncompleteCaptureFields(event)
 	default:
 		return 0
 	}
