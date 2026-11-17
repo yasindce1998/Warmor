@@ -33,6 +33,13 @@ func (*hookAwareFake) KernelKeyFieldsForEvent(event *api.Event) []string {
 			return nil
 		}
 		return []string{"path"}
+	case api.EventTypeFile:
+		// Mirror PolicyMapManager: only sb_mount is keyed, by fstype (hook
+		// metadata with no compiler bit); plain file_open has no key.
+		if event.Hook == "mount" {
+			return []string{"fstype"}
+		}
+		return nil
 	case api.EventTypeNetwork:
 		switch event.Hook {
 		case "", "connect", "bind":
@@ -55,6 +62,10 @@ func TestDecisionDeterminedByKernelKey(t *testing.T) {
 
 	proc := &api.Event{Type: api.EventTypeProcess, CgroupID: 1, Filename: "/bin/sh"}
 	file := &api.Event{Type: api.EventTypeFile, CgroupID: 1, Filename: "/etc/shadow"}
+	mountEv := &api.Event{
+		Type: api.EventTypeFile, CgroupID: 1, LSMEvent: true, Hook: "mount",
+		File: &api.FileEvent{Path: "proc"},
+	}
 	net := func(hook string) *api.Event {
 		return &api.Event{
 			Type: api.EventTypeNetwork, CgroupID: 1, Hook: hook,
@@ -100,6 +111,16 @@ func TestDecisionDeterminedByKernelKey(t *testing.T) {
 		{"listen port + wall clock is not key-determined", hookAware, net("listen"), compiler.FieldBitRemotePort | compiler.FieldBitTime, false},
 		{"exec hook respected for process", hookAware, proc, path, true},
 		{"non-exec process hook has no key", hookAware, &api.Event{Type: api.EventTypeProcess, Hook: "ptrace", Filename: "/bin/sh"}, path, false},
+		// Mount: fstype is hook metadata, not a policy field. Only a decision
+		// that reads no policy field is determined by that key; source/target
+		// paths are not in the key and uid/temporal are never covered.
+		{"mount constant decision is key-determined", hookAware, mountEv, 0, true},
+		{"mount + path is not key-determined", hookAware, mountEv, compiler.FieldBitPath, false},
+		{"mount + uid is not key-determined", hookAware, mountEv, compiler.FieldBitUID, false},
+		{"mount + comm is not key-determined", hookAware, mountEv, compiler.FieldBitComm, false},
+		{"mount + wall clock is not key-determined", hookAware, mountEv, compiler.FieldBitTime, false},
+		{"mount + container age is not key-determined", hookAware, mountEv, compiler.FieldBitContainerAge, false},
+		{"file_open has no key", hookAware, file, 0, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -370,5 +391,90 @@ func TestNew_EvalTimeoutOption(t *testing.T) {
 	}
 	if got := inProcessEvaluator(t, e).Timeout(); got != 123*time.Millisecond {
 		t.Fatalf("timeout after reload = %v, want 123ms", got)
+	}
+}
+
+// mountSyncRecorder mirrors the Linux PolicyMapManager's mount key report:
+// only sb_mount (Hook=="mount") has an exact key, keyed by fstype (hook
+// metadata with no compiler bit). It records SyncEvent calls.
+type mountSyncRecorder struct{ eventSyncRecorder }
+
+func (*mountSyncRecorder) KernelKeyFieldsForEvent(event *api.Event) []string {
+	if event == nil || event.GetType() != api.EventTypeFile || event.Hook != "mount" {
+		return nil
+	}
+	return []string{"fstype"}
+}
+
+// TestMountLSMWritebackFoldsAudit checks the LSM gate relaxation in
+// persistDecision: a mount LSM miss may be written back because the hook
+// already accepted the mount (it only emitted on a policy-map miss), the
+// userspace decision is keyed by the very same fstype, and there is no
+// default-deny domain. Only a decision determined by the key alone (no
+// policy field read) is synced; source/target/uid/temporal decisions stay
+// userspace-only. Audit downgrade must still reach the kernel (audit=1 means a
+// would-deny, never a block).
+func TestMountLSMWritebackFoldsAudit(t *testing.T) {
+	newMount := func() *api.Event {
+		return &api.Event{
+			Type: api.EventTypeFile, CgroupID: 42, LSMEvent: true, Hook: "mount",
+			Filename: "proc", MountSource: "/proc", File: &api.FileEvent{Path: "proc"},
+		}
+	}
+	// A deny that declares no policy fields read is fully determined by the
+	// fstype key and may be written back.
+	for _, tc := range []struct {
+		name      string
+		auditMode bool
+		wantAudit bool
+	}{
+		{"plain deny", false, false},
+		{"audit downgraded deny", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &mountSyncRecorder{}
+			e, _ := newTestEnforcer(t, testEnforcerOpts{
+				policyMap:  rec,
+				policyWasm: wasmtest.ConstPolicy(1, &[3]uint32{0, 0, 0}), // deny, no fields read
+			})
+			e.auditMode = tc.auditMode
+			e.handleEvent(newMount())
+			if len(rec.events) != 1 {
+				t.Fatalf("mount LSM DENY not written back: %+v", rec)
+			}
+			if rec.actions[0] != 1 {
+				t.Fatalf("action = %d, want DENY", rec.actions[0])
+			}
+			if rec.audits[0] != tc.wantAudit {
+				t.Fatalf("audit = %v, want %v", rec.audits[0], tc.wantAudit)
+			}
+		})
+	}
+
+	// A decision that reads `path` (the mount source/target, not in the key)
+	// must NOT be written back even though this is an LSM mount miss.
+	readsPath := &[3]uint32{0, compiler.FieldBitPath, 0}
+	rec := &mountSyncRecorder{}
+	e, _ := newTestEnforcer(t, testEnforcerOpts{
+		policyMap:  rec,
+		policyWasm: wasmtest.ConstPolicy(1, readsPath),
+	})
+	e.handleEvent(newMount())
+	if len(rec.events) != 0 {
+		t.Fatalf("unsound mount LSM decision was written back: %+v", rec)
+	}
+
+	// A non-mount LSM event (plain file_open) is still recorded, never re-synced.
+	rec2 := &mountSyncRecorder{}
+	e2, _ := newTestEnforcer(t, testEnforcerOpts{
+		policyMap:  rec2,
+		policyWasm: wasmtest.ConstPolicy(1, &[3]uint32{0, 0, 0}),
+	})
+	e2.handleEvent(&api.Event{
+		Type: api.EventTypeFile, CgroupID: 42, LSMEvent: true, Hook: "file",
+		File: &api.FileEvent{Path: "proc"},
+	})
+	if len(rec2.events) != 0 {
+		t.Fatalf("non-mount LSM event was synced: %+v", rec2)
 	}
 }

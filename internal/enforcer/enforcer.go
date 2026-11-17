@@ -1010,9 +1010,11 @@ type kernelKeyFielder interface {
 // listen and connect share event type network but use different policy_map
 // domains (EVENT_TYPE_BIND, EVENT_TYPE_LISTEN vs EVENT_TYPE_NETWORK); a bind
 // decision may only be written under the bind key (Hook=="bind") and a listen
-// decision only under the port-only listen key (Hook=="listen"). Maps that
-// implement this interface are always queried through it, so a hook without
-// an exact key (e.g. connect_unix) never receives a decision.
+// decision only under the port-only listen key (Hook=="listen"); mount is a
+// file-kind event keyed only by filesystem type (Hook=="mount"), while plain
+// file_open has no exact key. Maps that implement this interface are always
+// queried through it, so a hook without an exact key (e.g. connect_unix,
+// file_open) never receives a decision.
 type hookKernelKeyFielder interface {
 	KernelKeyFieldsForEvent(event *api.Event) []string
 }
@@ -1042,7 +1044,20 @@ func decisionDeterminedByKernelKey(pm PolicyMapSyncer, event *api.Event, fieldsR
 	if len(keyFields) == 0 {
 		return false
 	}
-	return fieldsRead&^compiler.FieldMask(keyFields...) == 0
+	keyMask := compiler.FieldMask(keyFields...)
+	if keyMask == compiler.FieldsUnknown {
+		// A reported key field with no compiler bit (mount's "fstype" is hook
+		// metadata, not a policy-declarable field) must NOT be read as "covers
+		// everything": compiler.FieldMask maps an unknown name to
+		// FieldsUnknown, which would otherwise make every decision look
+		// key-determined. Such a key can only discharge an empty field set, so
+		// only a decision that reads no policy field is sound to sync. Mount's
+		// source and target live only in the event aux and are never in the
+		// key, so a decision depending on them (or uid, comm, time, ...) must
+		// stay userspace-only.
+		return fieldsRead == 0
+	}
+	return fieldsRead&^keyMask == 0
 }
 
 // policyID is the policy_id metrics label for a policy file: its base name.
@@ -1137,19 +1152,25 @@ func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, g
 	// LSM-origin events are normally recorded, never re-synced: the kernel
 	// already reached its verdict from a policy snapshot, and writing a fresh
 	// decision back could apply it to events from a different generation.
-	// Bind and listen are the only deliberate exceptions. Both hooks look up
+	// Bind, listen and mount are the only deliberate exceptions. Each looks up
 	// an exact key (bind: {cgroup, family, addr, port, EVENT_TYPE_BIND};
-	// listen: {cgroup, family, port, EVENT_TYPE_LISTEN} — no address) and, on
-	// a miss, emit this event and return 0. So the kernel has *already
-	// accepted* the operation and there is no in-flight operation left to
-	// re-decide. Userspace evaluates the complete event and the write goes
-	// back under that very same exact key, so no other operation is affected.
-	// Both are dynamic-only (no default-deny domain): a miss stays an allow
-	// until a DENY is explicitly installed, so no allowlist completeness is
-	// claimed. Audit downgrade is folded in by syncDecision.
+	// listen: {cgroup, family, port, EVENT_TYPE_LISTEN} — no address;
+	// mount: {cgroup, fstype, EVENT_TYPE_MOUNT}) and, on a miss, emits this
+	// event and returns 0. So the kernel has *already accepted* the operation
+	// and there is no in-flight operation left to re-decide. Userspace
+	// evaluates the complete event and the write goes back under that very
+	// same exact key, so no other operation is affected. All are dynamic-only
+	// (no default-deny domain): a miss stays an allow until a DENY is
+	// explicitly installed, so no allowlist completeness is claimed. A mount
+	// DENY is coarse — it blocks every mount of that fstype in the cgroup,
+	// regardless of source/target, which are not in the key — and soundness
+	// is enforced in decisionDeterminedByKernelKey (only decisions determined
+	// by the key alone are synced). Audit downgrade is folded in by
+	// syncDecision.
 	lsmMissWriteback := event.LSMEvent && !event.KernelDenied &&
-		event.GetType() == api.EventTypeNetwork &&
-		(event.Hook == "bind" || event.Hook == "listen")
+		((event.GetType() == api.EventTypeNetwork &&
+			(event.Hook == "bind" || event.Hook == "listen")) ||
+			(event.GetType() == api.EventTypeFile && event.Hook == "mount"))
 	if e.policyMap != nil && (!event.LSMEvent || lsmMissWriteback) &&
 		(e.supervisor == nil || evaluator.LinuxKernelCacheEligible(event.GetType())) {
 		// Failures are counted and rate-limit logged inside; the event
