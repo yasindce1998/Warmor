@@ -33,6 +33,7 @@ var (
 	cgroupFilter             = flag.String("cgroup-filter", "", "Cgroup paths to filter (comma-separated, or 'auto' for K8s pod discovery)")
 	lsmEnforce               = flag.Bool("lsm-enforce", false, "Enable LSM-BPF kernel-level blocking (requires CONFIG_BPF_LSM)")
 	requireLSM               = flag.Bool("require-lsm", false, "Fail to start unless BPF-LSM kernel enforcement can be loaded (fail-closed; default is to degrade to observe-only)")
+	requireEnforcePosture    = flag.Bool("require-enforce-posture", false, "Fail to start if --lsm-enforce was requested but kernel LSM blocking could not be established (LSM unavailable or enforce toggle unset); unlike --require-lsm, this only applies when enforcement was requested")
 	noLSM                    = flag.Bool("no-lsm", false, "Skip LSM-BPF loading entirely (tracepoint-only observe mode)")
 	defaultDeny              = flag.Bool("default-deny", false, "Refuse in-kernel (EPERM) what the policy does not allow: preload the policy's static allow rules and deny policy-map misses (requires --lsm-enforce and an allowlist policy: default_action deny + exact eq rules; see docs/design/kernel-default-deny.md)")
 	eventSink                = flag.String("event-sink", "", "Event sinks: stdout, file:<path>, webhook:<url>, syslog:[udp|tcp://]host:port (comma-separated)")
@@ -182,6 +183,7 @@ func runDaemon(stop <-chan struct{}) {
 	log.Printf("Audit Mode: %v", *auditMode)
 	log.Printf("LSM Enforce: %v", *lsmEnforce)
 	log.Printf("Require LSM: %v", *requireLSM)
+	log.Printf("Require Enforce Posture: %v", *requireEnforcePosture)
 	if *defaultDeny {
 		log.Printf("Default-Deny: requested (kernel refuses exec/connect the policy does not allow)")
 	}
@@ -338,6 +340,7 @@ func runDaemon(stop <-chan struct{}) {
 		LogLevel:                *logLevel,
 		LSMEnforce:              *lsmEnforce,
 		RequireLSM:              *requireLSM,
+		RequireEnforcePosture:   *requireEnforcePosture,
 		SkipLSM:                 *noLSM,
 		StreamSinks:             sinks,
 		Labels:                  labels,

@@ -520,7 +520,19 @@ func eventPolicyKey(event *api.Event) (PolicyKey, error) {
 		}
 		return stringPolicyKey(event.CgroupID, EventTypeExec, path)
 	case api.EventTypeNetwork:
-		if event.Network == nil || event.Network.Operation != "connect" ||
+		if event.Network == nil {
+			break
+		}
+		// Bind and connect are distinct kernel domains (EVENT_TYPE_BIND vs
+		// EVENT_TYPE_NETWORK) with the same exact {family, addr, port} key.
+		// The live sensor reports Operation="connect" for bind events, so the
+		// hook — not the operation — is what separates them. Syncing a bind
+		// decision under the connect key would apply it to connects WASM
+		// never evaluated, and vice versa.
+		if event.Hook == "bind" {
+			return endpointPolicyKey(event.CgroupID, EventTypeBind, event.Network.RemoteAddr, event.Network.RemotePort)
+		}
+		if event.Network.Operation != "connect" ||
 			(event.Hook != "" && event.Hook != "connect") {
 			break
 		}
@@ -534,12 +546,54 @@ func eventPolicyKey(event *api.Event) (PolicyKey, error) {
 // exec filename for process events and the remote endpoint for connects.
 // File events are never keyed (lsm_file only sees the basename). The
 // enforcer only syncs decisions that depend on nothing else.
+//
+// This is the hook-agnostic view kept for interface compatibility with maps
+// whose keys do not vary by hook. For Linux decisions, KernelKeyFieldsForEvent
+// is authoritative: it additionally separates the bind key from the connect
+// key and refuses hooks with no exact kernel identity.
 func (m *PolicyMapManager) KernelKeyFields(t api.EventType) []string {
 	switch t {
 	case api.EventTypeProcess:
 		return []string{"path"}
 	case api.EventTypeNetwork:
 		return []string{"remote_addr", "remote_port"}
+	default:
+		return nil
+	}
+}
+
+// KernelKeyFieldsForEvent is the hook-aware form of KernelKeyFields. It
+// reports the compiler field names the kernel policy-map key covers for this
+// exact event, so the enforcer can prove a decision is fully determined by
+// the key before writing it back.
+//
+// Bind is a separate kernel domain keyed by the same exact endpoint as
+// connect. It is only matchable for Hook=="bind" and only when the decision
+// depends on nothing beyond {remote_addr, remote_port}: the BPF key carries
+// no other policy-visible field. In particular, network policies must not
+// read `operation` on bind for now — the live sensor reports Operation
+// "connect" for bind events, so a decision that branches on `operation`
+// cannot be reproduced by the kernel's bind key and is refused rather than
+// applied to other events. Other network hooks (connect_unix, listen) have
+// no exact policy-map key and are never synced.
+func (m *PolicyMapManager) KernelKeyFieldsForEvent(event *api.Event) []string {
+	if event == nil {
+		return nil
+	}
+	switch event.GetType() {
+	case api.EventTypeProcess:
+		if event.Hook != "" && event.Hook != "exec" {
+			return nil
+		}
+		return []string{"path"}
+	case api.EventTypeNetwork:
+		switch event.Hook {
+		case "", "connect", "bind":
+			return []string{"remote_addr", "remote_port"}
+		default:
+			// connect_unix, listen and any future hook have no exact key.
+			return nil
+		}
 	default:
 		return nil
 	}

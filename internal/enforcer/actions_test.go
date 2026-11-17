@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -305,5 +306,167 @@ func TestActionHandler_KernelDeniedIsEnforcedWithoutTermination(t *testing.T) {
 	s := h.GetStats()
 	if s.Denied != 1 || s.EnforcementAttempted != 0 || s.EnforcementSucceeded != 0 || s.EnforcementFailed != 0 || s.EnforcementRefused != 0 {
 		t.Fatalf("kernel counted as termination: %+v", s)
+	}
+}
+
+// refusalReason is intentionally a closed set: any unrecognized error text
+// must fall back to "unknown" instead of creating a new label value.
+func TestRefusalReasonIsBounded(t *testing.T) {
+	allowed := map[string]bool{
+		refusalReasonPIDZero: true, refusalReasonContext: true, refusalReasonUnsafePID: true,
+		refusalReasonMissingTS: true, refusalReasonPIDFD: true, refusalReasonStale: true,
+		refusalReasonClockDomain: true, refusalReasonNamespace: true,
+		refusalReasonClockUnavail: true, refusalReasonIdentity: true, refusalReasonUnknown: true,
+	}
+	inputs := []string{
+		"termination refused: PID is unknown/zero",
+		"context canceled",
+		"context deadline exceeded",
+		"process identity cannot be verified; termination refused: unsafe PID 2147483648",
+		"process identity cannot be verified; termination refused: missing trusted kernel monotonic timestamp",
+		"process identity cannot be verified; termination refused: initial PID namespace required for host-PID kernel events (use hostPID)",
+		"process identity cannot be verified; termination refused: procfs PID namespace does not match daemon",
+		"process identity cannot be verified; termination refused: cannot verify initial clock domain: open timens_offsets: no such file",
+		"process identity cannot be verified; termination refused: read monotonic clock: input/output error",
+		"process identity cannot be verified; termination refused: read USER_HZ: input/output error",
+		"process identity cannot be verified; termination refused: future timestamp or wrong clock domain",
+		"process identity cannot be verified; termination refused: process start tick does not strictly precede event (stale/reused PID)",
+		"read process 42 start identity: open /proc/42/stat: no such file or directory",
+		"process identity cannot be verified; termination refused: invalid process start tick or USER_HZ",
+		"pidfd_open(42), no numeric-PID fallback: function not implemented",
+		"a brand new error string never seen before",
+		"",
+	}
+	for _, in := range inputs {
+		if r := refusalReason(in); !allowed[r] {
+			t.Errorf("refusalReason(%q) = %q outside the bounded set", in, r)
+		}
+	}
+}
+
+func TestRefusalReasonClassification(t *testing.T) {
+	for _, tc := range []struct{ errText, want string }{
+		{"termination refused: PID is unknown/zero", refusalReasonPIDZero},
+		{"context deadline exceeded", refusalReasonContext},
+		{"process identity cannot be verified; termination refused: unsafe PID 1", refusalReasonUnsafePID},
+		{"process identity cannot be verified; termination refused: missing trusted kernel monotonic timestamp", refusalReasonMissingTS},
+		{"pidfd_open(42), no numeric-PID fallback: no such process", refusalReasonPIDFD},
+		{"process identity cannot be verified; termination refused: process start tick does not strictly precede event (stale)", refusalReasonStale},
+		{"process identity cannot be verified; termination refused: future timestamp or wrong clock domain", refusalReasonClockDomain},
+		{"process identity cannot be verified; termination refused: initial PID namespace required", refusalReasonNamespace},
+		{"process identity cannot be verified; termination refused: cannot verify initial clock domain: read: EIO", refusalReasonNamespace},
+		{"process identity cannot be verified; termination refused: read monotonic clock: EIO", refusalReasonClockUnavail},
+		{"process identity cannot be verified; termination refused: read USER_HZ: EIO", refusalReasonClockUnavail},
+		{"read process 42 start identity: stat: ENOENT", refusalReasonIdentity},
+		{"process identity cannot be verified; termination refused: invalid process start tick or USER_HZ", refusalReasonIdentity},
+		{"identity unavailable", refusalReasonIdentity},
+		{"totally unexpected", refusalReasonUnknown},
+	} {
+		if got := refusalReason(tc.errText); got != tc.want {
+			t.Errorf("refusalReason(%q) = %q, want %q", tc.errText, got, tc.want)
+		}
+	}
+}
+
+func TestActionHandler_RefusalReasonMetric(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pid     uint32
+		cancel  bool
+		termErr error
+		reason  string
+	}{
+		{"pid zero", 0, false, nil, refusalReasonPIDZero},
+		{"context canceled", 42, true, nil, refusalReasonContext},
+		{"namespace mismatch", 42, false, errors.New("process identity cannot be verified; termination refused: initial PID namespace required"), refusalReasonNamespace},
+		{"clock failure", 42, false, errors.New("process identity cannot be verified; termination refused: read monotonic clock: EIO"), refusalReasonClockUnavail},
+		{"pidfd unsupported", 42, false, errors.New("pidfd_open(42), no numeric-PID fallback: function not implemented"), refusalReasonPIDFD},
+		{"stale event", 42, false, errors.New("process identity cannot be verified; termination refused: process start tick does not strictly precede event"), refusalReasonStale},
+		{"unrecognized", 42, false, errors.New("some new refusal"), refusalReasonUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewActionHandler(false)
+			h.terminate = func(*api.Event) (bool, error) { return false, tc.termErr }
+			ctx := context.Background()
+			if tc.cancel {
+				c, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = c
+			}
+			before := testutil.ToFloat64(metrics.TerminationRefusals.WithLabelValues(tc.reason))
+			r := &api.ActionResult{Action: api.ActionDeny}
+			if err := h.Enforce(ctx, &api.Event{PID: tc.pid}, r); err == nil {
+				t.Fatal("expected refusal error")
+			}
+			if r.Enforced || r.EnforcementAttempted || r.EnforcementError == "" {
+				t.Fatalf("not a refusal: %+v", r)
+			}
+			if got := testutil.ToFloat64(metrics.TerminationRefusals.WithLabelValues(tc.reason)) - before; got != 1 {
+				t.Fatalf("refusal reason metric delta for %q = %v", tc.reason, got)
+			}
+			if got := h.GetStats().EnforcementRefused; got != 1 {
+				t.Fatalf("EnforcementRefused = %d", got)
+			}
+		})
+	}
+}
+
+func histogramState(t *testing.T) (uint64, float64) {
+	t.Helper()
+	var m dto.Metric
+	if err := metrics.TerminationLatency.Write(&m); err != nil {
+		t.Fatal(err)
+	}
+	h := m.GetHistogram()
+	return h.GetSampleCount(), h.GetSampleSum()
+}
+
+func TestActionHandler_LatencyRecordedOnlyOnSuccess(t *testing.T) {
+	countBefore, sumBefore := histogramState(t)
+	h := NewActionHandler(false)
+	// Windows timers can have coarse resolution; without a delay the measured
+	// interval may round to zero even though the sample was recorded.
+	h.terminate = func(*api.Event) (bool, error) {
+		time.Sleep(2 * time.Millisecond)
+		return true, nil
+	}
+	r := &api.ActionResult{Action: api.ActionDeny}
+	if err := h.Enforce(context.Background(), &api.Event{PID: 42}, r); err != nil {
+		t.Fatal(err)
+	}
+	countAfter, sumAfter := histogramState(t)
+	if countAfter-countBefore != 1 || sumAfter <= sumBefore {
+		t.Fatalf("latency not recorded on success: count %d->%d sum %v->%v", countBefore, countAfter, sumBefore, sumAfter)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		attempted bool
+		err       error
+	}{
+		{"failed signal", true, errors.New("permission denied")},
+		{"refusal", false, errors.New("identity unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h2 := NewActionHandler(false)
+			h2.terminate = func(*api.Event) (bool, error) { return tc.attempted, tc.err }
+			before, _ := histogramState(t)
+			_ = h2.Enforce(context.Background(), &api.Event{PID: 42}, &api.ActionResult{Action: api.ActionDeny})
+			after, _ := histogramState(t)
+			if after != before {
+				t.Fatalf("latency recorded for non-successful outcome (count %d->%d)", before, after)
+			}
+		})
+	}
+}
+
+func TestTerminationMetrics_Descriptors(t *testing.T) {
+	// The refusal breakdown and latency histogram are separate series that do
+	// not change the existing outcome series' label set.
+	if got := testutil.CollectAndCount(metrics.TerminationRefusals); got < 0 {
+		t.Fatalf("refusal counter not registered: %d", got)
+	}
+	if n := testutil.CollectAndCount(metrics.TerminationLatency); n != 1 {
+		t.Fatalf("latency histogram families = %d, want 1", n)
 	}
 }

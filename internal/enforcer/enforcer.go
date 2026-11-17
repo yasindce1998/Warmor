@@ -55,7 +55,13 @@ type Options struct {
 	// established (fail-closed startup). Without it, an unsupported kernel
 	// degrades to tracepoint-only observation.
 	RequireLSM bool
-	SkipLSM    bool
+	// RequireEnforcePosture fails startup when LSMEnforce was requested but
+	// kernel blocking was not established (LSM unavailable, or the blocking
+	// toggle could not be set). Unlike RequireLSM it does not change behavior
+	// when enforcement was not requested, and it is off by default so existing
+	// deployments keep their degraded-but-running semantics.
+	RequireEnforcePosture bool
+	SkipLSM               bool
 
 	// PolicyVerifyKey, when set, makes every policy load (startup and
 	// ReloadPolicy) require a valid detached ed25519 signature at
@@ -395,7 +401,7 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		// The platform already prints a startup warning in this case. Repeat
 		// it through the structured logger so the degraded posture is
 		// unmistakable in daemon logs even when stdout warnings are lost.
-		logger.LogInfo("⚠ DEGRADED POSTURE: --lsm-enforce requested but BPF LSM is unavailable; running in observe-only mode (pass --require-lsm to fail closed)")
+		logger.LogInfo("⚠ DEGRADED POSTURE: --lsm-enforce requested but BPF LSM is unavailable; running in observe-only mode (pass --require-lsm or --require-enforce-posture to fail closed)")
 	}
 	var policyMapSyncer PolicyMapSyncer
 	if caps.LSMEnforcement {
@@ -407,6 +413,17 @@ func New(ctx context.Context, policyPath string, opts *Options) (*Enforcer, erro
 		if pm, ok := plat.PolicyMap().(PolicyMapSyncer); ok {
 			policyMapSyncer = pm
 		}
+	}
+
+	// Optional fail-closed posture: an operator who asked for kernel blocking
+	// can require that it was actually established instead of silently
+	// degrading. kernelBlocking already folds in opts.LSMEnforce (which is
+	// false in audit/learning mode), so an explicit audit request is respected
+	// and the check only fires when enforcement was genuinely requested.
+	if opts.RequireEnforcePosture && opts.LSMEnforce && !kernelBlocking {
+		plat.Close()
+		return nil, errors.New("--require-enforce-posture was requested but kernel LSM blocking was not established " +
+			"(BPF LSM unavailable or enforce toggle not set); refusing to start in a degraded posture")
 	}
 
 	// Supervised readiness includes child-observed metadata and precedes any
@@ -884,12 +901,23 @@ type kernelKeyFielder interface {
 	KernelKeyFields(t api.EventType) []string
 }
 
+// hookKernelKeyFielder is the stronger form implemented by maps whose kernel
+// key depends on the LSM hook as well as the event type. On Linux, bind and
+// connect share event type network but use different policy_map domains
+// (EVENT_TYPE_BIND vs EVENT_TYPE_NETWORK); a bind decision may only be
+// written under the bind key, which exists solely for Hook=="bind". Maps that
+// implement this interface are always queried through it, so a hook without
+// an exact key (e.g. connect_unix, listen) never receives a decision.
+type hookKernelKeyFielder interface {
+	KernelKeyFieldsForEvent(event *api.Event) []string
+}
+
 // decisionDeterminedByKernelKey reports whether a decision of a policy that
-// reads fieldsRead (for events of type t) depends only on fields the kernel
-// key of pm covers.
-func decisionDeterminedByKernelKey(pm PolicyMapSyncer, t api.EventType, fieldsRead uint32) bool {
-	kf, ok := pm.(kernelKeyFielder)
-	if !ok || fieldsRead == wasm.FieldsUnknown {
+// reads fieldsRead for event depends only on fields the kernel key of pm
+// covers. The event (not just its type) is required because a Linux bind
+// decision is only kernel-matchable when Hook=="bind".
+func decisionDeterminedByKernelKey(pm PolicyMapSyncer, event *api.Event, fieldsRead uint32) bool {
+	if event == nil || fieldsRead == wasm.FieldsUnknown {
 		return false
 	}
 	if fieldsRead&wasm.TemporalFields != 0 {
@@ -897,7 +925,15 @@ func decisionDeterminedByKernelKey(pm PolicyMapSyncer, t api.EventType, fieldsRe
 		// would keep applying the decision after its window changed.
 		return false
 	}
-	keyFields := kf.KernelKeyFields(t)
+	var keyFields []string
+	switch kf := pm.(type) {
+	case hookKernelKeyFielder:
+		keyFields = kf.KernelKeyFieldsForEvent(event)
+	case kernelKeyFielder:
+		keyFields = kf.KernelKeyFields(event.GetType())
+	default:
+		return false
+	}
 	if len(keyFields) == 0 {
 		return false
 	}
@@ -991,8 +1027,24 @@ func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, g
 	}
 	decisionCache.Put(event, result)
 
-	// Compile decision into BPF policy map for kernel fast-path
-	if e.policyMap != nil && !event.LSMEvent && (e.supervisor == nil || evaluator.LinuxKernelCacheEligible(event.GetType())) {
+	// Compile decision into BPF policy map for kernel fast-path.
+	//
+	// LSM-origin events are normally recorded, never re-synced: the kernel
+	// already reached its verdict from a policy snapshot, and writing a fresh
+	// decision back could apply it to events from a different generation.
+	// Bind is the single deliberate exception. The bind hook (lsm_bind.bpf.c)
+	// looks up the exact {cgroup, family, addr, port, EVENT_TYPE_BIND} key; on
+	// a miss it emits this event and returns 0, so the kernel has *already
+	// accepted* this bind and there is no in-flight operation left to
+	// re-decide. Userspace then evaluates the complete event, and the write
+	// goes back under that very same exact key, so no other operation is
+	// affected. Bind is dynamic-only (no default-deny domain): a miss stays
+	// an allow until a DENY is explicitly installed, so no allowlist
+	// completeness is claimed. Audit downgrade is folded in by syncDecision.
+	bindWriteback := event.LSMEvent && !event.KernelDenied &&
+		event.GetType() == api.EventTypeNetwork && event.Hook == "bind"
+	if e.policyMap != nil && (!event.LSMEvent || bindWriteback) &&
+		(e.supervisor == nil || evaluator.LinuxKernelCacheEligible(event.GetType())) {
 		// Failures are counted and rate-limit logged inside; the event
 		// itself is already enforced in userspace.
 		_ = e.syncToPolicyMap(event, result, gen, evaluator.FieldsRead(event.GetType()))
@@ -1119,7 +1171,7 @@ func (e *Enforcer) syncDecision(event *api.Event, result *api.ActionResult, gen 
 	if e.policyGen.Load() != gen {
 		return errStaleDecision
 	}
-	if !decisionDeterminedByKernelKey(e.policyMap, event.GetType(), fieldsRead) {
+	if !decisionDeterminedByKernelKey(e.policyMap, event, fieldsRead) {
 		return errNotKeyDetermined
 	}
 
@@ -1131,6 +1183,13 @@ func (e *Enforcer) syncDecision(event *api.Event, result *api.ActionResult, gen 
 	// fold global audit mode in here: the kernel must never be stricter than
 	// userspace, and an audit-flagged deny is only logged by the BPF side.
 	audit := result.Audit || e.auditMode
+	if result.Action == api.ActionDeny && audit {
+		// The kernel computes blocked = is_enforce_enabled() && !val->audit,
+		// so this deny will be logged, not refused. Count the gap between the
+		// userspace decision and the kernel's actual behavior. Real kernel
+		// denials (audit=false) are deliberately not counted here.
+		metrics.RecordAuditSuppressedKernelDeny()
+	}
 	if e.generations != nil {
 		return e.generations.kernel.SyncEvent(gen, event, action, audit)
 	}

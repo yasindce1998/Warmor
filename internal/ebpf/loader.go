@@ -143,8 +143,8 @@ func (l *Loader) readEvent(rd *ringbuf.Reader, kind EventKind) (*Event, error) {
 
 	switch kind {
 	case EventKindProcess:
-		var raw ExecveEvent
-		if err := binary.Read(reader, binary.NativeEndian, &raw); err != nil {
+		raw, err := decodeExecveEvent(record.RawSample)
+		if err != nil {
 			return nil, fmt.Errorf("parse execve event: %w", err)
 		}
 		ev := raw.ToEvent()
@@ -168,6 +168,61 @@ func (l *Loader) readEvent(rd *ringbuf.Reader, kind EventKind) (*Event, error) {
 	}
 
 	return nil, fmt.Errorf("unknown event kind: %d", kind)
+}
+
+// perCPUMap is the subset of *ebpf.Map used to read a drop counter. Keeping
+// it narrow lets the summation be unit-tested without a kernel.
+type perCPUMap interface {
+	Lookup(key, value any) error
+}
+
+// sumTracepointDrops sums one PERCPU_ARRAY slot across all CPUs.
+func sumTracepointDrops(m perCPUMap) (uint64, error) {
+	var perCPU []uint64
+	if err := m.Lookup(uint32(0), &perCPU); err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, n := range perCPU {
+		total += n
+	}
+	return total, nil
+}
+
+// TracepointDrops returns, per tracepoint hook name, how many events could
+// not be queued because the ring buffer was full, summed across CPUs. A hook
+// with no drops is omitted. Objects that were never loaded are skipped so
+// callers holding a zero-value Loader get an empty result rather than a panic.
+func (l *Loader) TracepointDrops() (map[string]uint64, error) {
+	type hookMap struct {
+		name string
+		m    *ebpf.Map
+	}
+	var maps []hookMap
+	if l.execveObjs != nil {
+		maps = append(maps, hookMap{"execve", l.execveObjs.TracepointDrops})
+	}
+	if l.openatObjs != nil {
+		maps = append(maps, hookMap{"openat", l.openatObjs.TracepointDrops})
+	}
+	if l.connectObjs != nil {
+		maps = append(maps, hookMap{"connect", l.connectObjs.TracepointDrops})
+	}
+
+	out := make(map[string]uint64)
+	for _, hm := range maps {
+		if hm.m == nil {
+			continue
+		}
+		n, err := sumTracepointDrops(hm.m)
+		if err != nil {
+			return nil, fmt.Errorf("read tracepoint_drops[%s]: %w", hm.name, err)
+		}
+		if n > 0 {
+			out[hm.name] = n
+		}
+	}
+	return out, nil
 }
 
 // SetCgroupFilter populates the eBPF cgroup_filter maps across all monitors.

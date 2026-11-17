@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,10 +108,26 @@ type generationTestPlatform struct {
 	fakePlatform
 	k       *generationKernel
 	capture func(*api.Event) bool
+	// configWrites counts out-of-band LSM configuration changes (enforce
+	// toggle, cgroup filter, loss config). The generation activation path must
+	// never call these setters; see TestGenerationActivationDoesNotTouchConfigMaps.
+	configWrites atomic.Int32
 }
 
 func (p *generationTestPlatform) PolicyGenerations() platform.PolicyGenerations { return p.k }
 func (p *generationTestPlatform) SetEventCapture(f func(*api.Event) bool)       { p.capture = f }
+func (p *generationTestPlatform) SetEnforceMode(bool) error {
+	p.configWrites.Add(1)
+	return nil
+}
+func (p *generationTestPlatform) ReplaceCgroupFilter([]uint64) error {
+	p.configWrites.Add(1)
+	return nil
+}
+func (p *generationTestPlatform) SetOnEventLoss(string) error {
+	p.configWrites.Add(1)
+	return nil
+}
 
 func generationEnforcer(t *testing.T) (*Enforcer, *generationKernel) {
 	t.Helper()
@@ -583,5 +600,141 @@ func TestGenerationRetirementWaitsForOldProcessOutcome(t *testing.T) {
 	}
 	if stats := e.GetStats(); stats.Denied != 1 || stats.EnforcementRefused != 1 || stats.EnforcementSucceeded != 0 {
 		t.Fatalf("old outcome lost through activation: %+v", stats)
+	}
+}
+
+// Repeated success/failure cycles must not grow retained generation state. A
+// failed durable commit or drain keeps two generations (old + current) and
+// blocks a third; retrying the SAME immutable revision resolves it and returns
+// to one. Kernel FDs (acked retirements) and userspace evaluators (states) stay
+// bounded — there is no unbounded GC need in the enforcer path. See
+// docs/design/generation-crash-continuity.md §2.
+func TestGenerationBoundedStateAcrossRepeatedSuccessFailureCycles(t *testing.T) {
+	e, k := generationEnforcer(t)
+	const cycles = 12
+	baseGen := e.policyGen.Load()
+	preparedAtStart, ackedAtStart := len(k.prepared), len(k.acked)
+
+	for i := 0; i < cycles; i++ {
+		// Successful activation: current advances, old is retired.
+		if err := e.ActivatePolicy(generationCandidate(t, int32(i%2)), nil); err != nil {
+			t.Fatalf("cycle %d success activation: %v", i, err)
+		}
+		if got := len(e.generations.states); got > 2 {
+			t.Fatalf("cycle %d: state grew to %d after success", i, got)
+		}
+
+		// Failing durable commit: candidate stays live, old is retained, no new ID.
+		path := generationCandidate(t, int32((i+1)%2))
+		fail := true
+		commit := func() error {
+			if fail {
+				return errors.New("injected fsync failure")
+			}
+			return nil
+		}
+		if err := e.ActivatePolicy(path, commit); !errors.Is(err, ErrActivationPending) {
+			t.Fatalf("cycle %d: expected pending, got %v", i, err)
+		}
+		if got := len(e.generations.states); got > 2 {
+			t.Fatalf("cycle %d: state grew to %d while pending", i, got)
+		}
+
+		// Retry resolves the original revision and reclaims the old state.
+		fail = false
+		if err := e.ActivatePolicy(path, commit); err != nil {
+			t.Fatalf("cycle %d retry: %v", i, err)
+		}
+		if e.generations.pending != nil {
+			t.Fatalf("cycle %d: pending not cleared", i)
+		}
+		if got := len(e.generations.states); got != 1 {
+			t.Fatalf("cycle %d: quiescent state = %d, want 1", i, got)
+		}
+	}
+
+	// Each cycle admits exactly two generations (success + pending) and retires
+	// the previous one on each resolution. No third buffer is ever built.
+	if got := len(k.prepared) - preparedAtStart; got != 2*cycles {
+		t.Fatalf("admission count = %d, want %d", got, 2*cycles)
+	}
+	if got := len(k.acked) - ackedAtStart; got < 2*cycles {
+		t.Fatalf("retired FDs not released: acked %d, want >= %d", got, 2*cycles)
+	}
+	if e.policyGen.Load() != baseGen+2*cycles {
+		t.Fatalf("generation counter drift: got %d, want %d", e.policyGen.Load(), baseGen+2*cycles)
+	}
+}
+
+// Generation activation owns only the active_generation pointer; the enforce
+// toggle, cgroup filter and loss config are loader/platform state written
+// outside the generation transaction. This test drives success, pending-failure
+// and drain-timeout activations and asserts none of the config setters are
+// invoked. See docs/design/generation-crash-continuity.md §3.
+func TestGenerationActivationDoesNotTouchConfigMaps(t *testing.T) {
+	isolateCacheDir(t)
+	e, _ := newTestEnforcer(t, testEnforcerOpts{
+		audit: true, policyMap: &fakePolicyMap{}, policyWasm: wasmtest.ConstPolicy(0, &[3]uint32{}),
+	})
+	k := &generationKernel{}
+	p := &generationTestPlatform{k: k}
+	if err := e.enableGenerations(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.finishGeneration(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+
+	// Prove the spy is live so a zero assertion is meaningful.
+	if err := p.SetEnforceMode(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ReplaceCgroupFilter([]uint64{42}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetOnEventLoss("deny"); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.configWrites.Load(); got != 3 {
+		t.Fatalf("config spy not live: %d writes", got)
+	}
+	p.configWrites.Store(0)
+
+	// Success activation.
+	if err := e.ActivatePolicy(generationCandidate(t, 1), nil); err != nil {
+		t.Fatal(err)
+	}
+	// Pending durable commit, then retry on the same revision.
+	path := generationCandidate(t, 0)
+	fail := true
+	commit := func() error {
+		if fail {
+			return errors.New("injected fsync failure")
+		}
+		return nil
+	}
+	if err := e.ActivatePolicy(path, commit); !errors.Is(err, ErrActivationPending) {
+		t.Fatalf("expected pending: %v", err)
+	}
+	fail = false
+	if err := e.ActivatePolicy(path, commit); err != nil {
+		t.Fatal(err)
+	}
+	// Bounded drain timeout, then retry the SAME revision after the reader
+	// progresses. A pending activation must not be replaced by a new path.
+	e.generations.timeout = 20 * time.Millisecond
+	k.drain = func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }
+	drainPath := generationCandidate(t, 1)
+	if err := e.ActivatePolicy(drainPath, nil); !errors.Is(err, ErrActivationPending) {
+		t.Fatalf("expected drain pending: %v", err)
+	}
+	k.drain = nil
+	if err := e.ActivatePolicy(drainPath, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := p.configWrites.Load(); got != 0 {
+		t.Fatalf("generation activation wrote LSM config %d times", got)
 	}
 }

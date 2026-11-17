@@ -94,7 +94,7 @@ func rawExecveEvent(pid, uid, gid uint32, comm, filename string, ts, cgid uint64
 // rawExecveEventCtx additionally fills the ABI v4 capture fields: the
 // parent's PID and comm and up to 16 NUL-padded 64-byte argv slots.
 func rawExecveEventCtx(pid, uid, gid uint32, comm, filename string, ts, cgid uint64, ppid uint32, parentComm string, args []string) []byte {
-	buf := make([]byte, 1348)
+	buf := make([]byte, binary.Size(ExecveEvent{}))
 	binary.LittleEndian.PutUint32(buf[0:], pid)
 	binary.LittleEndian.PutUint32(buf[4:], uid)
 	binary.LittleEndian.PutUint32(buf[8:], gid)
@@ -156,7 +156,7 @@ func TestEventStructSizes(t *testing.T) {
 		v    any
 		want int
 	}{
-		{"ExecveEvent", ExecveEvent{}, 1348},
+		{"ExecveEvent", ExecveEvent{}, 1352},
 		{"OpenatEvent", OpenatEvent{}, 312},
 		{"ConnectEvent", ConnectEvent{}, 72},
 	}
@@ -254,6 +254,57 @@ func TestExecveEvent_DecodeProcessContext_TruncatedArg(t *testing.T) {
 	got := ev.ToEvent()
 	if len(got.Args) != 2 || got.Args[0] != strings.Repeat("a", ExecveArgLen-1) || got.Args[1] != "second" {
 		t.Errorf("Args = %q, want [truncated-63-a, second]", got.Args)
+	}
+}
+
+func TestExecveEvent_TruncationFlags(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags uint32
+		want  []string
+	}{
+		{"none", 0, nil},
+		{"filename", ExecveFlagFilenameTruncated, []string{"filename"}},
+		{"args", ExecveFlagArgTruncated, []string{"process.args"}},
+		{"both", ExecveFlagFilenameTruncated | ExecveFlagArgTruncated, []string{"filename", "process.args"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := rawExecveEventCtx(1, 0, 0, "x", "/bin/x", 0, 0, 0, "", []string{"arg"})
+			binary.LittleEndian.PutUint32(raw[legacyExecveEventSize:], tc.flags)
+
+			ev, err := decodeExecveEvent(raw)
+			if err != nil {
+				t.Fatalf("decodeExecveEvent: %v", err)
+			}
+			got := ev.ToEvent().TruncatedFields
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("TruncatedFields = %q, want %q (Flags=%#x)", got, tc.want, ev.Flags)
+			}
+		})
+	}
+}
+
+func TestExecveEvent_LegacySampleDecodesWithoutFlags(t *testing.T) {
+	// Objects embedded before the flags word existed emit samples that end
+	// at the argv block. The decoder must accept them and report no truncation.
+	full := rawExecveEventCtx(2, 0, 0, "x", "/bin/x", 0, 0, 0, "", []string{"arg"})
+	legacy := full[:legacyExecveEventSize]
+
+	ev, err := decodeExecveEvent(legacy)
+	if err != nil {
+		t.Fatalf("decodeExecveEvent(legacy): %v", err)
+	}
+	if ev.Flags != 0 {
+		t.Errorf("Flags = %#x, want 0 for a legacy sample", ev.Flags)
+	}
+	if got := ev.ToEvent().TruncatedFields; len(got) != 0 {
+		t.Errorf("TruncatedFields = %q, want none", got)
+	}
+
+	// A sample shorter than the legacy struct is still rejected.
+	if _, err := decodeExecveEvent(legacy[:legacyExecveEventSize-1]); err == nil {
+		t.Error("decodeExecveEvent accepted an undersized sample")
 	}
 }
 
@@ -373,7 +424,7 @@ func TestEventDecode_ShortInput(t *testing.T) {
 		dst  any
 		size int
 	}{
-		{"execve", &ExecveEvent{}, 1348},
+		{"execve", &ExecveEvent{}, 1352},
 		{"openat", &OpenatEvent{}, 312},
 		{"connect", &ConnectEvent{}, 72},
 	}
