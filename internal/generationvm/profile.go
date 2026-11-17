@@ -29,10 +29,11 @@ var profile struct {
 }
 
 type control struct {
-	HoldID      uint64
-	HoldPath    string
-	FailDurable bool
-	FailDrain   bool
+	HoldID       uint64
+	HoldPath     string
+	FailDurable  bool
+	FailDrain    bool
+	FailActivate bool
 }
 
 func ValidateGuard(initExe string, ports []string) error {
@@ -144,6 +145,13 @@ func Checkpoint(ctx context.Context, stage string, id uint64, event *api.Event) 
 	profile.Unlock()
 	if err != nil {
 		return err
+	}
+	if stage == "activate" && c.FailActivate {
+		// The caller invokes this stage immediately before the kernel's
+		// single BPF_MAP_UPDATE_ELEM publication. Returning here leaves the
+		// candidate unreachable and the previously active generation serving;
+		// no live commit, no userspace swap, no durable revision pointer.
+		return errors.New("generation VM injected map-write failure at kernel generation publication")
 	}
 	if stage == "durable-sync" && c.FailDurable {
 		return errors.New("generation VM injected durable-sync failure AFTER live commit")

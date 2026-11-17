@@ -189,19 +189,25 @@ func TestGenerationDaemonGatePassOracle(t *testing.T) {
 	const reload = "    --- PASS: TestDaemonGenerationOutcomes/opposing-captured-reload-LKG-and-idle-shutdown (0.50s)\n"
 	const recovery = "    --- PASS: TestDaemonGenerationOutcomes/fleet-live-durable-and-drain-pending-no-false-ack (0.50s)\n"
 	const shutdown = "    --- PASS: TestDaemonGenerationOutcomes/SIGTERM-cancels-held-generation-worker (0.20s)\n"
-	good := parent + release + reload + recovery + shutdown + "PASS\n"
+	const mapfault = "    --- PASS: TestDaemonGenerationOutcomes/map-write-failure-keeps-old-generation-no-gap (0.50s)\n"
+	const restart = "    --- PASS: TestDaemonGenerationOutcomes/clean-restart-first-denied-persists (0.50s)\n"
+	good := parent + release + reload + recovery + shutdown + mapfault + restart + "PASS\n"
 	for name, log := range map[string]string{
 		"pass":                 good,
 		"empty":                "",
 		"missing child":        parent + reload + "PASS\n",
 		"missing shutdown":     parent + reload + recovery + "PASS\n",
-		"missing normal build": parent + reload + recovery + shutdown + "PASS\n",
-		"missing parent":       reload + recovery + shutdown + "PASS\n",
+		"missing normal build": parent + reload + recovery + shutdown + mapfault + restart + "PASS\n",
+		"missing map fault":    parent + release + reload + recovery + shutdown + restart + "PASS\n",
+		"missing restart":      parent + release + reload + recovery + shutdown + mapfault + "PASS\n",
+		"missing parent":       reload + recovery + shutdown + mapfault + restart + "PASS\n",
 		"no tests":             "testing: warning: no tests to run\nPASS\n",
 		"skip":                 good + "    --- SKIP: TestDaemonGenerationOutcomes/required (0.00s)\n",
+		"skip map fault":       strings.Replace(good, mapfault, "    --- SKIP: TestDaemonGenerationOutcomes/map-write-failure-keeps-old-generation-no-gap (0.00s)\n", 1),
 		"fail":                 good + "    --- FAIL: TestDaemonGenerationOutcomes/required (0.00s)\n",
 		"panic":                good + "panic: unexpected fault\n",
 		"duplicate":            good + parent,
+		"duplicate map fault":  good + mapfault,
 		"no final PASS":        parent + reload + recovery,
 		"near match":           strings.Replace(good, "Outcomes (", "OutcomesOther (", 1),
 	} {
@@ -417,7 +423,180 @@ func TestGenerationDaemonGateRecordingAndBinarySelection(t *testing.T) {
 	if !strings.Contains(text[normal:profile], `f.startDaemon(t, "generation-release"`) || strings.Contains(text[normal:profile], "generation-vm-control") {
 		t.Fatal("nonfault outcomes must not select instrumented daemon")
 	}
-	if strings.Count(text, `f.startDaemonBinary(t, "warmor-daemon-profile"`) != 3 {
+	if strings.Count(text, `f.startDaemonBinary(t, "warmor-daemon-profile"`) != 4 {
 		t.Fatal("instrumented scenarios must select profile explicitly")
+	}
+}
+
+// The two new proofs are source-gated as well as log-gated: a renamed or
+// weakened fixture must fail the host oracle before any VM is booted.
+func TestGenerationDaemonGateMapFaultAndRestartFixture(t *testing.T) {
+	fixture, err := os.ReadFile("generation_daemon_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(fixture)
+	mapFault := strings.Index(text, `t.Run("map-write-failure-keeps-old-generation-no-gap"`)
+	restart := strings.Index(text, `t.Run("clean-restart-first-denied-persists"`)
+	if mapFault < 0 || restart < 0 || mapFault >= restart {
+		t.Fatal("missing named map-write fault or clean-restart fixture")
+	}
+	block := text[mapFault:restart]
+	for _, required := range []string{
+		`FailActivate: true`,
+		`generationStatus(t, control, "activate", 3)`,
+		`"live-3.json"`,
+		`continuousDenyOf(t, f, "allowed",`,
+		`f.requireFirstDenied(t, "allowed", "mapfault-fault-window-first-denied")`,
+		`*e.Generation == 2`,
+		`e.KernelDenied && e.Decision == "DENY" && e.Enforced && !e.Audit && !e.Attempted`,
+		`checkGenerationVerdicts(t, control, scope)`,
+		`d.stop(t)`,
+	} {
+		if !strings.Contains(block, required) {
+			t.Errorf("map-write fault fixture missing: %s", required)
+		}
+	}
+	// The captured-verdict oracle itself must reject a wrong generation, an
+	// unattributed capture and a false allow; this is exercised offline too.
+	if err := validateGenerationDaemonEvidence(daemonGenerationEvidence{
+		Phase: "decision", Generation: func() *uint64 { v := uint64(3); return &v }(), KernelGeneration: 3,
+		LSM: true, Hook: "exec", PID: 123, UID: 65534, CgroupID: 555,
+		Filename: "/fixture/allowed", Decision: "DENY", KernelDenied: true, Enforced: true,
+	}, 555); err == nil {
+		t.Fatal("oracle accepted an unexpected extra publication")
+	}
+	restartBlock := text[restart:]
+	for _, required := range []string{
+		`f.activePolicy(t, "generation-restart-active"`,
+		`f.startDaemon(t, name, active`,
+		`f.requireFirstDenied(t, "allowed"`,
+		`d.stop(t)`,
+		`awaitOutcomeDaemonExit`,
+	} {
+		if !strings.Contains(restartBlock, required) && !strings.Contains(text[:restart], required) {
+			t.Errorf("restart fixture missing: %s", required)
+		}
+	}
+	if strings.Contains(restartBlock, "generation-vm-control") {
+		t.Fatal("restart persistence must use the normal release daemon")
+	}
+	runner, err := os.ReadFile("run-generation-daemon.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"map-write-failure-keeps-old-generation-no-gap", "clean-restart-first-denied-persists"} {
+		if !strings.Contains(string(runner), name) {
+			t.Errorf("runner log oracle does not require %s", name)
+		}
+	}
+}
+
+// The outcome gate must also exercise the oldest supported kernel, using the
+// same cached IMA build the LSM workflow produces instead of a stale copy.
+func TestGenerationDaemonGateOutcomeWorkflowSecondKernel(t *testing.T) {
+	data, err := os.ReadFile("../../.github/workflows/enforcement-outcomes.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var w struct {
+		Jobs map[string]struct {
+			Continue any `yaml:"continue-on-error"`
+			Strategy struct {
+				Matrix struct {
+					Include []struct{ Version, Kernel, Minor string }
+				}
+			}
+			Steps []struct {
+				Uses string
+				With map[string]string
+			}
+		}
+	}
+	if err := yaml.Unmarshal(data, &w); err != nil {
+		t.Fatal(err)
+	}
+	job, ok := w.Jobs["whole-daemon-outcomes"]
+	if !ok {
+		t.Fatal("outcome job missing")
+	}
+	if job.Continue != nil && job.Continue != false {
+		t.Fatal("second-kernel outcome matrix must not allow failure")
+	}
+	seen := map[string]struct{ version, kernel, minor string }{}
+	for _, item := range job.Strategy.Matrix.Include {
+		seen[item.Version] = struct{ version, kernel, minor string }{item.Version, item.Kernel, item.Minor}
+	}
+	stable, ok := seen["stable"]
+	if !ok || !strings.Contains(stable.kernel, "ghcr.io/cilium/ci-kernels") {
+		t.Fatal("stable channel outcome entry changed")
+	}
+	old, ok := seen["6.1.188"]
+	if !ok || !strings.Contains(old.kernel, "/kernel-out/vmlinuz") || old.minor != "6.1" {
+		t.Fatal("6.1.188 outcome entry must boot the cached built IMA kernel")
+	}
+	const cacheKey = "ima-kernel-6.1.188-${{ hashFiles('ci/kernel/**', 'scripts/build-ci-kernel.sh') }}"
+	restored := false
+	for _, step := range job.Steps {
+		if step.Uses == "actions/cache/restore@v4" && step.With["key"] == cacheKey && step.With["path"] == "kernel-out" {
+			restored = true
+		}
+	}
+	if !restored {
+		t.Fatal("outcome gate does not restore the 6.1.188 IMA kernel cache built by lsm-test.yml")
+	}
+	lsm, err := os.ReadFile("../../.github/workflows/lsm-test.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lsmText := string(lsm)
+	for _, required := range []string{
+		`name: ima-kernel-${{ matrix.version }}`,
+		`version: ["6.18.53", "6.1.188"]`,
+		`key: ima-kernel-${{ matrix.version }}-${{ hashFiles('ci/kernel/**', 'scripts/build-ci-kernel.sh') }}`,
+	} {
+		if !strings.Contains(lsmText, required) {
+			t.Errorf("lsm-test.yml no longer provides the cached artifact: %s", required)
+		}
+	}
+}
+
+func TestGenerationDaemonGatePublicationFaultIsProfileOnly(t *testing.T) {
+	profile, err := os.ReadFile("../../internal/generationvm/profile.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(profile)
+	if !strings.HasPrefix(source, "//go:build linux && integration && generation_daemon_vm\n") {
+		t.Fatal("publication fault profile leaked into normal builds")
+	}
+	for _, required := range []string{
+		`FailActivate bool`,
+		`stage == "activate" && c.FailActivate`,
+		`map-write failure at kernel generation publication`,
+		`writeStatusLocked(stage, id, event)`,
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("profile missing publication fault seam: %s", required)
+		}
+	}
+	disabled, err := os.ReadFile("../../internal/generationvm/disabled.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(disabled), "//go:build !linux || !integration || !generation_daemon_vm\n") {
+		t.Fatal("disabled fault stub build constraint changed")
+	}
+	if strings.Contains(string(disabled), "FailActivate") {
+		t.Fatal("fault control must not exist in release builds")
+	}
+	unit, err := os.ReadFile("../../internal/generationvm/profile_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{`FailActivate: true`, `Checkpoint(context.Background(), "activate", 2, nil)`, `"activate-2.json"`} {
+		if !strings.Contains(string(unit), required) {
+			t.Errorf("profile fault unit oracle missing: %s", required)
+		}
 	}
 }

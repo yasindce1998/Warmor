@@ -65,7 +65,7 @@ Run 43613283613 reached and passed all six verifier/errno tests and executed the
 
 The nonroot termination gate assumes the daemon retains the ability to signal uid 65534 (normally `CAP_KILL`), alongside the capabilities needed to load/attach BPF. Root UID alone is insufficient evidence. PR #31's signaling/pidfd implementation is integrated from `origin/main`: trusted `KernelTimestampNS` must survive both sensor channels and the platform conversion, and the guest must have initial PID/time namespaces and usable procfs. The controlled file reader remains live for 100 ms after readiness before the trigger, clearing Linux's USER_HZ=100 process-start tick ambiguity without relaxing production identity checks. Its event must report an actual successful userspace enforcement attempt with no error, not kernel prevention. Capability absence, signal permission errors, identity refusals, pidfd failures, and cleanup kills remain failures, never skips or substitutes for actual SIGKILL and attributed enforcement.
 
-The suite does **not** yet prove atomic successful policy activation, map-write-failure rollback, no-gap switching, restart persistence, packet-level network prevention, or protection of operations outside the tested exec/file cases. The current reload test uses only today's supported SIGHUP/invalid-candidate APIs; kernel publication fault injection belongs with the activation implementation. Startup readiness here means the event loop/metrics are reachable and the exec default-deny domain has become active; it is not proof that startup had no enforcement gap.
+This legacy `run-outcomes.sh` suite still does **not** itself prove atomic successful policy activation, map-write-failure rollback, no-gap switching, restart persistence, packet-level network prevention, or protection of operations outside the tested exec/file cases. Its reload test uses only today's supported SIGHUP/invalid-candidate APIs. Those generation-specific proofs are now carried by the separate whole-daemon generation gate below, which runs the real enforcer and kernel maps. Startup readiness here means the event loop/metrics are reachable and the exec default-deny domain has become active; it is not proof that startup had no enforcement gap.
 
 `scripts/kind-e2e.sh` is a deployment/controller/**evaluation smoke test** on a shared host kernel. Ready pods, a loaded policy, Active CRs, events and deny counters demonstrate plumbing and policy evaluation, **not synchronous prevention or successful process termination**. Do not substitute its result for this VM outcome gate, or turn enforcement on in kind to obtain such proof. Lower-level `internal/ebpf` integration tests cover BPF loader/map behavior but likewise do not replace this whole-daemon test.
 
@@ -178,3 +178,31 @@ SIGTERM outcomes under `artifacts/generation-daemon.*`. It is not signed-mode or
 supervised-Host combination proof. See
 [`generation-daemon-vm.md`](../../docs/design/generation-daemon-vm.md) for exact
 assertions, compile-profile boundaries and locally unexecuted VM evidence.
+
+### New VM evidence: publication rollback, no gap, restart, second kernel
+
+Four added child fixtures are required by the same strict non-skipped PASS
+oracle (no SKIP, FAIL, panic, no-tests, duplicate PASS or missing child can
+pass). The first three reuse the captured-verdict oracle and the real profile
+seams; they are all compiled out of release binaries.
+
+| Required fixture | What a non-skipped PASS proves | What it still does not prove |
+| --- | --- | --- |
+| `map-write-failure-keeps-old-generation-no-gap` | With generation 2 live and a real held captured exec, a named fault at the `activate` seam fails immediately before the kernel's single outer-map update. No `live-3.json` appears; a deny anchor whose verdict would change if the rejected generation went live returns EPERM on its **first** attempt throughout the fault window, and the captured verdict still belongs to generation 2 with matching kernel denial, scope and PID. | That a real BPF map write failed at the syscall boundary (the fault is injected at the seam immediately before it); that the kernel RCU grace period was itself interrupted; or any behavior after the fault is cleared and publication retried. |
+| `clean-restart-first-denied-persists` | The normal (release) daemon is cleanly stopped with SIGTERM via `d.stop` (which waits with `awaitOutcomeDaemonExit` and refuses a harness kill), then relaunched with the **same immutable policy path**. The first eligible exec on **each** launch is EPERM with a fresh marker. | Crash, SIGKILL, power-loss or disk-corruption continuity. The on-disk boot revision is read on a graceful restart only. |
+| Kernel matrix `6.1.188` (both `lsm-test.yml` and now `enforcement-outcomes.yml`) | The whole-daemon outcome suite runs on the oldest supported LTS kernel too, reusing the exact cached IMA kernel image built by `lsm-test.yml` (`actions/cache/restore`, key `ima-kernel-6.1.188-...`). | That the two kernels were tested concurrently or on different hardware; or that any unlisted kernel works. |
+
+The fault seam is a no-op in every normal build: `internal/generationvm/profile.go`
+and the daemon's `--generation-vm-control` flag require both `integration` and
+`generation_daemon_vm` tags **and** real vimto PID 1 with private virtio ports.
+Release binaries have neither the flag nor the fault field. No fixture uses a
+host enforcing path, and the harness kill can never be reported as a clean
+shutdown or an EPERM prevention.
+
+**Remaining gaps after this sprint:** there is still no proof of physical
+crash/power-loss continuity (unpinned maps and restart adoption are not
+exercised), no multi-node/controller/fleet-at-scale proof (the fleet fixture is a
+single in-guest client/server), no signed-mode or supervised-Host combination,
+no packet-level network prevention, and no operations outside the tested
+exec/file cases. Local oracle and compile success without a live non-skipped VM
+run remains infrastructure-blocked evidence, not an enforcement pass.

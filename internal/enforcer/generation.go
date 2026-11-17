@@ -318,6 +318,12 @@ func (e *Enforcer) activateGeneration(path string, commit func() error) error {
 	if err := g.kernel.Prepare(state.id, spec); err != nil {
 		return errors.Join(err, e.abortGenerationCandidate(state.id))
 	}
+	// Compile-profile-only seam: Checkpoint is a no-op in release builds. In
+	// the guarded VM profile it can fail here, before registration and the
+	// irreversible kernel map write, exercising old-generation rollback.
+	if err := generationvm.Checkpoint(e.ctx, "activate", state.id, nil); err != nil {
+		return errors.Join(err, e.abortGenerationCandidate(state.id))
+	}
 	// Fence legacy/cache writers too, with the existing documented ordering.
 	e.decisionMu.Lock()
 	g.mu.Lock()

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,21 +57,30 @@ func TestProfileFaultStagesAndHeldEventCancellation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	set(control{FailDurable: true, FailDrain: true})
+	set(control{FailActivate: true, FailDurable: true, FailDrain: true})
 	var before unix.Timespec
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &before); err != nil {
 		t.Fatal(err)
 	}
-	for _, stage := range []string{"durable-sync", "before-drain"} {
+	for _, stage := range []string{"activate", "durable-sync", "before-drain"} {
 		if err := Checkpoint(context.Background(), stage, 2, nil); err == nil {
 			t.Fatal("fault stage falsely succeeded", stage)
 		}
 	}
+	// A failed publication must still leave an atomic named record, so the
+	// fixture can prove the fault fired before the kernel map write.
+	data, err := os.ReadFile(filepath.Join(dir, "activate-2.json"))
+	if err != nil || !strings.Contains(string(data), `"Stage":"activate"`) {
+		t.Fatalf("activate fault left no atomic record: %s %v", data, err)
+	}
 	set(control{})
+	if err := Checkpoint(context.Background(), "activate", 2, nil); err != nil {
+		t.Fatal(err)
+	}
 	if err := Checkpoint(context.Background(), "durable-sync", 2, nil); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "durable-sync-2.json"))
+	data, err = os.ReadFile(filepath.Join(dir, "durable-sync-2.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
