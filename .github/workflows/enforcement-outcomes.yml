@@ -53,10 +53,13 @@ jobs:
             kernel: ghcr.io/cilium/ci-kernels:stable-selftests
             minor: ''
           - version: '6.1.188'
-            kernel: ${{ github.workspace }}/kernel-out/vmlinuz
+            kernel: local
             minor: '6.1'
     env:
-      KERNEL: ${{ matrix.kernel }}
+      # Resolve the absolute path here: matrix include values are static and
+      # ${ { github.workspace } } is not expanded there, which made vimto treat
+      # a relative path as an OCI image reference and fail with UNAUTHORIZED.
+      KERNEL: ${{ matrix.version == '6.1.188' && format('{0}/kernel-out/vmlinuz', github.workspace) || matrix.kernel }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
