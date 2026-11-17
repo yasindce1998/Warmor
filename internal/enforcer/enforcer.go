@@ -902,12 +902,13 @@ type kernelKeyFielder interface {
 }
 
 // hookKernelKeyFielder is the stronger form implemented by maps whose kernel
-// key depends on the LSM hook as well as the event type. On Linux, bind and
-// connect share event type network but use different policy_map domains
-// (EVENT_TYPE_BIND vs EVENT_TYPE_NETWORK); a bind decision may only be
-// written under the bind key, which exists solely for Hook=="bind". Maps that
+// key depends on the LSM hook as well as the event type. On Linux, bind,
+// listen and connect share event type network but use different policy_map
+// domains (EVENT_TYPE_BIND, EVENT_TYPE_LISTEN vs EVENT_TYPE_NETWORK); a bind
+// decision may only be written under the bind key (Hook=="bind") and a listen
+// decision only under the port-only listen key (Hook=="listen"). Maps that
 // implement this interface are always queried through it, so a hook without
-// an exact key (e.g. connect_unix, listen) never receives a decision.
+// an exact key (e.g. connect_unix) never receives a decision.
 type hookKernelKeyFielder interface {
 	KernelKeyFieldsForEvent(event *api.Event) []string
 }
@@ -1032,18 +1033,20 @@ func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, g
 	// LSM-origin events are normally recorded, never re-synced: the kernel
 	// already reached its verdict from a policy snapshot, and writing a fresh
 	// decision back could apply it to events from a different generation.
-	// Bind is the single deliberate exception. The bind hook (lsm_bind.bpf.c)
-	// looks up the exact {cgroup, family, addr, port, EVENT_TYPE_BIND} key; on
-	// a miss it emits this event and returns 0, so the kernel has *already
-	// accepted* this bind and there is no in-flight operation left to
-	// re-decide. Userspace then evaluates the complete event, and the write
-	// goes back under that very same exact key, so no other operation is
-	// affected. Bind is dynamic-only (no default-deny domain): a miss stays
-	// an allow until a DENY is explicitly installed, so no allowlist
-	// completeness is claimed. Audit downgrade is folded in by syncDecision.
-	bindWriteback := event.LSMEvent && !event.KernelDenied &&
-		event.GetType() == api.EventTypeNetwork && event.Hook == "bind"
-	if e.policyMap != nil && (!event.LSMEvent || bindWriteback) &&
+	// Bind and listen are the only deliberate exceptions. Both hooks look up
+	// an exact key (bind: {cgroup, family, addr, port, EVENT_TYPE_BIND};
+	// listen: {cgroup, family, port, EVENT_TYPE_LISTEN} — no address) and, on
+	// a miss, emit this event and return 0. So the kernel has *already
+	// accepted* the operation and there is no in-flight operation left to
+	// re-decide. Userspace evaluates the complete event and the write goes
+	// back under that very same exact key, so no other operation is affected.
+	// Both are dynamic-only (no default-deny domain): a miss stays an allow
+	// until a DENY is explicitly installed, so no allowlist completeness is
+	// claimed. Audit downgrade is folded in by syncDecision.
+	lsmMissWriteback := event.LSMEvent && !event.KernelDenied &&
+		event.GetType() == api.EventTypeNetwork &&
+		(event.Hook == "bind" || event.Hook == "listen")
+	if e.policyMap != nil && (!event.LSMEvent || lsmMissWriteback) &&
 		(e.supervisor == nil || evaluator.LinuxKernelCacheEligible(event.GetType())) {
 		// Failures are counted and rate-limit logged inside; the event
 		// itself is already enforced in userspace.

@@ -340,3 +340,46 @@ func TestExactEndpointKeySeparatesFamilyPortAndAddressTail(t *testing.T) {
 		}
 	}
 }
+
+// TestListenKeyNoCrossDomainAlias verifies that the port-only listen key never
+// collides with the connect/bind endpoint keys for the same cgroup, family and
+// port, and that family, port and cgroup each separate listen keys. It also
+// documents the deliberate coarseness: because the listen hook has no address,
+// every interface listening on the same (family, port) inside one cgroup
+// shares a single key — a DENY applies to all of them.
+func TestListenKeyNoCrossDomainAlias(t *testing.T) {
+	for _, tc := range []struct {
+		addr   string
+		family uint8
+	}{
+		{"0.0.0.0", 2}, // AF_INET, all-zero address matches the listen key's zero address
+		{"::", 10},     // AF_INET6, all-zero address
+	} {
+		kl := listenPolicyKey(42, tc.family, 8080)
+		for _, typ := range []uint8{EventTypeNetwork, EventTypeBind} {
+			ke, err := endpointPolicyKey(42, typ, tc.addr, 8080)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kl == ke {
+				t.Fatalf("listen key aliased domain %d for family %d", typ, tc.family)
+			}
+		}
+	}
+	// Within the listen domain, family/port/cgroup each take part in the key.
+	base := listenPolicyKey(42, 2, 8080)
+	for _, other := range []PolicyKey{
+		listenPolicyKey(42, 10, 8080),
+		listenPolicyKey(42, 2, 8081),
+		listenPolicyKey(43, 2, 8080),
+	} {
+		if base == other {
+			t.Fatalf("listen keys aliased: %+v vs %+v", base, other)
+		}
+	}
+	// Coarseness is intentional, not an alias bug: two different bound
+	// addresses cannot be distinguished by the listen key at all.
+	if listenPolicyKey(42, 2, 8080).Address != [16]byte{} {
+		t.Fatal("listen key must carry no address")
+	}
+}

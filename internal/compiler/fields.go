@@ -23,14 +23,17 @@ import (
 // the declaration must be exhaustive or cached and kernel-compiled decisions
 // will be applied to events the policy would have decided differently.
 //
-// Note for network policies on Linux: bind and connect share this single
-// network declaration (the ABI has no separate bind domain), while the live
-// sensor reports operation "connect" for bind events. Because the kernel's
-// bind key covers only remote_addr/remote_port, a policy that reads
+// Note for network policies on Linux: bind, listen and connect share this
+// single network declaration (the ABI has no separate per-hook domain), while
+// the live sensor reports operation "connect" for bind events. Because the
+// kernel's bind key covers only remote_addr/remote_port, a policy that reads
 // "operation" cannot have its bind decisions compiled into the kernel map;
 // such decisions are refused rather than applied to other events. For now,
 // network policies that want the bind kernel fast-path must not read
-// "operation".
+// "operation". Listen is keyed by family+port only: its kernel key carries no
+// address, so a listen decision that reads "remote_addr" or "protocol" is
+// likewise refused rather than applied to other events; only "remote_port"
+// is a sound listen key field.
 const (
 	FieldBitPID        = policymeta.FieldBitPID
 	FieldBitUID        = policymeta.FieldBitUID

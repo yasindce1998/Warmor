@@ -264,6 +264,39 @@ func endpointPolicyKey(cgroupID uint64, eventType uint8, addr string, port uint1
 	return key, nil
 }
 
+// listenPolicyKey builds the exact policy_map key that lsm_listen.bpf.c looks
+// up. Unlike bind/connect, the listen hook has no sockaddr: it reads the
+// socket's skc_num (host order) and skc_family and writes only
+// {cgroup_id, EVENT_TYPE_LISTEN, family, port[2]}. The address, path and pad
+// bytes are NEVER populated by the kernel hook and must stay zero here or a
+// written key could not match. Port is stored big-endian (network byte order)
+// exactly as key.port[0]=port>>8, key.port[1]=port&255 does in the BPF program.
+// Family is the raw skc_family (AF_INET=2, AF_INET6=10); no IPv4-mapped-IPv6
+// normalization applies because no address exists.
+func listenPolicyKey(cgroupID uint64, family uint8, port uint16) PolicyKey {
+	key := PolicyKey{CgroupID: cgroupID, EventType: EventTypeListen, Family: family}
+	binary.BigEndian.PutUint16(key.Port[:], port)
+	return key
+}
+
+// listenFamily maps the sensor's Protocol label back to the skc_family that
+// the listen BPF hook writes into its key (platform.LinuxPlatform labels a
+// listen event "tcp6" iff ev.Family==10, otherwise "tcp"). Unknown labels are
+// refused rather than guessed, so a write-back never installs a key under a
+// family the hook cannot match. Protocol is sensor metadata used only to pick
+// the key; it is deliberately NOT a kernel key field for soundness (see
+// KernelKeyFieldsForEvent) — a policy decision that reads it is not synced.
+func listenFamily(protocol string) (uint8, bool) {
+	switch protocol {
+	case "tcp":
+		return 2, true // AF_INET
+	case "tcp6":
+		return 10, true // AF_INET6
+	default:
+		return 0, false
+	}
+}
+
 // HashIPv4Endpoint is a legacy hash helper, not a security identity.
 func HashIPv4Endpoint(addr uint32, port uint16) uint32 {
 	hash := uint32(2166136261)
@@ -523,6 +556,21 @@ func eventPolicyKey(event *api.Event) (PolicyKey, error) {
 		if event.Network == nil {
 			break
 		}
+		// Listen is a separate kernel domain (EVENT_TYPE_LISTEN) keyed by
+		// {family, port} ONLY: lsm_listen builds no address, so the endpoint
+		// key (which requires a canonical address) cannot represent it. The
+		// sensor reports no address for listen and labels the socket family
+		// through Protocol ("tcp"/"tcp6"); derive the raw skc_family from it
+		// so the write-back lands under the very key the hook looked up.
+		// Operation is "listen" here (and "connect" on some paths) and is not
+		// trusted to separate hooks — Hook is.
+		if event.Hook == "listen" {
+			family, ok := listenFamily(event.Network.Protocol)
+			if !ok {
+				break
+			}
+			return listenPolicyKey(event.CgroupID, family, event.Network.RemotePort), nil
+		}
 		// Bind and connect are distinct kernel domains (EVENT_TYPE_BIND vs
 		// EVENT_TYPE_NETWORK) with the same exact {family, addr, port} key.
 		// The live sensor reports Operation="connect" for bind events, so the
@@ -548,9 +596,11 @@ func eventPolicyKey(event *api.Event) (PolicyKey, error) {
 // enforcer only syncs decisions that depend on nothing else.
 //
 // This is the hook-agnostic view kept for interface compatibility with maps
-// whose keys do not vary by hook. For Linux decisions, KernelKeyFieldsForEvent
-// is authoritative: it additionally separates the bind key from the connect
-// key and refuses hooks with no exact kernel identity.
+// whose keys do not vary by hook (it overstates the listen key, which has no
+// address, so it must not be used for Linux listen decisions). For Linux
+// decisions, KernelKeyFieldsForEvent is authoritative: it separates the bind
+// key from the connect key, narrows listen to its port-only key, and refuses
+// hooks with no exact kernel identity.
 func (m *PolicyMapManager) KernelKeyFields(t api.EventType) []string {
 	switch t {
 	case api.EventTypeProcess:
@@ -574,8 +624,15 @@ func (m *PolicyMapManager) KernelKeyFields(t api.EventType) []string {
 // read `operation` on bind for now — the live sensor reports Operation
 // "connect" for bind events, so a decision that branches on `operation`
 // cannot be reproduced by the kernel's bind key and is refused rather than
-// applied to other events. Other network hooks (connect_unix, listen) have
-// no exact policy-map key and are never synced.
+// applied to other events.
+//
+// Listen is its own kernel domain (EVENT_TYPE_LISTEN), keyed by {family, port}
+// only: the BPF hook has no sockaddr and never fills the address. The sole
+// policy-visible key field is therefore `remote_port`; `remote_addr` is absent
+// and `protocol` (used only to recover the family for the key) is deliberately
+// not a key field, so a listen decision that reads either is refused rather
+// than applied to other events. Other network hooks (connect_unix and any
+// future hook) have no exact policy-map key and are never synced.
 func (m *PolicyMapManager) KernelKeyFieldsForEvent(event *api.Event) []string {
 	if event == nil {
 		return nil
@@ -590,8 +647,13 @@ func (m *PolicyMapManager) KernelKeyFieldsForEvent(event *api.Event) []string {
 		switch event.Hook {
 		case "", "connect", "bind":
 			return []string{"remote_addr", "remote_port"}
+		case "listen":
+			// lsm_listen keys on family+port with no address. Only remote_port
+			// is a policy-visible key field; protocol is key metadata, not a
+			// compiler field, and remote_addr is absent from the event.
+			return []string{"remote_port"}
 		default:
-			// connect_unix, listen and any future hook have no exact key.
+			// connect_unix and any future hook have no exact key.
 			return nil
 		}
 	default:
