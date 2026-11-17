@@ -79,8 +79,11 @@ func (e *Enforcer) enableGenerations(gp platform.GenerationPlatform) error {
 		e.telemetry.Seal() // a single legacy collector cannot own overlapping leases
 	}
 	gp.SetEventCapture(e.captureGeneration)
-	// Startup has no userspace work yet, but legacy samples can already be
-	// queued. Keep ID 0 until the reader starts and proves the first flush.
+	// Startup has no userspace work to reload, so the live kernel policy becomes
+	// generation 1 immediately below (Activate(1) is not gated on reader
+	// readiness). ID 0 is retained only as the *retiring* generation in pending;
+	// the initial finishGeneration drains legacy samples before acknowledging
+	// it. The reader flush proves ID 0 retirement, not readiness to activate 1.
 	spec, err := e.generationSpec(e.evaluator)
 	if err != nil {
 		return err
@@ -191,7 +194,12 @@ func (e *Enforcer) generationSpec(src staticRulesSource) (kernelmap.GenerationSp
 }
 
 // finishGeneration bounds grace waiting, never the lifetime of the retained old
-// resources. A timeout retains TWO generations and blocks third-buffer builds.
+// resources. A timeout retains exactly TWO generations (old + current) and
+// blocks third-buffer builds: GenerationManager refuses Prepare while a
+// candidate or retiring FD is held, and g.pending keeps activateGeneration from
+// allocating another ID. This is the retention bound, not an unbounded leak;
+// successful retirement deletes the old state and clears pending. See
+// docs/design/generation-crash-continuity.md.
 func (e *Enforcer) finishGeneration() error {
 	g := e.generations
 	p := g.pending
