@@ -29,6 +29,9 @@ func (*hookAwareFake) KernelKeyFieldsForEvent(event *api.Event) []string {
 	}
 	switch event.GetType() {
 	case api.EventTypeProcess:
+		if event.Hook == "ptrace" {
+			return []string{"path", "cgroup_id"}
+		}
 		if event.Hook != "" && event.Hook != "exec" {
 			return nil
 		}
@@ -52,6 +55,11 @@ func TestDecisionDeterminedByKernelKey(t *testing.T) {
 	windows := &eventSyncRecorder{}
 	path := compiler.FieldBitPath
 	ep := compiler.FieldBitRemoteAddr | compiler.FieldBitRemotePort
+	traceFields := compiler.FieldBitPath | compiler.FieldBitCgroupID
+	ptrace := &api.Event{
+		Type: api.EventTypeProcess, CgroupID: 1, Hook: "ptrace",
+		Filename: "sleep", TargetCgroupID: 4242,
+	}
 
 	proc := &api.Event{Type: api.EventTypeProcess, CgroupID: 1, Filename: "/bin/sh"}
 	file := &api.Event{Type: api.EventTypeFile, CgroupID: 1, Filename: "/etc/shadow"}
@@ -99,7 +107,15 @@ func TestDecisionDeterminedByKernelKey(t *testing.T) {
 		{"listen port + uid is not key-determined", hookAware, net("listen"), compiler.FieldBitRemotePort | compiler.FieldBitUID, false},
 		{"listen port + wall clock is not key-determined", hookAware, net("listen"), compiler.FieldBitRemotePort | compiler.FieldBitTime, false},
 		{"exec hook respected for process", hookAware, proc, path, true},
-		{"non-exec process hook has no key", hookAware, &api.Event{Type: api.EventTypeProcess, Hook: "ptrace", Filename: "/bin/sh"}, path, false},
+		{"ptrace target identity is key-determined", hookAware, ptrace, traceFields, true},
+		{"ptrace target comm only is key-determined", hookAware, ptrace, path, true},
+		{"ptrace + uid is not key-determined", hookAware, ptrace, traceFields | compiler.FieldBitUID, false},
+		{"ptrace + ppid is not key-determined", hookAware, ptrace, traceFields | compiler.FieldBitPPID, false},
+		{"ptrace + tracer comm is not key-determined", hookAware, ptrace, traceFields | compiler.FieldBitComm, false},
+		{"ptrace + wall clock is not key-determined", hookAware, ptrace, traceFields | compiler.FieldBitTime, false},
+		{"ptrace + container age is not key-determined", hookAware, ptrace, traceFields | compiler.FieldBitContainerAge, false},
+		{"ptrace undeclared fields are not key-determined", hookAware, ptrace, wasm.FieldsUnknown, false},
+		{"non-exec, non-ptrace process hook has no key", hookAware, &api.Event{Type: api.EventTypeProcess, Hook: "unknown", Filename: "/bin/sh"}, path, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -350,6 +366,95 @@ func TestHandleEvent_LoopingPolicyFailsClosedWithoutCaching(t *testing.T) {
 	}
 	if len(pm.snapshot()) != 0 {
 		t.Error("timed-out evaluation was synced to the kernel")
+	}
+}
+
+// ptraceSyncRecorder reports the ptrace kernel key fields and records the
+// SyncEvent calls, mirroring the Linux PolicyMapManager for ptrace.
+type ptraceSyncRecorder struct{ eventSyncRecorder }
+
+func (*ptraceSyncRecorder) KernelKeyFieldsForEvent(event *api.Event) []string {
+	if event != nil && event.GetType() == api.EventTypeProcess && event.Hook == "ptrace" {
+		return []string{"path", "cgroup_id"}
+	}
+	return nil
+}
+
+// TestPtraceLSMWritebackFoldsAudit checks the LSM gate relaxation in
+// persistDecision: a ptrace miss may be written back because the hook already
+// returned 0 (allow) and the write is keyed by the target's {cgroup, comm}.
+// Other LSM events stay record-only. Audit downgrade must still reach the
+// kernel, and an ALLOW decision must never install a reusable entry: ptrace
+// feedback is DENY-only with no default-deny domain.
+func TestPtraceLSMWritebackFoldsAudit(t *testing.T) {
+	traceOnly := &[3]uint32{compiler.FieldBitPath | compiler.FieldBitCgroupID, 0, 0}
+	newPtrace := func() *api.Event {
+		return &api.Event{
+			Type: api.EventTypeProcess, CgroupID: 99, LSMEvent: true,
+			Hook: "ptrace", Filename: "sleep", TargetCgroupID: 4242,
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		auditMode bool
+		wantAudit bool
+	}{
+		{"plain deny", false, false},
+		{"audit downgraded deny", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &ptraceSyncRecorder{}
+			e, _ := newTestEnforcer(t, testEnforcerOpts{
+				policyMap:  rec,
+				policyWasm: wasmtest.ConstPolicy(1, traceOnly), // deny, target-identity only
+			})
+			e.auditMode = tc.auditMode
+			e.handleEvent(newPtrace())
+			if len(rec.events) != 1 {
+				t.Fatalf("ptrace LSM DENY not written back: %+v", rec)
+			}
+			if rec.actions[0] != 1 {
+				t.Fatalf("action = %d, want DENY", rec.actions[0])
+			}
+			if rec.audits[0] != tc.wantAudit {
+				t.Fatalf("audit = %v, want %v", rec.audits[0], tc.wantAudit)
+			}
+		})
+	}
+
+	// A ptrace decision that reads uid is not determined by the target key.
+	recUID := &ptraceSyncRecorder{}
+	eUID, _ := newTestEnforcer(t, testEnforcerOpts{
+		policyMap:  recUID,
+		policyWasm: wasmtest.ConstPolicy(1, &[3]uint32{compiler.FieldBitPath | compiler.FieldBitCgroupID | compiler.FieldBitUID, 0, 0}),
+	})
+	eUID.handleEvent(newPtrace())
+	if len(recUID.events) != 0 {
+		t.Fatalf("unsound ptrace LSM decision was written back: %+v", recUID)
+	}
+
+	// DENY-only: an ALLOW decision must not be written back for ptrace.
+	recAllow := &ptraceSyncRecorder{}
+	eAllow, _ := newTestEnforcer(t, testEnforcerOpts{
+		policyMap:  recAllow,
+		policyWasm: wasmtest.ConstPolicy(0, traceOnly),
+	})
+	eAllow.handleEvent(newPtrace())
+	if len(recAllow.events) != 0 {
+		t.Fatalf("ptrace ALLOW feedback was written back: %+v", recAllow)
+	}
+
+	// A non-ptrace LSM event is still recorded, never re-synced.
+	recOther := &ptraceSyncRecorder{}
+	eOther, _ := newTestEnforcer(t, testEnforcerOpts{
+		policyMap:  recOther,
+		policyWasm: wasmtest.ConstPolicy(1, traceOnly),
+	})
+	eOther.handleEvent(&api.Event{
+		Type: api.EventTypeProcess, CgroupID: 99, LSMEvent: true, Hook: "exec", Filename: "/bin/sh",
+	})
+	if len(recOther.events) != 0 {
+		t.Fatalf("non-ptrace LSM event was synced: %+v", recOther)
 	}
 }
 

@@ -291,7 +291,13 @@ func TestSyncEventRequiresCompleteScopedIdentity(t *testing.T) {
 	if err := m.SyncEvent(e, ActionDeny, false); err != nil {
 		t.Fatal(err)
 	}
-	if len(b.entries) != 2 {
+	// A ptrace event is complete only with both the target comm and the
+	// target cgroup; a comm alone would be a wildcard across containers.
+	e = &api.Event{Type: api.EventTypeProcess, CgroupID: 42, Hook: "ptrace", Filename: "sleep", TargetCgroupID: 909}
+	if err := m.SyncEvent(e, ActionDeny, false); err != nil {
+		t.Fatalf("complete ptrace identity: %v", err)
+	}
+	if len(b.entries) != 3 {
 		t.Fatal("complete decisions not persisted")
 	}
 }

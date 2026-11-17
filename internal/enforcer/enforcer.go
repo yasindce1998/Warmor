@@ -1137,19 +1137,23 @@ func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, g
 	// LSM-origin events are normally recorded, never re-synced: the kernel
 	// already reached its verdict from a policy snapshot, and writing a fresh
 	// decision back could apply it to events from a different generation.
-	// Bind and listen are the only deliberate exceptions. Both hooks look up
-	// an exact key (bind: {cgroup, family, addr, port, EVENT_TYPE_BIND};
-	// listen: {cgroup, family, port, EVENT_TYPE_LISTEN} — no address) and, on
-	// a miss, emit this event and return 0. So the kernel has *already
-	// accepted* the operation and there is no in-flight operation left to
-	// re-decide. Userspace evaluates the complete event and the write goes
-	// back under that very same exact key, so no other operation is affected.
-	// Both are dynamic-only (no default-deny domain): a miss stays an allow
-	// until a DENY is explicitly installed, so no allowlist completeness is
-	// claimed. Audit downgrade is folded in by syncDecision.
+	// Bind and listen are deliberate exceptions. Both hooks look up an exact
+	// key (bind: {cgroup, family, addr, port, EVENT_TYPE_BIND}; listen:
+	// {cgroup, family, port, EVENT_TYPE_LISTEN} — no address) and, on a miss,
+	// emit this event and return 0. So the kernel has *already accepted* the
+	// operation and there is no in-flight operation left to re-decide.
+	// PTRACE is a third exception under the same reasoning: on a policy-map
+	// miss the hook emits the event, returns 0, and keys any later decision by
+	// the TARGET's {cgroup, comm}, so a DENY cannot affect another target.
+	// Userspace evaluates the complete event and the write goes back under
+	// that very same exact key, so no other operation is affected. All three
+	// are dynamic-only (no default-deny domain): a miss stays an allow until
+	// a DENY is explicitly installed, so no allowlist completeness is claimed.
+	// Audit downgrade is folded in by syncDecision.
 	lsmMissWriteback := event.LSMEvent && !event.KernelDenied &&
-		event.GetType() == api.EventTypeNetwork &&
-		(event.Hook == "bind" || event.Hook == "listen")
+		((event.GetType() == api.EventTypeNetwork &&
+			(event.Hook == "bind" || event.Hook == "listen")) ||
+			(event.GetType() == api.EventTypeProcess && event.Hook == "ptrace"))
 	if e.policyMap != nil && (!event.LSMEvent || lsmMissWriteback) &&
 		(e.supervisor == nil || evaluator.LinuxKernelCacheEligible(event.GetType())) {
 		// Failures are counted and rate-limit logged inside; the event
@@ -1417,6 +1421,14 @@ func (e *Enforcer) recordSync(event *api.Event, err error) {
 func (e *Enforcer) syncDecision(event *api.Event, result *api.ActionResult, gen uint64, fieldsRead uint32) error {
 	if e.policyGen.Load() != gen {
 		return errStaleDecision
+	}
+	if event.Hook == "ptrace" && result.Action != api.ActionDeny {
+		// PTRACE feedback is DENY-only: a miss already allows in the kernel,
+		// so a userspace ALLOW must not install a reusable entry (that would
+		// turn the target-scoped key into a first-touch allow fast path).
+		// Generation-backed syncs bypass PolicyMapManager.SyncEvent, so the
+		// gate belongs here where both write paths pass through.
+		return nil
 	}
 	if !decisionDeterminedByKernelKey(e.policyMap, event, fieldsRead) {
 		return errNotKeyDetermined

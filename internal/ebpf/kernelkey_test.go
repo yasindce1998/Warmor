@@ -6,10 +6,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
+	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 // TestKernelKeyPathBoundary pins the shared exact-path identity limit at the
@@ -209,6 +212,174 @@ func TestConnectBindKeysRemainByteIdentical(t *testing.T) {
 			if tail := b[12+len(tc.raw):]; !bytes.Equal(tail, make([]byte, len(tail))) {
 				t.Fatalf("domain %d %s nonzero tail: %x", typ, tc.addr, tail)
 			}
+		}
+	}
+}
+
+// TestPtracePolicyKeyWireBytes pins the exact 288-byte layout that
+// lsm_ptrace.bpf.c looks up: cgroup_id is the TARGET's cgroup (not the
+// tracer's), event_type is EVENT_TYPE_PTRACE, path holds the target's comm
+// and every unused byte is zero. This is the key a DENY feedback writes.
+func TestPtracePolicyKeyWireBytes(t *testing.T) {
+	const targetCGID = uint64(0x0102030405060708)
+	k, err := ptracePolicyKey(targetCGID, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := k.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) != 288 {
+		t.Fatalf("key length = %d, want 288", len(b))
+	}
+	if got := binary.NativeEndian.Uint64(b[:8]); got != targetCGID {
+		t.Fatalf("cgroup bytes = %x, want target cgroup %x", got, targetCGID)
+	}
+	if b[8] != EventTypePtrace {
+		t.Fatalf("event_type = %d, want %d", b[8], EventTypePtrace)
+	}
+	if !bytes.Equal(b[28:28+5], []byte("sleep")) || b[33] != 0 {
+		t.Fatalf("target comm bytes = %q, want zero-terminated sleep", b[28:40])
+	}
+	// family, port, address, the rest of path and pad are all unused.
+	if tail := b[9:28]; !bytes.Equal(tail, make([]byte, len(tail))) {
+		t.Fatalf("nonzero key prefix before path: %x", tail)
+	}
+	if tail := b[33:]; !bytes.Equal(tail, make([]byte, len(tail))) {
+		t.Fatalf("nonzero key tail after comm: %x", tail)
+	}
+
+	// The BPF side writes the same bytes: target cgroup in cgroup_id, the
+	// 16-byte comm buffer at the start of path. A Go key with a 15-byte comm
+	// (TASK_COMM_LEN 16 minus NUL) must match that buffer byte-for-byte.
+	var commBuf [16]byte
+	copy(commBuf[:], "sleep")
+	if !bytes.Equal(b[28:44], commBuf[:]) {
+		t.Fatalf("comm buffer mismatch: %x vs %x", b[28:44], commBuf)
+	}
+
+	// Domain separation: the same comm and cgroup in the exec domain, or a
+	// different target cgroup in the ptrace domain, must produce different
+	// keys. Otherwise a deny could be applied to another domain/container.
+	execKey, err := stringPolicyKey(targetCGID, EventTypeExec, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k == execKey {
+		t.Fatal("ptrace key aliased the exec domain for the same comm/cgroup")
+	}
+	other, err := ptracePolicyKey(targetCGID+1, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k == other {
+		t.Fatal("target cgroup does not distinguish two same-comm targets")
+	}
+	otherComm, err := ptracePolicyKey(targetCGID, "sshd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k == otherComm {
+		t.Fatal("target comm does not distinguish two same-cgroup targets")
+	}
+
+	// A zero target cgroup would be a wildcard deny over every container.
+	if _, err := ptracePolicyKey(0, "sleep"); !errors.Is(err, ErrNotKernelMatchable) {
+		t.Fatalf("zero target cgroup: %v", err)
+	}
+	for _, comm := range []string{"", "a\x00b", strings.Repeat("x", 16)} {
+		if _, err := ptracePolicyKey(targetCGID, comm); !errors.Is(err, ErrNotKernelMatchable) {
+			t.Fatalf("comm %q: %v", comm, err)
+		}
+	}
+}
+
+// TestEventPolicyKeyPtraceUsesTargetIdentity checks the dynamic write-back
+// path: a ptrace PROCESS LSM event is keyed by the target identity from the
+// event (TargetCgroupID from aux_id, Filename/Process.Filename from the
+// sensor's comm buffer), never by the tracer's cgroup or comm.
+func TestEventPolicyKeyPtraceUsesTargetIdentity(t *testing.T) {
+	newPtrace := func() *api.Event {
+		return &api.Event{
+			Type: api.EventTypeProcess, CgroupID: 99, Comm: "tracer",
+			LSMEvent: true, Hook: "ptrace", Filename: "sleep", TargetCgroupID: 4242,
+			Process: &api.ProcessEvent{Filename: "sleep"},
+		}
+	}
+	got, err := eventPolicyKey(newPtrace())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := ptracePolicyKey(4242, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("ptrace key = %+v, want target-scoped %+v", got, want)
+	}
+	if got.CgroupID == 99 {
+		t.Fatal("ptrace key used the tracer cgroup instead of the target cgroup")
+	}
+
+	// Without a target cgroup the identity is incomplete: it would be a
+	// wildcard over all containers, so it is refused.
+	e := newPtrace()
+	e.TargetCgroupID = 0
+	if _, err := eventPolicyKey(e); !errors.Is(err, ErrNotKernelMatchable) {
+		t.Fatalf("missing target cgroup: %v", err)
+	}
+
+	// An exec PROCESS event with the same comm stays in the exec domain.
+	exec := newPtrace()
+	exec.Hook = "exec"
+	exec.TargetCgroupID = 0
+	exec.Filename = "/bin/sleep"
+	exec.Process.Filename = "/bin/sleep"
+	ek, err := eventPolicyKey(exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ek.EventType != EventTypeExec || ek == got {
+		t.Fatalf("exec key = %+v, want EVENT_TYPE_EXEC distinct from ptrace", ek)
+	}
+}
+
+// TestPtraceKernelKeySoundness pins the fields the enforcer may rely on for
+// ptrace write-back: target comm ("path") and target cgroup ("cgroup_id").
+// Anything else the policy reads — uid, ppid, the tracer comm, or temporal
+// context — cannot be reproduced by that key and must be refused.
+func TestPtraceKernelKeySoundness(t *testing.T) {
+	m := &PolicyMapManager{}
+	ev := &api.Event{
+		Type: api.EventTypeProcess, CgroupID: 99, LSMEvent: true,
+		Hook: "ptrace", Filename: "sleep", TargetCgroupID: 4242,
+	}
+	keyFields := m.KernelKeyFieldsForEvent(ev)
+	want := []string{"path", "cgroup_id"}
+	if !reflect.DeepEqual(keyFields, want) {
+		t.Fatalf("ptrace key fields = %v, want %v", keyFields, want)
+	}
+	covered := compiler.FieldMask(keyFields...)
+	for _, tc := range []struct {
+		name   string
+		fields uint32
+		want   bool
+	}{
+		{"target identity only", covered, true},
+		{"constant decision", 0, true},
+		{"target comm only", compiler.FieldBitPath, true},
+		{"uid", covered | compiler.FieldBitUID, false},
+		{"ppid", covered | compiler.FieldBitPPID, false},
+		{"tracer comm", covered | compiler.FieldBitComm, false},
+		{"args", covered | compiler.FieldBitArgs, false},
+		{"wall clock", covered | compiler.FieldBitTime, false},
+		{"container age", covered | compiler.FieldBitContainerAge, false},
+		{"undeclared", compiler.FieldsUnknown, false},
+	} {
+		got := tc.fields&^covered == 0 && tc.fields != compiler.FieldsUnknown
+		if got != tc.want {
+			t.Errorf("%s: determined=%v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

@@ -34,6 +34,14 @@ import (
 // address, so a listen decision that reads "remote_addr" or "protocol" is
 // likewise refused rather than applied to other events; only "remote_port"
 // is a sound listen key field.
+//
+// For ptrace LSM events the kernel key is {target cgroup, target comm}: the
+// target comm is the process "filename"/"path" the sensor reports, and the
+// target cgroup is kernel-only (never exposed to WASM, so no declaration bit
+// exists for it). Feedback is DENY-only with no default-deny domain: a miss
+// allows. A ptrace decision that additionally reads uid, ppid, the tracer's
+// comm, or temporal context cannot be reproduced by that key and is refused
+// rather than applied to other targets.
 const (
 	FieldBitPID        = policymeta.FieldBitPID
 	FieldBitUID        = policymeta.FieldBitUID
