@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/yasindce1998/warmor/pkg/api"
 	"golang.org/x/sys/unix"
@@ -63,10 +64,63 @@ func (b signalingClockBound) eventBootLower(stamp uint64) uint64 {
 	return stamp
 }
 
+// signalingInvariants caches the checks that describe this daemon's own
+// startup environment (procfs layout, PID/time namespace, auxv AT_CLKTCK).
+// Those cannot change for a running process, so re-running Statfs/Stat/Readlink/
+// timens_offsets/auxv on every deny is wasted work. Per-event checks (start
+// ticks, monotonic clock, event lower bound) remain fresh in
+// terminateLinuxEventProcess.
+//
+// Only successful checks are cached: a transient read failure is retried on the
+// next deny rather than permanently disabling termination. Failures are
+// fail-closed on every attempt.
+type signalingInvariants struct {
+	mu       sync.Mutex
+	checked  bool
+	hz       uint64
+	verifyNS func() error
+	readHZ   func() (uint64, error)
+}
+
+func (s *signalingInvariants) load() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.checked {
+		return nil
+	}
+	if err := s.verifyNS(); err != nil {
+		return err
+	}
+	hz, err := s.readHZ()
+	if err != nil {
+		return err
+	}
+	s.hz, s.checked = hz, true
+	return nil
+}
+
+func (s *signalingInvariants) namespace() error {
+	return s.load()
+}
+
+func (s *signalingInvariants) clockTicks() (uint64, error) {
+	if err := s.load(); err != nil {
+		return 0, err
+	}
+	return s.hz, nil
+}
+
+// startupInvariants is the production cache; tests construct their own
+// signalingInvariants with injected counters to prove checks are not repeated.
+var startupInvariants = &signalingInvariants{
+	verifyNS: verifySignalingNamespaces,
+	readHZ:   readClockTicks,
+}
+
 func terminateEventProcess(event *api.Event) (bool, error) {
 	return terminateLinuxEventProcess(event, linuxProcessOps{
-		open: unix.PidfdOpen, close: unix.Close, namespace: verifySignalingNamespaces,
-		startTicks: readProcessStartTicks, clockTicks: readClockTicks,
+		open: unix.PidfdOpen, close: unix.Close, namespace: startupInvariants.namespace,
+		startTicks: readProcessStartTicks, clockTicks: startupInvariants.clockTicks,
 		now: monotonicNowNS, eventBootLower: signalingClockBaseline.eventBootLower,
 		signal: unix.PidfdSendSignal,
 	})

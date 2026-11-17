@@ -204,3 +204,50 @@ func TestReloadPolicy_RuntimeCreationError(t *testing.T) {
 func writeFile(path string) error {
 	return os.WriteFile(path, []byte("x"), 0o600)
 }
+
+// The daemon's own namespace/procfs/auxv layout is a startup invariant. These
+// tests inject counters in place of Statfs/Stat/Readlink/timens_offsets/auxv to
+// prove those checks are not repeated on every deny.
+func TestStartupInvariantsCachedAcrossDenies(t *testing.T) {
+	var nsCalls, hzCalls int
+	inv := &signalingInvariants{
+		verifyNS: func() error { nsCalls++; return nil },
+		readHZ:   func() (uint64, error) { hzCalls++; return 100, nil },
+	}
+	for range 3 {
+		if err := inv.namespace(); err != nil {
+			t.Fatal(err)
+		}
+		hz, err := inv.clockTicks()
+		if err != nil || hz != 100 {
+			t.Fatalf("clockTicks = %d, %v", hz, err)
+		}
+	}
+	if nsCalls != 1 || hzCalls != 1 {
+		t.Fatalf("startup invariants re-checked per deny: ns=%d hz=%d", nsCalls, hzCalls)
+	}
+}
+
+func TestStartupInvariantsFailureRefusesAndRetries(t *testing.T) {
+	var nsCalls int
+	inv := &signalingInvariants{
+		verifyNS: func() error { nsCalls++; return errors.New("namespace mismatch") },
+		readHZ: func() (uint64, error) {
+			t.Fatal("clock ticks must not be read when namespace verification fails")
+			return 0, nil
+		},
+	}
+	for range 2 {
+		if err := inv.namespace(); err == nil {
+			t.Fatal("expected namespace refusal")
+		}
+		if _, err := inv.clockTicks(); err == nil {
+			t.Fatal("expected refusal from failed invariant check")
+		}
+	}
+	// A failed (transient) check is not cached, so it is retried and stays
+	// fail-closed rather than permanently disabling termination.
+	if nsCalls != 4 {
+		t.Fatalf("failed invariant check calls = %d, want 4 (retried each time)", nsCalls)
+	}
+}

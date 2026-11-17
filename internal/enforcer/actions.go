@@ -4,11 +4,61 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
+
+// Bounded refusal reason categories. Any unrecognized enforcement error text
+// maps to refusalReasonUnknown, so the "reason" label cardinality is fixed and
+// cannot grow with the underlying error detail.
+const (
+	refusalReasonPIDZero      = "pid_zero"
+	refusalReasonContext      = "context_canceled"
+	refusalReasonUnsafePID    = "unsafe_pid"
+	refusalReasonMissingTS    = "missing_timestamp"
+	refusalReasonPIDFD        = "pidfd_unavailable"
+	refusalReasonStale        = "stale_identity"
+	refusalReasonClockDomain  = "clock_domain"
+	refusalReasonNamespace    = "namespace"
+	refusalReasonClockUnavail = "clock_unavailable"
+	refusalReasonIdentity     = "identity_unavailable"
+	refusalReasonUnknown      = "unknown"
+)
+
+// refusalReason classifies an EnforcementError string into one of the fixed
+// categories above. Ordering matters: more specific patterns are checked first
+// so, e.g., a future-clock refusal is not mistaken for a generic clock failure
+// and an invalid start tick is not mistaken for a USER_HZ read failure.
+func refusalReason(errText string) string {
+	switch {
+	case strings.Contains(errText, "PID is unknown/zero"):
+		return refusalReasonPIDZero
+	case strings.Contains(errText, "context canceled"), strings.Contains(errText, "context deadline exceeded"):
+		return refusalReasonContext
+	case strings.Contains(errText, "unsafe PID"):
+		return refusalReasonUnsafePID
+	case strings.Contains(errText, "missing trusted kernel monotonic timestamp"):
+		return refusalReasonMissingTS
+	case strings.Contains(errText, "pidfd_open"):
+		return refusalReasonPIDFD
+	case strings.Contains(errText, "start tick does not strictly precede event"):
+		return refusalReasonStale
+	case strings.Contains(errText, "future timestamp or wrong clock domain"):
+		return refusalReasonClockDomain
+	case strings.Contains(errText, "namespace"), strings.Contains(errText, "procfs"), strings.Contains(errText, "initial clock domain"):
+		return refusalReasonNamespace
+	case strings.Contains(errText, "read monotonic clock"), strings.Contains(errText, "read USER_HZ"), strings.Contains(errText, "AT_CLKTCK"), strings.Contains(errText, "auxv"):
+		return refusalReasonClockUnavail
+	case strings.Contains(errText, "start identity"), strings.Contains(errText, "starttime"), strings.Contains(errText, "start tick or USER_HZ"), strings.Contains(errText, "start time overflow"), strings.Contains(errText, "identity unavailable"):
+		return refusalReasonIdentity
+	default:
+		return refusalReasonUnknown
+	}
+}
 
 // ActionHandler handles policy decisions
 type ActionHandler struct {
@@ -63,6 +113,9 @@ func (h *ActionHandler) handleAllow(_ *api.Event, _ *api.ActionResult) error {
 
 func (h *ActionHandler) handleDeny(ctx context.Context, event *api.Event, result *api.ActionResult) error {
 	log.Printf("DENY pid=%d type=%s reason=%q", event.PID, event.Type, result.Reason)
+	// The DENY decision is made here; time until the terminate call returns
+	// success is the latency from that decision to SIGKILL acceptance.
+	start := time.Now()
 	var attempted bool
 	err := ctx.Err()
 	if err == nil {
@@ -85,6 +138,7 @@ func (h *ActionHandler) handleDeny(ctx context.Context, event *api.Event, result
 		} else {
 			atomic.AddUint64(&h.enforcementRefused, 1)
 			metrics.TerminationsTotal.WithLabelValues("refused").Inc()
+			metrics.TerminationRefusals.WithLabelValues(refusalReason(err.Error())).Inc()
 		}
 		log.Printf("DENY pid=%d: termination unsuccessful attempted=%v: %v", event.PID, attempted, err)
 		return err
@@ -92,6 +146,9 @@ func (h *ActionHandler) handleDeny(ctx context.Context, event *api.Event, result
 	result.Enforced = true
 	atomic.AddUint64(&h.enforcementSucceeded, 1)
 	metrics.TerminationsTotal.WithLabelValues("succeeded").Inc()
+	// Only a successful signal is observed. An accepted SIGKILL is asynchronous:
+	// this records request latency, not evidence that the process exited.
+	metrics.TerminationLatency.Observe(time.Since(start).Seconds())
 	return nil
 }
 
