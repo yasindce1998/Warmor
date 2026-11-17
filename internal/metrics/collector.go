@@ -134,6 +134,70 @@ func RecordAuditSuppressedKernelDeny() {
 	AuditSuppressedKernelDeniesTotal.Inc()
 }
 
+// Bounded kernel policy-map sync failure reasons. This set is deliberately
+// closed: it is a Prometheus label, so it must never be derived from raw error
+// strings (unbounded cardinality). Add a reason here only when a distinct,
+// actionable failure mode needs its own alert.
+const (
+	SyncReasonMapFull         = "map_full"
+	SyncReasonVerifierReject  = "verifier_reject"
+	SyncReasonInvalidKey      = "invalid_key"
+	SyncReasonGenerationStale = "generation_stale"
+	SyncReasonUnknown         = "unknown"
+)
+
+// KernelSyncFailuresTotal counts userspace decisions that did not reach the
+// kernel policy-map fast path, by reason. A failure is any sync outcome other
+// than a successful write: a full/permission-denied map, an unmatchable or
+// unsound key, or a decision made by a replaced generation. Each leaves the
+// kernel without a fast-path entry even though userspace still enforces it.
+var KernelSyncFailuresTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "warmor_kernel_sync_failures_total",
+		Help: "Total userspace decisions not synced to the kernel policy map, by reason (map_full, verifier_reject, invalid_key, generation_stale, unknown).",
+	},
+	[]string{"reason"},
+)
+
+// KernelSyncSuccessesTotal is the denominator for the kernel sync failure
+// ratio, so dashboards can see coverage degrading rather than just raw errors.
+var KernelSyncSuccessesTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "warmor_kernel_sync_successes_total",
+		Help: "Total userspace decisions successfully synced to the kernel policy map.",
+	},
+)
+
+// KernelSyncHealthy is 1 while recent kernel syncs stay below the degraded
+// threshold and 0 once they exceed it. It is an observability posture signal
+// published next to readiness; it never changes the readiness verdict.
+var KernelSyncHealthy = promauto.NewGauge(
+	prometheus.GaugeOpts{
+		Name: "warmor_kernel_sync_healthy",
+		Help: "1 when recent kernel policy-map syncs are healthy, 0 when failures exceed the bounded threshold (observability only; does not gate readiness).",
+	},
+)
+
+// RecordKernelSyncFailure counts one decision that did not reach the kernel
+// policy-map fast path. reason must be one of the bounded SyncReason* values.
+func RecordKernelSyncFailure(reason string) {
+	KernelSyncFailuresTotal.WithLabelValues(reason).Inc()
+}
+
+// RecordKernelSyncSuccess counts one decision successfully synced to kernel.
+func RecordKernelSyncSuccess() {
+	KernelSyncSuccessesTotal.Inc()
+}
+
+// SetKernelSyncHealthy publishes the kernel fast-path posture as a gauge.
+func SetKernelSyncHealthy(healthy bool) {
+	if healthy {
+		KernelSyncHealthy.Set(1)
+	} else {
+		KernelSyncHealthy.Set(0)
+	}
+}
+
 // Policy signature rejection sources.
 const (
 	PolicySourceFile   = "file"
