@@ -34,6 +34,14 @@ import (
 // address, so a listen decision that reads "remote_addr" or "protocol" is
 // likewise refused rather than applied to other events; only "remote_port"
 // is a sound listen key field.
+//
+// Mount is a file-kind LSM event (Hook="mount") whose kernel key carries only
+// the filesystem type. That fstype is hook metadata, not a compiler field a
+// policy declares it reads, and the mount source/target are never in the key.
+// There is therefore no sound mount key field: a mount decision that reads any
+// policy field (path, uid, temporal context, ...) is refused kernel write-back
+// and stays userspace-only. Only a decision fully determined by the key alone
+// may be compiled in, as a coarse DENY that blocks every mount of that fstype.
 const (
 	FieldBitPID        = policymeta.FieldBitPID
 	FieldBitUID        = policymeta.FieldBitUID

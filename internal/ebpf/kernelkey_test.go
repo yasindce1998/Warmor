@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/yasindce1998/warmor/internal/kernelmap"
+	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 // TestKernelKeyPathBoundary pins the shared exact-path identity limit at the
@@ -211,4 +212,134 @@ func TestConnectBindKeysRemainByteIdentical(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestMountPolicyKeyWireBytes pins the exact 288-byte mount key against
+// lsm_mount.bpf.c: only cgroup_id, EVENT_TYPE_MOUNT and the fstype bytes in
+// path[0..len] are set; family/port/address and the rest of path and pad stay
+// zero. There is no source/target field: dev_name is aux-only in the hook.
+func TestMountPolicyKeyWireBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fstype string
+	}{
+		{"ext4", "ext4"},
+		{"proc", "proc"},
+		{"max", strings.Repeat("f", maxMountPatternLen)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, err := mountPolicyKey(0x0102030405060708, tc.fstype)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := k.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(b) != 288 {
+				t.Fatalf("key length = %d, want 288", len(b))
+			}
+			if binary.NativeEndian.Uint64(b[:8]) != 0x0102030405060708 {
+				t.Fatalf("cgroup bytes = %x", b[:8])
+			}
+			if b[8] != EventTypeMount {
+				t.Fatalf("event_type = %d, want %d", b[8], EventTypeMount)
+			}
+			if !bytes.Equal(b[28:28+len(tc.fstype)], []byte(tc.fstype)) {
+				t.Fatalf("fstype bytes = %x, want %q", b[28:28+len(tc.fstype)], tc.fstype)
+			}
+			// family/port/address are never set by the mount hook.
+			if !bytes.Equal(b[9:28], make([]byte, 19)) {
+				t.Fatalf("family/port/address nonzero: %x", b[9:28])
+			}
+			// The rest of path (after the fstype) and the pad stay zero.
+			if tail := b[28+len(tc.fstype):]; !bytes.Equal(tail, make([]byte, len(tail))) {
+				t.Fatalf("mount key tail is not zero: %x", tail)
+			}
+		})
+	}
+}
+
+// TestMountKeySeparateFromFileOpenDomain checks the two file-kind hooks stay
+// distinct: an LSM mount event is keyed in EVENT_TYPE_MOUNT, while a plain
+// file_open event (same Kind=File, different Hook) has no exact kernel key and
+// is refused. A fstype deny can never leak into the file_open domain.
+func TestMountKeySeparateFromFileOpenDomain(t *testing.T) {
+	mount := &api.Event{
+		Type: api.EventTypeFile, CgroupID: 42, LSMEvent: true, Hook: "mount",
+		Filename: "tmpfs", File: &api.FileEvent{Path: "tmpfs"},
+	}
+	km, err := eventPolicyKey(mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if km.EventType != EventTypeMount || km.EventType == EventTypeFile {
+		t.Fatalf("mount event type = %d, want EVENT_TYPE_MOUNT", km.EventType)
+	}
+	if got := string(km.Path[:5]); got != "tmpfs" {
+		t.Fatalf("mount key fstype = %q, want tmpfs", got)
+	}
+	// A file_open event with the same Path must not become a kernel key at all.
+	fileOpen := &api.Event{
+		Type: api.EventTypeFile, CgroupID: 42, LSMEvent: true, Hook: "file",
+		Filename: "tmpfs", File: &api.FileEvent{Path: "tmpfs"},
+	}
+	if _, err := eventPolicyKey(fileOpen); !errors.Is(err, ErrNotKernelMatchable) {
+		t.Fatalf("file_open event was keyed: %v", err)
+	}
+	fileOpen.Hook = ""
+	if _, err := eventPolicyKey(fileOpen); !errors.Is(err, ErrNotKernelMatchable) {
+		t.Fatalf("empty-hook file event was keyed: %v", err)
+	}
+}
+
+// TestMountOverlongFstypeRejectedWithoutTruncatedKey verifies a >=64-byte
+// fstype (which lsm_mount would treat as truncated and skip) is refused by the
+// public write path, leaving no truncated key that BPF could never match.
+func TestMountOverlongFstypeRejectedWithoutTruncatedKey(t *testing.T) {
+	b := newFakeBackend()
+	m := &PolicyMapManager{policyMap: b}
+
+	// A 62-byte fstype is the longest accepted identity.
+	fstype := strings.Repeat("x", maxMountPatternLen)
+	mount := &api.Event{
+		Type: api.EventTypeFile, CgroupID: 42, LSMEvent: true, Hook: "mount",
+		File: &api.FileEvent{Path: fstype},
+	}
+	if err := m.SyncEvent(mount, ActionDeny, false); err != nil {
+		t.Fatalf("%d-byte fstype must be accepted: %v", maxMountPatternLen, err)
+	}
+	if len(b.entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(b.entries))
+	}
+
+	// 63/64/128 bytes are all refused, with no truncated prefix installed.
+	for _, n := range []int{63, 64, 128} {
+		long := strings.Repeat("y", n)
+		ev := &api.Event{
+			Type: api.EventTypeFile, CgroupID: 42, LSMEvent: true, Hook: "mount",
+			File: &api.FileEvent{Path: long},
+		}
+		if err := m.SyncEvent(ev, ActionDeny, false); !errors.Is(err, ErrNotKernelMatchable) {
+			t.Fatalf("%d-byte fstype: got %v, want ErrNotKernelMatchable", n, err)
+		}
+	}
+	if len(b.entries) != 1 {
+		t.Fatalf("overlong fstypes installed %d extra entries", len(b.entries)-1)
+	}
+	if _, ok := b.entries[mustMountKey(t, 42, strings.Repeat("y", maxMountPatternLen))]; ok {
+		t.Fatal("a truncated mount fstype prefix key was installed")
+	}
+	if v := b.entries[mustMountKey(t, 42, fstype)]; v.Action != ActionDeny {
+		t.Fatal("the legitimate mount entry was disturbed")
+	}
+}
+
+func mustMountKey(t *testing.T, scope uint64, fstype string) PolicyKey {
+	t.Helper()
+	k, err := mountPolicyKey(scope, fstype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
 }
