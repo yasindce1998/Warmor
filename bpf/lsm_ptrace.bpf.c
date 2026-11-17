@@ -72,7 +72,10 @@ int BPF_PROG(lsm_ptrace_check, struct task_struct *child, unsigned int mode)
 		return 0;
 	}
 
-	emit_lsm_event_aux_generation(snapshot.generation, EVENT_TYPE_PTRACE, 0, comm_buf, 16, cgid, 0, 0, 0, 0, 0, target_cgid);
+	// No match — emit for userspace evaluation. If the ring is full nobody
+	// will evaluate it; --on-event-loss decides (fail closed when configured).
+	if (!emit_lsm_event_aux_generation(snapshot.generation, EVENT_TYPE_PTRACE, 0, comm_buf, 16, cgid, 0, 0, 0, 0, 0, target_cgid))
+		return lost_verdict(EVENT_TYPE_PTRACE);
 	return 0;
 }
 

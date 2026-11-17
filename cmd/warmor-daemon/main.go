@@ -54,7 +54,7 @@ var (
 
 	integrityDB   = flag.String("integrity-db", "", "Integrity database from warmor-integrity-scan; its SHA-256 digests become the kernel exec allowlist")
 	lsmRingSize   = flag.String("lsm-ringbuf-size", "4MiB", "LSM event ring buffer size (power of two, e.g. 1MiB, 4MiB, 16MiB); a larger ring absorbs bigger bursts before events are dropped")
-	onEventLoss   = flag.String("on-event-loss", "log", "When the LSM event ring is full: log (allow the operation, count the drop) or deny (refuse unknown exec/connect in enforce mode)")
+	onEventLoss   = flag.String("on-event-loss", "log", "When the LSM event ring is full: log (allow the operation, count the drop) or deny (refuse unknown exec/connect/bind/listen/ptrace/mount in enforce mode; file and integrity stay audit-only)")
 	escapeDetect  = flag.String("escape-detect", "off", "Container escape detection: off, alert (log, count and stream matches) or deny (also terminate the process)")
 	integrityMode = flag.String("integrity-mode", "off", "Exec integrity check: off, audit (report unlisted binaries) or enforce (refuse them in-kernel)")
 

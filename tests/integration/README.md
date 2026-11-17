@@ -75,7 +75,8 @@ Local build/oracle success without a live VM run must be reported as **infrastru
 
 `run-kernel-generations.sh` is the separate strict, non-skippable gate for the
 opt-in kernel generation API. It requires real PASS results for every
-`TestLSM_Generation*` fixture plus named legacy/integrity regressions. It runs a
+`TestLSM_Generation*` fixture, the two event-loss regressions described below,
+plus named legacy/integrity regressions. It runs a
 prebuilt hashed binary only in a disposable vimto VM, requires BPF LSM and IMA,
 and checks the requested actual kernel minor. Broad suite skips do not count.
 
@@ -101,6 +102,55 @@ The required-PASS/no-SKIP/duplicate-PASS oracle is unchanged. See
 [`docs/design/kernel-generations.md`](../../docs/design/kernel-generations.md)
 for concurrency and flush/retirement assertions. A build-only success is not
 verifier/runtime evidence.
+
+## Required event-loss and broad LSM hook gates
+
+Two event-loss regressions are now named fixtures in the strict
+`run-kernel-generations.sh` manifest, so a silent skip can no longer leave CI
+green:
+
+| Required test | What a non-skipped PASS proves |
+| --- | --- |
+| `TestLSM_EventLossIsCounted` | Under a 20k-open flood into a one-page ring, every probe open is either delivered to userspace or counted in `lsm_drops`. No operation is silently evaluated by nobody and accounted for by nobody. |
+| `TestLSM_OnEventLossDeny` | With `--on-event-loss=deny` in enforce mode an exec whose event cannot be queued is refused with `EPERM`, while the default (`on-loss=log`) still allows it. Event loss therefore fails closed rather than allowing an unevaluated operation. |
+
+`run-lsm-hooks.sh` adds a separate strict, non-skippable `lsm-hooks` VM phase
+(reusing the `run-vm.sh` phase structure) for the broad hook tests that
+previously ran with no oracle. These are now required gates:
+
+| Required test | What a non-skipped PASS proves |
+| --- | --- |
+| `TestLSM_WASMFeedbackLoop` | A batch of WASM decisions is synced into the BPF policy map; kernel-matchable entries carry the correct action/audit bits and the file-only entry is correctly skipped. |
+| `TestLSM_ExecBlocked` | A deny exec rule actually blocks execution of the configured binary. |
+| `TestLSM_ConnectBlocked` | A deny endpoint rule actually blocks `connect(2)` to the configured address/port. |
+| `TestLSM_BindBlocked` | A deny endpoint rule actually blocks `bind(2)` to the configured address/port. |
+| `TestLSM_ListenBlocked` | A deny listen rule actually blocks `listen(2)` on the configured port after a successful bind. |
+| `TestLSM_PtraceBlocked` | A deny ptrace rule actually blocks `PTRACE_ATTACH` to the named process. |
+| `TestLSM_MountBlocked` | A deny mount rule actually blocks mounting the named filesystem type. |
+
+Both gates use the **unchanged** strict oracle: exactly one non-skipped
+`--- PASS:` per manifest fixture, rejection of any `--- SKIP`, `--- FAIL`,
+`panic:` or no-tests line (including child/subtest skips), no duplicate PASS
+lines, and a final `PASS`. They execute only a prepared, hashed `kernel.test`
+binary in a disposable vimto VM with `WARMOR_REQUIRE_BPF_LSM=1`; an unavailable
+LSM or incompatible BTF fails closed instead of skipping. The `lsm-hooks` phase
+has a 300-second host deadline and a 120-second guest test timer, and its
+`lsm-hooks.log`/status are retained on failure. AST-based gate tests scan the
+integration sources so a renamed, removed or newly added hook fixture cannot
+silently fall out of the manifest.
+
+Safe local checks (no VM, no BPF attachment):
+
+```sh
+bash -n tests/integration/run-lsm-hooks.sh tests/integration/run-vm.sh
+go test -race -count=1 -run '^TestLSMHooksGate' ./tests/integration
+bash tests/integration/run-lsm-hooks.sh --build-only
+```
+
+A green CI run therefore proves, in addition to the existing gates, that event
+loss is both counted and fail-closed and that the
+exec/connect/bind/listen/ptrace/mount deny rules plus the WASM-to-BPF feedback
+loop are exercised rather than skipped.
 
 ## Whole-daemon generation activation gate
 

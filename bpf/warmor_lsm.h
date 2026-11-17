@@ -389,10 +389,21 @@ static __always_inline __u64 submit_flags(__u8 decision)
 }
 
 // lost_verdict returns what an LSM hook should return for an operation the
-// policy map didn't know and whose event was dropped: 0 to allow it, or
-// -EPERM in enforce mode with --on-event-loss=deny.
-static __always_inline int lost_verdict(void)
+// policy map didn't know and whose event was dropped because the ring was
+// full: 0 to allow it, or -EPERM in enforce mode with --on-event-loss=deny.
+// The drop itself was already counted in lsm_drops by emit_lsm_event*; this
+// only decides the verdict. Every blocking hook calls this on ring-full so a
+// flood can never silently convert a would-be denial into an allow.
+//
+// event_type separates operations whose verdict depends on userspace actually
+// evaluating the dropped event (exec, connect, bind, listen, ptrace, mount)
+// from audit-only hooks (file, integrity). A dropped audit event must never
+// turn an otherwise-allowed operation into a denial, so those allow in every
+// mode. With the flag off, all hooks keep their existing allow behaviour.
+static __always_inline int lost_verdict(__u8 event_type)
 {
+	if (event_type == EVENT_TYPE_FILE || event_type == EVENT_TYPE_INTEGRITY)
+		return 0;
 	__u32 zero = 0;
 	struct lsm_config *cfg = bpf_map_lookup_elem(&lsm_cfg, &zero);
 	if (cfg && cfg->on_loss == ON_LOSS_DENY && is_enforce_enabled())

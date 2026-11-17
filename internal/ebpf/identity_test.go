@@ -213,7 +213,7 @@ func TestStringIdentityBoundsAndLiteralSemantics(t *testing.T) {
 	for _, tc := range []struct {
 		typ uint8
 		max int
-	}{{EventTypeExec, 254}, {EventTypeMount, 62}, {EventTypePtrace, 15}} {
+	}{{EventTypeExec, kernelmap.MaxPolicyPathBytes}, {EventTypeMount, 62}, {EventTypePtrace, 15}} {
 		p := strings.Repeat("x", tc.max)
 		k := mustStringKey(t, 2, tc.typ, p)
 		if string(k.Path[:tc.max]) != p || k.Path[tc.max] != 0 {

@@ -404,3 +404,75 @@ func TestResolveCgroupID_MatchesInode(t *testing.T) {
 		t.Errorf("ResolveCgroupID = %d, want inode %d", id, st.Ino)
 	}
 }
+
+// The marker fallback is what the unit tests exercise: a temp dir has no
+// cgroup superblock, so DetectCgroupView must fall back to control files.
+func TestDetectCgroupViewByFiles(t *testing.T) {
+	t.Run("v2 unified marker", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "cgroup.controllers"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := detectCgroupViewByFiles(root); got != CgroupViewV2 {
+			t.Fatalf("view = %v, want v2", got)
+		}
+	})
+	t.Run("v1 controller root", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "cgroup.procs"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := detectCgroupViewByFiles(root); got != CgroupViewV1 {
+			t.Fatalf("view = %v, want v1", got)
+		}
+	})
+	t.Run("v1 controller subdirectories", func(t *testing.T) {
+		root := t.TempDir()
+		ctrl := filepath.Join(root, "memory")
+		if err := os.MkdirAll(ctrl, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(ctrl, "cgroup.procs"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := detectCgroupViewByFiles(root); got != CgroupViewV1 {
+			t.Fatalf("view = %v, want v1", got)
+		}
+	})
+	t.Run("empty view is unknown", func(t *testing.T) {
+		if got := detectCgroupViewByFiles(t.TempDir()); got != CgroupViewUnknown {
+			t.Fatalf("view = %v, want unknown", got)
+		}
+	})
+	t.Run("missing root is unknown", func(t *testing.T) {
+		if got := detectCgroupViewByFiles(filepath.Join(t.TempDir(), "missing")); got != CgroupViewUnknown {
+			t.Fatalf("view = %v, want unknown", got)
+		}
+	})
+	if CgroupViewV2.String() != "v2" || CgroupViewV1.String() != "v1" || CgroupViewUnknown.String() != "unknown" {
+		t.Fatal("CgroupView.String labels are inconsistent")
+	}
+}
+
+func TestRequireCgroupV2(t *testing.T) {
+	v2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(v2, "cgroup.controllers"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RequireCgroupV2(v2); err != nil {
+		t.Fatalf("confirmed v2 view must be accepted: %v", err)
+	}
+
+	v1 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(v1, "cgroup.procs"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RequireCgroupV2(v1); err == nil || !strings.Contains(err.Error(), "cgroup v1") {
+		t.Fatalf("v1 view must be refused with a clear reason: %v", err)
+	}
+
+	unknown := t.TempDir()
+	if err := RequireCgroupV2(unknown); err == nil || !strings.Contains(err.Error(), "cannot determine") {
+		t.Fatalf("unknown view must be refused with a clear reason: %v", err)
+	}
+}

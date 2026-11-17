@@ -99,8 +99,11 @@ func TestTelemetryFinalizedEventPopulation(t *testing.T) {
 		{name: "audit-deny", opts: testEnforcerOpts{audit: true}, event: api.Event{Comm: "bash"}, excluded: 3, hits: 2},
 		{name: "log-only", event: api.Event{Comm: "python"}, excluded: 3, hits: 2},
 		{name: "learning-bypass", opts: testEnforcerOpts{learning: true}, event: api.Event{Comm: "bash"}},
-		{name: "kernel-bypass", event: api.Event{Comm: "bash", KernelDenied: true}},
-		{name: "independent-filter-bypass", opts: testEnforcerOpts{netFilter: &NetFilterConfig{BlockCIDRs: []string{"10.0.0.0/8"}}}, event: api.Event{Type: api.EventTypeNetwork, Network: &api.NetworkEvent{RemoteAddr: "10.0.0.1"}}},
+		// Kernel verdicts are reported by the kernel path, not by userspace telemetry.
+		{name: "kernel-bypass", event: api.Event{Comm: "bash", LSMEvent: true, KernelTimestampNS: 1, KernelDenied: true}},
+		// An early filter deny is still a userspace decision: it must be counted
+		// in telemetry like any other deny (and never consult the decision cache).
+		{name: "independent-filter-denial", opts: testEnforcerOpts{netFilter: &NetFilterConfig{BlockCIDRs: []string{"10.0.0.0/8"}}}, event: api.Event{Type: api.EventTypeNetwork, Network: &api.NetworkEvent{RemoteAddr: "10.0.0.1"}}, total: 3, denied: 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e, _ := newTestEnforcer(t, tc.opts)

@@ -48,7 +48,10 @@ int BPF_PROG(lsm_listen_check, struct socket *sock, int backlog)
 		return 0;
 	}
 
-	emit_lsm_event_generation(snapshot.generation, EVENT_TYPE_LISTEN, 0, 0, 0, cgid, family, port, 0, 0);
+	// No match — emit for userspace evaluation. If the ring is full nobody
+	// will evaluate it; --on-event-loss decides (fail closed when configured).
+	if (!emit_lsm_event_generation(snapshot.generation, EVENT_TYPE_LISTEN, 0, 0, 0, cgid, family, port, 0, 0))
+		return lost_verdict(EVENT_TYPE_LISTEN);
 	return 0;
 }
 

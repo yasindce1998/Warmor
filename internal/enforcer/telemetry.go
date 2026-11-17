@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/internal/telemetry"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
@@ -36,6 +37,22 @@ func (e *Enforcer) ActivatePolicyTelemetry(path string, commit func() error, ass
 		return err
 	}
 	return e.activatePolicy(path, nil, commit, &snapshot)
+}
+
+// reportOutcome performs the same denial log, audit metric and telemetry
+// reporting as the main WASM evaluation path for decisions made by a cache hit
+// or an early deny (netfilter, sandbox, escape). It must be called after
+// ActionHandler.Enforce, which may set result.Audit in global audit mode.
+func (e *Enforcer) reportOutcome(event *api.Event, result *api.ActionResult, evaluationError error) {
+	if result != nil {
+		if result.Action == api.ActionDeny && !result.Audit && e.logger != nil {
+			e.logger.LogDenial(event, result)
+		}
+		if result.Audit {
+			metrics.RecordAuditDenied()
+		}
+	}
+	e.recordTelemetryDecision(result, evaluationError)
 }
 
 func (e *Enforcer) recordTelemetryDecision(result *api.ActionResult, evaluationError error) {

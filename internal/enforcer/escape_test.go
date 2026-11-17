@@ -80,6 +80,7 @@ func TestEscape_KernelDeniedStillAlerts(t *testing.T) {
 
 	ev := nsenterEvent(uint32(victim.pid))
 	ev.KernelDenied = true
+	ev.KernelTimestampNS = 1 // genuine in-tree LSM events carry a kernel timestamp
 	e.handleEvent(ev)
 
 	if n := len(e.escape.Alerts()); n != 1 {

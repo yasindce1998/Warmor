@@ -27,8 +27,12 @@ int BPF_PROG(lsm_file_check, struct file *file)
 		return 0;
 
 	// A basename is not a policy path identity. Never consult policy_map,
-	// even if an external raw-map writer installs a basename entry.
-	emit_lsm_event(EVENT_TYPE_FILE, 0, fname_buf, len, cgid, 0, 0, 0, 0);
+	// even if an external raw-map writer installs a basename entry. This is
+	// an audit-only event: a ring-full drop is counted in lsm_drops, but the
+	// open is still allowed in every mode (lost_verdict keeps audit hooks
+	// from failing closed).
+	if (!emit_lsm_event(EVENT_TYPE_FILE, 0, fname_buf, len, cgid, 0, 0, 0, 0))
+		return lost_verdict(EVENT_TYPE_FILE);
 	return 0;
 }
 

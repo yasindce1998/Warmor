@@ -25,6 +25,8 @@ on:
       - "scripts/build-ci-kernel.sh"
       - "tests/integration/run-kernel-generations.sh"
       - "tests/integration/kernel_generations_gate_test.go"
+      - "tests/integration/run-lsm-hooks.sh"
+      - "tests/integration/lsm_hooks_gate_test.go"
       - "tests/integration/run-vm.sh"
       - "tests/integration/workflow_test.go"
   pull_request:
@@ -51,6 +53,8 @@ on:
       - "scripts/build-ci-kernel.sh"
       - "tests/integration/run-kernel-generations.sh"
       - "tests/integration/kernel_generations_gate_test.go"
+      - "tests/integration/run-lsm-hooks.sh"
+      - "tests/integration/lsm_hooks_gate_test.go"
       - "tests/integration/run-vm.sh"
       - "tests/integration/workflow_test.go"
   workflow_dispatch:
@@ -326,7 +330,9 @@ jobs:
     name: Required generation verifier/outcomes (${{ matrix.version }})
     runs-on: ubuntu-24.04
     needs: [unit-tests, bpf-compile, ima-kernel]
-    timeout-minutes: 25
+    # +5m over the original 25m covers the added 300s lsm-hooks host deadline
+    # with the same margin; guest/phase timeouts are unchanged.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -369,6 +375,8 @@ jobs:
           go test -race -count=1 -run '^(TestGenerationGate|TestVM)' ./tests/integration
           bash -n tests/integration/run-generation-daemon.sh
           go test -race -count=1 -run '^TestGenerationDaemonGate' ./tests/integration
+          bash -n tests/integration/run-lsm-hooks.sh
+          go test -race -count=1 -run '^TestLSMHooksGate' ./tests/integration
       - name: Require actual non-skipped generation, legacy and integrity outcomes in VM
         env:
           KERNEL: ${{ github.workspace }}/kernel-out/vmlinuz
@@ -379,6 +387,11 @@ jobs:
           KERNEL: ${{ github.workspace }}/kernel-out/vmlinuz
           EXPECT_KERNEL_MINOR: ${{ matrix.minor }}
         run: bash tests/integration/run-generation-daemon.sh
+      - name: Require non-skipped LSM hook blocking and WASM feedback outcomes
+        env:
+          KERNEL: ${{ github.workspace }}/kernel-out/vmlinuz
+          EXPECT_KERNEL_MINOR: ${{ matrix.minor }}
+        run: bash tests/integration/run-lsm-hooks.sh
       - name: Retain exact inputs and VM verdict evidence even on failure
         if: always()
         uses: actions/upload-artifact@v4
@@ -391,5 +404,6 @@ jobs:
             tests/integration/artifacts/generations.*/*.log
             tests/integration/artifacts/generations.*/generations-status.txt
             tests/integration/artifacts/generation-daemon.*/**
+            tests/integration/artifacts/lsm-hooks.*/**
           if-no-files-found: error
           retention-days: 14

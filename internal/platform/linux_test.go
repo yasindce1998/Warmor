@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/yasindce1998/warmor/internal/ebpf"
+	"github.com/yasindce1998/warmor/internal/metrics"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -327,6 +329,54 @@ func TestLoadFailsWithoutPrivileges(t *testing.T) {
 
 func TestPlatformInterfaceSatisfied(t *testing.T) {
 	var _ Platform = (*LinuxPlatform)(nil)
+}
+
+// Delivery applies backpressure on a full userspace channel rather than
+// dropping the event (dropping would change enforcement semantics and strand
+// generation fences). The blocked send must still be counted for visibility.
+func TestDeliverCountsBackpressureWithoutDropping(t *testing.T) {
+	before := testutil.ToFloat64(metrics.EventChannelBackpressure)
+	// Unbuffered channel: the non-blocking probe has no ready receiver, so it
+	// fails and the delivery has to fall through to the blocking send.
+	ch := make(chan *api.Event)
+	p := &LinuxPlatform{eventChan: ch, stopChan: make(chan struct{})}
+	event := &api.Event{PID: 42}
+
+	received := make(chan *api.Event, 1)
+	go func() {
+		// Let deliver() reach the blocking send before consuming.
+		time.Sleep(20 * time.Millisecond)
+		received <- <-ch
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if !p.deliver(ctx, event) {
+		t.Fatal("deliver must not drop on a full channel (backpressure preserved)")
+	}
+	select {
+	case got := <-received:
+		if got != event {
+			t.Fatal("delivered a different event")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked delivery was never received")
+	}
+	if after := testutil.ToFloat64(metrics.EventChannelBackpressure); after != before+1 {
+		t.Fatalf("backpressure counter = %v, want %v", after, before+1)
+	}
+}
+
+func TestDeliverWithCapacityDoesNotCountBackpressure(t *testing.T) {
+	before := testutil.ToFloat64(metrics.EventChannelBackpressure)
+	ch := make(chan *api.Event, 1)
+	p := &LinuxPlatform{eventChan: ch, stopChan: make(chan struct{})}
+	if !p.deliver(context.Background(), &api.Event{PID: 7}) {
+		t.Fatal("deliver should succeed when the channel has a free slot")
+	}
+	if after := testutil.ToFloat64(metrics.EventChannelBackpressure); after != before {
+		t.Fatalf("backpressure counter = %v, want unchanged %v", after, before)
+	}
 }
 
 func captureStdout(t *testing.T, fn func()) string {

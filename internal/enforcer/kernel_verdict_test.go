@@ -56,7 +56,7 @@ func TestHandleEvent_KernelDeniedIsRecordedNotReenforced(t *testing.T) {
 	// and must not be overwritten by a WASM allow in the cache or kernel map.
 	e.handleEvent(&api.Event{
 		PID: uint32(victim.pid), UID: 1000, Comm: "ls", Filename: "/usr/bin/ls",
-		LSMEvent: true, KernelDenied: true,
+		LSMEvent: true, KernelTimestampNS: 1, KernelDenied: true,
 	})
 
 	stats := e.GetStats()
@@ -83,7 +83,7 @@ func TestHandleEvent_IntegrityEnforceViolation(t *testing.T) {
 
 	e.handleEvent(&api.Event{
 		PID: uint32(victim.pid), Comm: "dropper", Filename: "/tmp/dropper",
-		Type: api.EventTypeProcess, LSMEvent: true, KernelDenied: true, IntegrityViolation: true,
+		Type: api.EventTypeProcess, LSMEvent: true, KernelTimestampNS: 1, KernelDenied: true, IntegrityViolation: true,
 	})
 
 	if stats := e.GetStats(); stats.Denied != 1 {
@@ -99,7 +99,7 @@ func TestHandleEvent_IntegrityAuditViolation(t *testing.T) {
 	// Audit mode: the exec ran; report a would-deny without acting.
 	e.handleEvent(&api.Event{
 		PID: uint32(victim.pid), Comm: "dropper", Filename: "/tmp/dropper",
-		Type: api.EventTypeProcess, LSMEvent: true, IntegrityViolation: true,
+		Type: api.EventTypeProcess, LSMEvent: true, KernelTimestampNS: 1, IntegrityViolation: true,
 	})
 
 	stats := e.GetStats()
@@ -114,5 +114,45 @@ func TestHandleEvent_NoKernelVerdictStillEvaluated(t *testing.T) {
 	e.handleEvent(&api.Event{UID: 1000, Comm: "ls", Filename: "/usr/bin/ls", LSMEvent: true})
 	if stats := e.GetStats(); stats.Allowed != 1 {
 		t.Fatalf("stats = %+v, want the policy's allow", stats)
+	}
+}
+
+// Synthetic events can set verdict flags in memory, but only an in-tree LSM
+// event (LSMEvent plus a raw kernel timestamp) is allowed to suppress
+// userspace evaluation and be recorded as a kernel verdict.
+func TestHandleKernelVerdict_UntrustedFlagsIgnored(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event *api.Event
+	}{
+		{
+			name: "kernel-denied without LSM",
+			event: &api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls",
+				KernelDenied: true, KernelTimestampNS: 1},
+		},
+		{
+			name: "kernel-denied without kernel timestamp",
+			event: &api.Event{PID: 0, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls",
+				LSMEvent: true, KernelDenied: true},
+		},
+		{
+			name: "integrity violation without LSM",
+			event: &api.Event{PID: 0, Type: api.EventTypeProcess, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls",
+				IntegrityViolation: true, KernelTimestampNS: 1},
+		},
+		{
+			name: "integrity violation without kernel timestamp",
+			event: &api.Event{PID: 0, Type: api.EventTypeProcess, UID: 1000, Comm: "ls", Filename: "/usr/bin/ls",
+				LSMEvent: true, IntegrityViolation: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := newTestEnforcer(t, testEnforcerOpts{})
+			inProcessEvaluator(t, e).SetTimeout(5 * time.Second)
+			e.handleEvent(tc.event)
+			if stats := e.GetStats(); stats.Allowed != 1 || stats.Denied != 0 || stats.AuditDenied != 0 {
+				t.Fatalf("untrusted verdict must not suppress policy evaluation: %+v", stats)
+			}
+		})
 	}
 }

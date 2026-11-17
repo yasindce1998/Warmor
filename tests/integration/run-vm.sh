@@ -9,6 +9,7 @@ ARTIFACTS="${2:?artifact directory required}"
 shift 2
 case "$PHASE" in
   verifier) LIMIT=300s ;;
+  lsm-hooks) LIMIT=300s ;;
   outcomes) LIMIT=360s ;;
   generations) LIMIT=420s ;;
   generation-daemon) LIMIT=480s ;;

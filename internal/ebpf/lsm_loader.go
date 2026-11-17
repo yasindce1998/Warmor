@@ -238,7 +238,9 @@ type OnEventLoss uint32
 const (
 	// OnLossLog allows the operation and counts the drop (default).
 	OnLossLog OnEventLoss = 0
-	// OnLossDeny refuses unknown execs and connects in enforce mode.
+	// OnLossDeny refuses an operation whose miss event could not be queued,
+	// for every blocking hook (exec, connect, bind, listen, ptrace, mount),
+	// in enforce mode. Audit-only hooks still allow.
 	OnLossDeny OnEventLoss = 1
 )
 
