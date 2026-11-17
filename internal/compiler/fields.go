@@ -22,6 +22,15 @@ import (
 // Hand-written (non-YAML) policies may export the same function to opt in;
 // the declaration must be exhaustive or cached and kernel-compiled decisions
 // will be applied to events the policy would have decided differently.
+//
+// Note for network policies on Linux: bind and connect share this single
+// network declaration (the ABI has no separate bind domain), while the live
+// sensor reports operation "connect" for bind events. Because the kernel's
+// bind key covers only remote_addr/remote_port, a policy that reads
+// "operation" cannot have its bind decisions compiled into the kernel map;
+// such decisions are refused rather than applied to other events. For now,
+// network policies that want the bind kernel fast-path must not read
+// "operation".
 const (
 	FieldBitPID        = policymeta.FieldBitPID
 	FieldBitUID        = policymeta.FieldBitUID

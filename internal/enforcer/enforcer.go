@@ -884,12 +884,23 @@ type kernelKeyFielder interface {
 	KernelKeyFields(t api.EventType) []string
 }
 
+// hookKernelKeyFielder is the stronger form implemented by maps whose kernel
+// key depends on the LSM hook as well as the event type. On Linux, bind and
+// connect share event type network but use different policy_map domains
+// (EVENT_TYPE_BIND vs EVENT_TYPE_NETWORK); a bind decision may only be
+// written under the bind key, which exists solely for Hook=="bind". Maps that
+// implement this interface are always queried through it, so a hook without
+// an exact key (e.g. connect_unix, listen) never receives a decision.
+type hookKernelKeyFielder interface {
+	KernelKeyFieldsForEvent(event *api.Event) []string
+}
+
 // decisionDeterminedByKernelKey reports whether a decision of a policy that
-// reads fieldsRead (for events of type t) depends only on fields the kernel
-// key of pm covers.
-func decisionDeterminedByKernelKey(pm PolicyMapSyncer, t api.EventType, fieldsRead uint32) bool {
-	kf, ok := pm.(kernelKeyFielder)
-	if !ok || fieldsRead == wasm.FieldsUnknown {
+// reads fieldsRead for event depends only on fields the kernel key of pm
+// covers. The event (not just its type) is required because a Linux bind
+// decision is only kernel-matchable when Hook=="bind".
+func decisionDeterminedByKernelKey(pm PolicyMapSyncer, event *api.Event, fieldsRead uint32) bool {
+	if event == nil || fieldsRead == wasm.FieldsUnknown {
 		return false
 	}
 	if fieldsRead&wasm.TemporalFields != 0 {
@@ -897,7 +908,15 @@ func decisionDeterminedByKernelKey(pm PolicyMapSyncer, t api.EventType, fieldsRe
 		// would keep applying the decision after its window changed.
 		return false
 	}
-	keyFields := kf.KernelKeyFields(t)
+	var keyFields []string
+	switch kf := pm.(type) {
+	case hookKernelKeyFielder:
+		keyFields = kf.KernelKeyFieldsForEvent(event)
+	case kernelKeyFielder:
+		keyFields = kf.KernelKeyFields(event.GetType())
+	default:
+		return false
+	}
 	if len(keyFields) == 0 {
 		return false
 	}
@@ -991,8 +1010,24 @@ func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, g
 	}
 	decisionCache.Put(event, result)
 
-	// Compile decision into BPF policy map for kernel fast-path
-	if e.policyMap != nil && !event.LSMEvent && (e.supervisor == nil || evaluator.LinuxKernelCacheEligible(event.GetType())) {
+	// Compile decision into BPF policy map for kernel fast-path.
+	//
+	// LSM-origin events are normally recorded, never re-synced: the kernel
+	// already reached its verdict from a policy snapshot, and writing a fresh
+	// decision back could apply it to events from a different generation.
+	// Bind is the single deliberate exception. The bind hook (lsm_bind.bpf.c)
+	// looks up the exact {cgroup, family, addr, port, EVENT_TYPE_BIND} key; on
+	// a miss it emits this event and returns 0, so the kernel has *already
+	// accepted* this bind and there is no in-flight operation left to
+	// re-decide. Userspace then evaluates the complete event, and the write
+	// goes back under that very same exact key, so no other operation is
+	// affected. Bind is dynamic-only (no default-deny domain): a miss stays
+	// an allow until a DENY is explicitly installed, so no allowlist
+	// completeness is claimed. Audit downgrade is folded in by syncDecision.
+	bindWriteback := event.LSMEvent && !event.KernelDenied &&
+		event.GetType() == api.EventTypeNetwork && event.Hook == "bind"
+	if e.policyMap != nil && (!event.LSMEvent || bindWriteback) &&
+		(e.supervisor == nil || evaluator.LinuxKernelCacheEligible(event.GetType())) {
 		// Failures are counted and rate-limit logged inside; the event
 		// itself is already enforced in userspace.
 		_ = e.syncToPolicyMap(event, result, gen, evaluator.FieldsRead(event.GetType()))
@@ -1119,7 +1154,7 @@ func (e *Enforcer) syncDecision(event *api.Event, result *api.ActionResult, gen 
 	if e.policyGen.Load() != gen {
 		return errStaleDecision
 	}
-	if !decisionDeterminedByKernelKey(e.policyMap, event.GetType(), fieldsRead) {
+	if !decisionDeterminedByKernelKey(e.policyMap, event, fieldsRead) {
 		return errNotKeyDetermined
 	}
 
