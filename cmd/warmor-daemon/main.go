@@ -53,11 +53,12 @@ var (
 	policyHostLoadTimeout    = flag.Duration("policy-host-load-timeout", 5*time.Second, "Supervised child compilation/initialization deadline (positive, at most 10s)")
 	policyDeclarationDigests = flag.String("policy-declaration-digests", "", "Administrator-attested deterministic/exhaustive module SHA-256 digests, comma-separated; empty disables supervised caches/static rules")
 
-	integrityDB   = flag.String("integrity-db", "", "Integrity database from warmor-integrity-scan; its SHA-256 digests become the kernel exec allowlist")
-	lsmRingSize   = flag.String("lsm-ringbuf-size", "4MiB", "LSM event ring buffer size (power of two, e.g. 1MiB, 4MiB, 16MiB); a larger ring absorbs bigger bursts before events are dropped")
-	onEventLoss   = flag.String("on-event-loss", "log", "When the LSM event ring is full: log (allow the operation, count the drop) or deny (refuse unknown exec/connect/bind/listen/ptrace/mount in enforce mode; file and integrity stay audit-only)")
-	escapeDetect  = flag.String("escape-detect", "off", "Container escape detection: off, alert (log, count and stream matches) or deny (also terminate the process)")
-	integrityMode = flag.String("integrity-mode", "off", "Exec integrity check: off, audit (report unlisted binaries) or enforce (refuse them in-kernel)")
+	integrityDB       = flag.String("integrity-db", "", "Integrity database from warmor-integrity-scan; its SHA-256 digests become the kernel exec allowlist")
+	lsmRingSize       = flag.String("lsm-ringbuf-size", "4MiB", "LSM event ring buffer size (power of two, e.g. 1MiB, 4MiB, 16MiB); a larger ring absorbs bigger bursts before events are dropped")
+	onEventLoss       = flag.String("on-event-loss", "log", "When the LSM event ring is full: log (allow the operation, count the drop) or deny (refuse unknown exec/connect/bind/listen/ptrace/mount in enforce mode; file and integrity stay audit-only)")
+	onIncompleteInput = flag.String("on-incomplete-input", "log", "Host-enforced input-quality gate for policies declaring require_complete_capture: log (default, report only), audit (record a would-deny), or deny (fail closed in enforce mode when a required captured field is truncated/absent)")
+	escapeDetect      = flag.String("escape-detect", "off", "Container escape detection: off, alert (log, count and stream matches) or deny (also terminate the process)")
+	integrityMode     = flag.String("integrity-mode", "off", "Exec integrity check: off, audit (report unlisted binaries) or enforce (refuse them in-kernel)")
 
 	serverURL    = flag.String("server", "", "Policy server URL (e.g. https://warmor-server:8443); downloaded policies replace --policy")
 	serverToken  = flag.String("server-token", "", "Agent JWT (role agent) for the policy server (default: $"+serverTokenEnv+")")
@@ -315,6 +316,9 @@ func runDaemon(stop <-chan struct{}) {
 	if *onEventLoss != "log" && *onEventLoss != "deny" {
 		daemonFatalf("❌ invalid --on-event-loss %q (valid: log, deny)", *onEventLoss)
 	}
+	if *onIncompleteInput != "log" && *onIncompleteInput != "audit" && *onIncompleteInput != "deny" {
+		daemonFatalf("❌ invalid --on-incomplete-input %q (valid: log, audit, deny)", *onIncompleteInput)
+	}
 
 	digests, err := loadIntegrityDigests(*integrityMode, *integrityDB)
 	if err != nil {
@@ -353,6 +357,7 @@ func runDaemon(stop <-chan struct{}) {
 
 		LSMRingBufferSize: ringSize,
 		OnEventLoss:       *onEventLoss,
+		OnIncompleteInput: *onIncompleteInput,
 		DefaultDeny:       *defaultDeny,
 		AtomicGenerations: *atomicGenerations,
 		SupervisedBackend: hostConfig,

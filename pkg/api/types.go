@@ -279,6 +279,41 @@ func (e *Event) ToProcessEvent() *ProcessEvent {
 	}
 }
 
+// CaptureQualityState describes whether an evaluator input field was captured
+// in full. It is the vocabulary shared by streaming.InputIssue, ABI v6 JSON
+// carriage and the host-side capture-quality gate.
+//
+//	truncated: a partial value is present (Event.TruncatedFields);
+//	unknown:   the sensor supplied no value (zero/absent parent or cgroup on a
+//	           trusted live event);
+//	ok:        no issue is recorded for the field.
+//
+// These states are observations about the EVENT, computed by the host from
+// kernel telemetry. They are never a guest claim that its own inputs were
+// complete.
+type CaptureQualityState string
+
+const (
+	CaptureStateOK        CaptureQualityState = "ok"
+	CaptureStateTruncated CaptureQualityState = "truncated"
+	CaptureStateUnknown   CaptureQualityState = "unknown"
+)
+
+// FieldTruncated reports whether name is one of the sensor-reported truncated
+// evaluator inputs. The partial value is still carried on the event; this only
+// makes the loss observable to consumers and to the host quality gate.
+func (e *Event) FieldTruncated(name string) bool {
+	if e == nil {
+		return false
+	}
+	for _, f := range e.TruncatedFields {
+		if f == name {
+			return true
+		}
+	}
+	return false
+}
+
 // Action represents the enforcement decision
 type Action int32
 

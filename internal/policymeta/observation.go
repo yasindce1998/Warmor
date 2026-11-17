@@ -19,10 +19,18 @@ const (
 	MaxStaticRules      = 4096 // total across both domains, below kernel map capacity
 	MaxPatternBytes     = 254
 	MaxStaticTableBytes = 1 + MaxStaticRules*(6+MaxPatternBytes)
-	KnownFields         = FieldBitContainerAge*2 - 1
-	TemporalFields      = FieldBitTime | FieldBitContainerAge
-	EncodingBinary      = "binary"
-	EncodingJSON        = "json"
+	// KnownFields now includes the process-context field bits and the
+	// require-complete-capture declaration bit. Unknown bits still never imply
+	// finite dependency coverage on an older reader.
+	KnownFields    = FieldBitRequireCompleteCapture*2 - 1
+	TemporalFields = FieldBitTime | FieldBitContainerAge
+	EncodingBinary = "binary"
+	EncodingJSON   = "json"
+	// MaxABIVersion is the highest policy ABI this host understands. The wasm
+	// package aliases its exported MaxABIVersion to this value so metadata
+	// validation and module loading cannot drift apart. ABI 6 adds capture-
+	// quality carriage; 1-5 keep their existing behavior.
+	MaxABIVersion uint32 = 6
 )
 
 const (
@@ -98,7 +106,7 @@ func KernelFields(t api.EventType) uint32 {
 	}
 }
 func Flags(abi uint32, t api.EventType, fields uint32) uint32 {
-	if abi == 0 || abi > 5 || t < api.EventTypeProcess || t > api.EventTypeNetwork || !ValidFields(fields) {
+	if abi == 0 || abi > MaxABIVersion || t < api.EventTypeProcess || t > api.EventTypeNetwork || !ValidFields(fields) {
 		return 0
 	}
 	var flags uint32
@@ -172,7 +180,7 @@ func ValidateDomain(d Domain, fields uint32) error {
 }
 
 func (m Module) Validate(expectedDigest string) error {
-	if m.Version != Version || !ValidDigest(m.ModuleSHA256) || m.ModuleSHA256 != expectedDigest || m.ABIVersion > 5 || m.Encoding != EncodingBinary && m.Encoding != EncodingJSON || len(m.Events) != 3 || len(m.Domains) != 2 {
+	if m.Version != Version || !ValidDigest(m.ModuleSHA256) || m.ModuleSHA256 != expectedDigest || m.ABIVersion > MaxABIVersion || m.Encoding != EncodingBinary && m.Encoding != EncodingJSON || len(m.Events) != 3 || len(m.Domains) != 2 {
 		return ErrMetadata
 	}
 	if m.Build != nil && ValidateBuild(*m.Build) != nil {
