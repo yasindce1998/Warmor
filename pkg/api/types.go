@@ -134,6 +134,11 @@ type Event struct {
 	// feeds the lineage tracker.
 	PPID       uint32 `json:"ppid,omitempty"`
 	ParentComm string `json:"parent_comm,omitempty"`
+	// TruncatedFields lists evaluator input fields the kernel sensor could
+	// not capture in full (e.g. "filename", "process.args"). The partial
+	// value is still carried; this only makes the loss observable to the
+	// streaming layer, which records an InputIssue with state "truncated".
+	TruncatedFields []string `json:"truncated_fields,omitempty"`
 	// ContainerStart is when the container the event came from started
 	// (zero: unknown, or not a container). The enforcer fills it from the
 	// cgroup for policies that read container age; the policy host sends

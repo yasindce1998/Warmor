@@ -3,6 +3,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include "tracepoint_defs.h"
+#include "warmor_common.h"
 
 #define AF_INET  2
 #define AF_INET6 10
@@ -82,8 +83,10 @@ int tracepoint__syscalls__sys_enter_connect(struct trace_event_raw_sys_enter* ct
 
 	// Reserve space
 	event = bpf_ringbuf_reserve(&network_events, sizeof(*event), 0);
-	if (!event)
+	if (!event) {
+		count_tracepoint_drop();
 		return 0;
+	}
 
 	// Get process info
 	__u64 pid_tgid = bpf_get_current_pid_tgid();

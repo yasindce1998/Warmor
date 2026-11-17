@@ -5,6 +5,7 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 #include "tracepoint_defs.h"
+#include "warmor_common.h"
 
 // Minimal CO-RE view of the parent chain; the ___warmor suffix is dropped
 // when relocating against kernel BTF (same pattern as lsm_ptrace.bpf.c).
@@ -16,6 +17,12 @@ struct task_struct___warmor {
 
 #define ARGS_MAX  16
 #define ARG_LEN   64
+
+// Capture flags: bits set when the sensor could not read a user string in
+// full (bpf_probe_read_user_str truncated it to the buffer size). Carried to
+// userspace so an incomplete input is observable, never silently complete.
+#define EXECVE_FLAG_FILENAME_TRUNCATED (1u << 0)
+#define EXECVE_FLAG_ARG_TRUNCATED      (1u << 1)
 
 // Event structure sent to userspace
 struct execve_event {
@@ -29,6 +36,9 @@ struct execve_event {
 	__u32 ppid;                 // real_parent's tgid (0 when unreadable)
 	char parent_comm[16];       // real_parent's comm ("" when unreadable)
 	char args[ARGS_MAX][ARG_LEN]; // argv, NUL-padded; all-zero = none captured
+	// Fills the struct's trailing padding; old objects leave it zero. Keep it
+	// last so existing readers keep their offsets.
+	__u32 flags;
 };
 
 // Ring buffer for sending events to userspace
@@ -70,6 +80,7 @@ int tracepoint__syscalls__sys_enter_execve(struct trace_event_raw_sys_enter* ctx
 	// Reserve space in ring buffer
 	event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
 	if (!event) {
+		count_tracepoint_drop();
 		return 0;
 	}
 
@@ -83,9 +94,13 @@ int tracepoint__syscalls__sys_enter_execve(struct trace_event_raw_sys_enter* ctx
 	// Get process name
 	bpf_get_current_comm(&event->comm, sizeof(event->comm));
 
-	// Get filename from syscall arguments
+	// Get filename from syscall arguments. bpf_probe_read_user_str returns
+	// the number of bytes written (including the NUL); a return equal to the
+	// buffer size means the string was longer and was truncated.
 	const char *filename_ptr = (const char *)ctx->args[0];
-	bpf_probe_read_user_str(&event->filename, sizeof(event->filename), filename_ptr);
+	int n = bpf_probe_read_user_str(&event->filename, sizeof(event->filename), filename_ptr);
+	if (n >= (int)sizeof(event->filename))
+		event->flags |= EXECVE_FLAG_FILENAME_TRUNCATED;
 
 	// Parent context: real_parent's PID and comm. The ringbuf reservation
 	// zeroed the event, so on any read failure ppid stays 0 and parent_comm
@@ -110,8 +125,11 @@ int tracepoint__syscalls__sys_enter_execve(struct trace_event_raw_sys_enter* ctx
 				break;
 			if (!argp)
 				break;
-			if (bpf_probe_read_user_str(&event->args[i], ARG_LEN, argp) < 0)
+			n = bpf_probe_read_user_str(&event->args[i], ARG_LEN, argp);
+			if (n < 0)
 				break;
+			if (n >= ARG_LEN)
+				event->flags |= EXECVE_FLAG_ARG_TRUNCATED;
 		}
 	}
 
