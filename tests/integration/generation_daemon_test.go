@@ -134,10 +134,11 @@ rules:
 }
 
 type generationControl struct {
-	HoldID      uint64
-	HoldPath    string
-	FailDurable bool
-	FailDrain   bool
+	HoldID       uint64
+	HoldPath     string
+	FailDurable  bool
+	FailDrain    bool
+	FailActivate bool
 }
 
 func atomicFixtureWrite(t *testing.T, path string, data []byte) {
@@ -317,6 +318,15 @@ func checkGenerationVerdicts(t *testing.T, dir string, scoped uint64) {
 
 func continuousGenerationDeny(t *testing.T, f *outcomeFixture) func() {
 	t.Helper()
+	return continuousDenyOf(t, f, "global-audit", "generation-never-allowed")
+}
+
+// continuousDenyOf attempts one binary repeatedly and requires every attempt
+// to fail with EPERM. Choosing a binary whose verdict differs between the
+// current and the rejected candidate turns this into a no-gap oracle: if a
+// failed publication ever went live, the very first allowed run is reported.
+func continuousDenyOf(t *testing.T, f *outcomeFixture, binary, markerPrefix string) func() {
+	t.Helper()
 	stop, done := make(chan struct{}), make(chan struct{})
 	var attempts atomic.Int32
 	var failure string // published by done
@@ -328,11 +338,11 @@ func continuousGenerationDeny(t *testing.T, f *outcomeFixture) func() {
 				return
 			default:
 			}
-			cmd := f.helper(t, "global-audit", fmt.Sprintf("generation-never-allowed-%d", i), "", 0)
+			cmd := f.helper(t, binary, fmt.Sprintf("%s-%d", markerPrefix, i), "", 0)
 			err := cmd.Start()
 			if err == nil {
 				_ = waitCommand(cmd, outcomeTimeout)
-				failure = "invariant deny anchor executed during reload"
+				failure = binary + " executed: generation gap allowed an excluded operation"
 				return
 			}
 			if !isEPERM(err) {
@@ -352,7 +362,7 @@ func continuousGenerationDeny(t *testing.T, f *outcomeFixture) func() {
 				t.Error(failure)
 			}
 			if attempts.Load() < 2 {
-				t.Error("concurrent deny loop did not exercise reload")
+				t.Error("concurrent deny loop did not exercise the fault window")
 			}
 		})
 	}
@@ -703,5 +713,80 @@ func TestDaemonGenerationOutcomes(t *testing.T) {
 		// must release the lease and close both generations safely.
 		d.stop(t)
 		release()
+	})
+	t.Run("map-write-failure-keeps-old-generation-no-gap", func(t *testing.T) {
+		control := generationControlDir(t, "mapfault")
+		active := f.activePolicy(t, "generation-mapfault-active", filepath.Join(f.dir, "generation-A.wasm"))
+		d := f.startDaemonBinary(t, "warmor-daemon-profile", "generation-mapfault", active, "--experimental-atomic-generations", "--default-deny", "--eval-timeout", "2s", "--generation-vm-control", control)
+		t.Cleanup(func() { controlGeneration(t, control, generationControl{}) })
+
+		// Generation 1 (A) is live: reload-denied is EPERM, allowed is audited.
+		f.requireFirstDenied(t, "reload-denied", "mapfault-A-first-denied")
+		f.runAudited(t, d, "allowed", "mapfault-A-audited")
+
+		// Publish B cleanly as generation 2. B denies "allowed", which gives
+		// the fault window an anchor whose verdict would change if a rejected
+		// third publication ever became live.
+		b, err := os.ReadFile(filepath.Join(f.dir, "generation-B.wasm"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		atomicFixtureWrite(t, active, b)
+		generationStatus(t, control, "live", 2)
+		f.requireFirstDenied(t, "allowed", "mapfault-B-first-denied")
+
+		// Hold real generation-2 work so the old evaluator is demonstrably
+		// still serving captured events at the moment publication is faulted.
+		controlGeneration(t, control, generationControl{HoldID: 2, HoldPath: filepath.Join(f.work, "reload-denied")})
+		heldPID, releaseHeld := heldGenerationHelper(t, f, "reload-denied", "mapfault-B-held")
+		generationStatus(t, control, "event", 2)
+		requireGenerationEvidence(t, control, func(e daemonGenerationEvidence) bool {
+			return e.Phase == "capture" && e.LSM && e.PID == uint32(heldPID) && e.Generation != nil && *e.Generation == 2
+		})
+		stopDeny := continuousDenyOf(t, f, "allowed", "mapfault-old-generation-deny")
+
+		// A's bytes become a third candidate. The profile fails immediately
+		// before the kernel's single outer-map write: no live-3, no userspace
+		// swap, no durable pointer, and the old generation keeps serving.
+		controlGeneration(t, control, generationControl{HoldID: 2, HoldPath: filepath.Join(f.work, "reload-denied"), FailActivate: true})
+		a, err := os.ReadFile(filepath.Join(f.dir, "generation-A.wasm"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		atomicFixtureWrite(t, active, a)
+		generationStatus(t, control, "activate", 3)
+		if _, err := os.Stat(filepath.Join(control, "live-3.json")); !os.IsNotExist(err) {
+			t.Fatal("faulted candidate reached kernel publication")
+		}
+		// First attempt at the deny anchor must still be EPERM, and the
+		// captured verdict must still belong to the old (generation-2) map.
+		f.requireFirstDenied(t, "allowed", "mapfault-fault-window-first-denied")
+		requireGenerationEvidence(t, control, func(e daemonGenerationEvidence) bool {
+			return e.Phase == "decision" && e.LSM && e.Generation != nil && *e.Generation == 2 &&
+				filepath.Base(e.Filename) == "allowed" && e.KernelDenied && e.Decision == "DENY" && e.Enforced && !e.Audit && !e.Attempted
+		})
+		logData, err := os.ReadFile(filepath.Join(f.dir, "generation-mapfault.log"))
+		if err != nil || !strings.Contains(string(logData), "map-write failure at kernel generation publication") {
+			t.Fatalf("daemon did not surface publication failure: %v", err)
+		}
+		releaseHeld()
+		stopDeny()
+		d.stop(t)
+		checkGenerationVerdicts(t, control, scope)
+	})
+	t.Run("clean-restart-first-denied-persists", func(t *testing.T) {
+		// Same immutable policy path on both launches. d.stop delegates to
+		// awaitOutcomeDaemonExit, so a non-SIGTERM/nonzero exit cannot stand
+		// in for the clean stop required before the restart.
+		active := f.activePolicy(t, "generation-restart-active", filepath.Join(f.dir, "generation-B.wasm"))
+		launch := func(name string) {
+			d := f.startDaemon(t, name, active, "--experimental-atomic-generations", "--default-deny", "--eval-timeout", "2s")
+			// First eligible attempt on every launch must be EPERM, with a
+			// fresh marker so neither launch can reuse a cached verdict.
+			f.requireFirstDenied(t, "allowed", name+"-first-denied")
+			d.stop(t)
+		}
+		launch("generation-restart-before")
+		launch("generation-restart-after")
 	})
 }
