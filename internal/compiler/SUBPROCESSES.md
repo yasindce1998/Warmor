@@ -46,6 +46,41 @@ A correct Windows implementation needs a Job Object with kill-on-close ownership
 established before any child can spawn; assigning an already running process
 would leave a race and is deliberately not presented as containment here.
 
+## Compiler environment policy
+
+The artifact-producing subprocess does **not** inherit the ambient environment.
+`hermeticBuildEnv` in `internal/compiler/build.go` is a complete allowlist:
+
+| Variable | Value | Why |
+| --- | --- | --- |
+| `PATH` | inherited | Locates the operator-installed Rust toolchain. |
+| `HOME`, `TMPDIR`, `TMP`, `TEMP` | the fresh private crate | No caller/controller directories or config files. |
+| `CARGO_HOME` | empty directory below the crate | Pins Cargo config away from user/global locations. |
+| `RUSTUP_HOME` | operator's toolchain location (or `$HOME/.rustup`) | rustup proxy binaries need it to find the toolchain. |
+| `CARGO_TARGET_DIR` | `target/` inside the crate | Tooling compatibility only. |
+| `LANG`, `LC_ALL` | `C` | Deterministic diagnostics. |
+
+On Windows, `SYSTEMROOT`, `COMSPEC`, and `PATHEXT` are also inherited, while
+`USERPROFILE`, `APPDATA`, and `LOCALAPPDATA` point into the private crate.
+
+Everything else is stripped, in particular `RUSTFLAGS`,
+`RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC_WRAPPER`, `CARGO_ENCODED_RUSTFLAGS`, `RUSTC`,
+`RUSTC_BOOTSTRAP`, other `RUSTC_*`/`CARGO_*`/`RUSTUP_*` overrides (including
+`RUSTUP_TOOLCHAIN`), and loader injection such as `LD_PRELOAD` or
+`DYLD_INSERT_LIBRARIES`. Previously, a planted rustc wrapper in the environment
+executed arbitrary code while building controller-supplied policy input.
+
+The generated crate has no dependencies or build scripts, so the build calls
+`rustc` directly with flags matching `GenerateCargoToml`'s release profile and
+`cdylib` ABI. Cargo is not invoked for compilation: this also removes Cargo's
+search for `.cargo/config.toml` in ancestor directories of the temp crate,
+another arbitrary-code-injection path (`[build] rustc-wrapper`, `rustflags`,
+`[env]`, and friends). Link output is emitted directly into the private crate
+as a single-link regular file. Tool discovery still uses the host `cargo` and
+`rustup` under their existing lifetime bounds; it does not run generated code.
+This environment policy is hermetic with respect to configuration and ambient
+variables, not an OS sandbox (see below).
+
 These are **lifetime and captured-output bounds, not a sandbox**. They do not
 limit CPU, RSS, disk consumption, network access, privileges, or escaped sessions.
 A deliberately hostile executable can leave its group with `setsid`/`setpgid`;

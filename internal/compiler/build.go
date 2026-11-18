@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -85,9 +86,9 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 		return nil, fmt.Errorf("write lib.rs: %w", err)
 	}
 
-	builtPath, err := cargoBuild(crateDir, policy.Name, opts)
+	builtPath, err := compile(crateDir, policy.Name, opts)
 	if err != nil {
-		return nil, fmt.Errorf("cargo build: %w", err)
+		return nil, fmt.Errorf("compile: %w", err)
 	}
 	if err := opts.Context.Err(); err != nil {
 		return nil, err
@@ -167,37 +168,126 @@ func checkCargoContext(ctx context.Context) error {
 	return nil
 }
 
-func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) {
+// compilerInvocation is the single subprocess that produces the linked wasm.
+// Production always uses hermeticRustcBuild. It is a variable solely so the
+// package's fake-toolchain tests can exercise tool failure paths; see the
+// test-only override in hermetic_testshim_test.go.
+var compilerInvocation = hermeticRustcBuild
+
+func compile(crateDir, policyName string, opts BuildOptions) (string, error) {
+	return compilerInvocation(crateDir, policyName, opts)
+}
+
+// hermeticBuildEnv is the complete child environment. Nothing is inherited
+// implicitly: every entry is explicit so controller-supplied policy input
+// cannot reach the compiler through ambient configuration.
+//
+// Allowed:
+//   - PATH: operator-installed toolchain location (trusted host configuration).
+//   - HOME, TMPDIR, TMP, TEMP: the fresh private crate, not the caller's.
+//   - CARGO_HOME: an isolated, empty directory below the crate. rustc does not
+//     read it, but pinning it prevents any Cargo-based future path from
+//     consulting a user or ancestor config.
+//   - RUSTUP_HOME: the operator's toolchain location. rustup proxy binaries
+//     need it to find the selected toolchain; it is host configuration, never
+//     derived from policy input. RUSTUP_TOOLCHAIN is deliberately not allowed.
+//   - CARGO_TARGET_DIR: inside the private crate, for tooling compatibility.
+//   - LANG/LC_ALL: deterministic diagnostics.
+//
+// Deliberately absent: RUSTFLAGS, RUSTC_WRAPPER, CARGO_BUILD_RUSTC_WRAPPER,
+// CARGO_ENCODED_RUSTFLAGS, RUSTC, RUSTC_BOOTSTRAP, all other RUSTC_/CARGO_/
+// RUSTUP_ overrides, linker/loader injection (LD_PRELOAD, DYLD_*), and every
+// other ambient variable. PATH is inherited only as tool discovery input.
+func hermeticBuildEnv(crateDir string) []string {
+	rustupHome := os.Getenv("RUSTUP_HOME")
+	if rustupHome == "" {
+		home := os.Getenv("HOME")
+		if runtime.GOOS == "windows" && home == "" {
+			home = os.Getenv("USERPROFILE")
+		}
+		if home != "" {
+			rustupHome = filepath.Join(home, ".rustup")
+		}
+	}
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + crateDir,
+		"TMPDIR=" + crateDir,
+		"TMP=" + crateDir,
+		"TEMP=" + crateDir,
+		"CARGO_HOME=" + filepath.Join(crateDir, "cargo-home"),
+		"RUSTUP_HOME=" + rustupHome,
+		"CARGO_TARGET_DIR=" + filepath.Join(crateDir, "target"),
+		"LANG=C",
+		"LC_ALL=C",
+	}
+	if runtime.GOOS == "windows" {
+		// Windows toolchains and rustup need these host-provided directories;
+		// point writable ones into the private crate.
+		env = append(env,
+			"USERPROFILE="+crateDir,
+			"APPDATA="+filepath.Join(crateDir, "appdata", "roaming"),
+			"LOCALAPPDATA="+filepath.Join(crateDir, "appdata", "local"),
+			"SYSTEMROOT="+os.Getenv("SYSTEMROOT"),
+			"COMSPEC="+os.Getenv("COMSPEC"),
+			"PATHEXT="+os.Getenv("PATHEXT"),
+		)
+	}
+	return env
+}
+
+// hermeticRustcBuild invokes rustc directly. The generated crate has no
+// dependencies and no build scripts, so Cargo adds no value here. Avoiding it
+// also removes Cargo's config-file search: a .cargo/config.toml in any ancestor
+// of the temp crate (or in CARGO_HOME) can otherwise set a rustc wrapper,
+// rustflags, or injected [env] entries. Nothing outside argv and the explicit
+// allowlist can influence code generation.
+//
+// The flags mirror [profile.release] in GenerateCargoToml (opt-level="z",
+// lto=true, codegen-units=1, strip=true) and its [lib] crate-type cdylib and
+// edition 2021, preserving the artifact ABI. Link output is emitted directly
+// into the private crate as a singly linked regular file, never as a Cargo
+// hard link into target/, and never into the caller's destination.
+func hermeticRustcBuild(crateDir, policyName string, opts BuildOptions) (string, error) {
 	safeName := crateIdentifier(policyName)
 	wasmFile := fmt.Sprintf("warmor_policy_%s.wasm", safeName)
 	builtPath := filepath.Join(crateDir, wasmFile)
-	// Cargo normally hard-links release artifacts to its deps directory. Have
-	// rustc emit the final link output directly into our private crate instead,
-	// so strict rejection of hard-linked tool output also works with real Cargo.
-	// rustc parses commas inside --emit even in a single argv entry. Use only
-	// the sanitized basename, relative to cmd.Dir, not a caller's temp parent.
-	args := []string{"rustc", "--target", "wasm32-unknown-unknown", "--release", "--lib", "--", "--emit=link=" + wasmFile}
+	args := []string{
+		"--edition=2021",
+		"--crate-type=cdylib",
+		"--crate-name=warmor_policy_" + safeName,
+		"--target=wasm32-unknown-unknown",
+		"-C", "opt-level=z",
+		"-C", "lto=fat",
+		"-C", "codegen-units=1",
+		"-C", "strip=symbols",
+		// rustc parses commas inside --emit even in a single argv entry. Use
+		// only the sanitized basename, relative to cmd.Dir, not a caller path.
+		"--emit=link=" + wasmFile,
+		filepath.Join("src", "lib.rs"),
+	}
 	ctx := opts.Context
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	cmd := exec.CommandContext(ctx, "cargo", args...)
+	cmd := exec.CommandContext(ctx, "rustc", args...)
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = crateDir
-	cmd.Env = append(os.Environ(), "CARGO_TARGET_DIR="+filepath.Join(crateDir, "target"))
+	cmd.Env = hermeticBuildEnv(crateDir)
 
-	output, err := runTool(opts.Context, cmd)
+	output, err := runTool(ctx, cmd)
 	if opts.Verbose {
 		fmt.Fprint(os.Stdout, output.stdout)
 		fmt.Fprint(os.Stderr, output.stderr)
 	}
 
 	if err != nil {
-		return "", fmt.Errorf("cargo build failed: %w\n%s", err, output.stderr)
+		return "", fmt.Errorf("rustc build failed: %w\n%s", err, output.stderr)
 	}
 
-	// Cargo never receives or writes the caller's destination. Build reads this
-	// private artifact with a size bound and validates metadata before publishing.
+	// The compiler never receives or writes the caller's destination. Build
+	// reads this private artifact with a size bound and validates metadata
+	// before publishing.
 	return builtPath, nil
 }
 
