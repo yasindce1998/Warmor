@@ -213,7 +213,10 @@ func (c *eventCorrelator) register(event *api.Event) []*api.Event {
 	c.entries[key] = e
 	for c.lru.Len() > c.maxEntries {
 		back := c.lru.Back()
-		victim := back.Value.(*corrEntry)
+		victim, ok := back.Value.(*corrEntry)
+		if !ok {
+			break
+		}
 		out = append(out, victim.event)
 		c.removeEntryLocked(victim)
 	}
@@ -265,8 +268,8 @@ func (c *eventCorrelator) flushExpired() []*api.Event {
 		if back == nil {
 			break
 		}
-		e := back.Value.(*corrEntry)
-		if now.Before(e.expiresAt) {
+		e, ok := back.Value.(*corrEntry)
+		if !ok || now.Before(e.expiresAt) {
 			break
 		}
 		out = append(out, e.event)
@@ -282,7 +285,9 @@ func (c *eventCorrelator) flushAll() []*api.Event {
 	defer c.mu.Unlock()
 	out := make([]*api.Event, 0, c.lru.Len())
 	for e := c.lru.Front(); e != nil; e = e.Next() {
-		out = append(out, e.Value.(*corrEntry).event)
+		if entry, ok := e.Value.(*corrEntry); ok {
+			out = append(out, entry.event)
+		}
 	}
 	c.entries = make(map[correlationKey]*corrEntry)
 	c.lru.Init()

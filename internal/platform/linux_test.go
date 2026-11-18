@@ -604,7 +604,9 @@ func TestDeliverLSMUnpairedPassesBothThrough(t *testing.T) {
 		t.Fatalf("unpaired delivery must not count a duplicate: %v -> %v", before, after)
 	}
 	// The tracepoint twin is still buffered and delivered on shutdown.
-	p.Stop()
+	if err := p.Stop(); err != nil {
+		t.Fatal(err)
+	}
 	if len(out) != 1 {
 		t.Fatalf("shutdown should deliver the stranded twin: %d", len(out))
 	}
