@@ -27,3 +27,20 @@ Windows/macOS equivalent. The exact executable pin, signed module and physical
 root-owned installation path must be configured explicitly; see
 [supervised host deployment](design/supervised-host-deployment.md). Inclusion is
 not proof of native-code isolation or supported-kernel VM enforcement outcomes.
+
+## Release history note — v0.4.1 skipped, v0.4.2 current
+
+`v0.4.1` was **not a complete release** and should not be used. Its tag points at
+the same commit as `v0.4.2`, and the release workflow built and tested that
+commit successfully, but a timing-sensitive macOS build test failed after the
+OCI chart `0.4.1` had already been pushed to GHCR. The workflow's overwrite
+guard then correctly refused to republish it, so **no GitHub release, final
+container images, attestations or archives were published for `v0.4.1`**. Per
+the release-integrity policy the partial artifact was left in place rather
+than deleted or force-overwritten.
+
+`v0.4.2` is the clean release for that same green commit: it has the full set of
+archives with provenance attestations, SBOMs, container images, OCI chart
+(version and appVersion `0.4.2`) and this support note. Use `v0.4.2`, not
+`v0.4.1`. The macOS failure was an intermittent test timeout; the build passed
+on re-run.
