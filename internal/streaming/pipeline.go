@@ -313,6 +313,13 @@ func FromAPIEvent(event *api.Event, result *api.ActionResult) *SecurityEvent {
 	for _, field := range event.TruncatedFields {
 		se.InputIssues = append(se.InputIssues, InputIssue{field, "truncated"})
 	}
+	// A deduplicated event carries the LSM kernel decision enriched with the
+	// tracepoint's argv/parent. Surface the merge so consumers know the twin
+	// was suppressed rather than lost, and that policy_input is the richer of
+	// the two raw observations.
+	if event.Deduplicated {
+		se.InputIssues = append(se.InputIssues, InputIssue{CorrelationIssueField, "deduplicated"})
+	}
 	// JSON replaces invalid UTF-8 with U+FFFD. Mark loss before serialization.
 	values := map[string]string{"comm": event.Comm, "filename": event.Filename, "parent_comm": event.ParentComm, "hook": event.Hook, "mount_source": event.MountSource}
 	if event.Process != nil {

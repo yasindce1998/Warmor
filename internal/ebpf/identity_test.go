@@ -291,7 +291,13 @@ func TestSyncEventRequiresCompleteScopedIdentity(t *testing.T) {
 	if err := m.SyncEvent(e, ActionDeny, false); err != nil {
 		t.Fatal(err)
 	}
-	if len(b.entries) != 2 {
+	// A ptrace event is complete only with both the target comm and the
+	// target cgroup; a comm alone would be a wildcard across containers.
+	e = &api.Event{Type: api.EventTypeProcess, CgroupID: 42, Hook: "ptrace", Filename: "sleep", TargetCgroupID: 909}
+	if err := m.SyncEvent(e, ActionDeny, false); err != nil {
+		t.Fatalf("complete ptrace identity: %v", err)
+	}
+	if len(b.entries) != 3 {
 		t.Fatal("complete decisions not persisted")
 	}
 }
@@ -381,5 +387,51 @@ func TestListenKeyNoCrossDomainAlias(t *testing.T) {
 	// addresses cannot be distinguished by the listen key at all.
 	if listenPolicyKey(42, 2, 8080).Address != [16]byte{} {
 		t.Fatal("listen key must carry no address")
+	}
+}
+
+// TestMountKeyIdentityIsFstypeOnly documents the deliberate coarseness of the
+// mount key: cgroup and fstype are the whole identity. The mount source
+// (dev_name) and target path are aux-only in the hook and never participate,
+// so two mounts of the same fstype in one cgroup share a key even if their
+// sources differ — a DENY blocks every mount of that type in the cgroup.
+func TestMountKeyIdentityIsFstypeOnly(t *testing.T) {
+	mount := func(cgroup uint64, fstype, source string) PolicyKey {
+		k, err := mountPolicyKey(cgroup, fstype)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	base := mount(42, "proc", "/proc")
+	// A different source (or target) cannot be represented in the key: the
+	// identity is byte-identical. This is the coarse-DENY limitation, not an
+	// alias bug.
+	if base != mount(42, "proc", "/dev/other") {
+		t.Fatal("mount source leaked into the key")
+	}
+	if base.Path[4] != 0 {
+		t.Fatal("fstype key must be zero-terminated")
+	}
+	for _, other := range []PolicyKey{
+		mount(42, "tmpfs", "/proc"), // different fstype
+		mount(43, "proc", "/proc"),  // different cgroup
+	} {
+		if base == other {
+			t.Fatalf("mount keys aliased: %+v vs %+v", base, other)
+		}
+	}
+	// A fstype deny lives in EVENT_TYPE_MOUNT, never the file event type.
+	if base.EventType != EventTypeMount || base.EventType == EventTypeFile {
+		t.Fatalf("mount key event type = %d, want %d", base.EventType, EventTypeMount)
+	}
+	// First-touch stays userspace: an empty/zero-scope mount is not keyed.
+	for _, ev := range []*api.Event{
+		{Type: api.EventTypeFile, Hook: "mount", File: &api.FileEvent{Path: "proc"}},
+		{Type: api.EventTypeFile, CgroupID: 42, Hook: "mount"},
+	} {
+		if _, err := eventPolicyKey(ev); !errors.Is(err, ErrNotKernelMatchable) {
+			t.Fatalf("accepted incomplete mount event: %v", err)
+		}
 	}
 }

@@ -529,3 +529,169 @@ func TestSyncEventListenDenyWritesExactKernelKey(t *testing.T) {
 		t.Fatalf("listen tcp6 entry = %+v, want action=deny audit=0", v6)
 	}
 }
+
+// TestSyncEventMountDenyWritesExactKernelKey proves a mount DENY is written
+// under the exact {cgroup, EVENT_TYPE_MOUNT, fstype} key with the audit flag
+// preserved, and never leaks into the file_open domain. A miss still allows
+// (no default-deny), so only this DENY entry changes kernel behaviour.
+func TestSyncEventMountDenyWritesExactKernelKey(t *testing.T) {
+	b := newFakeBackend()
+	m := &PolicyMapManager{policyMap: b}
+	mount := &api.Event{
+		Type: api.EventTypeFile, CgroupID: 42, LSMEvent: true, Hook: "mount",
+		Filename: "proc", MountSource: "/proc",
+		File: &api.FileEvent{Path: "proc"},
+	}
+	if err := m.SyncEvent(mount, ActionDeny, true); err != nil {
+		t.Fatalf("SyncEvent mount DENY: %v", err)
+	}
+	mountKey, err := mountPolicyKey(42, "proc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, ok := b.entries[mountKey]
+	if !ok {
+		t.Fatalf("mount DENY not written to policy map: %+v", b.entries)
+	}
+	if v.Action != ActionDeny || v.Audit != 1 {
+		t.Fatalf("mount entry = %+v, want action=deny audit=1", v)
+	}
+	// The fstype is the whole identity: a different fstype is a distinct key.
+	otherKey, err := mountPolicyKey(42, "tmpfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.entries[otherKey]; ok {
+		t.Fatal("mount DENY leaked into another fstype's key")
+	}
+	// A plain file_open key is never writable; the mount entry must not be
+	// reachable through the file domain (which is a different event type).
+	if mountKey.EventType == EventTypeFile {
+		t.Fatal("mount key must not use the file event type")
+	}
+	if _, err := eventPolicyKey(&api.Event{
+		Type: api.EventTypeFile, CgroupID: 42, Hook: "file", File: &api.FileEvent{Path: "proc"},
+	}); !errors.Is(err, ErrNotKernelMatchable) {
+		t.Fatal("file_open unexpectedly keyed")
+	}
+	// A second mount DENY with audit off is stored independently.
+	if err := m.SyncEvent(mount, ActionDeny, false); err != nil {
+		t.Fatal(err)
+	}
+	if v = b.entries[mountKey]; v.Action != ActionDeny || v.Audit != 0 {
+		t.Fatalf("mount entry after re-sync = %+v, want audit=0", v)
+	}
+}
+
+// TestKernelKeyFieldsForEventMountSoundness checks the hook-aware key-field
+// report the enforcer uses to gate writes. The mount kernel key carries only
+// the fstype, which is hook metadata with no compiler field bit; the source
+// and target paths are never in the key. Reporting "fstype" (an unknown field
+// name) lets the enforcer treat only a no-field (constant) decision as
+// determined by the key, refusing path/uid/temporal decisions.
+func TestKernelKeyFieldsForEventMountSoundness(t *testing.T) {
+	m := &PolicyMapManager{}
+	mount := &api.Event{
+		Type: api.EventTypeFile, CgroupID: 42, LSMEvent: true, Hook: "mount",
+		File: &api.FileEvent{Path: "proc"},
+	}
+	keyFields := m.KernelKeyFieldsForEvent(mount)
+	if want := []string{"fstype"}; !reflect.DeepEqual(keyFields, want) {
+		t.Fatalf("mount key fields = %v, want %v", keyFields, want)
+	}
+	// "fstype" has no compiler bit, so its mask is FieldsUnknown. A decision
+	// is only sound to sync when it reads no policy field at all.
+	keyMask := compiler.FieldMask(keyFields...)
+	if keyMask != compiler.FieldsUnknown {
+		t.Fatalf("fstype key mask = %x, want FieldsUnknown", keyMask)
+	}
+	for _, tc := range []struct {
+		name   string
+		fields uint32
+		want   bool // determined by key => safe to sync
+	}{
+		{"no policy fields", 0, true},
+		{"path (source/target not in key)", compiler.FieldBitPath, false},
+		{"uid", compiler.FieldBitUID, false},
+		{"comm", compiler.FieldBitComm, false},
+		{"wall clock", compiler.FieldBitTime, false},
+		{"container age", compiler.FieldBitContainerAge, false},
+		{"undeclared", compiler.FieldsUnknown, false},
+	} {
+		got := tc.fields == 0 // FieldsUnknown key mask => only constant decisions are determined
+		if got != tc.want {
+			t.Errorf("%s: determined=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// Plain file_open (and an empty hook) keep no exact key.
+	for _, hook := range []string{"file", ""} {
+		mount.Hook = hook
+		if got := m.KernelKeyFieldsForEvent(mount); len(got) != 0 {
+			t.Errorf("hook %q key fields = %v, want none", hook, got)
+		}
+	}
+}
+
+// TestSyncEventPtraceDenyWritesTargetScopedKey proves a ptrace DENY from
+// userspace is written under the exact target-scoped key, preserves the audit
+// flag, does not leak into the exec domain or another target's cgroup, and
+// that ALLOW feedback is not installed (ptrace is a DENY-only domain).
+func TestSyncEventPtraceDenyWritesTargetScopedKey(t *testing.T) {
+	b := newFakeBackend()
+	m := &PolicyMapManager{policyMap: b}
+	ptrace := &api.Event{
+		Type: api.EventTypeProcess, CgroupID: 99, Comm: "tracer",
+		LSMEvent: true, Hook: "ptrace", Filename: "sleep", TargetCgroupID: 4242,
+	}
+	if err := m.SyncEvent(ptrace, ActionDeny, true); err != nil {
+		t.Fatalf("SyncEvent ptrace DENY: %v", err)
+	}
+	want, err := ptracePolicyKey(4242, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, ok := b.entries[want]
+	if !ok {
+		t.Fatalf("ptrace DENY not written to policy map: %+v", b.entries)
+	}
+	if v.Action != ActionDeny || v.Audit != 1 {
+		t.Fatalf("ptrace entry = %+v, want action=deny audit=1", v)
+	}
+
+	// Two same-comm targets in different cgroups must be distinct entries.
+	otherTarget := &api.Event{
+		Type: api.EventTypeProcess, CgroupID: 99,
+		LSMEvent: true, Hook: "ptrace", Filename: "sleep", TargetCgroupID: 7777,
+	}
+	if err := m.SyncEvent(otherTarget, ActionDeny, false); err != nil {
+		t.Fatal(err)
+	}
+	otherKey, err := ptracePolicyKey(7777, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.entries[otherKey].Action != ActionDeny {
+		t.Fatal("second target's DENY was not installed")
+	}
+	if len(b.entries) != 2 {
+		t.Fatalf("entries = %d, want one DENY per target cgroup", len(b.entries))
+	}
+
+	// DENY-only: an ALLOW must not build an allowlist/first-touch fast path.
+	before := len(b.entries)
+	if err := m.SyncEvent(ptrace, ActionAllow, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(b.entries) != before || b.entries[want].Action != ActionDeny {
+		t.Fatal("ptrace ALLOW feedback overwrote an installed DENY")
+	}
+
+	// Domain separation from exec for the same comm/cgroup.
+	execKey, err := stringPolicyKey(4242, EventTypeExec, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.entries[execKey]; ok {
+		t.Fatal("ptrace DENY leaked into the exec domain")
+	}
+}

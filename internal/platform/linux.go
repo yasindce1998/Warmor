@@ -3,10 +3,12 @@
 package platform
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,6 +76,10 @@ type LinuxPlatform struct {
 	readerErr     error
 	lsmEvents     lsmEventStream // production loader or VM-free reader fixture
 	scope         cgroupScope
+	// correlator pairs a tracepoint observation with its LSM twin so one
+	// syscall is delivered once. Nil unless both monitors are active (LSM
+	// loaded): direct-monitor unit tests and non-Linux builds never dedup.
+	correlator *eventCorrelator
 	// kernelSync is observability-only posture state mirroring recent
 	// userspace→kernel policy-map sync health. Ready() never reads it: a
 	// degraded kernel fast path must not make the daemon unready.
@@ -97,6 +103,273 @@ type lsmEventStream interface {
 	ReadLSMEvent() (*ebpf.Event, error)
 	FlushLSMEvents() error
 	StopReaders() error
+}
+
+// Tracepoint↔LSM correlation. A single exec/connect/file operation is observed
+// twice: a tracepoint (sys_enter_*, rich in argv/parent) and an LSM hook
+// (bprm_check_security/file_open/security_socket_connect, carrying the kernel
+// verdict and policy generation). The two ring buffers are read by different
+// goroutines, so their delivery order is not guaranteed. We buffer the
+// tracepoint observation briefly and let the LSM decision claim it.
+//
+// Pairing is deliberately conservative. A twin must share (cgroup, pid,
+// event type) and carry a kernel timestamp within corrMaxSkewNS; a wider gap
+// is treated as PID reuse and both events are kept. Unsure → deliver both.
+const (
+	// corrMaxSkewNS bounds how far apart the two bpf_ktime_get_ns stamps of
+	// one operation may be. sys_enter_execve and bprm_check_security run at
+	// different points in an exec; 100 ms is far wider than that gap but far
+	// shorter than any realistic PID reuse window.
+	corrMaxSkewNS uint64 = uint64(100 * time.Millisecond)
+	// corrTTL is how long an unclaimed tracepoint waits for its LSM twin
+	// before it is delivered as-is.
+	corrTTL = time.Second
+	// corrMaxEntries caps buffered tracepoints; beyond it the least-recently
+	// used twin is evicted and delivered rather than dropped.
+	corrMaxEntries = 4096
+	// corrSweepInterval is the cadence for flushing TTL-expired twins.
+	corrSweepInterval = 250 * time.Millisecond
+)
+
+// correlationKey identifies the process and syscall class a twin belongs to.
+// The kernel timestamp is a skew dimension checked on lookup, not part of the
+// key: the two observations of one exec never carry the exact same stamp.
+type correlationKey struct {
+	cgroupID  uint64
+	pid       uint32
+	eventType api.EventType
+}
+
+type corrEntry struct {
+	key       correlationKey
+	kernelTS  uint64
+	event     *api.Event
+	expiresAt time.Time
+	elem      *list.Element
+}
+
+// eventCorrelator is a bounded, TTL+LRU window of unpaired tracepoint events.
+// It is safe for concurrent use by the tracepoint readers, the LSM reader and
+// the TTL sweeper.
+type eventCorrelator struct {
+	mu         sync.Mutex
+	entries    map[correlationKey]*corrEntry
+	lru        list.List // front = most recently added, back = oldest
+	maxEntries int
+	maxSkew    uint64
+	ttl        time.Duration
+	now        func() time.Time
+}
+
+func newEventCorrelator() *eventCorrelator {
+	return &eventCorrelator{
+		entries:    make(map[correlationKey]*corrEntry),
+		maxEntries: corrMaxEntries,
+		maxSkew:    corrMaxSkewNS,
+		ttl:        corrTTL,
+		now:        time.Now,
+	}
+}
+
+func correlationKeyOf(event *api.Event) correlationKey {
+	return correlationKey{cgroupID: event.CgroupID, pid: event.PID, eventType: event.GetType()}
+}
+
+func tsSkew(a, b uint64) uint64 {
+	if a >= b {
+		return a - b
+	}
+	return b - a
+}
+
+// removeEntryLocked unlinks e from both the map and the LRU list. Caller holds mu.
+func (c *eventCorrelator) removeEntryLocked(e *corrEntry) {
+	c.lru.Remove(e.elem)
+	delete(c.entries, e.key)
+}
+
+// register enrolls a tracepoint observation as a potential twin. It returns
+// any previously buffered events that must still be delivered: a displaced
+// twin for the same key and/or LRU victims when the window is full.
+func (c *eventCorrelator) register(event *api.Event) []*api.Event {
+	if event == nil || event.KernelTimestampNS == 0 {
+		return nil // never correlate events without a trusted kernel stamp
+	}
+	key := correlationKeyOf(event)
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var out []*api.Event
+	if old, ok := c.entries[key]; ok {
+		out = append(out, old.event) // a twin from a different operation: keep it
+		c.removeEntryLocked(old)
+	}
+	e := &corrEntry{
+		key: key, kernelTS: event.KernelTimestampNS,
+		event: event, expiresAt: now.Add(c.ttl),
+	}
+	e.elem = c.lru.PushFront(e)
+	c.entries[key] = e
+	for c.lru.Len() > c.maxEntries {
+		back := c.lru.Back()
+		victim, ok := back.Value.(*corrEntry)
+		if !ok {
+			break
+		}
+		out = append(out, victim.event)
+		c.removeEntryLocked(victim)
+	}
+	return out
+}
+
+// correlate tries to claim the tracepoint twin of an LSM decision. The
+// returned twin (when non-nil) has been removed from the window; the caller
+// merges its process context into the LSM event and suppresses the twin. A
+// present-but-expired twin is returned in expired for unconditional delivery
+// so TTL expiry never loses a security event.
+func (c *eventCorrelator) correlate(lsm *api.Event) (twin *api.Event, expired []*api.Event) {
+	if lsm == nil || lsm.KernelTimestampNS == 0 || !correlatableHook(lsm.Hook) {
+		return nil, nil
+	}
+	key := correlationKeyOf(lsm)
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	e, ok := c.entries[key]
+	if !ok {
+		return nil, nil
+	}
+	if !now.Before(e.expiresAt) {
+		expired = append(expired, e.event)
+		c.removeEntryLocked(e)
+		return nil, expired
+	}
+	if tsSkew(e.kernelTS, lsm.KernelTimestampNS) > c.maxSkew {
+		// PID reuse suspicion: keep both, leave the twin for TTL delivery.
+		return nil, nil
+	}
+	twin = e.event
+	c.removeEntryLocked(e)
+	return twin, nil
+}
+
+// flushExpired returns every twin whose TTL elapsed, removing them from the
+// window. LRU order is arrival order and TTL is uniform, so the back expires
+// first and we can stop at the first unexpired entry.
+func (c *eventCorrelator) flushExpired() []*api.Event {
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []*api.Event
+	for {
+		back := c.lru.Back()
+		if back == nil {
+			break
+		}
+		e, ok := back.Value.(*corrEntry)
+		if !ok || now.Before(e.expiresAt) {
+			break
+		}
+		out = append(out, e.event)
+		c.removeEntryLocked(e)
+	}
+	return out
+}
+
+// flushAll drains the window (e.g. on shutdown) so buffered observations are
+// never lost.
+func (c *eventCorrelator) flushAll() []*api.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]*api.Event, 0, c.lru.Len())
+	for e := c.lru.Front(); e != nil; e = e.Next() {
+		if entry, ok := e.Value.(*corrEntry); ok {
+			out = append(out, entry.event)
+		}
+	}
+	c.entries = make(map[correlationKey]*corrEntry)
+	c.lru.Init()
+	return out
+}
+
+// correlatableHook restricts dedup to LSM hooks whose twin carries context
+// worth inheriting and whose delivery can tolerate a short buffer window.
+// exec/connect twins supply argv/parent/PPID for the richer tracepoint payload.
+// file_open is deliberately excluded: every open is high-frequency, it has no
+// process context to merge, and buffering it for the correlation TTL adds up
+// to 1s of latency that breaks latency-sensitive paths (e.g. the supervised
+// host's held-load confirmation, which completes inside a 500ms window).
+// Hooks such as ptrace/mount/bind/listen/connect_unix have no tracepoint
+// counterpart and must never be paired with an unrelated observation.
+func correlatableHook(hook string) bool {
+	switch hook {
+	case "exec", "connect":
+		return true
+	default:
+		return false
+	}
+}
+
+// correlatableTracepoint is the mirror of correlatableHook for the tracepoint
+// side: only process (exec) and network (connect) observations are buffered.
+// File opens are delivered immediately so their high volume never waits on the
+// correlation TTL (which would add up to 1s of latency to every file event).
+func correlatableTracepoint(event *api.Event) bool {
+	if event == nil {
+		return false
+	}
+	switch event.GetType() {
+	case api.EventTypeProcess, api.EventTypeNetwork:
+		return true
+	default:
+		return false
+	}
+}
+
+// inheritProcessContext grafts the tracepoint's richer process context onto
+// the authoritative LSM-origin event. The LSM kernel decision fields
+// (KernelDenied, PolicyGeneration, Hook, ...) are left untouched.
+func inheritProcessContext(dst, src *api.Event) {
+	if src == nil {
+		return
+	}
+	if src.PPID != 0 {
+		dst.PPID = src.PPID
+	}
+	if src.ParentComm != "" {
+		dst.ParentComm = src.ParentComm
+	}
+	dst.TruncatedFields = append(dst.TruncatedFields, src.TruncatedFields...)
+	if src.Process == nil {
+		return
+	}
+	if dst.Process == nil {
+		cp := *src.Process
+		cp.Args = slices.Clone(src.Process.Args)
+		dst.Process = &cp
+		return
+	}
+	if len(dst.Process.Args) == 0 && src.Process.Args != nil {
+		dst.Process.Args = slices.Clone(src.Process.Args)
+	}
+	if dst.Process.Filename == "" {
+		dst.Process.Filename = src.Process.Filename
+	}
+}
+
+func duplicateEventType(event *api.Event) string {
+	switch event.GetType() {
+	case api.EventTypeProcess:
+		return "exec"
+	case api.EventTypeFile:
+		return "file"
+	case api.EventTypeNetwork:
+		return "network"
+	default:
+		return "unknown"
+	}
 }
 
 func NewLinuxPlatform(config LinuxConfig) (Platform, error) {
@@ -328,7 +601,8 @@ func (p *LinuxPlatform) Start(ctx context.Context, eventChan chan<- *api.Event) 
 
 	goroutines := 4
 	if p.lsmEnabled {
-		goroutines = 6
+		goroutines = 7 // + LSM reader, drop poll, correlation TTL sweeper
+		p.correlator = newEventCorrelator()
 	}
 	if p.autoCgroups() {
 		goroutines++
@@ -342,6 +616,7 @@ func (p *LinuxPlatform) Start(ctx context.Context, eventChan chan<- *api.Event) 
 	if p.lsmEnabled {
 		go p.monitorLSMEvents(ctx)
 		go p.monitorEventDrops(ctx)
+		go p.monitorCorrelation(ctx)
 	}
 	if p.autoCgroups() {
 		go p.monitorCgroups(ctx)
@@ -402,7 +677,7 @@ func (p *LinuxPlatform) monitorProcessEventsFrom(ctx context.Context, read func(
 			},
 		}
 
-		if !p.deliver(ctx, event) {
+		if !p.deliverTracepoint(ctx, event) {
 			return
 		}
 	}
@@ -459,7 +734,7 @@ func (p *LinuxPlatform) monitorFileEventsFrom(ctx context.Context, read func() (
 			},
 		}
 
-		if !p.deliver(ctx, event) {
+		if !p.deliverTracepoint(ctx, event) {
 			return
 		}
 	}
@@ -520,7 +795,7 @@ func (p *LinuxPlatform) monitorNetworkEventsFrom(ctx context.Context, read func(
 			},
 		}
 
-		if !p.deliver(ctx, event) {
+		if !p.deliverTracepoint(ctx, event) {
 			return
 		}
 	}
@@ -643,13 +918,73 @@ func (p *LinuxPlatform) monitorLSMEventsFrom(ctx context.Context, read func() (*
 			}
 		}
 
-		if !p.deliver(ctx, event) {
+		if !p.deliverLSM(ctx, event) {
 			return
 		}
 	}
 }
 
 func (p *LinuxPlatform) SetEventCapture(capture func(*api.Event) bool) { p.capture = capture }
+
+// deliverTracepoint enrolls a tracepoint observation in the correlation window
+// instead of delivering it immediately when LSM is active. Anything evicted
+// from the bounded window is delivered first so no observation is lost; for a
+// confident twin the LSM path delivers the single merged event instead.
+func (p *LinuxPlatform) deliverTracepoint(ctx context.Context, event *api.Event) bool {
+	if p.correlator == nil || !correlatableTracepoint(event) {
+		return p.deliver(ctx, event)
+	}
+	for _, evicted := range p.correlator.register(event) {
+		if !p.deliver(ctx, evicted) {
+			return false
+		}
+	}
+	return true
+}
+
+// deliverLSM claims the tracepoint twin of an LSM decision (if any). On a
+// confident pair the twin's argv/parent context is inherited into the LSM
+// event, the twin is suppressed, the pair is counted, and the single enriched
+// event is delivered. Unpaired decisions pass through unchanged.
+func (p *LinuxPlatform) deliverLSM(ctx context.Context, event *api.Event) bool {
+	if p.correlator != nil {
+		twin, expired := p.correlator.correlate(event)
+		if twin != nil {
+			inheritProcessContext(event, twin)
+			event.Deduplicated = true
+			metrics.RecordDuplicateEvent(duplicateEventType(event))
+		}
+		// TTL-expired twins are delivered unpaired; best effort only. Never
+		// let a failed sidecar delivery suppress the authoritative decision.
+		for _, ev := range expired {
+			p.deliver(ctx, ev)
+		}
+	}
+	return p.deliver(ctx, event)
+}
+
+// monitorCorrelation periodically delivers twins whose LSM counterpart never
+// arrived within the TTL window, so a tracepoint-only observation is still
+// surfaced rather than waiting indefinitely for a twin.
+func (p *LinuxPlatform) monitorCorrelation(ctx context.Context) {
+	defer p.wg.Done()
+	ticker := time.NewTicker(corrSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.stopChan:
+			return
+		case <-ticker.C:
+		}
+		for _, ev := range p.correlator.flushExpired() {
+			if !p.deliver(ctx, ev) {
+				return
+			}
+		}
+	}
+}
 
 func (p *LinuxPlatform) deliver(ctx context.Context, event *api.Event) bool {
 	if event.DispatchBarrier == nil && p.capture != nil && !p.capture(event) {
@@ -864,6 +1199,13 @@ func (p *LinuxPlatform) Stop() error {
 		p.stopErr = errors.Join(errs...)
 	})
 	p.wg.Wait()
+	// All readers have stopped: deliver any twins still waiting for an LSM
+	// counterpart so shutdown never strands a security observation.
+	if p.correlator != nil {
+		for _, ev := range p.correlator.flushAll() {
+			p.deliver(context.Background(), ev)
+		}
+	}
 	return p.stopErr
 }
 

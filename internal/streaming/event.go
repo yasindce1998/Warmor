@@ -70,9 +70,13 @@ type SecurityEvent struct {
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
+// CorrelationIssueField is the InputIssue field used to surface that two
+// kernel observations (tracepoint + LSM) were merged into one event.
+const CorrelationIssueField = "correlation"
+
 type InputIssue struct {
 	Field string `json:"field"`
-	State string `json:"state"` // unknown, truncated, redacted
+	State string `json:"state"` // unknown, truncated, redacted, deduplicated
 }
 
 // SummaryForExport removes the full evaluator snapshot without mutating the

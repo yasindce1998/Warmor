@@ -26,6 +26,20 @@ var EventChannelBackpressure = prometheus.NewCounter(prometheus.CounterOpts{
 	Help: "Number of platform event deliveries that blocked because the userspace event channel was full (no event was dropped).",
 })
 
+// DuplicateEvents counts tracepoint+LSM observations for one syscall that were
+// confidently correlated into a single event. The twin is suppressed so SIEM,
+// lineage and policy caches see the operation once; an unpaired observation is
+// never counted here (both are delivered in that case).
+var DuplicateEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "warmor", Name: "duplicate_events_total",
+	Help: "Tracepoint/LSM event pairs merged after kernel-timestamp correlation, by event type.",
+}, []string{"event_type"})
+
+// RecordDuplicateEvent counts one confidently correlated tracepoint+LSM pair.
+func RecordDuplicateEvent(eventType string) {
+	DuplicateEvents.WithLabelValues(eventType).Inc()
+}
+
 func RecordStreamingLoss(boundary, sink string, n uint64) {
 	StreamingLosses.WithLabelValues(boundary, sink).Add(float64(n))
 }
@@ -40,4 +54,6 @@ func RecordEventChannelBackpressure() {
 	EventChannelBackpressure.Inc()
 }
 
-func init() { prometheus.MustRegister(StreamingLosses, StreamingErrors, EventChannelBackpressure) }
+func init() {
+	prometheus.MustRegister(StreamingLosses, StreamingErrors, EventChannelBackpressure, DuplicateEvents)
+}

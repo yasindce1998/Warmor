@@ -191,7 +191,9 @@ func HashPattern(pattern string) uint32 {
 // evaluation is unaffected: WASM still sees the full path; only kernel-map
 // writes beyond 127 bytes are refused, never silently truncated. See
 // docs/design/kernel-default-deny.md. Mount and ptrace are tighter still,
-// bounded by their own sensor buffers.
+// bounded by their own sensor buffers (mount's fstype must fit lsm_mount's
+// 64-byte type_buf, so an overlong fstype is refused outright — never
+// truncated into a key the hook skips).
 const (
 	maxExecPatternLen   = kernelmap.MaxPolicyPathBytes // 127: WASM ABI 128 minus one reserved byte, not the 256-byte BPF key buffer
 	maxMountPatternLen  = 62                           // lsm_mount type_buf[64]
@@ -239,6 +241,56 @@ func stringPolicyKey(cgroupID uint64, eventType uint8, pattern string) (PolicyKe
 		return key, fmt.Errorf("pattern %q for event type %d: %w", pattern, eventType, ErrNotKernelMatchable)
 	}
 	copy(key.Path[:], pattern)
+	return key, nil
+}
+
+// mountPolicyKey builds the exact policy_map key that lsm_mount.bpf.c looks
+// up. The hook copies the filesystem type ("ext4", "proc", ...) into a
+// 64-byte type_buf and keys on {cgroup_id, EVENT_TYPE_MOUNT, type_buf}: the
+// mount source (dev_name) and target path live only in the event's aux and are
+// NEVER part of the key. A full buffer means bpf_probe_read_kernel_str
+// truncated the type, and the hook deliberately skips the map lookup for it;
+// writing a >=64-byte fstype here would install a key BPF can never match, so
+// it is refused rather than truncated. maxMountPatternLen (62) is the
+// conservative bound; every other byte of the key stays zero.
+//
+// The key is coarsely DENY-only: a miss already allows (mount has no
+// default-deny domain), so only a DENY entry changes behavior, and it blocks
+// every mount of that fstype in the cgroup regardless of source or target.
+func mountPolicyKey(cgroupID uint64, fstype string) (PolicyKey, error) {
+	key := PolicyKey{CgroupID: cgroupID, EventType: EventTypeMount}
+	// The sensor and WASM both treat NUL as the end of a string. Refuse empty,
+	// overlong, embedded-NUL and invalid UTF-8 fstypes so no partial identity
+	// ever reaches the kernel map.
+	if fstype == "" || len(fstype) > maxMountPatternLen ||
+		strings.IndexByte(fstype, 0) >= 0 || !utf8.ValidString(fstype) {
+		return key, fmt.Errorf("fstype %q for mount event: %w", fstype, ErrNotKernelMatchable)
+	}
+	copy(key.Path[:], fstype)
+	return key, nil
+}
+
+// ptracePolicyKey builds the exact policy_map key lsm_ptrace.bpf.c looks up.
+// Unlike every other hook, the ptrace key identifies the operation by its
+// TARGET, not its subject: CgroupID is the target task's cgroup id (the value
+// the kernel otherwise reports only in aux_id) and Path holds the target's
+// comm. Two same-comm targets in different cgroups therefore get different
+// keys, so a feedback DENY cannot leak into another container. A zero target
+// cgroup is refused: a DENY under it would be a wildcard over all targets.
+//
+// The tracer's cgroup is deliberately absent. Feedback is DENY-only and
+// target-scoped: a miss stays an allow for everybody, and the kernel's
+// cgroup=0 fallback still matches static comm-only SetRule entries.
+func ptracePolicyKey(targetCgroupID uint64, comm string) (PolicyKey, error) {
+	key := PolicyKey{CgroupID: targetCgroupID, EventType: EventTypePtrace}
+	if targetCgroupID == 0 {
+		return key, fmt.Errorf("ptrace target cgroup is zero: %w", ErrNotKernelMatchable)
+	}
+	if comm == "" || len(comm) > maxPtracePatternLen ||
+		strings.IndexByte(comm, 0) >= 0 || !utf8.ValidString(comm) {
+		return key, fmt.Errorf("ptrace target comm %q: %w", comm, ErrNotKernelMatchable)
+	}
+	copy(key.Path[:], comm)
 	return key, nil
 }
 
@@ -530,17 +582,41 @@ func (m *PolicyMapManager) SyncEvent(event *api.Event, action uint8, audit bool)
 	if err != nil {
 		return err
 	}
+	if event.Hook == "ptrace" && action != ActionDeny {
+		// PTRACE feedback is DENY-only: a userspace allow is already the
+		// kernel's behaviour on a policy-map miss, so installing it would
+		// build an allowlist/first-touch fast path ptrace does not have.
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.put(key, generationPolicyValue(action, audit).Policy)
 }
 
 func eventPolicyKey(event *api.Event) (PolicyKey, error) {
-	if event == nil || event.CgroupID == 0 {
+	if event == nil {
+		return PolicyKey{}, fmt.Errorf("missing event scope: %w", ErrNotKernelMatchable)
+	}
+	// For ptrace the key's scope is the TARGET's cgroup; the tracer's cgroup
+	// is not part of the key, so it is not required here. ptracePolicyKey
+	// still refuses a zero target cgroup (a wildcard over all containers).
+	ptraceProcess := event.Hook == "ptrace" && event.GetType() == api.EventTypeProcess
+	if !ptraceProcess && event.CgroupID == 0 {
 		return PolicyKey{}, fmt.Errorf("missing event scope: %w", ErrNotKernelMatchable)
 	}
 	switch event.GetType() {
 	case api.EventTypeProcess:
+		if event.Hook == "ptrace" {
+			// The sensor puts the ptrace target's comm in Filename (and
+			// Process.Filename) and its cgroup in TargetCgroupID (aux_id
+			// from the kernel). Both are required: a comm alone would
+			// conflate same-named targets in different containers.
+			comm := event.Filename
+			if event.Process != nil {
+				comm = event.Process.Filename
+			}
+			return ptracePolicyKey(event.TargetCgroupID, comm)
+		}
 		if event.Hook != "" && event.Hook != "exec" {
 			break
 		}
@@ -552,6 +628,19 @@ func eventPolicyKey(event *api.Event) (PolicyKey, error) {
 			break
 		}
 		return stringPolicyKey(event.CgroupID, EventTypeExec, path)
+	case api.EventTypeFile:
+		// sb_mount is a file-kind event: lsm_loader puts the filesystem type
+		// in File.Path (and Filename), with the source only in MountSource.
+		// Hook, not Kind, separates it from file_open, whose dentry basename
+		// has no exact kernel identity and must stay unsynced.
+		if event.Hook != "mount" {
+			break
+		}
+		fstype := event.Filename
+		if event.File != nil {
+			fstype = event.File.Path
+		}
+		return mountPolicyKey(event.CgroupID, fstype)
 	case api.EventTypeNetwork:
 		if event.Network == nil {
 			break
@@ -592,15 +681,17 @@ func eventPolicyKey(event *api.Event) (PolicyKey, error) {
 // KernelKeyFields reports which event fields (compiler field names) the BPF
 // programs' policy_map key covers per event type, besides the cgroup: the
 // exec filename for process events and the remote endpoint for connects.
-// File events are never keyed (lsm_file only sees the basename). The
+// File events are never keyed here (lsm_file only sees the basename). The
 // enforcer only syncs decisions that depend on nothing else.
 //
 // This is the hook-agnostic view kept for interface compatibility with maps
 // whose keys do not vary by hook (it overstates the listen key, which has no
-// address, so it must not be used for Linux listen decisions). For Linux
-// decisions, KernelKeyFieldsForEvent is authoritative: it separates the bind
-// key from the connect key, narrows listen to its port-only key, and refuses
-// hooks with no exact kernel identity.
+// address, and cannot express the mount fstype key — mount is a file-kind
+// event while plain file_open is never keyed — so it must not be used for
+// those Linux decisions). For Linux decisions, KernelKeyFieldsForEvent is
+// authoritative: it separates the bind key from the connect key, narrows
+// listen to its port-only key, reports the mount fstype key, and refuses hooks
+// with no exact kernel identity.
 func (m *PolicyMapManager) KernelKeyFields(t api.EventType) []string {
 	switch t {
 	case api.EventTypeProcess:
@@ -626,6 +717,12 @@ func (m *PolicyMapManager) KernelKeyFields(t api.EventType) []string {
 // cannot be reproduced by the kernel's bind key and is refused rather than
 // applied to other events.
 //
+// PTRACE is its own kernel domain (EVENT_TYPE_PTRACE), keyed by the target's
+// cgroup and the target's comm. It is a DENY-only feedback domain with no
+// default-deny marking: a miss is an allow and only an explicit DENY is
+// installed. The key's cgroup is the target's cgroup, not the tracer's — the
+// ABI has no field for the target cgroup, so no DSL declaration bit is added.
+//
 // Listen is its own kernel domain (EVENT_TYPE_LISTEN), keyed by {family, port}
 // only: the BPF hook has no sockaddr and never fills the address. The sole
 // policy-visible key field is therefore `remote_port`; `remote_addr` is absent
@@ -633,16 +730,43 @@ func (m *PolicyMapManager) KernelKeyFields(t api.EventType) []string {
 // not a key field, so a listen decision that reads either is refused rather
 // than applied to other events. Other network hooks (connect_unix and any
 // future hook) have no exact policy-map key and are never synced.
+//
+// Mount is a file-kind event (Kind=File, Hook="mount") whose kernel key holds
+// only the filesystem type from File.Path. "fstype" is intentionally NOT a
+// compiler field name: it is hook metadata, not a field a policy declares it
+// reads, and the mount source/target are never in the key. A policy decision
+// that reads any policy field (path, uid, temporal, ...) is therefore not
+// fully covered by that key and must not be synced; only a decision determined
+// by the key alone (no policy fields read) is eligible. Plain file_open
+// (Hook="file"/empty) has no exact key and is always refused. The enforcer
+// handles this via the FieldsUnknown key-mask rule in
+// decisionDeterminedByKernelKey.
 func (m *PolicyMapManager) KernelKeyFieldsForEvent(event *api.Event) []string {
 	if event == nil {
 		return nil
 	}
 	switch event.GetType() {
 	case api.EventTypeProcess:
+		if event.Hook == "ptrace" {
+			// The ptrace key is {target cgroup, target comm}: cgroup_id
+			// holds the TARGET's cgroup and "path" is the target comm the
+			// sensor reports as Filename. The target cgroup is kernel-only
+			// (no DSL/WASM field exposes it), so no declaration bit is
+			// needed; a decision reading uid/ppid/comm/temporal cannot be
+			// reproduced by this key and is refused by the enforcer.
+			return []string{"path", "cgroup_id"}
+		}
 		if event.Hook != "" && event.Hook != "exec" {
 			return nil
 		}
 		return []string{"path"}
+	case api.EventTypeFile:
+		// Only sb_mount is keyed; lsm_file_open only sees a basename and would
+		// match every same-named file, so it is never synced.
+		if event.Hook == "mount" {
+			return []string{"fstype"}
+		}
+		return nil
 	case api.EventTypeNetwork:
 		switch event.Hook {
 		case "", "connect", "bind":

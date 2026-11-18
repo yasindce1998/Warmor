@@ -6,10 +6,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/yasindce1998/warmor/internal/compiler"
 	"github.com/yasindce1998/warmor/internal/kernelmap"
+	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 // TestKernelKeyPathBoundary pins the shared exact-path identity limit at the
@@ -209,6 +212,304 @@ func TestConnectBindKeysRemainByteIdentical(t *testing.T) {
 			if tail := b[12+len(tc.raw):]; !bytes.Equal(tail, make([]byte, len(tail))) {
 				t.Fatalf("domain %d %s nonzero tail: %x", typ, tc.addr, tail)
 			}
+		}
+	}
+}
+
+// TestMountPolicyKeyWireBytes pins the exact 288-byte mount key against
+// lsm_mount.bpf.c: only cgroup_id, EVENT_TYPE_MOUNT and the fstype bytes in
+// path[0..len] are set; family/port/address and the rest of path and pad stay
+// zero. There is no source/target field: dev_name is aux-only in the hook.
+func TestMountPolicyKeyWireBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fstype string
+	}{
+		{"ext4", "ext4"},
+		{"proc", "proc"},
+		{"max", strings.Repeat("f", maxMountPatternLen)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, err := mountPolicyKey(0x0102030405060708, tc.fstype)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := k.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(b) != 288 {
+				t.Fatalf("key length = %d, want 288", len(b))
+			}
+			if binary.NativeEndian.Uint64(b[:8]) != 0x0102030405060708 {
+				t.Fatalf("cgroup bytes = %x", b[:8])
+			}
+			if b[8] != EventTypeMount {
+				t.Fatalf("event_type = %d, want %d", b[8], EventTypeMount)
+			}
+			if !bytes.Equal(b[28:28+len(tc.fstype)], []byte(tc.fstype)) {
+				t.Fatalf("fstype bytes = %x, want %q", b[28:28+len(tc.fstype)], tc.fstype)
+			}
+			// family/port/address are never set by the mount hook.
+			if !bytes.Equal(b[9:28], make([]byte, 19)) {
+				t.Fatalf("family/port/address nonzero: %x", b[9:28])
+			}
+			// The rest of path (after the fstype) and the pad stay zero.
+			if tail := b[28+len(tc.fstype):]; !bytes.Equal(tail, make([]byte, len(tail))) {
+				t.Fatalf("mount key tail is not zero: %x", tail)
+			}
+		})
+	}
+}
+
+// TestMountKeySeparateFromFileOpenDomain checks the two file-kind hooks stay
+// distinct: an LSM mount event is keyed in EVENT_TYPE_MOUNT, while a plain
+// file_open event (same Kind=File, different Hook) has no exact kernel key and
+// is refused. A fstype deny can never leak into the file_open domain.
+func TestMountKeySeparateFromFileOpenDomain(t *testing.T) {
+	mount := &api.Event{
+		Type: api.EventTypeFile, CgroupID: 42, LSMEvent: true, Hook: "mount",
+		Filename: "tmpfs", File: &api.FileEvent{Path: "tmpfs"},
+	}
+	km, err := eventPolicyKey(mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if km.EventType != EventTypeMount || km.EventType == EventTypeFile {
+		t.Fatalf("mount event type = %d, want EVENT_TYPE_MOUNT", km.EventType)
+	}
+	if got := string(km.Path[:5]); got != "tmpfs" {
+		t.Fatalf("mount key fstype = %q, want tmpfs", got)
+	}
+	// A file_open event with the same Path must not become a kernel key at all.
+	fileOpen := &api.Event{
+		Type: api.EventTypeFile, CgroupID: 42, LSMEvent: true, Hook: "file",
+		Filename: "tmpfs", File: &api.FileEvent{Path: "tmpfs"},
+	}
+	if _, err := eventPolicyKey(fileOpen); !errors.Is(err, ErrNotKernelMatchable) {
+		t.Fatalf("file_open event was keyed: %v", err)
+	}
+	fileOpen.Hook = ""
+	if _, err := eventPolicyKey(fileOpen); !errors.Is(err, ErrNotKernelMatchable) {
+		t.Fatalf("empty-hook file event was keyed: %v", err)
+	}
+}
+
+// TestMountOverlongFstypeRejectedWithoutTruncatedKey verifies a >=64-byte
+// fstype (which lsm_mount would treat as truncated and skip) is refused by the
+// public write path, leaving no truncated key that BPF could never match.
+func TestMountOverlongFstypeRejectedWithoutTruncatedKey(t *testing.T) {
+	b := newFakeBackend()
+	m := &PolicyMapManager{policyMap: b}
+
+	// A 62-byte fstype is the longest accepted identity.
+	fstype := strings.Repeat("x", maxMountPatternLen)
+	mount := &api.Event{
+		Type: api.EventTypeFile, CgroupID: 42, LSMEvent: true, Hook: "mount",
+		File: &api.FileEvent{Path: fstype},
+	}
+	if err := m.SyncEvent(mount, ActionDeny, false); err != nil {
+		t.Fatalf("%d-byte fstype must be accepted: %v", maxMountPatternLen, err)
+	}
+	if len(b.entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(b.entries))
+	}
+
+	// 63/64/128 bytes are all refused, with no truncated prefix installed.
+	for _, n := range []int{63, 64, 128} {
+		long := strings.Repeat("y", n)
+		ev := &api.Event{
+			Type: api.EventTypeFile, CgroupID: 42, LSMEvent: true, Hook: "mount",
+			File: &api.FileEvent{Path: long},
+		}
+		if err := m.SyncEvent(ev, ActionDeny, false); !errors.Is(err, ErrNotKernelMatchable) {
+			t.Fatalf("%d-byte fstype: got %v, want ErrNotKernelMatchable", n, err)
+		}
+	}
+	if len(b.entries) != 1 {
+		t.Fatalf("overlong fstypes installed %d extra entries", len(b.entries)-1)
+	}
+	if _, ok := b.entries[mustMountKey(t, 42, strings.Repeat("y", maxMountPatternLen))]; ok {
+		t.Fatal("a truncated mount fstype prefix key was installed")
+	}
+	if v := b.entries[mustMountKey(t, 42, fstype)]; v.Action != ActionDeny {
+		t.Fatal("the legitimate mount entry was disturbed")
+	}
+}
+
+func mustMountKey(t *testing.T, scope uint64, fstype string) PolicyKey {
+	t.Helper()
+	k, err := mountPolicyKey(scope, fstype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
+// TestPtracePolicyKeyWireBytes pins the exact 288-byte layout that
+// lsm_ptrace.bpf.c looks up: cgroup_id is the TARGET's cgroup (not the
+// tracer's), event_type is EVENT_TYPE_PTRACE, path holds the target's comm
+// and every unused byte is zero. This is the key a DENY feedback writes.
+func TestPtracePolicyKeyWireBytes(t *testing.T) {
+	const targetCGID = uint64(0x0102030405060708)
+	k, err := ptracePolicyKey(targetCGID, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := k.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) != 288 {
+		t.Fatalf("key length = %d, want 288", len(b))
+	}
+	if got := binary.NativeEndian.Uint64(b[:8]); got != targetCGID {
+		t.Fatalf("cgroup bytes = %x, want target cgroup %x", got, targetCGID)
+	}
+	if b[8] != EventTypePtrace {
+		t.Fatalf("event_type = %d, want %d", b[8], EventTypePtrace)
+	}
+	if !bytes.Equal(b[28:28+5], []byte("sleep")) || b[33] != 0 {
+		t.Fatalf("target comm bytes = %q, want zero-terminated sleep", b[28:40])
+	}
+	// family, port, address, the rest of path and pad are all unused.
+	if tail := b[9:28]; !bytes.Equal(tail, make([]byte, len(tail))) {
+		t.Fatalf("nonzero key prefix before path: %x", tail)
+	}
+	if tail := b[33:]; !bytes.Equal(tail, make([]byte, len(tail))) {
+		t.Fatalf("nonzero key tail after comm: %x", tail)
+	}
+
+	// The BPF side writes the same bytes: target cgroup in cgroup_id, the
+	// 16-byte comm buffer at the start of path. A Go key with a 15-byte comm
+	// (TASK_COMM_LEN 16 minus NUL) must match that buffer byte-for-byte.
+	var commBuf [16]byte
+	copy(commBuf[:], "sleep")
+	if !bytes.Equal(b[28:44], commBuf[:]) {
+		t.Fatalf("comm buffer mismatch: %x vs %x", b[28:44], commBuf)
+	}
+
+	// Domain separation: the same comm and cgroup in the exec domain, or a
+	// different target cgroup in the ptrace domain, must produce different
+	// keys. Otherwise a deny could be applied to another domain/container.
+	execKey, err := stringPolicyKey(targetCGID, EventTypeExec, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k == execKey {
+		t.Fatal("ptrace key aliased the exec domain for the same comm/cgroup")
+	}
+	other, err := ptracePolicyKey(targetCGID+1, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k == other {
+		t.Fatal("target cgroup does not distinguish two same-comm targets")
+	}
+	otherComm, err := ptracePolicyKey(targetCGID, "sshd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k == otherComm {
+		t.Fatal("target comm does not distinguish two same-cgroup targets")
+	}
+
+	// A zero target cgroup would be a wildcard deny over every container.
+	if _, err := ptracePolicyKey(0, "sleep"); !errors.Is(err, ErrNotKernelMatchable) {
+		t.Fatalf("zero target cgroup: %v", err)
+	}
+	for _, comm := range []string{"", "a\x00b", strings.Repeat("x", 16)} {
+		if _, err := ptracePolicyKey(targetCGID, comm); !errors.Is(err, ErrNotKernelMatchable) {
+			t.Fatalf("comm %q: %v", comm, err)
+		}
+	}
+}
+
+// TestEventPolicyKeyPtraceUsesTargetIdentity checks the dynamic write-back
+// path: a ptrace PROCESS LSM event is keyed by the target identity from the
+// event (TargetCgroupID from aux_id, Filename/Process.Filename from the
+// sensor's comm buffer), never by the tracer's cgroup or comm.
+func TestEventPolicyKeyPtraceUsesTargetIdentity(t *testing.T) {
+	newPtrace := func() *api.Event {
+		return &api.Event{
+			Type: api.EventTypeProcess, CgroupID: 99, Comm: "tracer",
+			LSMEvent: true, Hook: "ptrace", Filename: "sleep", TargetCgroupID: 4242,
+			Process: &api.ProcessEvent{Filename: "sleep"},
+		}
+	}
+	got, err := eventPolicyKey(newPtrace())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := ptracePolicyKey(4242, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("ptrace key = %+v, want target-scoped %+v", got, want)
+	}
+	if got.CgroupID == 99 {
+		t.Fatal("ptrace key used the tracer cgroup instead of the target cgroup")
+	}
+
+	// Without a target cgroup the identity is incomplete: it would be a
+	// wildcard over all containers, so it is refused.
+	e := newPtrace()
+	e.TargetCgroupID = 0
+	if _, err := eventPolicyKey(e); !errors.Is(err, ErrNotKernelMatchable) {
+		t.Fatalf("missing target cgroup: %v", err)
+	}
+
+	// An exec PROCESS event with the same comm stays in the exec domain.
+	exec := newPtrace()
+	exec.Hook = "exec"
+	exec.TargetCgroupID = 0
+	exec.Filename = "/bin/sleep"
+	exec.Process.Filename = "/bin/sleep"
+	ek, err := eventPolicyKey(exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ek.EventType != EventTypeExec || ek == got {
+		t.Fatalf("exec key = %+v, want EVENT_TYPE_EXEC distinct from ptrace", ek)
+	}
+}
+
+// TestPtraceKernelKeySoundness pins the fields the enforcer may rely on for
+// ptrace write-back: target comm ("path") and target cgroup ("cgroup_id").
+// Anything else the policy reads — uid, ppid, the tracer comm, or temporal
+// context — cannot be reproduced by that key and must be refused.
+func TestPtraceKernelKeySoundness(t *testing.T) {
+	m := &PolicyMapManager{}
+	ev := &api.Event{
+		Type: api.EventTypeProcess, CgroupID: 99, LSMEvent: true,
+		Hook: "ptrace", Filename: "sleep", TargetCgroupID: 4242,
+	}
+	keyFields := m.KernelKeyFieldsForEvent(ev)
+	want := []string{"path", "cgroup_id"}
+	if !reflect.DeepEqual(keyFields, want) {
+		t.Fatalf("ptrace key fields = %v, want %v", keyFields, want)
+	}
+	covered := compiler.FieldMask(keyFields...)
+	for _, tc := range []struct {
+		name   string
+		fields uint32
+		want   bool
+	}{
+		{"target identity only", covered, true},
+		{"constant decision", 0, true},
+		{"target comm only", compiler.FieldBitPath, true},
+		{"uid", covered | compiler.FieldBitUID, false},
+		{"ppid", covered | compiler.FieldBitPPID, false},
+		{"tracer comm", covered | compiler.FieldBitComm, false},
+		{"args", covered | compiler.FieldBitArgs, false},
+		{"wall clock", covered | compiler.FieldBitTime, false},
+		{"container age", covered | compiler.FieldBitContainerAge, false},
+		{"undeclared", compiler.FieldsUnknown, false},
+	} {
+		got := tc.fields&^covered == 0 && tc.fields != compiler.FieldsUnknown
+		if got != tc.want {
+			t.Errorf("%s: determined=%v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
