@@ -22,7 +22,7 @@ func hasInputIssue(issues []InputIssue, field, state string) bool {
 func TestFromAPIEventMarksDeduplicated(t *testing.T) {
 	event := &api.Event{
 		Type: api.EventTypeProcess, PID: 42, CgroupID: 7,
-		Timestamp: time.Unix(1, 0),
+		Timestamp:    time.Unix(1, 0),
 		Deduplicated: true,
 		Process:      &api.ProcessEvent{Filename: "/bin/sh", Args: []string{"/bin/sh", "-c", "echo hi"}},
 	}
