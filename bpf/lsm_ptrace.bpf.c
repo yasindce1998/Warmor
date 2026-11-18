@@ -43,8 +43,15 @@ int BPF_PROG(lsm_ptrace_check, struct task_struct *child, unsigned int mode)
 	__u64 target_cgid = BPF_CORE_READ((struct task_struct___warmor *)child, cgroups, dfl_cgrp, kn, id);
 
 	struct policy_snapshot snapshot = snapshot_policy(cgid, EVENT_TYPE_PTRACE);
+
+	// The exact key identifies the TARGET of the ptrace, not the tracer:
+	// cgroup_id is the target's cgroup (previously available only in the
+	// event's aux_id) and path carries the target's comm. A DENY userspace
+	// writes under this key therefore cannot affect a same-named target in a
+	// different container. A policy-map miss still falls back to the global
+	// (cgroup_id = 0) key, so static comm-only SetRule entries keep matching.
 	struct policy_key key = {
-		.cgroup_id = cgid,
+		.cgroup_id = target_cgid,
 		.event_type = EVENT_TYPE_PTRACE,
 	};
 	__builtin_memcpy(key.path, comm_buf, sizeof(comm_buf));

@@ -270,6 +270,30 @@ func mountPolicyKey(cgroupID uint64, fstype string) (PolicyKey, error) {
 	return key, nil
 }
 
+// ptracePolicyKey builds the exact policy_map key lsm_ptrace.bpf.c looks up.
+// Unlike every other hook, the ptrace key identifies the operation by its
+// TARGET, not its subject: CgroupID is the target task's cgroup id (the value
+// the kernel otherwise reports only in aux_id) and Path holds the target's
+// comm. Two same-comm targets in different cgroups therefore get different
+// keys, so a feedback DENY cannot leak into another container. A zero target
+// cgroup is refused: a DENY under it would be a wildcard over all targets.
+//
+// The tracer's cgroup is deliberately absent. Feedback is DENY-only and
+// target-scoped: a miss stays an allow for everybody, and the kernel's
+// cgroup=0 fallback still matches static comm-only SetRule entries.
+func ptracePolicyKey(targetCgroupID uint64, comm string) (PolicyKey, error) {
+	key := PolicyKey{CgroupID: targetCgroupID, EventType: EventTypePtrace}
+	if targetCgroupID == 0 {
+		return key, fmt.Errorf("ptrace target cgroup is zero: %w", ErrNotKernelMatchable)
+	}
+	if comm == "" || len(comm) > maxPtracePatternLen ||
+		strings.IndexByte(comm, 0) >= 0 || !utf8.ValidString(comm) {
+		return key, fmt.Errorf("ptrace target comm %q: %w", comm, ErrNotKernelMatchable)
+	}
+	copy(key.Path[:], comm)
+	return key, nil
+}
+
 func endpointPolicyKey(cgroupID uint64, eventType uint8, addr string, port uint16) (PolicyKey, error) {
 	key := PolicyKey{CgroupID: cgroupID, EventType: eventType}
 	if eventType != EventTypeNetwork && eventType != EventTypeBind {
@@ -558,17 +582,41 @@ func (m *PolicyMapManager) SyncEvent(event *api.Event, action uint8, audit bool)
 	if err != nil {
 		return err
 	}
+	if event.Hook == "ptrace" && action != ActionDeny {
+		// PTRACE feedback is DENY-only: a userspace allow is already the
+		// kernel's behaviour on a policy-map miss, so installing it would
+		// build an allowlist/first-touch fast path ptrace does not have.
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.put(key, generationPolicyValue(action, audit).Policy)
 }
 
 func eventPolicyKey(event *api.Event) (PolicyKey, error) {
-	if event == nil || event.CgroupID == 0 {
+	if event == nil {
+		return PolicyKey{}, fmt.Errorf("missing event scope: %w", ErrNotKernelMatchable)
+	}
+	// For ptrace the key's scope is the TARGET's cgroup; the tracer's cgroup
+	// is not part of the key, so it is not required here. ptracePolicyKey
+	// still refuses a zero target cgroup (a wildcard over all containers).
+	ptraceProcess := event.Hook == "ptrace" && event.GetType() == api.EventTypeProcess
+	if !ptraceProcess && event.CgroupID == 0 {
 		return PolicyKey{}, fmt.Errorf("missing event scope: %w", ErrNotKernelMatchable)
 	}
 	switch event.GetType() {
 	case api.EventTypeProcess:
+		if event.Hook == "ptrace" {
+			// The sensor puts the ptrace target's comm in Filename (and
+			// Process.Filename) and its cgroup in TargetCgroupID (aux_id
+			// from the kernel). Both are required: a comm alone would
+			// conflate same-named targets in different containers.
+			comm := event.Filename
+			if event.Process != nil {
+				comm = event.Process.Filename
+			}
+			return ptracePolicyKey(event.TargetCgroupID, comm)
+		}
 		if event.Hook != "" && event.Hook != "exec" {
 			break
 		}
@@ -669,6 +717,12 @@ func (m *PolicyMapManager) KernelKeyFields(t api.EventType) []string {
 // cannot be reproduced by the kernel's bind key and is refused rather than
 // applied to other events.
 //
+// PTRACE is its own kernel domain (EVENT_TYPE_PTRACE), keyed by the target's
+// cgroup and the target's comm. It is a DENY-only feedback domain with no
+// default-deny marking: a miss is an allow and only an explicit DENY is
+// installed. The key's cgroup is the target's cgroup, not the tracer's — the
+// ABI has no field for the target cgroup, so no DSL declaration bit is added.
+//
 // Listen is its own kernel domain (EVENT_TYPE_LISTEN), keyed by {family, port}
 // only: the BPF hook has no sockaddr and never fills the address. The sole
 // policy-visible key field is therefore `remote_port`; `remote_addr` is absent
@@ -693,6 +747,15 @@ func (m *PolicyMapManager) KernelKeyFieldsForEvent(event *api.Event) []string {
 	}
 	switch event.GetType() {
 	case api.EventTypeProcess:
+		if event.Hook == "ptrace" {
+			// The ptrace key is {target cgroup, target comm}: cgroup_id
+			// holds the TARGET's cgroup and "path" is the target comm the
+			// sensor reports as Filename. The target cgroup is kernel-only
+			// (no DSL/WASM field exposes it), so no declaration bit is
+			// needed; a decision reading uid/ppid/comm/temporal cannot be
+			// reproduced by this key and is refused by the enforcer.
+			return []string{"path", "cgroup_id"}
+		}
 		if event.Hook != "" && event.Hook != "exec" {
 			return nil
 		}

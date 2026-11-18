@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"testing"
+
+	"github.com/yasindce1998/warmor/pkg/api"
 )
 
 // rawLSMEvent builds a struct warmor_event exactly as laid out by the C
@@ -71,6 +73,44 @@ func TestLSMEvent_HookExtras(t *testing.T) {
 	}
 	if e := decode(EventTypeExec, "/bin/sh", 0); e.Hook != "exec" || e.MountSource != "" || e.TargetCgroupID != 0 {
 		t.Errorf("exec: Hook=%q extras leaked: %q %d", e.Hook, e.MountSource, e.TargetCgroupID)
+	}
+}
+
+// TestPtraceKeyFromDecodedLSMEvent ties the kernel's aux_id to the userspace
+// write-back key. rawLSMEvent puts the target cgroup at aux_id=31337 and the
+// target comm in filename; the platform layer copies those into
+// api.Event.TargetCgroupID and Process.Filename, which must produce the same
+// target-scoped key the BPF program looks up.
+func TestPtraceKeyFromDecodedLSMEvent(t *testing.T) {
+	var ev LSMEvent
+	raw := rawLSMEvent(EventTypePtrace, 0, "sleep", 0, [4]byte{}, [16]byte{}, 0)
+	if err := binary.Read(bytes.NewReader(raw), binary.LittleEndian, &ev); err != nil {
+		t.Fatalf("binary.Read: %v", err)
+	}
+	decoded := ev.ToEvent()
+	if decoded.Hook != "ptrace" || decoded.Filename != "sleep" || decoded.TargetCgroupID != 31337 {
+		t.Fatalf("decoded ptrace = hook %q comm %q target cgid %d", decoded.Hook, decoded.Filename, decoded.TargetCgroupID)
+	}
+	// This is the shape platform/linux.go hands to the enforcer.
+	plat := &api.Event{
+		Type: api.EventTypeProcess, CgroupID: decoded.CgroupID,
+		Hook: decoded.Hook, Filename: decoded.Filename,
+		TargetCgroupID: decoded.TargetCgroupID,
+		Process:        &api.ProcessEvent{Filename: decoded.Filename},
+	}
+	got, err := eventPolicyKey(plat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := ptracePolicyKey(31337, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("decoded ptrace key = %+v, want %+v", got, want)
+	}
+	if got.CgroupID == decoded.CgroupID {
+		t.Fatal("key used the tracer cgroup instead of the target's aux_id cgroup")
 	}
 }
 

@@ -42,11 +42,16 @@
 // IPv6 normalizes to IPv4, matching net.IP.String in the event decoders.
 #define WARMOR_POLICY_PATH_MAX 256
 struct policy_key {
+	// For ptrace this is the TARGET task's cgroup id (the value otherwise
+	// only reported in warmor_event.aux_id), so a feedback DENY is scoped to
+	// the target's container. Every other hook keeps the subject's cgroup.
 	__u64 cgroup_id;
 	__u8  event_type;
 	__u8  family;
 	__u8  port[2]; // network byte order, including listen
 	__u8  address[16]; // IPv4 in first four bytes, zero tail
+	// For ptrace this holds the target's comm (<= 15 usable bytes); all
+	// remaining bytes stay zero. EVENT_TYPE_PTRACE separates it from exec.
 	char  path[WARMOR_POLICY_PATH_MAX];
 	__u8  pad[4];
 };

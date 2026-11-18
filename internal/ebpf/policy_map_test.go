@@ -631,3 +631,67 @@ func TestKernelKeyFieldsForEventMountSoundness(t *testing.T) {
 		}
 	}
 }
+
+// TestSyncEventPtraceDenyWritesTargetScopedKey proves a ptrace DENY from
+// userspace is written under the exact target-scoped key, preserves the audit
+// flag, does not leak into the exec domain or another target's cgroup, and
+// that ALLOW feedback is not installed (ptrace is a DENY-only domain).
+func TestSyncEventPtraceDenyWritesTargetScopedKey(t *testing.T) {
+	b := newFakeBackend()
+	m := &PolicyMapManager{policyMap: b}
+	ptrace := &api.Event{
+		Type: api.EventTypeProcess, CgroupID: 99, Comm: "tracer",
+		LSMEvent: true, Hook: "ptrace", Filename: "sleep", TargetCgroupID: 4242,
+	}
+	if err := m.SyncEvent(ptrace, ActionDeny, true); err != nil {
+		t.Fatalf("SyncEvent ptrace DENY: %v", err)
+	}
+	want, err := ptracePolicyKey(4242, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, ok := b.entries[want]
+	if !ok {
+		t.Fatalf("ptrace DENY not written to policy map: %+v", b.entries)
+	}
+	if v.Action != ActionDeny || v.Audit != 1 {
+		t.Fatalf("ptrace entry = %+v, want action=deny audit=1", v)
+	}
+
+	// Two same-comm targets in different cgroups must be distinct entries.
+	otherTarget := &api.Event{
+		Type: api.EventTypeProcess, CgroupID: 99,
+		LSMEvent: true, Hook: "ptrace", Filename: "sleep", TargetCgroupID: 7777,
+	}
+	if err := m.SyncEvent(otherTarget, ActionDeny, false); err != nil {
+		t.Fatal(err)
+	}
+	otherKey, err := ptracePolicyKey(7777, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.entries[otherKey].Action != ActionDeny {
+		t.Fatal("second target's DENY was not installed")
+	}
+	if len(b.entries) != 2 {
+		t.Fatalf("entries = %d, want one DENY per target cgroup", len(b.entries))
+	}
+
+	// DENY-only: an ALLOW must not build an allowlist/first-touch fast path.
+	before := len(b.entries)
+	if err := m.SyncEvent(ptrace, ActionAllow, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(b.entries) != before || b.entries[want].Action != ActionDeny {
+		t.Fatal("ptrace ALLOW feedback overwrote an installed DENY")
+	}
+
+	// Domain separation from exec for the same comm/cgroup.
+	execKey, err := stringPolicyKey(4242, EventTypeExec, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.entries[execKey]; ok {
+		t.Fatal("ptrace DENY leaked into the exec domain")
+	}
+}

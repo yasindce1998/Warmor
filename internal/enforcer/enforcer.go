@@ -1152,25 +1152,26 @@ func (e *Enforcer) persistDecision(event *api.Event, result *api.ActionResult, g
 	// LSM-origin events are normally recorded, never re-synced: the kernel
 	// already reached its verdict from a policy snapshot, and writing a fresh
 	// decision back could apply it to events from a different generation.
-	// Bind, listen and mount are the only deliberate exceptions. Each looks up
+	// Bind, listen, mount and ptrace are deliberate exceptions. Each looks up
 	// an exact key (bind: {cgroup, family, addr, port, EVENT_TYPE_BIND};
 	// listen: {cgroup, family, port, EVENT_TYPE_LISTEN} — no address;
-	// mount: {cgroup, fstype, EVENT_TYPE_MOUNT}) and, on a miss, emits this
-	// event and returns 0. So the kernel has *already accepted* the operation
-	// and there is no in-flight operation left to re-decide. Userspace
-	// evaluates the complete event and the write goes back under that very
-	// same exact key, so no other operation is affected. All are dynamic-only
-	// (no default-deny domain): a miss stays an allow until a DENY is
-	// explicitly installed, so no allowlist completeness is claimed. A mount
-	// DENY is coarse — it blocks every mount of that fstype in the cgroup,
-	// regardless of source/target, which are not in the key — and soundness
-	// is enforced in decisionDeterminedByKernelKey (only decisions determined
-	// by the key alone are synced). Audit downgrade is folded in by
+	// mount: {cgroup, fstype, EVENT_TYPE_MOUNT}; ptrace: {TARGET cgroup, comm,
+	// EVENT_TYPE_PTRACE}) and, on a miss, emits this event and returns 0. So
+	// the kernel has *already accepted* the operation and there is no in-flight
+	// operation left to re-decide. Userspace evaluates the complete event and
+	// the write goes back under that very same exact key, so no other operation
+	// is affected. All are dynamic-only (no default-deny domain): a miss stays
+	// an allow until a DENY is explicitly installed, so no allowlist completeness
+	// is claimed. A mount DENY is coarse (it blocks every mount of that fstype
+	// in the cgroup; source/target are not in the key) and a ptrace DENY is
+	// scoped to the target's cgroup; soundness is enforced in
+	// decisionDeterminedByKernelKey. Audit downgrade is folded in by
 	// syncDecision.
 	lsmMissWriteback := event.LSMEvent && !event.KernelDenied &&
 		((event.GetType() == api.EventTypeNetwork &&
 			(event.Hook == "bind" || event.Hook == "listen")) ||
-			(event.GetType() == api.EventTypeFile && event.Hook == "mount"))
+			(event.GetType() == api.EventTypeFile && event.Hook == "mount") ||
+			(event.GetType() == api.EventTypeProcess && event.Hook == "ptrace"))
 	if e.policyMap != nil && (!event.LSMEvent || lsmMissWriteback) &&
 		(e.supervisor == nil || evaluator.LinuxKernelCacheEligible(event.GetType())) {
 		// Failures are counted and rate-limit logged inside; the event
@@ -1438,6 +1439,14 @@ func (e *Enforcer) recordSync(event *api.Event, err error) {
 func (e *Enforcer) syncDecision(event *api.Event, result *api.ActionResult, gen uint64, fieldsRead uint32) error {
 	if e.policyGen.Load() != gen {
 		return errStaleDecision
+	}
+	if event.Hook == "ptrace" && result.Action != api.ActionDeny {
+		// PTRACE feedback is DENY-only: a miss already allows in the kernel,
+		// so a userspace ALLOW must not install a reusable entry (that would
+		// turn the target-scoped key into a first-touch allow fast path).
+		// Generation-backed syncs bypass PolicyMapManager.SyncEvent, so the
+		// gate belongs here where both write paths pass through.
+		return nil
 	}
 	if !decisionDeterminedByKernelKey(e.policyMap, event, fieldsRead) {
 		return errNotKeyDetermined
