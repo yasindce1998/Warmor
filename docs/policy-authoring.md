@@ -71,10 +71,36 @@ policies retain ABI 3 compatibility.
 | `not` | Not equal to | `uid: { not: 0 }` |
 | `any_of` | Value in list | `path: { any_of: $my_list }` |
 | `none_of` | Value not in list | `path: { none_of: $blocked }` |
-| `glob` | Glob pattern match | `path: { glob: "/tmp/**" }` |
+| `glob` | Anchored, `filepath.Match`-style glob with recursive `**` segments (see [Glob semantics](#glob-semantics)) | `path: { glob: "/tmp/**" }` |
 | `gt` / `lt` / `gte` / `lte` | Numeric comparison | `uid: { gte: 1000 }` |
 | `starts_with` | String prefix | `path: { starts_with: "/opt/app" }` |
 | `contains` | Substring match | `path: { contains: "passwd" }` |
+
+### Glob semantics
+
+`glob` patterns are matched against the **entire** path (not a substring) by
+both the Go matcher and compiled Rust policies, using identical rules:
+
+- `/` is the only path separator. `*` matches zero or more characters *within
+  one segment* and `?` matches exactly one character *within one segment*;
+  neither can cross `/`.
+- Character classes (`[abc]`, `[^abc]`, `[a-z]`) and `\` escapes follow Go's
+  `filepath.Match`. Matching is by UTF-8 rune, not by byte.
+- `**` is recursive **only when it forms a whole path segment** (bounded by
+  `/` or the pattern boundaries). It matches zero or more whole segments.
+  A `**` that is part of a segment, such as `a**b`, is just two `*` wildcards.
+- A `/` immediately before `**` is literal and must be present in the path, so
+  `/tmp/**` matches `/tmp/a/b` but **not** `/tmp` itself. A `/` immediately
+  after `**` is skipped when `**` matches zero segments, so `/tmp/**/x.sh`
+  matches both `/tmp/x.sh` and `/tmp/a/b/x.sh`, but not `/tmp/foox.sh`.
+- `**/x.sh` matches `x.sh` as well as `/a/b/x.sh`; `**` alone matches any
+  path, including the empty string.
+
+These rules became stricter for compiled policies: formerly `*` and `?` in a
+generated matcher also crossed `/`, which made allow rules broader and deny
+rules over-match (for example `/tmp/*.sh` matched `/tmp/a/b/evil.sh`). Review
+existing glob rules when upgrading compiled policies, since some rules may
+now match fewer paths.
 
 ## Actions
 

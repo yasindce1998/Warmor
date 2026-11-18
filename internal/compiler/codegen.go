@@ -88,47 +88,196 @@ unsafe fn read_str<'a>(base: *const u8, offset: usize, max_len: usize) -> &'a st
     core::str::from_utf8_unchecked(slice)
 }
 
+// BACKWARD COMPATIBILITY / SECURITY: glob semantics now match the Go matcher
+// (internal/patterns/glob.go). Previously '*'/'?' crossed '/' and '**' had
+// ad-hoc boundaries, so compiled policies matched paths their Go counterparts
+// rejected (e.g. /tmp/*.sh matched /tmp/a/b/evil.sh). Now '/' is the only
+// separator, '*'/'?' stay in one segment, and '**' is recursive only as a
+// whole segment. Character classes and '\' escapes are now honored in
+// compiled rules too (they already were in the Go matcher). Existing
+// allow/deny glob rules may therefore match different paths.
+//
+// This is an NFA simulation over pattern positions; both matchers use the
+// same algorithm. The bit set bounds work to O(path * pattern / 64).
+const GLOB_MAX_PATTERN: usize = 1024;
+const GLOB_WORDS: usize = GLOB_MAX_PATTERN / 64 + 1;
+
 fn matches_glob(s: &str, pattern: &str) -> bool {
     glob_match(s.as_bytes(), pattern.as_bytes())
 }
 
 fn glob_match(s: &[u8], p: &[u8]) -> bool {
+    if p.len() > GLOB_MAX_PATTERN { return false; }
+    let mut cur = [0u64; GLOB_WORDS];
+    let mut next = [0u64; GLOB_WORDS];
+    glob_set(&mut cur, 0);
+    glob_closure(p, &mut cur);
     let mut si = 0;
-    let mut pi = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_si = 0;
-
     while si < s.len() {
-        if pi < p.len() && p[pi] == b'*' {
-            if pi + 1 < p.len() && p[pi + 1] == b'*' {
-                pi += 2;
-                if pi < p.len() && p[pi] == b'/' {
-                    pi += 1;
+        let (r, n) = glob_decode_rune(&s[si..]);
+        if n == 0 { break; }
+        let mut w = 0;
+        while w < GLOB_WORDS { next[w] = 0; w += 1; }
+        let mut pi = 0;
+        while pi <= p.len() {
+            if glob_get(&cur, pi) && pi < p.len() {
+                if glob_is_double_star_start(p, pi) {
+                    // '**' entry: consuming a rune (even '/') enters the
+                    // running state at the second star.
+                    glob_set(&mut next, pi + 1);
+                } else if glob_is_double_star_running(p, pi) {
+                    // '**' running: keep consuming; closure allows stopping.
+                    glob_set(&mut next, pi);
+                } else if p[pi] == b'*' {
+                    if r != b'/' as u32 { glob_set(&mut next, pi); }
+                } else if p[pi] == b'?' {
+                    if r != b'/' as u32 { glob_set(&mut next, pi + 1); }
+                } else if p[pi] == b'[' {
+                    if let Some(end) = glob_class_end(p, pi) {
+                        if r != b'/' as u32 && glob_class_match(p, pi, end, r) {
+                            glob_set(&mut next, end);
+                        }
+                    }
+                } else if p[pi] == b'\\' {
+                    let (pr, pn) = glob_pattern_rune(p, pi + 1);
+                    if pn > 0 && pr == r { glob_set(&mut next, pi + 1 + pn); }
+                } else {
+                    let (pr, pn) = glob_pattern_rune(p, pi);
+                    if pn > 0 && pr == r { glob_set(&mut next, pi + pn); }
                 }
-                star_pi = pi;
-                star_si = si;
-            } else {
-                pi += 1;
-                star_pi = pi;
-                star_si = si;
             }
-        } else if pi < p.len() && (p[pi] == b'?' || p[pi] == s[si]) {
-            si += 1;
             pi += 1;
-        } else if star_pi != usize::MAX {
-            pi = star_pi;
-            star_si += 1;
-            si = star_si;
-        } else {
-            return false;
         }
+        glob_closure(p, &mut next);
+        cur = next;
+        si += n;
     }
+    glob_get(&cur, p.len())
+}
 
-    while pi < p.len() && p[pi] == b'*' {
+// Epsilon moves: every wildcard may match zero characters. All moves advance
+// the pattern index, so one ascending pass is enough and cannot loop.
+fn glob_closure(p: &[u8], bits: &mut [u64; GLOB_WORDS]) {
+    let mut pi = 0;
+    while pi < p.len() {
+        if glob_get(bits, pi) && p[pi] == b'*' {
+            if glob_is_double_star_start(p, pi) {
+                glob_set(bits, pi + 2); // '**' matched zero bytes
+                if pi + 2 < p.len() && p[pi + 2] == b'/' {
+                    glob_set(bits, pi + 3); // '**/' matched zero whole segments
+                }
+            } else {
+                glob_set(bits, pi + 1); // running '**' stops, or single '*' skips
+            }
+        }
         pi += 1;
     }
+}
 
-    pi == p.len()
+// A recursive '**' is two stars forming a whole path segment. pi is the entry
+// state; pi+1 is reserved for the "already consumed a rune" running state.
+fn glob_is_double_star_start(p: &[u8], pi: usize) -> bool {
+    pi + 1 < p.len() && p[pi] == b'*' && p[pi + 1] == b'*'
+        && (pi == 0 || p[pi - 1] == b'/')
+        && (pi + 2 == p.len() || p[pi + 2] == b'/')
+}
+
+fn glob_is_double_star_running(p: &[u8], pi: usize) -> bool {
+    pi > 0 && p[pi] == b'*' && glob_is_double_star_start(p, pi - 1)
+}
+
+fn glob_set(bits: &mut [u64; GLOB_WORDS], i: usize) {
+    bits[i / 64] |= 1u64 << (i % 64);
+}
+
+fn glob_get(bits: &[u64; GLOB_WORDS], i: usize) -> bool {
+    bits[i / 64] & (1u64 << (i % 64)) != 0
+}
+
+// Decode one UTF-8 rune, matching Go's utf8.DecodeRune (RuneError, 1 on bad
+// input) so '?' and character classes agree with the Go matcher.
+fn glob_decode_rune(b: &[u8]) -> (u32, usize) {
+    if b.is_empty() { return (0xFFFD, 0); }
+    let b0 = b[0];
+    if b0 < 0x80 { return (b0 as u32, 1); }
+    let (need, mut r, min): (usize, u32, u32) = if b0 & 0xE0 == 0xC0 {
+        (2, (b0 & 0x1F) as u32, 0x80)
+    } else if b0 & 0xF0 == 0xE0 {
+        (3, (b0 & 0x0F) as u32, 0x800)
+    } else if b0 & 0xF8 == 0xF0 {
+        (4, (b0 & 0x07) as u32, 0x10000)
+    } else {
+        return (0xFFFD, 1);
+    };
+    if b.len() < need { return (0xFFFD, 1); }
+    let mut i = 1;
+    while i < need {
+        let c = b[i];
+        if c & 0xC0 != 0x80 { return (0xFFFD, 1); }
+        r = (r << 6) | (c & 0x3F) as u32;
+        i += 1;
+    }
+    if r < min || r > 0x10FFFF || (r >= 0xD800 && r <= 0xDFFF) { return (0xFFFD, 1); }
+    (r, need)
+}
+
+fn glob_pattern_rune(p: &[u8], i: usize) -> (u32, usize) {
+    if i >= p.len() { return (0xFFFD, 0); }
+    glob_decode_rune(&p[i..])
+}
+
+// Mirror filepath.Match's getEsc: '-' and ']' cannot start a range and a
+// trailing backslash is a bad pattern.
+fn glob_get_esc(p: &[u8], i: usize, end: usize) -> Option<(u32, usize)> {
+    if i >= end || p[i] == b'-' || p[i] == b']' { return None; }
+    let mut j = i;
+    if p[j] == b'\\' {
+        j += 1;
+        if j >= end { return None; }
+    }
+    let (r, n) = glob_decode_rune(&p[j..end]);
+    if r == 0xFFFD && n == 1 { return None; }
+    Some((r, n))
+}
+
+fn glob_class_end(p: &[u8], pi: usize) -> Option<usize> {
+    let mut i = pi + 1;
+    if i < p.len() && p[i] == b'^' { i += 1; }
+    let mut nrange = 0usize;
+    while i < p.len() {
+        if p[i] == b']' && nrange > 0 { return Some(i + 1); }
+        let (_, n) = glob_get_esc(p, i, p.len())?;
+        i += n;
+        if i < p.len() && p[i] == b'-' {
+            let (_, n2) = glob_get_esc(p, i + 1, p.len())?;
+            i += 1 + n2;
+        }
+        nrange += 1;
+    }
+    None
+}
+
+fn glob_class_match(p: &[u8], pi: usize, end: usize, r: u32) -> bool {
+    let mut i = pi + 1;
+    let mut negated = false;
+    if i < end && p[i] == b'^' { negated = true; i += 1; }
+    let mut matched = false;
+    let mut nrange = 0usize;
+    while i < end {
+        if p[i] == b']' && nrange > 0 { break; }
+        let (lo, n) = match glob_get_esc(p, i, end) { Some(v) => v, None => return false };
+        i += n;
+        let mut hi = lo;
+        if i < end && p[i] == b'-' {
+            match glob_get_esc(p, i + 1, end) {
+                Some((h, hn)) => { hi = h; i += 1 + hn; }
+                None => return false,
+            }
+        }
+        if lo <= r && r <= hi { matched = true; }
+        nrange += 1;
+    }
+    matched != negated
 }
 
 fn any_of_str(s: &str, values: &[&str]) -> bool {
