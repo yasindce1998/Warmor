@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yasindce1998/warmor/internal/policymeta"
 	"github.com/yasindce1998/warmor/pkg/api"
 )
 
@@ -38,6 +39,12 @@ type DecisionCache struct {
 	// pidRelevant reports whether decisions for an event type may depend on
 	// the PID. nil means always (the safe default).
 	pidRelevant func(api.EventType) bool
+	// declaredInputs reports the policy's fields-read mask per event type.
+	// It lets a policy that did not declare FieldBitPPID keep the exact keys
+	// it had before PPID became observable. nil (the default) keeps PPID in
+	// every key, which is always sound; capture quality has no declaration
+	// bit, so it is always part of the key.
+	declaredInputs func(api.EventType) uint32
 	// timeDependent reports whether decisions for an event type may depend
 	// on time (wall clock, container age); those are never cached. nil
 	// means never, which is only right for policies that are not sent
@@ -72,18 +79,32 @@ type CacheStats struct {
 // is added to any of those, it must be added here too;
 // TestKey_CoversEveryPolicyInput enforces this.
 //
+// ppid and captureQuality are host-owned observations that hand-written
+// modules can read through get_field_u32 (fields 17 and 16). They are part of
+// the key even though no compiled YAML policy reads them yet: a module that
+// does read them must never be served a decision made for an event with a
+// different parent or different capture loss. Both are zero for events that
+// carry no such observation, so events with clean capture keep exactly the
+// keys they had before these fields existed; a policy that does not read them
+// can only ever see a finer key (extra misses), never a coarser one (stale
+// hits). SetDeclaredInputs can restore the old key for policies that declare
+// they never read the PPID; capture quality has no declaration bit and is
+// always keyed.
+//
 // The temporal context of ABI >= 3 modules (wall clock and container age,
 // from Timestamp and ContainerStart) is deliberately not in the key:
 // decisions that may depend on it are not cached (SetTimeDependent).
 type Key struct {
-	typ        api.EventType
-	pid        uint32 // zero when the policy does not read it
-	uid        uint32
-	gid        uint32
-	comm       string
-	filename   string
-	cgroupID   uint64
-	parentComm string
+	typ            api.EventType
+	pid            uint32 // zero when the policy does not read it
+	ppid           uint32 // get_field_u32(FieldPPID); zero when unknown
+	captureQuality uint32 // get_field_u32(FieldCaptureQuality); host-computed
+	uid            uint32
+	gid            uint32
+	comm           string
+	filename       string
+	cgroupID       uint64
+	parentComm     string
 
 	// Windows identity, visible to policies through the WASM JSON ABI.
 	user         string
@@ -127,6 +148,23 @@ func (c *DecisionCache) SetPIDRelevant(f func(api.EventType) bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pidRelevant = f
+	c.clearLocked()
+}
+
+// SetDeclaredInputs installs the policy's fields-read declaration. For event
+// types whose mask does not include FieldBitPPID, the parent PID is left out
+// of the key: a policy written before PPID was observable keeps its old hit
+// rate for events that differ only in their parent. The cache is cleared,
+// since existing keys were built under the previous rule.
+//
+// A nil f (the default) keeps PPID in every key. That is the conservative
+// choice: a finer key can only cost a cache hit, never serve a stale decision.
+// Capture quality is never dropped here: it is a host-owned observation with
+// no declaration bit, so no mask can prove a policy does not read it.
+func (c *DecisionCache) SetDeclaredInputs(f func(api.EventType) uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.declaredInputs = f
 	c.clearLocked()
 }
 
@@ -244,21 +282,25 @@ func (c *DecisionCache) Stats() CacheStats {
 func (c *DecisionCache) makeKey(event *api.Event) Key {
 	typ := event.GetType()
 	k := Key{
-		typ:          typ,
-		uid:          event.UID,
-		gid:          event.GID,
-		comm:         event.Comm,
-		filename:     event.Filename,
-		cgroupID:     event.CgroupID,
-		parentComm:   event.ParentComm,
-		user:         event.User,
-		domain:       event.Domain,
-		isAdmin:      event.IsAdmin,
-		logonID:      event.LogonID,
-		socketCookie: event.SocketCookie,
+		typ:            typ,
+		captureQuality: policymeta.IncompleteCaptureFields(event),
+		uid:            event.UID,
+		gid:            event.GID,
+		comm:           event.Comm,
+		filename:       event.Filename,
+		cgroupID:       event.CgroupID,
+		parentComm:     event.ParentComm,
+		user:           event.User,
+		domain:         event.Domain,
+		isAdmin:        event.IsAdmin,
+		logonID:        event.LogonID,
+		socketCookie:   event.SocketCookie,
 	}
 	if c.pidRelevant == nil || c.pidRelevant(typ) {
 		k.pid = event.PID
+	}
+	if c.declaredInputs == nil || c.declaredInputs(typ)&policymeta.FieldBitPPID != 0 {
+		k.ppid = event.PPID
 	}
 	if p := event.Process; p != nil {
 		k.hasProcess = true
