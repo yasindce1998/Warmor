@@ -96,7 +96,15 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read built wasm: %w", err)
 	}
-	data, err = policybuild.Append(data, policybuild.Metadata{Compiler: Identity, DefaultAction: policy.DefaultAction})
+	// Record the exact compiler that produced these bytes. rustc versions can
+	// change the WASM emitted for identical generated Rust, so this value is a
+	// build-identity claim (metadata) and a cache invalidation input (see the
+	// YAML cache key in internal/wasm). A failure to query rustc is not fatal:
+	// the field is optional/back-compatible and is simply omitted.
+	rustcVersion, _ := RustcVersion()
+	data, err = policybuild.Append(data, policybuild.Metadata{
+		Compiler: Identity, DefaultAction: policy.DefaultAction, RustcVersion: rustcVersion,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("append build metadata: %w", err)
 	}
@@ -114,6 +122,22 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 		RustSource: rustSource,
 		CratePath:  crateDir,
 	}, nil
+}
+
+// RustcVersion returns the full, trimmed output of `rustc --version` for the
+// toolchain selected for this build (rust-toolchain.toml pins it). The exact
+// compiler build is part of the compiled-policy identity: a different rustc
+// can emit different WASM bytes for the same YAML, so this value is carried in
+// build metadata and in the YAML compile cache key. The call is best-effort so
+// minimal environments without rustc can still produce (unlabelled) artifacts.
+func RustcVersion() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), toolCheckTimeout)
+	defer cancel()
+	out, err := runTool(ctx, exec.Command("rustc", "--version"))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out.stdout), nil
 }
 
 func checkCargo() error {

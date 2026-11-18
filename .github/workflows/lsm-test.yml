@@ -366,8 +366,9 @@ jobs:
         run: go generate ./internal/ebpf
       - name: Install real policy compilation target for daemon phase
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          # Pin to the release toolchain: rustc is part of the compiled-policy identity.
+          rustup toolchain install 1.100.0 --profile minimal
+          rustup default 1.100.0
           rustup target add wasm32-unknown-unknown
       - name: Validate strict gate oracles without enforcement
         run: |

@@ -47,8 +47,9 @@ jobs:
             echo VIMTO_DISABLE_KVM=1 >> "$GITHUB_ENV"
           fi
           CGO_ENABLED=0 go install lmb.io/vimto@v0.4.0
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          # Pin to the release toolchain: rustc is part of the compiled-policy identity.
+          rustup toolchain install 1.100.0 --profile minimal
+          rustup default 1.100.0
           rustup target add wasm32-unknown-unknown
       - name: Offline harness and owned-host lifetime tests
         run: |

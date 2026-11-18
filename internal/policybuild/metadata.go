@@ -20,6 +20,14 @@ const Section = "warmor.build.v1"
 type Metadata struct {
 	Compiler      string `json:"compiler"`
 	DefaultAction string `json:"default_action"`
+	// RustcVersion is the full, trimmed output of `rustc --version` for the
+	// toolchain that produced the WASM (e.g. "rustc 1.100.0 (abc 2026-01-01)").
+	// The exact compiler is part of artifact identity: different rustc versions
+	// can emit different bytes for the same source. This field is additive and
+	// optional: `omitempty` keeps the on-wire format of older artifacts intact
+	// (new readers accept them), and producers without rustc may omit it. It is
+	// an author/declared build claim, not proof of compiler provenance.
+	RustcVersion string `json:"rustc,omitempty"`
 }
 
 func varint(b []byte) (uint32, int, error) {
@@ -88,6 +96,12 @@ func Read(wasm []byte) (*Metadata, error) {
 // provenance or effective runtime posture.
 func Validate(m Metadata) error {
 	if m.Compiler == "" || len(m.Compiler) > 256 || !utf8.ValidString(m.Compiler) || strings.IndexFunc(m.Compiler, func(r rune) bool { return r < 32 || r == 127 }) >= 0 || m.DefaultAction != "allow" && m.DefaultAction != "deny" && m.DefaultAction != "log" {
+		return errors.New("invalid build metadata")
+	}
+	// The rustc claim follows the same bounded, printable-UTF-8 rules as the
+	// compiler label. Empty is valid for artifacts produced before this field
+	// existed or by a producer that could not query rustc.
+	if len(m.RustcVersion) > 256 || !utf8.ValidString(m.RustcVersion) || strings.IndexFunc(m.RustcVersion, func(r rune) bool { return r < 32 || r == 127 }) >= 0 {
 		return errors.New("invalid build metadata")
 	}
 	return nil

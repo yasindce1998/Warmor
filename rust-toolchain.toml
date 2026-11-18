@@ -1,0 +1,10 @@
+# Reproducible policy builds pin the exact Rust compiler, not a rolling
+# channel. Keep this in sync with deploy/Dockerfile and the release workflow.
+#
+# The full, trimmed output of `rustc --version` is recorded in compiled-policy
+# build metadata and folded into the YAML compilation cache key. Different
+# rustc versions can emit different bytes for the same YAML, so changing the
+# toolchain necessarily changes the artifact and cache identity.
+[toolchain]
+channel = "1.100.0"
+targets = ["wasm32-unknown-unknown"]

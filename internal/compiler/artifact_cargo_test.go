@@ -94,7 +94,11 @@ func TestBuildArtifactCommaTempDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := policybuild.Append(raw, policybuild.Metadata{Compiler: "warmor-yaml/7", DefaultAction: "deny"})
+	rustcVersion, err := compiler.RustcVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := policybuild.Append(raw, policybuild.Metadata{Compiler: "warmor-yaml/7", DefaultAction: "deny", RustcVersion: rustcVersion})
 	if err != nil || !bytes.Equal(module, want) {
 		t.Fatalf("published bytes differ from raw output plus build declarations: %v", err)
 	}

@@ -84,8 +84,11 @@ jobs:
         with:
           go-version: "1.26"
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pin the compiler rather than tracking @stable: rustc is part of the
+      # compiled-policy identity, and releases use this exact toolchain.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
+          toolchain: '1.100.0'
           targets: wasm32-unknown-unknown
 
       - name: Build daemon
@@ -111,8 +114,11 @@ jobs:
         with:
           go-version: "1.26"
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pin the compiler rather than tracking @stable: rustc is part of the
+      # compiled-policy identity, and releases use this exact toolchain.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
+          toolchain: '1.100.0'
           targets: wasm32-unknown-unknown
 
       - name: Build Rust policy crates
@@ -189,3 +195,37 @@ jobs:
           path: ${{ runner.temp }}/warmor-kind-e2e-diagnostics/
           if-no-files-found: warn
           retention-days: 7
+
+  # Reproducibility gate (non-publishing): the same YAML must compile to
+  # byte-identical WASM under the pinned toolchain. Every warmor-compile run
+  # creates a fresh temp crate and its own CARGO_TARGET_DIR, so no build cache
+  # is shared between the two builds; Cargo is offline (the crate has no deps).
+  reproducible-policy-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: '1.100.0'
+          targets: wasm32-unknown-unknown
+
+      - name: Build the same policy twice, clean each time, compare WASM bytes
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          set -euo pipefail
+          rustc --version | grep -F '1.100.0'
+          go build -o warmor-compile ./cmd/warmor-compile
+          policy=policies/yaml-example/policy.yaml
+          for n in first second; do
+            # A fresh crate + target dir per invocation means a clean cache.
+            ./warmor-compile "$policy" -o "${RUNNER_TEMP}/${n}.wasm"
+          done
+          cmp "${RUNNER_TEMP}/first.wasm" "${RUNNER_TEMP}/second.wasm"
+          echo "Reproducible: policy builds are byte-identical under the pinned toolchain"
