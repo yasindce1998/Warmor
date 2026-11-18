@@ -289,12 +289,34 @@ func (c *eventCorrelator) flushAll() []*api.Event {
 	return out
 }
 
-// correlatableHook restricts dedup to LSM hooks that have a tracepoint twin.
+// correlatableHook restricts dedup to LSM hooks whose twin carries context
+// worth inheriting and whose delivery can tolerate a short buffer window.
+// exec/connect twins supply argv/parent/PPID for the richer tracepoint payload.
+// file_open is deliberately excluded: every open is high-frequency, it has no
+// process context to merge, and buffering it for the correlation TTL adds up
+// to 1s of latency that breaks latency-sensitive paths (e.g. the supervised
+// host's held-load confirmation, which completes inside a 500ms window).
 // Hooks such as ptrace/mount/bind/listen/connect_unix have no tracepoint
 // counterpart and must never be paired with an unrelated observation.
 func correlatableHook(hook string) bool {
 	switch hook {
-	case "exec", "file", "connect":
+	case "exec", "connect":
+		return true
+	default:
+		return false
+	}
+}
+
+// correlatableTracepoint is the mirror of correlatableHook for the tracepoint
+// side: only process (exec) and network (connect) observations are buffered.
+// File opens are delivered immediately so their high volume never waits on the
+// correlation TTL (which would add up to 1s of latency to every file event).
+func correlatableTracepoint(event *api.Event) bool {
+	if event == nil {
+		return false
+	}
+	switch event.GetType() {
+	case api.EventTypeProcess, api.EventTypeNetwork:
 		return true
 	default:
 		return false
@@ -904,7 +926,7 @@ func (p *LinuxPlatform) SetEventCapture(capture func(*api.Event) bool) { p.captu
 // from the bounded window is delivered first so no observation is lost; for a
 // confident twin the LSM path delivers the single merged event instead.
 func (p *LinuxPlatform) deliverTracepoint(ctx context.Context, event *api.Event) bool {
-	if p.correlator == nil {
+	if p.correlator == nil || !correlatableTracepoint(event) {
 		return p.deliver(ctx, event)
 	}
 	for _, evicted := range p.correlator.register(event) {
