@@ -86,6 +86,12 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 		return nil, fmt.Errorf("write lib.rs: %w", err)
 	}
 
+	// Record the exact compiler that produced these bytes. rustc versions can
+	// change the WASM emitted for identical generated Rust, so this value is a
+	// build-identity claim (metadata) and a cache invalidation input (see the
+	// YAML cache key in internal/wasm). A failure to query rustc is not fatal:
+	// the field is optional/back-compatible and is simply omitted.
+	rustcVersion, _ := RustcVersion()
 	builtPath, err := compile(crateDir, policy.Name, opts)
 	if err != nil {
 		return nil, fmt.Errorf("compile: %w", err)
@@ -97,12 +103,6 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read built wasm: %w", err)
 	}
-	// Record the exact compiler that produced these bytes. rustc versions can
-	// change the WASM emitted for identical generated Rust, so this value is a
-	// build-identity claim (metadata) and a cache invalidation input (see the
-	// YAML cache key in internal/wasm). A failure to query rustc is not fatal:
-	// the field is optional/back-compatible and is simply omitted.
-	rustcVersion, _ := RustcVersion()
 	data, err = policybuild.Append(data, policybuild.Metadata{
 		Compiler: Identity, DefaultAction: policy.DefaultAction, RustcVersion: rustcVersion,
 	})

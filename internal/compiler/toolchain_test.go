@@ -35,9 +35,17 @@ func fakeToolchain(t *testing.T, withRustc bool) string {
 			"  case \"$arg\" in --emit=link=*) out=${arg#--emit=link=};; esac\n" +
 			"done\ntest -n \"$out\"\n/bin/cp \"$WARMOR_TEST_ARTIFACT\" \"$out\"\n",
 	}
+	fixture := writeToolchainFixture(t)
 	if withRustc {
-		// Leading/trailing whitespace and a newline must be trimmed.
-		scripts["rustc"] = "#!/bin/sh\nprintf '  " + fakeRustcVersion + "  \\n'\n"
+		// Trim whitespace/newline and honor --emit=link=... so a hermetic
+		// (direct rustc) build both prints the version and writes the artifact.
+		// Embed the fixture path literally: the hermetic child env strips all
+		// ambient variables including WARMOR_TEST_ARTIFACT.
+		scripts["rustc"] = "#!/bin/sh\n" +
+			"for arg do case \"$arg\" in --emit=link=*) out=${arg#--emit=link=};; esac; done\n" +
+			"printf '  " + fakeRustcVersion + "  \\n'\n" +
+			"[ -n \"$out\" ] && /bin/cp \"" + fixture + "\" \"$out\"\n" +
+			"exit 0\n"
 	}
 	for name, script := range scripts {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil {
@@ -46,7 +54,7 @@ func fakeToolchain(t *testing.T, withRustc bool) string {
 	}
 	t.Setenv("PATH", bin)
 	t.Setenv("TMPDIR", t.TempDir())
-	t.Setenv("WARMOR_TEST_ARTIFACT", writeToolchainFixture(t))
+	t.Setenv("WARMOR_TEST_ARTIFACT", fixture)
 	return bin
 }
 
