@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +102,9 @@ func TestHermeticBuildIgnoresAncestorCargoConfig(t *testing.T) {
 // toolchain. It proves the allowlist is actually applied to the child, not
 // just unit-tested in isolation.
 func TestHermeticBuildCompilerReceivesAllowlistedEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("observing rustc shim is a POSIX shell script")
+	}
 	requireWasmToolchain(t)
 	realRustc, err := exec.LookPath("rustc")
 	if err != nil {
