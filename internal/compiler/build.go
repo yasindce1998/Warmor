@@ -221,6 +221,12 @@ func hermeticBuildEnv(crateDir string) []string {
 		"LANG=C",
 		"LC_ALL=C",
 	}
+	// A pinned RUSTUP_TOOLCHAIN is trusted host configuration (it selects the
+	// toolchain whose std/targets are installed); allow it so the child rustup
+	// proxy resolves the same compiler as the parent. It cannot inject code.
+	if tc := os.Getenv("RUSTUP_TOOLCHAIN"); tc != "" {
+		env = append(env, "RUSTUP_TOOLCHAIN="+tc)
+	}
 	if runtime.GOOS == "windows" {
 		// Windows toolchains and rustup need these host-provided directories;
 		// point writable ones into the private crate.
