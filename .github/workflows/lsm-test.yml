@@ -70,6 +70,13 @@ jobs:
         with:
           go-version: "1.24"
 
+      # rust-toolchain.toml pins 1.100.0; install it up front so rustup does
+      # not download it lazily inside timed compiler tests.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: '1.100.0'
+          targets: wasm32-unknown-unknown
+
       - name: Run identity, static-rule, and serialization tests
         run: go test -v -race -short -p 1 ./internal/ebpf/... ./internal/compiler/... ./internal/wasm/...
 
@@ -366,8 +373,9 @@ jobs:
         run: go generate ./internal/ebpf
       - name: Install real policy compilation target for daemon phase
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          # Pin to the release toolchain: rustc is part of the compiled-policy identity.
+          rustup toolchain install 1.100.0 --profile minimal
+          rustup default 1.100.0
           rustup target add wasm32-unknown-unknown
       - name: Validate strict gate oracles without enforcement
         run: |

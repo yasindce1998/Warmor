@@ -38,7 +38,15 @@ func PolicyInputsForABI(event *api.Event, abiVersion uint32) [][]byte {
 
 	ctx := contextWithEvent(context.Background(), event)
 	var cb []byte
-	for _, id := range []uint32{FieldPID, FieldUID, FieldGID, FieldFlags, FieldRemotePort, FieldLocalPort} {
+	// Every get_field_u32 id a guest can call belongs here. Fields 16 and 17
+	// (capture quality and PPID) are readable by any module that registers
+	// the host callback, not just compiled YAML policies: leaving them out
+	// made TestKey_CoversEveryPolicyInput blind to the cache-key gap for
+	// hand-written modules.
+	for _, id := range []uint32{
+		FieldPID, FieldUID, FieldGID, FieldFlags, FieldRemotePort, FieldLocalPort,
+		FieldCaptureQuality, FieldPPID,
+	} {
 		cb = binary.LittleEndian.AppendUint32(cb, hostGetFieldU32(ctx, nil, id))
 	}
 	for _, s := range []string{

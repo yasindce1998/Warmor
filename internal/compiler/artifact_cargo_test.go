@@ -94,7 +94,11 @@ func TestBuildArtifactCommaTempDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := policybuild.Append(raw, policybuild.Metadata{Compiler: "warmor-yaml/7", DefaultAction: "deny"})
+	rustcVersion, err := compiler.RustcVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := policybuild.Append(raw, policybuild.Metadata{Compiler: "warmor-yaml/7", DefaultAction: "deny", RustcVersion: rustcVersion})
 	if err != nil || !bytes.Equal(module, want) {
 		t.Fatalf("published bytes differ from raw output plus build declarations: %v", err)
 	}
@@ -131,14 +135,26 @@ func TestBuildArtifactCommaTempDir(t *testing.T) {
 	compiler.Cleanup(result)
 	assertCargoDirectoryEntries(t, work)
 
-	// Force a real rustc option error via real Cargo, not an injected tool.
-	// The previously published module and its signature must remain untouched.
-	t.Setenv("CARGO_ENCODED_RUSTFLAGS", "--warmor-test-invalid-rustc-option")
+	// Force a real compiler failure through a PATH-local failing rustc. The
+	// hermetic build discovers rustc via PATH, so this exercises a genuine tool
+	// failure; ambient CARGO_*/RUSTFLAGS are correctly stripped and cannot be
+	// used. The previously published module and its signature must remain
+	// untouched.
+	shimDir := t.TempDir()
+	marker := filepath.Join(shimDir, "rustc-failed")
+	shim := "#!/bin/sh\necho 'simulated rustc failure' >&2\nprintf x > \"" + marker + "\"\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "rustc"), []byte(shim), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	failed, err := compiler.Build(policy, compiler.BuildOptions{Context: ctx, OutputPath: out})
 	defer compiler.Cleanup(failed)
 	if err == nil || failed != nil || errors.Is(err, compiler.ErrArtifactPublicationIndeterminate) ||
-		!strings.Contains(err.Error(), "warmor-test-invalid-rustc-option") {
-		t.Fatalf("real Cargo failure = %+v, %v", failed, err)
+		!strings.Contains(err.Error(), "simulated rustc failure") {
+		t.Fatalf("real compiler failure = %+v, %v", failed, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("failing rustc shim was not invoked: %v", err)
 	}
 	after, err := crypto.ReadVerifiedPolicy(key.Public, out, 64<<20)
 	if err != nil || !bytes.Equal(after, verified) {

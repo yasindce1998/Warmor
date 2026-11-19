@@ -19,6 +19,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -mod=readonly -
 # runs cargo, so this stage needs the Rust toolchain and the wasm32 target.
 # The distroless runtime image has neither, which is why the policy must be
 # compiled here rather than on the node.
+# Keep this pin in sync with rust-toolchain.toml and the release workflow: the
+# rustc version is part of the compiled-policy identity (build metadata + cache key).
 FROM rust:1.100.0-slim@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS rust-base
 # The current immutable Rust base predates these Debian security fixes. Keep
 # the compiler/Cargo runtime intact and upgrade only the affected packages to

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -85,9 +86,15 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 		return nil, fmt.Errorf("write lib.rs: %w", err)
 	}
 
-	builtPath, err := cargoBuild(crateDir, policy.Name, opts)
+	// Record the exact compiler that produced these bytes. rustc versions can
+	// change the WASM emitted for identical generated Rust, so this value is a
+	// build-identity claim (metadata) and a cache invalidation input (see the
+	// YAML cache key in internal/wasm). A failure to query rustc is not fatal:
+	// the field is optional/back-compatible and is simply omitted.
+	rustcVersion, _ := RustcVersion()
+	builtPath, err := compile(crateDir, policy.Name, opts)
 	if err != nil {
-		return nil, fmt.Errorf("cargo build: %w", err)
+		return nil, fmt.Errorf("compile: %w", err)
 	}
 	if err := opts.Context.Err(); err != nil {
 		return nil, err
@@ -96,7 +103,9 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read built wasm: %w", err)
 	}
-	data, err = policybuild.Append(data, policybuild.Metadata{Compiler: Identity, DefaultAction: policy.DefaultAction})
+	data, err = policybuild.Append(data, policybuild.Metadata{
+		Compiler: Identity, DefaultAction: policy.DefaultAction, RustcVersion: rustcVersion,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("append build metadata: %w", err)
 	}
@@ -114,6 +123,39 @@ func Build(policy *Policy, opts BuildOptions) (*BuildResult, error) {
 		RustSource: rustSource,
 		CratePath:  crateDir,
 	}, nil
+}
+
+// RustcVersion returns the full, trimmed output of `rustc --version` for the
+// toolchain selected for this build (rust-toolchain.toml pins it). The exact
+// compiler build is part of the compiled-policy identity: a different rustc
+// can emit different WASM bytes for the same YAML, so this value is carried in
+// build metadata and in the YAML compile cache key. The call is best-effort so
+// minimal environments without rustc can still produce (unlabelled) artifacts.
+func RustcVersion() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), toolCheckTimeout)
+	defer cancel()
+	out, err := runTool(ctx, exec.Command("rustc", "--version"))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out.stdout), nil
+}
+
+// activeToolchain returns the rustup toolchain selected for the current
+// working directory, or "" when rustup is unavailable or reports none. The
+// result is best-effort: callers fall back to the child's own resolution.
+func activeToolchain() string {
+	ctx, cancel := context.WithTimeout(context.Background(), toolCheckTimeout)
+	defer cancel()
+	out, err := runTool(ctx, exec.Command("rustup", "show", "active-toolchain"))
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(out.stdout)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }
 
 func checkCargo() error {
@@ -143,37 +185,164 @@ func checkCargoContext(ctx context.Context) error {
 	return nil
 }
 
-func cargoBuild(crateDir, policyName string, opts BuildOptions) (string, error) {
+// compilerInvocation is the single subprocess that produces the linked wasm.
+// Production always uses hermeticRustcBuild. It is a variable solely so the
+// package's fake-toolchain tests can exercise tool failure paths; see the
+// test-only override in hermetic_testshim_test.go.
+var compilerInvocation = hermeticRustcBuild
+
+func compile(crateDir, policyName string, opts BuildOptions) (string, error) {
+	return compilerInvocation(crateDir, policyName, opts)
+}
+
+// hermeticBuildEnv is the complete child environment. Nothing is inherited
+// implicitly: every entry is explicit so controller-supplied policy input
+// cannot reach the compiler through ambient configuration.
+//
+// Allowed:
+//   - PATH: operator-installed toolchain location (trusted host configuration).
+//   - HOME, TMPDIR, TMP, TEMP: the fresh private crate, not the caller's.
+//   - CARGO_HOME: an isolated, empty directory below the crate. rustc does not
+//     read it, but pinning it prevents any Cargo-based future path from
+//     consulting a user or ancestor config.
+//   - RUSTUP_HOME: the operator's toolchain location. rustup proxy binaries
+//     need it to find the selected toolchain; it is host configuration, never
+//     derived from policy input. RUSTUP_TOOLCHAIN is deliberately not allowed.
+//   - CARGO_TARGET_DIR: inside the private crate, for tooling compatibility.
+//   - LANG/LC_ALL: deterministic diagnostics.
+//
+// Deliberately absent: RUSTFLAGS, RUSTC_WRAPPER, CARGO_BUILD_RUSTC_WRAPPER,
+// CARGO_ENCODED_RUSTFLAGS, RUSTC, RUSTC_BOOTSTRAP, all other RUSTC_/CARGO_/
+// RUSTUP_ overrides, linker/loader injection (LD_PRELOAD, DYLD_*), and every
+// other ambient variable. PATH is inherited only as tool discovery input.
+// cargoHome returns the operator's cargo home for rustup proxy tool discovery.
+func cargoHome() string {
+	if h := os.Getenv("CARGO_HOME"); h != "" {
+		return h
+	}
+	if h := homeDir(); h != os.TempDir() {
+		return filepath.Join(h, ".cargo")
+	}
+	return os.TempDir()
+}
+
+// homeDir returns the operator's real home, used by rustup for toolchain
+// discovery. It is trusted host configuration, never derived from policy input.
+func homeDir() string {
+	if h := os.Getenv("HOME"); h != "" {
+		return h
+	}
+	if runtime.GOOS == "windows" {
+		return os.Getenv("USERPROFILE")
+	}
+	return os.TempDir()
+}
+
+func hermeticBuildEnv(crateDir string) []string {
+	rustupHome := os.Getenv("RUSTUP_HOME")
+	if rustupHome == "" {
+		if home := homeDir(); home != os.TempDir() {
+			rustupHome = filepath.Join(home, ".rustup")
+		}
+	}
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		// HOME must remain the operator's: rustup reads its settings and
+		// toolchain overrides from $HOME/.rustup. Policy input cannot reach it.
+		"HOME=" + homeDir(),
+		"TMPDIR=" + crateDir,
+		"TMP=" + crateDir,
+		"TEMP=" + crateDir,
+		// rustc itself never reads CARGO_HOME, but a rustup proxy (the common
+		// rustc on PATH) uses it to locate installed toolchains/targets. Point
+		// it at the operator's real cargo home so the wasm32 std is found;
+		// direct rustc invocation already removes Cargo's config search, so no
+		// ancestor .cargo/config.toml can influence the build.
+		"CARGO_HOME=" + cargoHome(),
+		"RUSTUP_HOME=" + rustupHome,
+		"CARGO_TARGET_DIR=" + filepath.Join(crateDir, "target"),
+		"LANG=C",
+		"LC_ALL=C",
+	}
+	// A pinned RUSTUP_TOOLCHAIN is trusted host configuration (it selects the
+	// toolchain whose std/targets are installed); allow it so the child rustup
+	// proxy resolves the same compiler as the parent. It cannot inject code.
+	// Otherwise resolve the toolchain the parent sees (rust-toolchain.toml in
+	// the operator's working directory): the child runs in a private temp
+	// crate where that file is invisible, and the rustup default there may
+	// lack the wasm32 target.
+	if tc := os.Getenv("RUSTUP_TOOLCHAIN"); tc != "" {
+		env = append(env, "RUSTUP_TOOLCHAIN="+tc)
+	} else if tc := activeToolchain(); tc != "" {
+		env = append(env, "RUSTUP_TOOLCHAIN="+tc)
+	}
+	if runtime.GOOS == "windows" {
+		// Windows toolchains and rustup need these host-provided directories;
+		// point writable ones into the private crate.
+		env = append(env,
+			"USERPROFILE="+crateDir,
+			"APPDATA="+filepath.Join(crateDir, "appdata", "roaming"),
+			"LOCALAPPDATA="+filepath.Join(crateDir, "appdata", "local"),
+			"SYSTEMROOT="+os.Getenv("SYSTEMROOT"),
+			"COMSPEC="+os.Getenv("COMSPEC"),
+			"PATHEXT="+os.Getenv("PATHEXT"),
+		)
+	}
+	return env
+}
+
+// hermeticRustcBuild invokes rustc directly. The generated crate has no
+// dependencies and no build scripts, so Cargo adds no value here. Avoiding it
+// also removes Cargo's config-file search: a .cargo/config.toml in any ancestor
+// of the temp crate (or in CARGO_HOME) can otherwise set a rustc wrapper,
+// rustflags, or injected [env] entries. Nothing outside argv and the explicit
+// allowlist can influence code generation.
+//
+// The flags mirror [profile.release] in GenerateCargoToml (opt-level="z",
+// lto=true, codegen-units=1, strip=true) and its [lib] crate-type cdylib and
+// edition 2021, preserving the artifact ABI. Link output is emitted directly
+// into the private crate as a singly linked regular file, never as a Cargo
+// hard link into target/, and never into the caller's destination.
+func hermeticRustcBuild(crateDir, policyName string, opts BuildOptions) (string, error) {
 	safeName := crateIdentifier(policyName)
 	wasmFile := fmt.Sprintf("warmor_policy_%s.wasm", safeName)
 	builtPath := filepath.Join(crateDir, wasmFile)
-	// Cargo normally hard-links release artifacts to its deps directory. Have
-	// rustc emit the final link output directly into our private crate instead,
-	// so strict rejection of hard-linked tool output also works with real Cargo.
-	// rustc parses commas inside --emit even in a single argv entry. Use only
-	// the sanitized basename, relative to cmd.Dir, not a caller's temp parent.
-	args := []string{"rustc", "--target", "wasm32-unknown-unknown", "--release", "--lib", "--", "--emit=link=" + wasmFile}
+	args := []string{
+		"--edition=2021",
+		"--crate-type=cdylib",
+		"--crate-name=warmor_policy_" + safeName,
+		"--target=wasm32-unknown-unknown",
+		"-C", "opt-level=z",
+		"-C", "lto=fat",
+		"-C", "codegen-units=1",
+		"-C", "strip=symbols",
+		// rustc parses commas inside --emit even in a single argv entry. Use
+		// only the sanitized basename, relative to cmd.Dir, not a caller path.
+		"--emit=link=" + wasmFile,
+		filepath.Join("src", "lib.rs"),
+	}
 	ctx := opts.Context
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	cmd := exec.CommandContext(ctx, "cargo", args...)
+	cmd := exec.CommandContext(ctx, "rustc", args...)
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = crateDir
-	cmd.Env = append(os.Environ(), "CARGO_TARGET_DIR="+filepath.Join(crateDir, "target"))
+	cmd.Env = hermeticBuildEnv(crateDir)
 
-	output, err := runTool(opts.Context, cmd)
+	output, err := runTool(ctx, cmd)
 	if opts.Verbose {
 		fmt.Fprint(os.Stdout, output.stdout)
 		fmt.Fprint(os.Stderr, output.stderr)
 	}
 
 	if err != nil {
-		return "", fmt.Errorf("cargo build failed: %w\n%s", err, output.stderr)
+		return "", fmt.Errorf("rustc build failed: %w\n%s", err, output.stderr)
 	}
 
-	// Cargo never receives or writes the caller's destination. Build reads this
-	// private artifact with a size bound and validates metadata before publishing.
+	// The compiler never receives or writes the caller's destination. Build
+	// reads this private artifact with a size bound and validates metadata
+	// before publishing.
 	return builtPath, nil
 }
 

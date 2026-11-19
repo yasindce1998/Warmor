@@ -90,8 +90,9 @@ jobs:
           CGO_ENABLED=0 go install lmb.io/vimto@v0.4.0
       - name: Install policy compilation target
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          # Pin to the release toolchain: rustc is part of the compiled-policy identity.
+          rustup toolchain install 1.100.0 --profile minimal
+          rustup default 1.100.0
           rustup target add wasm32-unknown-unknown
       - name: Validate harness oracles and syntax without enforcement
         run: |

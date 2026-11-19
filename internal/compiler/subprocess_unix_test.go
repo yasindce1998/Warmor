@@ -21,7 +21,9 @@ func TestBuildTimeoutKillsOwnedToolTree(t *testing.T) {
 			fakeToolchain(t, mode)
 			pidsDir := t.TempDir()
 			t.Setenv("WARMOR_COMPILER_TEST_PIDS", pidsDir)
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			// CI runners under parallel load can need longer to spawn the fake
+			// tool tree; the test asserts ordering/cleanup, not wall-clock speed.
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			done := make(chan struct{})
 			var buildErr error

@@ -100,7 +100,7 @@ rules:
     event: file
     conditions:
       all:
-        - path: {glob: "*"}
+        - path: {glob: "**"}
     action: allow
 `, filepath.Join(guestFixtureDir, "allowed"), filepath.Join(guestFixtureDir, "rule-audit"))
 	filePolicy := fmt.Sprintf(`name: outcome-file

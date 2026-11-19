@@ -30,6 +30,13 @@ jobs:
         with:
           go-version: '1.26.11'
 
+      # rust-toolchain.toml pins 1.100.0; install it up front so rustup does
+      # not download it lazily inside timed compiler tests.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: '1.100.0'
+          targets: wasm32-unknown-unknown
+
       - name: Build portable tools/stubs (not the cgo ESF backend)
         run: CGO_ENABLED=0 go build ./...
 
@@ -37,9 +44,6 @@ jobs:
       # or XNU's zombie-only process-group EPERM behavior.
       - name: Native Darwin compiler subprocess regressions
         run: CGO_ENABLED=0 go test -short -count=3 ./internal/compiler
-
-      - name: Install Rust WASM target for native compiler contracts
-        run: rustup target add wasm32-unknown-unknown
 
       - name: Native Darwin actual Cargo and WASM contracts
         run: CGO_ENABLED=0 WARMOR_REQUIRE_CARGO=1 go test -count=1 ./internal/compiler ./internal/wasm ./cmd/warmor-compile

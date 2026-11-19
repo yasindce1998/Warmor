@@ -281,7 +281,11 @@ func (r *Runtime) LoadPolicyFromYAML(ctx context.Context, yamlPath string) error
 		outDir = tmp
 	}
 
-	key, err := yamlCacheKey(data, policy)
+	// The exact rustc that produced a compiled policy is part of its identity:
+	// fold the recorded version into the cache key so a toolchain change
+	// invalidates cached artifacts instead of reusing different bytes.
+	rustcVersion, _ := compiler.RustcVersion()
+	key, err := yamlCacheKey(data, policy, rustcVersion)
 	if err != nil {
 		return fmt.Errorf("compile YAML policy: %w", err)
 	}
@@ -309,15 +313,17 @@ func (r *Runtime) LoadPolicyFromYAML(ctx context.Context, yamlPath string) error
 }
 
 // yamlCacheKey identifies a compiled YAML policy: sha256 over the YAML bytes,
-// the compiler version and the generated Rust source (which changes whenever
-// codegen does, even if compiler.Version was not bumped).
-func yamlCacheKey(yamlBytes []byte, policy *compiler.Policy) (string, error) {
+// the compiler version, the recorded rustc version and the generated Rust source
+// (which changes whenever codegen does, even if compiler.Version was not bumped).
+// Including rustcVersion means a toolchain change yields a different key, so a
+// cached module compiled by another rustc is never silently reused.
+func yamlCacheKey(yamlBytes []byte, policy *compiler.Policy, rustcVersion string) (string, error) {
 	src, err := compiler.GenerateRust(policy)
 	if err != nil {
 		return "", err
 	}
 	h := sha256.New()
-	fmt.Fprintf(h, "warmor-yaml\x00%s\x00%d\x00", compiler.Version, len(yamlBytes))
+	fmt.Fprintf(h, "warmor-yaml\x00%s\x00%s\x00%d\x00", compiler.Version, rustcVersion, len(yamlBytes))
 	h.Write(yamlBytes)
 	h.Write([]byte{0})
 	h.Write([]byte(src))
