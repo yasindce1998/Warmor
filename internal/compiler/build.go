@@ -203,8 +203,20 @@ func cargoHome() string {
 	if h := os.Getenv("CARGO_HOME"); h != "" {
 		return h
 	}
-	if h := os.Getenv("HOME"); h != "" {
+	if h := homeDir(); h != os.TempDir() {
 		return filepath.Join(h, ".cargo")
+	}
+	return os.TempDir()
+}
+
+// homeDir returns the operator's real home, used by rustup for toolchain
+// discovery. It is trusted host configuration, never derived from policy input.
+func homeDir() string {
+	if h := os.Getenv("HOME"); h != "" {
+		return h
+	}
+	if runtime.GOOS == "windows" {
+		return os.Getenv("USERPROFILE")
 	}
 	return os.TempDir()
 }
@@ -212,17 +224,15 @@ func cargoHome() string {
 func hermeticBuildEnv(crateDir string) []string {
 	rustupHome := os.Getenv("RUSTUP_HOME")
 	if rustupHome == "" {
-		home := os.Getenv("HOME")
-		if runtime.GOOS == "windows" && home == "" {
-			home = os.Getenv("USERPROFILE")
-		}
-		if home != "" {
+		if home := homeDir(); home != os.TempDir() {
 			rustupHome = filepath.Join(home, ".rustup")
 		}
 	}
 	env := []string{
 		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + crateDir,
+		// HOME must remain the operator's: rustup reads its settings and
+		// toolchain overrides from $HOME/.rustup. Policy input cannot reach it.
+		"HOME=" + homeDir(),
 		"TMPDIR=" + crateDir,
 		"TMP=" + crateDir,
 		"TEMP=" + crateDir,
