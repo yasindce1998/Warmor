@@ -141,6 +141,23 @@ func RustcVersion() (string, error) {
 	return strings.TrimSpace(out.stdout), nil
 }
 
+// activeToolchain returns the rustup toolchain selected for the current
+// working directory, or "" when rustup is unavailable or reports none. The
+// result is best-effort: callers fall back to the child's own resolution.
+func activeToolchain() string {
+	ctx, cancel := context.WithTimeout(context.Background(), toolCheckTimeout)
+	defer cancel()
+	out, err := runTool(ctx, exec.Command("rustup", "show", "active-toolchain"))
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(out.stdout)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
 func checkCargo() error {
 	return checkCargoContext(context.Background())
 }
@@ -250,7 +267,13 @@ func hermeticBuildEnv(crateDir string) []string {
 	// A pinned RUSTUP_TOOLCHAIN is trusted host configuration (it selects the
 	// toolchain whose std/targets are installed); allow it so the child rustup
 	// proxy resolves the same compiler as the parent. It cannot inject code.
+	// Otherwise resolve the toolchain the parent sees (rust-toolchain.toml in
+	// the operator's working directory): the child runs in a private temp
+	// crate where that file is invisible, and the rustup default there may
+	// lack the wasm32 target.
 	if tc := os.Getenv("RUSTUP_TOOLCHAIN"); tc != "" {
+		env = append(env, "RUSTUP_TOOLCHAIN="+tc)
+	} else if tc := activeToolchain(); tc != "" {
 		env = append(env, "RUSTUP_TOOLCHAIN="+tc)
 	}
 	if runtime.GOOS == "windows" {
