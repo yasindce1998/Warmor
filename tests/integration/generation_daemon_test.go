@@ -82,7 +82,7 @@ rules:
     event: file
     conditions:
       all:
-        - path: {glob: "/**"}
+        - path: {glob: "**"}
     action: allow
 `, version, filepath.Join(guestFixtureDir, "allowed"), allowedMode,
 			filepath.Join(guestFixtureDir, "rule-audit"), filepath.Join(guestFixtureDir, "reload-denied"), changedMode)
