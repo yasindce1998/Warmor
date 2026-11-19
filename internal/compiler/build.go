@@ -198,6 +198,17 @@ func compile(crateDir, policyName string, opts BuildOptions) (string, error) {
 // CARGO_ENCODED_RUSTFLAGS, RUSTC, RUSTC_BOOTSTRAP, all other RUSTC_/CARGO_/
 // RUSTUP_ overrides, linker/loader injection (LD_PRELOAD, DYLD_*), and every
 // other ambient variable. PATH is inherited only as tool discovery input.
+// cargoHome returns the operator's cargo home for rustup proxy tool discovery.
+func cargoHome() string {
+	if h := os.Getenv("CARGO_HOME"); h != "" {
+		return h
+	}
+	if h := os.Getenv("HOME"); h != "" {
+		return filepath.Join(h, ".cargo")
+	}
+	return os.TempDir()
+}
+
 func hermeticBuildEnv(crateDir string) []string {
 	rustupHome := os.Getenv("RUSTUP_HOME")
 	if rustupHome == "" {
@@ -215,7 +226,12 @@ func hermeticBuildEnv(crateDir string) []string {
 		"TMPDIR=" + crateDir,
 		"TMP=" + crateDir,
 		"TEMP=" + crateDir,
-		"CARGO_HOME=" + filepath.Join(crateDir, "cargo-home"),
+		// rustc itself never reads CARGO_HOME, but a rustup proxy (the common
+		// rustc on PATH) uses it to locate installed toolchains/targets. Point
+		// it at the operator's real cargo home so the wasm32 std is found;
+		// direct rustc invocation already removes Cargo's config search, so no
+		// ancestor .cargo/config.toml can influence the build.
+		"CARGO_HOME=" + cargoHome(),
 		"RUSTUP_HOME=" + rustupHome,
 		"CARGO_TARGET_DIR=" + filepath.Join(crateDir, "target"),
 		"LANG=C",
