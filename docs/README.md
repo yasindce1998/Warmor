@@ -57,6 +57,7 @@ status, see [STATUS.md](STATUS.md); for a high-level overview, start with the
 | [macOS](PLATFORM_MACOS.md) | ESF setup, event types and detection-only status |
 | [PRD and roadmap](PRD.md) | Product requirements, phase tracking and roadmap |
 | [Production-readiness plan](PRODUCTION_READINESS_PLAN.md) | Historical assessment and required release gates |
+| [Production-readiness checklist](PRODUCTION_READINESS_CHECKLIST.md) | Open/closed ledger against current source |
 
 ## Security intelligence
 
