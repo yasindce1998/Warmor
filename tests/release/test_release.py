@@ -253,8 +253,9 @@ class WorkflowTests(unittest.TestCase):
         dockerfile = (ROOT / "deploy/Dockerfile").read_text()
         rust_base = dockerfile.split(" AS rust-base\n", 1)[1].split("\nFROM ", 1)[0]
         self.assertIn("--no-install-recommends --only-upgrade --no-remove", rust_base)
-        for package, version in (("linux-libc-dev", "6.12.117-1"),
-                                 ("zlib1g", "1:1.3.dfsg+really1.3.1-1+deb13u1")):
+        for package, version in (("linux-libc-dev", "6.12.118-1"),
+                                 ("zlib1g", "1:1.3.dfsg+really1.3.1-1+deb13u1"),
+                                 ("libzstd1", "1.5.7+dfsg-1+deb13u1")):
             self.assertIn(f"{package}={version}", rust_base)
             self.assertIn(f"dpkg-query -W -f='${{Version}}' {package})\" = '{version}'", rust_base)
         self.assertIn("RUN rustup target add wasm32-unknown-unknown", rust_base)

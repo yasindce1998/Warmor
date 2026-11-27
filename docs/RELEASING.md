@@ -72,8 +72,8 @@ pinned to commit IDs; Go/Rust/Helm/Buildx are fixed versions, BuildKit/base imag
 pinned, and Trivy binary downloads are SHA-256 checked. Dependency downloads use
 Go checksums (`go mod verify`); generated controller policies compile offline.
 Until the pinned Rust base incorporates its Debian security updates,
-`deploy/Dockerfile` overlays exact `linux-libc-dev` and `zlib1g` package versions
-from signed Debian repositories. Missing versions fail the build; updates must
+`deploy/Dockerfile` overlays exact `linux-libc-dev`, `zlib1g` and `libzstd1`
+package versions from signed Debian repositories. Missing versions fail the build; updates must
 retain the controller's Rust/Cargo/wasm32 compilation capability and pass the
 unchanged image scan. This is not an unpinned blanket OS upgrade. The repository
 indexes remain live, so availability of those exact versions is not guaranteed
