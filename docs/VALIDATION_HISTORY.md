@@ -273,6 +273,33 @@ BuildKit execution of this patch. Native image gates remain mandatory, as do
 fresh scans after dependency integration. No push, PR, remote CI rerun, image
 publication, tag, release or deployment was performed.
 
+## Controller Debian overlay refresh (2026-11-27)
+
+The scheduled Release run on `main` (2026-11-23, head `2e9b43b`) and PR checks
+began failing the controller image gate for both architectures. The live Debian
+indexes had published newer fixes, so `--ignore-unfixed` now reported findings
+that the pinned overlay was holding back. No source change caused this.
+
+- `linux-libc-dev` 6.12.117-1 → **6.12.118-1** (19 fixable HIGH findings).
+- `libzstd1` 1.5.7+dfsg-1 → **1.5.7+dfsg-1+deb13u1** (1 fixable HIGH finding,
+  CVE-2026-124851), a package the overlay did not previously cover. It was not
+  visible until the `linux-libc-dev` findings were cleared.
+- `zlib1g` is unchanged.
+
+Local validation with the repository's own pinned Trivy 0.76.2 and the CI gate
+flags (`--scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`):
+the real controller target was built for linux/amd64; the installed versions
+were confirmed in the image; Rust/Cargo 1.100.0 and the wasm32 target remain; the
+scan reported **0 OS-package and 0 Go-binary vulnerabilities** and exited 0.
+Before the `libzstd1` pin the same scan exited 1, so the `linux-libc-dev` bump
+alone was not sufficient.
+
+Debian's arm64 `trixie-security` index lists all three pinned versions, so the
+ARM64 installation step resolves. Native ARM64 execution was **not** run locally;
+the ARM64 build and scan are covered only by hosted CI. The exact versions remain
+live-index dependent, so this overlay will need the same refresh again; retiring
+it requires a refreshed immutable `rust` base digest.
+
 ## Darwin declaration-test setup timing (head `0ea2e84`)
 
 Read the completed job's logs directly from

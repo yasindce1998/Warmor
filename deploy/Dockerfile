@@ -28,10 +28,12 @@ FROM rust:1.100.0-slim@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc03
 # fail the build; never fall back to the vulnerable versions or skip scanning.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends --only-upgrade --no-remove \
-      linux-libc-dev=6.12.117-1 \
+      linux-libc-dev=6.12.118-1 \
       zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
- && test "$(dpkg-query -W -f='${Version}' linux-libc-dev)" = '6.12.117-1' \
+      libzstd1=1.5.7+dfsg-1+deb13u1 \
+ && test "$(dpkg-query -W -f='${Version}' linux-libc-dev)" = '6.12.118-1' \
  && test "$(dpkg-query -W -f='${Version}' zlib1g)" = '1:1.3.dfsg+really1.3.1-1+deb13u1' \
+ && test "$(dpkg-query -W -f='${Version}' libzstd1)" = '1.5.7+dfsg-1+deb13u1' \
  && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown
 ENV CARGO_NET_OFFLINE=true
